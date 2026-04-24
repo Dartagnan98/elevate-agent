@@ -51,23 +51,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ELEVATE_MODEL_WARNING = (
-    "Nous Research Elevate 3 & 4 models are NOT agentic and are not designed "
+    "Nous Research Hermes 3 & 4 models are NOT agentic and are not designed "
     "for use with Elevate. They lack the tool-calling capabilities "
     "required for agent workflows. Consider using an agentic model instead "
     "(Claude, GPT, Gemini, DeepSeek, etc.)."
 )
 
-# Match only the real Nous Research Elevate 3 / Elevate 4 chat families.
-# The previous substring check (`"elevate" in name.lower()`) false-positived on
-# unrelated local Modelfiles like ``elevate-brain:qwen3-14b-ctx16k`` that just
-# happen to carry "elevate" in their tag but are fully tool-capable.
+# Match only the real Nous Research Hermes 3 / Hermes 4 chat families.
+# The previous substring check (`"hermes" in name.lower()`) false-positived on
+# unrelated local Modelfiles that just happen to carry "hermes" in their tag
+# but are fully tool-capable.
 #
 # Positive examples the regex must match:
-#   NousResearch/Elevate-3-Llama-3.1-70B, elevate-4-405b, openrouter/elevate3:70b
+#   NousResearch/Hermes-3-Llama-3.1-70B, hermes-4-405b, openrouter/hermes3:70b
 # Negative examples it must NOT match:
-#   elevate-brain:qwen3-14b-ctx16k, qwen3:14b, claude-opus-4-6
+#   qwen3:14b, claude-opus-4-6
 _NOUS_ELEVATE_NON_AGENTIC_RE = re.compile(
-    r"(?:^|[/:])elevate[-_ ]?[34](?:[-_.:]|$)",
+    r"(?:^|[/:])hermes[-_ ]?[34](?:[-_.:]|$)",
     re.IGNORECASE,
 )
 

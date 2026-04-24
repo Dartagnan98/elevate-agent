@@ -99,7 +99,7 @@ class TestCompactBannerSkinIntegration:
              patch("cli.format_banner_version_label", return_value="Elevate v0.1.0 (test)"):
             banner = _build_compact_banner()
 
-        assert "NOUS ELEVATE" in banner
+        assert "ELEVATE" in banner
 
     def test_poseidon_compact_banner_uses_skin_branding_instead_of_nous_elevate(self):
         set_active_skin("poseidon")
@@ -109,7 +109,7 @@ class TestCompactBannerSkinIntegration:
             banner = _build_compact_banner()
 
         assert "Poseidon Agent" in banner
-        assert "NOUS ELEVATE" not in banner
+        assert "ELEVATE" not in banner
 
     def test_poseidon_compact_banner_uses_skin_colors(self):
         set_active_skin("poseidon")

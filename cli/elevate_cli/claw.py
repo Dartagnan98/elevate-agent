@@ -335,7 +335,7 @@ def _cmd_migrate(args):
     )
     print(
         color(
-            "│          ⚕ Elevate — OpenClaw Migration                 │",
+            "│          ▲ Elevate — OpenClaw Migration                 │",
             Colors.MAGENTA,
         )
     )
@@ -505,7 +505,7 @@ def _cmd_cleanup(args):
     )
     print(
         color(
-            "│          ⚕ Elevate — OpenClaw Cleanup                   │",
+            "│          ▲ Elevate — OpenClaw Cleanup                   │",
             Colors.MAGENTA,
         )
     )
