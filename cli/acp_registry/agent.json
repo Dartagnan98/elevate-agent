@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "elevate",
+  "display_name": "Elevate",
+  "description": "AI agent by Nous Research with 90+ tools, persistent memory, and multi-platform support",
+  "icon": "icon.svg",
+  "distribution": {
+    "type": "command",
+    "command": "elevate",
+    "args": ["acp"]
+  }
+}

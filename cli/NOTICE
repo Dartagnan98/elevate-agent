@@ -1,0 +1,10 @@
+RAgent — AI chief of staff for real estate agents
+
+Forked from Hermes-Agent by Nous Research.
+Upstream: https://github.com/NousResearch/Hermes-Agent
+Original license: MIT (see LICENSE).
+
+This fork adds:
+- License check on startup (subscription-gated)
+- Skill fetch from CTRL Strategies backend
+- Stripe-driven revocation

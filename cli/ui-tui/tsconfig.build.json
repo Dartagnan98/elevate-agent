@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@elevate/ink": ["src/types/elevate-ink.d.ts"]
+    }
+  }
+}
