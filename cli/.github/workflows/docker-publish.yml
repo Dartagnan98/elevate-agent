@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build-and-push:
     # Only run on the upstream repository, not on forks
-    if: github.repository == 'NousResearch/elevate'
+    if: github.repository == 'CtrlStrategies/elevate'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -48,7 +48,7 @@ jobs:
           file: Dockerfile
           load: true
           platforms: linux/amd64
-          tags: nousresearch/elevate:test
+          tags: ctrlstrategies/elevate:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -65,7 +65,7 @@ jobs:
           docker run --rm \
             -v /tmp/elevate-test:/opt/data \
             --entrypoint /opt/elevate/docker/entrypoint.sh \
-            nousresearch/elevate:test --help
+            ctrlstrategies/elevate:test --help
 
       - name: Log in to Docker Hub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'release'
@@ -82,7 +82,7 @@ jobs:
           file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: nousresearch/elevate:latest
+          tags: ctrlstrategies/elevate:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -94,6 +94,6 @@ jobs:
           file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: nousresearch/elevate:${{ github.event.release.tag_name }}
+          tags: ctrlstrategies/elevate:${{ github.event.release.tag_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
