@@ -49,7 +49,7 @@ export const zh: Translations = {
   },
 
   app: {
-    brand: "Hermes Agent",
+    brand: "Elevate",
     brandShort: "HA",
     closeNavigation: "关闭导航",
     closeModelTools: "关闭模型与工具",
@@ -115,8 +115,8 @@ export const zh: Translations = {
     starting: "启动中",
     startedInBackground: "已在后台启动 — 请查看日志",
     stopped: "已停止",
-    updateHermes: "更新 Hermes",
-    updatingHermes: "正在更新 Hermes…",
+    updateElevate: "更新 Elevate",
+    updatingElevate: "正在更新 Elevate…",
     waitingForOutput: "等待输出…",
   },
 
@@ -214,7 +214,7 @@ export const zh: Translations = {
     all: "全部",
     categories: "分类",
     filters: "筛选",
-    noSkills: "未找到技能。技能从 ~/.hermes/skills/ 加载",
+    noSkills: "未找到技能。技能从 ~/.elevate/skills/ 加载",
     noSkillsMatch: "没有匹配的技能。",
     skillCount: "{count} 个技能",
     resultCount: "{count} 个结果",
@@ -228,7 +228,7 @@ export const zh: Translations = {
   },
 
   config: {
-    configPath: "~/.hermes/config.yaml",
+    configPath: "~/.elevate/config.yaml",
     filters: "筛选",
     sections: "分类",
     exportConfig: "导出配置为 JSON",

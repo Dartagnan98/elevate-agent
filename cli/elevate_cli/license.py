@@ -1,9 +1,9 @@
 """
 Elevate subscription license gate.
 
-Lives alongside (but independent of) the forked Nous Research Hermes auth
-system. That system handles LLM provider credentials (BYOK). This module
-handles the paid subscription to the CTRL Strategies skill library.
+Lives alongside (but independent of) the BYOK auth system. That system
+handles LLM provider credentials. This module handles the paid
+subscription to the CTRL Strategies skill library.
 
 Flow:
     elevate subscribe         -> POST /api/auth/login, stores license.json

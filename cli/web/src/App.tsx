@@ -78,7 +78,7 @@ const CHAT_NAV_ITEM: NavItem = {
   icon: Terminal,
 };
 
-/** Built-in routes except /chat (only with `hermes dashboard --tui`). */
+/** Built-in routes except /chat (only with `elevate dashboard --tui`). */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/sessions": SessionsPage,
@@ -395,9 +395,7 @@ export default function App() {
                 className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground"
                 style={{ mixBlendMode: "plus-lighter" }}
               >
-                Hermes
-                <br />
-                Agent
+                Elevate
               </Typography>
 
               <button
@@ -548,8 +546,8 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
     {
       action: "update",
       icon: Download,
-      label: t.status.updateHermes,
-      runningLabel: t.status.updatingHermes,
+      label: t.status.updateElevate,
+      runningLabel: t.status.updatingElevate,
       spin: false,
     },
   ];

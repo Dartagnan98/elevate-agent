@@ -572,8 +572,8 @@ for desc in descriptions:
 
 ## References
 
-- **[Advanced Usage](https://github.com/NousResearch/elevate/blob/main/skills/mlops/models/audiocraft/references/advanced-usage.md)** - Training, fine-tuning, deployment
-- **[Troubleshooting](https://github.com/NousResearch/elevate/blob/main/skills/mlops/models/audiocraft/references/troubleshooting.md)** - Common issues and solutions
+- **[Advanced Usage](https://github.com/CtrlStrategies/elevate/blob/main/skills/mlops/models/audiocraft/references/advanced-usage.md)** - Training, fine-tuning, deployment
+- **[Troubleshooting](https://github.com/CtrlStrategies/elevate/blob/main/skills/mlops/models/audiocraft/references/troubleshooting.md)** - Common issues and solutions
 
 ## Resources
 

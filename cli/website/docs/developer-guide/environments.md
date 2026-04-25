@@ -448,7 +448,7 @@ env:
   terminal_backend: "modal"
   terminal_timeout: 300
   dataset_name: "NousResearch/terminal-bench-2"
-  tokenizer_name: "NousResearch/Elevate-3-Llama-3.1-8B"
+  tokenizer_name: "NousResearch/Hermes-3-Llama-3.1-8B"
   use_wandb: true
   wandb_name: "my-benchmark"
 

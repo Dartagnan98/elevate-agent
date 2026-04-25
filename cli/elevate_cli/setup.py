@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
-_DOCS_BASE = "https://elevate.nousresearch.com/docs"
+_DOCS_BASE = "https://elevate.ctrlstrategies.com/docs"
 
 
 def _model_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -372,7 +372,7 @@ def _print_setup_summary(config: dict, elevate_home):
 
     # Web tools (Exa, Parallel, Firecrawl, or Tavily)
     if subscription_features.web.managed_by_nous:
-        tool_status.append(("Web Search & Extract (Nous subscription)", True, None))
+        tool_status.append(("Web Search & Extract (Elevate subscription)", True, None))
     elif subscription_features.web.available:
         label = "Web Search & Extract"
         if subscription_features.web.current_provider:
@@ -384,7 +384,7 @@ def _print_setup_summary(config: dict, elevate_home):
     # Browser tools (local Chromium, Camofox, Browserbase, Browser Use, or Firecrawl)
     browser_provider = subscription_features.browser.current_provider
     if subscription_features.browser.managed_by_nous:
-        tool_status.append(("Browser Automation (Nous Browser Use)", True, None))
+        tool_status.append(("Browser Automation (Elevate)", True, None))
     elif subscription_features.browser.available:
         label = "Browser Automation"
         if browser_provider:
@@ -409,10 +409,10 @@ def _print_setup_summary(config: dict, elevate_home):
             ("Browser Automation", False, missing_browser_hint)
         )
 
-    # Image generation — FAL (direct or via Nous), or any plugin-registered
+    # Image generation — FAL (direct or via Elevate), or any plugin-registered
     # provider (OpenAI, etc.)
     if subscription_features.image_gen.managed_by_nous:
-        tool_status.append(("Image Generation (Nous subscription)", True, None))
+        tool_status.append(("Image Generation (Elevate subscription)", True, None))
     elif subscription_features.image_gen.available:
         tool_status.append(("Image Generation", True, None))
     else:
@@ -443,7 +443,7 @@ def _print_setup_summary(config: dict, elevate_home):
     # TTS — show configured provider
     tts_provider = config.get("tts", {}).get("provider", "edge")
     if subscription_features.tts.managed_by_nous:
-        tool_status.append(("Text-to-Speech (OpenAI via Nous subscription)", True, None))
+        tool_status.append(("Text-to-Speech (OpenAI via Elevate subscription)", True, None))
     elif tts_provider == "elevenlabs" and get_env_value("ELEVENLABS_API_KEY"):
         tool_status.append(("Text-to-Speech (ElevenLabs)", True, None))
     elif tts_provider == "openai" and (
@@ -479,14 +479,14 @@ def _print_setup_summary(config: dict, elevate_home):
         tool_status.append(("Text-to-Speech (Edge TTS)", True, None))
 
     if subscription_features.modal.managed_by_nous:
-        tool_status.append(("Modal Execution (Nous subscription)", True, None))
+        tool_status.append(("Modal Execution (Elevate subscription)", True, None))
     elif config.get("terminal", {}).get("backend") == "modal":
         if subscription_features.modal.direct_override:
             tool_status.append(("Modal Execution (direct Modal)", True, None))
         else:
             tool_status.append(("Modal Execution", False, "run 'elevate setup terminal'"))
     elif managed_nous_tools_enabled() and subscription_features.nous_auth_present:
-        tool_status.append(("Modal Execution (optional via Nous subscription)", True, None))
+        tool_status.append(("Modal Execution (optional via Elevate subscription)", True, None))
 
     # Tinker + WandB (RL training)
     if get_env_value("TINKER_API_KEY") and get_env_value("WANDB_API_KEY"):
@@ -997,7 +997,7 @@ def _setup_tts_provider(config: dict):
     choices = []
     providers = []
     if managed_nous_tools_enabled() and subscription_features.nous_auth_present:
-        choices.append("Nous Subscription (managed OpenAI TTS, billed to your subscription)")
+        choices.append("Elevate Subscription (managed OpenAI TTS, billed to your subscription)")
         providers.append("nous-openai")
     choices.extend(
         [
@@ -1024,7 +1024,7 @@ def _setup_tts_provider(config: dict):
     selected_via_nous = selected == "nous-openai"
     if selected == "nous-openai":
         selected = "openai"
-        print_info("OpenAI TTS will use the managed Nous gateway and bill to your subscription.")
+        print_info("OpenAI TTS will use the managed Elevate gateway and bill to your subscription.")
         if get_env_value("VOICE_TOOLS_OPENAI_KEY") or get_env_value("OPENAI_API_KEY"):
             print_warning(
                 "Direct OpenAI credentials are still configured and may take precedence until removed from ~/.elevate/.env."
@@ -1308,7 +1308,7 @@ def setup_terminal_backend(config: dict):
         use_managed_modal = False
         if managed_modal_available:
             modal_choices = [
-                "Use my Nous subscription",
+                "Use my Elevate subscription",
                 "Use my own Modal account",
             ]
             if modal_mode == "managed":
@@ -1326,7 +1326,7 @@ def setup_terminal_backend(config: dict):
 
         if use_managed_modal:
             config["terminal"]["modal_mode"] = "managed"
-            print_info("Modal execution will use the managed Nous gateway and bill to your subscription.")
+            print_info("Modal execution will use the managed Elevate gateway and bill to your subscription.")
             if get_env_value("MODAL_TOKEN_ID") or get_env_value("MODAL_TOKEN_SECRET"):
                 print_info(
                     "Direct Modal credentials are still configured, but this backend is pinned to managed mode."
@@ -1876,7 +1876,7 @@ def _setup_slack():
     print_info("   6. Reinstall the app after any scope or event changes")
     print_info("   7. After installing, invite the bot to channels: /invite @YourBot")
     print()
-    print_info("   Full guide: https://elevate.nousresearch.com/docs/user-guide/messaging/slack/")
+    print_info("   Full guide: https://elevate.ctrlstrategies.com/docs/user-guide/messaging/slack/")
     print()
     bot_token = prompt("Slack Bot Token (xoxb-...)", password=True)
     if not bot_token:
@@ -2184,7 +2184,7 @@ def _setup_webhooks():
     print_warning("   internet. For security, run the gateway in a sandboxed environment")
     print_warning("   (Docker, VM, etc.) to limit blast radius from prompt injection.")
     print()
-    print_info("   Full guide: https://elevate.nousresearch.com/docs/user-guide/messaging/webhooks/")
+    print_info("   Full guide: https://elevate.ctrlstrategies.com/docs/user-guide/messaging/webhooks/")
     print()
 
     port = prompt("Webhook port (default 8644)")
@@ -2211,7 +2211,7 @@ def _setup_webhooks():
     print_info("      http://your-server:8644/webhooks/<route-name>")
     print()
     print_info("   Route configuration guide:")
-    print_info("   https://elevate.nousresearch.com/docs/user-guide/messaging/webhooks/#configuring-routes")
+    print_info("   https://elevate.ctrlstrategies.com/docs/user-guide/messaging/webhooks/#configuring-routes")
     print()
     print_info("   Open config in your editor:  elevate config edit")
 

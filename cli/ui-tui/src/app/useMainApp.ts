@@ -322,7 +322,7 @@ export function useMainApp(gw: GatewayClient) {
 
   const tabCwd = ui.info?.cwd
 
-  useTerminalTitle(model ? `${marker} ${model}${tabCwd ? ` · ${shortCwd(tabCwd, 24)}` : ''}` : 'Hermes')
+  useTerminalTitle(model ? `${marker} ${model}${tabCwd ? ` · ${shortCwd(tabCwd, 24)}` : ''}` : 'Elevate')
 
   useEffect(() => {
     if (!ui.sid || !stdout) {
@@ -710,7 +710,7 @@ export function useMainApp(gw: GatewayClient) {
 
   const appProgress = liveTailVisible || !ui.busy ? liveProgress : frozenProgressRef.current
 
-  const cwd = ui.info?.cwd || process.env.HERMES_CWD || process.cwd()
+  const cwd = ui.info?.cwd || process.env.ELEVATE_CWD || process.cwd()
   const gitBranch = useGitBranch(cwd)
 
   const appStatus = useMemo(

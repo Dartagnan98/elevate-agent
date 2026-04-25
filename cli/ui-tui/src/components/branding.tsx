@@ -1,6 +1,6 @@
 import { Box, Text, useStdout } from '@hermes/ink'
 
-import { artWidth, caduceus, CADUCEUS_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
+import { artWidth, logo, LOGO_WIDTH, peak, PEAK_WIDTH } from '../banner.js'
 import { flat } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { PanelSection, SessionInfo } from '../types.js'
@@ -27,19 +27,19 @@ export function Banner({ t }: { t: Theme }) {
         <ArtLines lines={logoLines} />
       ) : (
         <Text bold color={t.color.gold}>
-          {t.brand.icon} NOUS HERMES
+          {t.brand.icon} ELEVATE
         </Text>
       )}
 
-      <Text color={t.color.dim}>{t.brand.icon} Nous Research · Messenger of the Digital Gods</Text>
+      <Text color={t.color.dim}>{t.brand.icon} Ctrl Strategies · AI chief of staff for real estate</Text>
     </Box>
   )
 }
 
 export function SessionPanel({ info, sid, t }: SessionPanelProps) {
   const cols = useStdout().stdout?.columns ?? 100
-  const heroLines = caduceus(t.color, t.bannerHero || undefined)
-  const leftW = Math.min((artWidth(heroLines) || CADUCEUS_WIDTH) + 4, Math.floor(cols * 0.4))
+  const heroLines = peak(t.color, t.bannerHero || undefined)
+  const leftW = Math.min((artWidth(heroLines) || PEAK_WIDTH) + 4, Math.floor(cols * 0.4))
   const wide = cols >= 90 && leftW + 40 < cols
   const w = Math.max(20, wide ? cols - leftW - 14 : cols - 12)
   const lineBudget = Math.max(12, w - 2)
@@ -168,7 +168,7 @@ export function SessionPanel({ info, sid, t }: SessionPanelProps) {
               - run{' '}
             </Text>
             <Text bold color={t.color.warn}>
-              {info.update_command || 'hermes update'}
+              {info.update_command || 'elevate update'}
             </Text>
             <Text bold={false} color={t.color.warn} dimColor>
               {' '}

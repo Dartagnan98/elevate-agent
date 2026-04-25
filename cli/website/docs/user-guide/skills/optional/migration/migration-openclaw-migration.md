@@ -17,7 +17,7 @@ Migrate a user's OpenClaw customization footprint into Elevate. Imports Elevate-
 | Source | Optional — install with `elevate skills install official/migration/openclaw-migration` |
 | Path | `optional-skills/migration/openclaw-migration` |
 | Version | `1.0.0` |
-| Author | Elevate (Nous Research) |
+| Author | Elevate (Ctrl Strategies) |
 | License | MIT |
 | Tags | `Migration`, `OpenClaw`, `Elevate`, `Memory`, `Persona`, `Import` |
 | Related skills | [`elevate`](/docs/user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-elevate) |

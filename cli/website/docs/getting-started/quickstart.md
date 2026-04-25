@@ -37,7 +37,7 @@ Run the one-line installer:
 
 ```bash
 # Linux / macOS / WSL2 / Android (Termux)
-curl -fsSL https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts/install.sh | bash
 ```
 
 :::tip Android / Termux

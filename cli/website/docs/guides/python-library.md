@@ -15,19 +15,19 @@ Elevate isn't just a CLI tool. You can import `AIAgent` directly and use it prog
 Install Elevate directly from the repository:
 
 ```bash
-pip install git+https://github.com/NousResearch/elevate.git
+pip install git+https://github.com/CtrlStrategies/elevate.git
 ```
 
 Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip install git+https://github.com/NousResearch/elevate.git
+uv pip install git+https://github.com/CtrlStrategies/elevate.git
 ```
 
 You can also pin it in your `requirements.txt`:
 
 ```text
-elevate @ git+https://github.com/NousResearch/elevate.git
+elevate @ git+https://github.com/CtrlStrategies/elevate.git
 ```
 
 :::tip

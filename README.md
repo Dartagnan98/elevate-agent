@@ -1,19 +1,21 @@
 # Elevate
 
-AI chief of staff for real estate agents. Forked from Hermes-Agent (MIT, Nous Research) + subscription-gated skill library.
+AI chief of staff for real estate agents. By Ctrl Strategies.
+
+Subscription-gated skill library on top of an open-source agent runtime. Agents bring their own LLM key (Anthropic or OpenAI); Elevate adds the skills, the install, and the support.
 
 ## Layout
 
 ```
 elevate/
-├── cli/        # forked Hermes-Agent, renamed hermes→elevate
+├── cli/        # the agent runtime (Python 3.11+)
 │              #   + elevate_cli/license.py      — subscription gate
 │              #   + elevate_cli/cloud_skills.py — fetch skills from backend
 ├── backend/    # Next.js API — login, license refresh, skill serve, stripe webhook
 └── db/         # Supabase SQL migrations
 ```
 
-## The three extras we added on top of Hermes
+## What Elevate adds on top of the upstream agent runtime
 
 1. **License check on startup** — `cli/elevate_cli/license.py`. `~/.elevate/license.json` holds a JWT + refresh token. `cmd_chat` calls `ensure_valid()` before anything else; refreshes when <5min remain; exits with paywall msg if revoked.
 2. **Cloud skill fetch** — `cli/elevate_cli/cloud_skills.py`. On chat start, fetches all subscription skills from backend and writes them to a tmp dir that is wiped on exit. Never persists to disk between sessions.
@@ -53,4 +55,4 @@ Dev flag to bypass the subscription gate while building: `ELEVATE_DEV_MODE=1 ele
 
 ## License
 
-MIT. Upstream attribution to Nous Research in `cli/LICENSE` and `cli/NOTICE`.
+MIT. The agent runtime is forked from the open-source Hermes-Agent project (Nous Research) — upstream attribution lives in `cli/LICENSE` and `cli/NOTICE`.

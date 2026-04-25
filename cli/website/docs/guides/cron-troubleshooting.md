@@ -214,7 +214,7 @@ If you've worked through this guide and the issue persists:
 
 1. Run the job with `elevate cron run <job_id>` (fires on next gateway tick) and watch for errors in the chat output
 2. Check `~/.elevate/logs/agent.log` for scheduler messages and `~/.elevate/logs/errors.log` for warnings
-3. Open an issue at [github.com/NousResearch/elevate](https://github.com/NousResearch/elevate) with:
+3. Open an issue at [github.com/CtrlStrategies/elevate](https://github.com/CtrlStrategies/elevate) with:
    - The job ID and schedule
    - The delivery target
    - What you expected vs. what happened

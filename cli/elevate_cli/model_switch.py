@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Non-agentic model warning
 # ---------------------------------------------------------------------------
 
-_ELEVATE_MODEL_WARNING = (
+_NOUS_HERMES_MODEL_WARNING = (
     "Nous Research Hermes 3 & 4 models are NOT agentic and are not designed "
     "for use with Elevate. They lack the tool-calling capabilities "
     "required for agent workflows. Consider using an agentic model instead "
@@ -66,14 +66,14 @@ _ELEVATE_MODEL_WARNING = (
 #   NousResearch/Hermes-3-Llama-3.1-70B, hermes-4-405b, openrouter/hermes3:70b
 # Negative examples it must NOT match:
 #   qwen3:14b, claude-opus-4-6
-_NOUS_ELEVATE_NON_AGENTIC_RE = re.compile(
+_NOUS_HERMES_NON_AGENTIC_RE = re.compile(
     r"(?:^|[/:])hermes[-_ ]?[34](?:[-_.:]|$)",
     re.IGNORECASE,
 )
 
 
-def is_nous_elevate_non_agentic(model_name: str) -> bool:
-    """Return True if *model_name* is a real Nous Elevate 3/4 chat model.
+def is_nous_hermes_non_agentic(model_name: str) -> bool:
+    """Return True if *model_name* is a real Nous Research Hermes 3/4 chat model.
 
     Used to decide whether to surface the non-agentic warning at startup.
     Callers in :mod:`cli.py` and here should go through this single helper
@@ -81,13 +81,13 @@ def is_nous_elevate_non_agentic(model_name: str) -> bool:
     """
     if not model_name:
         return False
-    return bool(_NOUS_ELEVATE_NON_AGENTIC_RE.search(model_name))
+    return bool(_NOUS_HERMES_NON_AGENTIC_RE.search(model_name))
 
 
-def _check_elevate_model_warning(model_name: str) -> str:
-    """Return a warning string if *model_name* is a Nous Elevate 3/4 chat model."""
-    if is_nous_elevate_non_agentic(model_name):
-        return _ELEVATE_MODEL_WARNING
+def _check_nous_hermes_model_warning(model_name: str) -> str:
+    """Return a warning string if *model_name* is a Nous Research Hermes 3/4 chat model."""
+    if is_nous_hermes_non_agentic(model_name):
+        return _NOUS_HERMES_MODEL_WARNING
     return ""
 
 
@@ -884,9 +884,9 @@ def switch_model(
     warnings: list[str] = []
     if validation.get("message"):
         warnings.append(validation["message"])
-    elevate_warn = _check_elevate_model_warning(new_model)
-    if elevate_warn:
-        warnings.append(elevate_warn)
+    nous_hermes_warn = _check_nous_hermes_model_warning(new_model)
+    if nous_hermes_warn:
+        warnings.append(nous_hermes_warn)
 
     # --- Build result ---
     return ModelSwitchResult(

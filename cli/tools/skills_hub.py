@@ -2155,7 +2155,7 @@ class OptionalSkillSource(SkillSource):
     """
     Fetch skills from the optional-skills/ directory shipped with the repo.
 
-    These skills are official (maintained by Nous Research) but not activated
+    These skills are official (maintained by Ctrl Strategies) but not activated
     by default — they don't appear in the system prompt and aren't copied to
     ~/.elevate/skills/ during setup.  They are discoverable via the Skills Hub
     (search / install / inspect) and labelled "official" with "builtin" trust.
@@ -2703,7 +2703,7 @@ def check_for_skill_updates(
 # Elevate centralized index source
 # ---------------------------------------------------------------------------
 
-ELEVATE_INDEX_URL = "https://elevate.nousresearch.com/docs/api/skills-index.json"
+ELEVATE_INDEX_URL = "https://elevate.ctrlstrategies.com/api/skills-index.json"
 ELEVATE_INDEX_CACHE_FILE = INDEX_CACHE_DIR / "elevate-index.json"
 ELEVATE_INDEX_TTL = 6 * 3600  # 6 hours
 

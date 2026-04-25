@@ -1597,7 +1597,7 @@ ELEVATE_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████�
 [#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
 
 # ASCII Art - Elevate Peak (compact, fits in left panel)
-ELEVATE_CADUCEUS = """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+ELEVATE_PEAK = """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⣿⣿⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣿⣿⣿⣿⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
@@ -3419,7 +3419,7 @@ class ElevateCLI:
         if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
             ctx_len = self.agent.context_compressor.context_length
         
-        # Auto-compact for narrow terminals — the full banner with caduceus
+        # Auto-compact for narrow terminals — the full banner with peak glyph
         # + tool list needs ~80 columns minimum to render without wrapping.
         term_width = shutil.get_terminal_size().columns
         use_compact = self.compact or term_width < 80
@@ -3472,14 +3472,14 @@ class ElevateCLI:
                     "[dim]   Fix: Set model.context_length in config.yaml, or increase your server's context setting[/]"
                 )
 
-        # Warn if the configured model is a Nous Elevate LLM (not agentic)
-        from elevate_cli.model_switch import is_nous_elevate_non_agentic
+        # Warn if the configured model is a Nous Research Hermes 3/4 LLM (not agentic)
+        from elevate_cli.model_switch import is_nous_hermes_non_agentic
 
         model_name = getattr(self, "model", "") or ""
-        if is_nous_elevate_non_agentic(model_name):
+        if is_nous_hermes_non_agentic(model_name):
             self._console_print()
             self._console_print(
-                "[bold yellow]⚠  Nous Research Elevate 3 & 4 models are NOT agentic and are not "
+                "[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
                 "designed for use with Elevate.[/]"
             )
             self._console_print(

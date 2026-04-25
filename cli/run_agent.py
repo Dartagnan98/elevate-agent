@@ -1244,7 +1244,7 @@ class AIAgent:
                 effective_base = base_url
                 if base_url_host_matches(effective_base, "openrouter.ai"):
                     client_kwargs["default_headers"] = {
-                        "HTTP-Referer": "https://elevate.nousresearch.com",
+                        "HTTP-Referer": "https://elevate.ctrlstrategies.com",
                         "X-OpenRouter-Title": "Elevate",
                         "X-OpenRouter-Categories": "productivity,cli-agent",
                     }

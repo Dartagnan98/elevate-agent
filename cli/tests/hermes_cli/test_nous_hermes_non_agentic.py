@@ -1,6 +1,6 @@
 """Tests for the Nous Hermes 3/4 non-agentic warning detector.
 
-``is_nous_elevate_non_agentic`` should only match the actual Nous Research
+``is_nous_hermes_non_agentic`` should only match the actual Nous Research
 Hermes-3 / Hermes-4 chat family (the non-agentic models), not unrelated
 models that happen to contain "hermes" in their tag.
 """
@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 
 from elevate_cli.model_switch import (
-    _ELEVATE_MODEL_WARNING,
-    _check_elevate_model_warning,
-    is_nous_elevate_non_agentic,
+    _NOUS_HERMES_MODEL_WARNING,
+    _check_nous_hermes_model_warning,
+    is_nous_hermes_non_agentic,
 )
 
 
@@ -33,10 +33,10 @@ from elevate_cli.model_switch import (
     ],
 )
 def test_matches_real_nous_hermes_chat_models(model_name: str) -> None:
-    assert is_nous_elevate_non_agentic(model_name), (
+    assert is_nous_hermes_non_agentic(model_name), (
         f"expected {model_name!r} to be flagged as Nous Hermes 3/4"
     )
-    assert _check_elevate_model_warning(model_name) == _ELEVATE_MODEL_WARNING
+    assert _check_nous_hermes_model_warning(model_name) == _NOUS_HERMES_MODEL_WARNING
 
 
 @pytest.mark.parametrize(
@@ -63,13 +63,13 @@ def test_matches_real_nous_hermes_chat_models(model_name: str) -> None:
     ],
 )
 def test_does_not_match_unrelated_models(model_name: str) -> None:
-    assert not is_nous_elevate_non_agentic(model_name), (
+    assert not is_nous_hermes_non_agentic(model_name), (
         f"expected {model_name!r} NOT to be flagged as Nous Hermes 3/4"
     )
-    assert _check_elevate_model_warning(model_name) == ""
+    assert _check_nous_hermes_model_warning(model_name) == ""
 
 
 def test_none_like_inputs_are_safe() -> None:
-    assert is_nous_elevate_non_agentic("") is False
+    assert is_nous_hermes_non_agentic("") is False
     # Defensive: the helper shouldn't crash on None-ish falsy input either.
-    assert _check_elevate_model_warning("") == ""
+    assert _check_nous_hermes_model_warning("") == ""

@@ -1,14 +1,12 @@
 # Elevate
 
-AI chief of staff for real estate agents.
-
-Forked from [Hermes-Agent](https://github.com/NousResearch/Hermes-Agent) (MIT, Nous Research). See `NOTICE` and `LICENSE`.
+AI chief of staff for real estate agents. By Ctrl Strategies.
 
 ## What it is
 
 A terminal-based AI agent that runs on the user's machine, connects to their tools (GHL, SkySlope, Google Workspace, Meta/Google Ads), and executes real estate workflows. BYOK — bring your own Anthropic or OpenAI key.
 
-Paid subscription unlocks access to the CTRL Strategies skill library: CMA generation, listing pipeline automation, seller reports, outreach scripts, pricing strategy.
+Paid subscription unlocks access to the Ctrl Strategies skill library: CMA generation, listing pipeline automation, seller reports, outreach scripts, pricing strategy.
 
 ## Install
 
@@ -34,4 +32,4 @@ elevate start           # start chatting
 
 ## License
 
-MIT — see `LICENSE` for upstream (Nous Research) attribution and `NOTICE` for fork modifications.
+MIT. The agent runtime is forked from the open-source Hermes-Agent project (Nous Research) — upstream attribution lives in `LICENSE` and `NOTICE`.

@@ -5,7 +5,7 @@ Skills live server-side, gated by subscription tier. This module:
   - lists skills available to the user (manifest only, no body)
   - fetches a skill body on demand (GET /api/skills/run)
   - mounts all available skills into a session-ephemeral tmp dir so the
-    existing Hermes skill loader picks them up
+    existing Elevate skill loader picks them up
 
 The tmp dir is wiped when the process exits.
 """
@@ -110,7 +110,7 @@ def mount_all() -> Optional[Path]:
         _write_skill(tmp, full["name"], full.get("body", ""), full.get("manifest", {}))
 
     _MOUNT_DIR = tmp
-    # Point Hermes's skill loader at the mount dir (additive).
+    # Point Elevate's skill loader at the mount dir (additive).
     existing = os.environ.get("ELEVATE_EXTRA_SKILLS_PATH", "")
     os.environ["ELEVATE_EXTRA_SKILLS_PATH"] = (
         f"{existing}:{tmp}" if existing else str(tmp)

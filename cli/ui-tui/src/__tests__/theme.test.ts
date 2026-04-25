@@ -4,7 +4,7 @@ import { DARK_THEME, DEFAULT_THEME, detectLightMode, fromSkin, LIGHT_THEME } fro
 
 describe('DEFAULT_THEME', () => {
   it('has brand defaults', () => {
-    expect(DEFAULT_THEME.brand.name).toBe('Hermes Agent')
+    expect(DEFAULT_THEME.brand.name).toBe('Elevate')
     expect(DEFAULT_THEME.brand.prompt).toBe('❯')
     expect(DEFAULT_THEME.brand.tool).toBe('┊')
   })
@@ -40,12 +40,12 @@ describe('detectLightMode', () => {
     expect(detectLightMode({})).toBe(false)
   })
 
-  it('honors HERMES_TUI_LIGHT on/off', () => {
-    expect(detectLightMode({ HERMES_TUI_LIGHT: '1' })).toBe(true)
-    expect(detectLightMode({ HERMES_TUI_LIGHT: 'true' })).toBe(true)
-    expect(detectLightMode({ HERMES_TUI_LIGHT: 'on' })).toBe(true)
-    expect(detectLightMode({ HERMES_TUI_LIGHT: '0' })).toBe(false)
-    expect(detectLightMode({ HERMES_TUI_LIGHT: 'off' })).toBe(false)
+  it('honors ELEVATE_TUI_LIGHT on/off', () => {
+    expect(detectLightMode({ ELEVATE_TUI_LIGHT: '1' })).toBe(true)
+    expect(detectLightMode({ ELEVATE_TUI_LIGHT: 'true' })).toBe(true)
+    expect(detectLightMode({ ELEVATE_TUI_LIGHT: 'on' })).toBe(true)
+    expect(detectLightMode({ ELEVATE_TUI_LIGHT: '0' })).toBe(false)
+    expect(detectLightMode({ ELEVATE_TUI_LIGHT: 'off' })).toBe(false)
   })
 
   it('sniffs COLORFGBG bg slots 7 and 15 as light (#11300)', () => {
@@ -56,8 +56,8 @@ describe('detectLightMode', () => {
     expect(detectLightMode({ COLORFGBG: '7;default;0' })).toBe(false)
   })
 
-  it('lets HERMES_TUI_LIGHT=0 override a light COLORFGBG', () => {
-    expect(detectLightMode({ COLORFGBG: '0;15', HERMES_TUI_LIGHT: '0' })).toBe(false)
+  it('lets ELEVATE_TUI_LIGHT=0 override a light COLORFGBG', () => {
+    expect(detectLightMode({ COLORFGBG: '0;15', ELEVATE_TUI_LIGHT: '0' })).toBe(false)
   })
 })
 

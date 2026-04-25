@@ -66,14 +66,14 @@ def _skin_branding(key: str, fallback: str) -> str:
 
 from elevate_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
 
-ELEVATE_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
+ELEVATE_AGENT_LOGO = """[bold #FFD700]███████╗██╗     ███████╗██╗   ██╗ █████╗ ████████╗███████╗[/]
+[bold #FFD700]██╔════╝██║     ██╔════╝██║   ██║██╔══██╗╚══██╔══╝██╔════╝[/]
+[#FFBF00]█████╗  ██║     █████╗  ██║   ██║███████║   ██║   █████╗  [/]
+[#FFBF00]██╔══╝  ██║     ██╔══╝  ╚██╗ ██╔╝██╔══██║   ██║   ██╔══╝  [/]
+[#CD7F32]███████╗███████╗███████╗ ╚████╔╝ ██║  ██║   ██║   ███████╗[/]
+[#CD7F32]╚══════╝╚══════╝╚══════╝  ╚═══╝  ╚═╝  ╚═╝   ╚═╝   ╚══════╝[/]"""
 
-ELEVATE_CADUCEUS = """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+ELEVATE_PEAK = """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⣿⣿⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣿⣿⣿⣿⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
@@ -238,17 +238,18 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 
 
-_RELEASE_URL_BASE = "https://github.com/NousResearch/elevate/releases/tag"
+_RELEASE_URL_BASE = ""  # set when public release feed exists
 _latest_release_cache: Optional[tuple] = None  # (tag, url) once resolved
 
 
 def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
     """Return ``(tag, release_url)`` for the latest git tag, or None.
 
-    Local-only — runs ``git describe --tags --abbrev=0`` against the
-    Elevate checkout. Cached per-process. Release URL always points at the
-    canonical NousResearch/elevate repo (forks don't get a link).
+    Disabled until Elevate publishes a release feed — set _RELEASE_URL_BASE
+    above and remove this short-circuit to re-enable.
     """
+    if not _RELEASE_URL_BASE:
+        return None
     global _latest_release_cache
     if _latest_release_cache is not None:
         return _latest_release_cache or None
@@ -364,7 +365,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
                          session_id: str = None,
                          get_toolset_for_tool=None,
                          context_length: int = None):
-    """Build and print a welcome banner with caduceus on left and info on right.
+    """Build and print a welcome banner with peak glyph on left and info on right.
 
     Args:
         console: Rich Console instance.
@@ -408,14 +409,14 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     text = _skin_color("banner_text", "#FFF8DC")
     session_color = _skin_color("session_border", "#8B8682")
 
-    # Use skin's custom caduceus art if provided
+    # Use skin's custom peak art if provided
     try:
         from elevate_cli.skin_engine import get_active_skin
         _bskin = get_active_skin()
-        _hero = _bskin.banner_hero if hasattr(_bskin, 'banner_hero') and _bskin.banner_hero else ELEVATE_CADUCEUS
+        _hero = _bskin.banner_hero if hasattr(_bskin, 'banner_hero') and _bskin.banner_hero else ELEVATE_PEAK
     except Exception:
         _bskin = None
-        _hero = ELEVATE_CADUCEUS
+        _hero = ELEVATE_PEAK
     left_lines = ["", _hero, ""]
     model_short = model.split("/")[-1] if "/" in model else model
     if model_short.endswith(".gguf"):

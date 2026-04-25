@@ -156,7 +156,7 @@ Tools marked "active via Nous subscription" are routed through the gateway. Tool
 For self-hosted or custom gateway deployments, you can override the gateway endpoints via environment variables in `~/.elevate/.env`:
 
 ```bash
-TOOL_GATEWAY_DOMAIN=nousresearch.com     # Base domain for gateway routing
+TOOL_GATEWAY_DOMAIN=ctrlstrategies.com     # Base domain for gateway routing
 TOOL_GATEWAY_SCHEME=https                 # HTTP or HTTPS (default: https)
 TOOL_GATEWAY_USER_TOKEN=your-token        # Auth token (normally auto-populated)
 FIRECRAWL_GATEWAY_URL=https://...         # Override for the Firecrawl endpoint specifically

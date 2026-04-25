@@ -3,15 +3,15 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'Hermes Agent',
-  tagline: 'The self-improving AI agent',
+  title: 'Elevate',
+  tagline: 'AI chief of staff for real estate',
   favicon: 'img/favicon.ico',
 
-  url: 'https://hermes-agent.nousresearch.com',
+  url: 'https://elevate.ctrlstrategies.com',
   baseUrl: '/docs/',
 
-  organizationName: 'NousResearch',
-  projectName: 'hermes-agent',
+  organizationName: 'CtrlStrategies',
+  projectName: 'elevate',
 
   onBrokenLinks: 'warn',
 
@@ -51,7 +51,6 @@ const config: Config = {
         docs: {
           routeBasePath: '/',  // Docs at the root of /docs/
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/NousResearch/hermes-agent/edit/main/website/',
         },
         blog: false,
         theme: {
@@ -62,7 +61,7 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/hermes-agent-banner.png',
+    image: 'img/elevate-banner.png',
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
@@ -74,9 +73,9 @@ const config: Config = {
       },
     },
     navbar: {
-      title: 'Hermes Agent',
+      title: 'Elevate',
       logo: {
-        alt: 'Hermes Agent',
+        alt: 'Elevate',
         src: 'img/logo.png',
       },
       items: [
@@ -92,18 +91,8 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://hermes-agent.nousresearch.com',
+          href: 'https://elevate.ctrlstrategies.com',
           label: 'Home',
-          position: 'right',
-        },
-        {
-          href: 'https://github.com/NousResearch/hermes-agent',
-          label: 'GitHub',
-          position: 'right',
-        },
-        {
-          href: 'https://discord.gg/NousResearch',
-          label: 'Discord',
           position: 'right',
         },
       ],
@@ -116,27 +105,17 @@ const config: Config = {
           items: [
             { label: 'Getting Started', to: '/getting-started/quickstart' },
             { label: 'User Guide', to: '/user-guide/cli' },
-            { label: 'Developer Guide', to: '/developer-guide/architecture' },
             { label: 'Reference', to: '/reference/cli-commands' },
-          ],
-        },
-        {
-          title: 'Community',
-          items: [
-            { label: 'Discord', href: 'https://discord.gg/NousResearch' },
-            { label: 'GitHub Discussions', href: 'https://github.com/NousResearch/hermes-agent/discussions' },
-            { label: 'Skills Hub', href: 'https://agentskills.io' },
           ],
         },
         {
           title: 'More',
           items: [
-            { label: 'GitHub', href: 'https://github.com/NousResearch/hermes-agent' },
-            { label: 'Nous Research', href: 'https://nousresearch.com' },
+            { label: 'Ctrl Strategies', href: 'https://ctrlstrategies.com' },
           ],
         },
       ],
-      copyright: `Built by <a href="https://nousresearch.com">Nous Research</a> · MIT License · ${new Date().getFullYear()}`,
+      copyright: `Built by <a href="https://ctrlstrategies.com">Ctrl Strategies</a> · MIT License · ${new Date().getFullYear()}`,
     },
     prism: {
       theme: prismThemes.github,
