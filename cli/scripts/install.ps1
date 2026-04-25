@@ -1,11 +1,11 @@
 # ============================================================================
-# Hermes Agent Installer for Windows
+# Elevate Installer for Windows
 # ============================================================================
 # Installation script for Windows (PowerShell).
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/CtrlStrategies/elevate/main/cli/scripts/install.ps1 | iex
 #
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
@@ -16,8 +16,8 @@ param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
     [string]$Branch = "main",
-    [string]$HermesHome = "$env:LOCALAPPDATA\hermes",
-    [string]$InstallDir = "$env:LOCALAPPDATA\hermes\hermes-agent"
+    [string]$ElevateHome = "$env:LOCALAPPDATA\elevate",
+    [string]$InstallDir = "$env:LOCALAPPDATA\elevate\elevate"
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,8 +26,8 @@ $ErrorActionPreference = "Stop"
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
-$RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+$RepoUrlSsh = "git@github.com:CtrlStrategies/elevate.git"
+$RepoUrlHttps = "https://github.com/CtrlStrategies/elevate.git"
 $PythonVersion = "3.11"
 $NodeVersion = "22"
 
@@ -38,9 +38,10 @@ $NodeVersion = "22"
 function Write-Banner {
     Write-Host ""
     Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Magenta
-    Write-Host "│             ⚕ Hermes Agent Installer                    │" -ForegroundColor Magenta
+    Write-Host "│             ▲ Elevate Installer                          │" -ForegroundColor Magenta
     Write-Host "├─────────────────────────────────────────────────────────┤" -ForegroundColor Magenta
-    Write-Host "│  An open source AI agent by Nous Research.              │" -ForegroundColor Magenta
+    Write-Host "│  AI chief of staff for real estate.                     │" -ForegroundColor Magenta
+    Write-Host "│  Elevation Real Estate HQ                                │" -ForegroundColor Magenta
     Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -71,7 +72,7 @@ function Write-Err {
 
 function Install-Uv {
     Write-Info "Checking for uv package manager..."
-    
+
     # Check if uv is already available
     if (Get-Command uv -ErrorAction SilentlyContinue) {
         $version = uv --version
@@ -79,7 +80,7 @@ function Install-Uv {
         Write-Success "uv found ($version)"
         return $true
     }
-    
+
     # Check common install locations
     $uvPaths = @(
         "$env:USERPROFILE\.local\bin\uv.exe",
@@ -93,12 +94,12 @@ function Install-Uv {
             return $true
         }
     }
-    
+
     # Install uv
     Write-Info "Installing uv (fast Python package manager)..."
     try {
         powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>&1 | Out-Null
-        
+
         # Find the installed binary
         $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
         if (-not (Test-Path $uvExe)) {
@@ -111,14 +112,14 @@ function Install-Uv {
                 $uvExe = (Get-Command uv).Source
             }
         }
-        
+
         if (Test-Path $uvExe) {
             $script:UvCmd = $uvExe
             $version = & $uvExe --version
             Write-Success "uv installed ($version)"
             return $true
         }
-        
+
         Write-Err "uv installed but not found on PATH"
         Write-Info "Try restarting your terminal and re-running"
         return $false
@@ -131,7 +132,7 @@ function Install-Uv {
 
 function Test-Python {
     Write-Info "Checking Python $PythonVersion..."
-    
+
     # Let uv find or install Python
     try {
         $pythonPath = & $UvCmd python find $PythonVersion 2>$null
@@ -141,7 +142,7 @@ function Test-Python {
             return $true
         }
     } catch { }
-    
+
     # Python not found — use uv to install it (no admin needed!)
     Write-Info "Python $PythonVersion not found, installing via uv..."
     try {
@@ -183,7 +184,7 @@ function Test-Python {
             return $true
         }
     }
-    
+
     Write-Err "Failed to install Python $PythonVersion"
     Write-Info "Install Python 3.11 manually, then re-run this script:"
     Write-Info "  https://www.python.org/downloads/"
@@ -193,13 +194,13 @@ function Test-Python {
 
 function Test-Git {
     Write-Info "Checking Git..."
-    
+
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $version = git --version
         Write-Success "Git found ($version)"
         return $true
     }
-    
+
     Write-Err "Git not found"
     Write-Info "Please install Git from:"
     Write-Info "  https://git-scm.com/download/win"
@@ -217,11 +218,11 @@ function Test-Node {
     }
 
     # Check our own managed install from a previous run
-    $managedNode = "$HermesHome\node\node.exe"
+    $managedNode = "$ElevateHome\node\node.exe"
     if (Test-Path $managedNode) {
         $version = & $managedNode --version
-        $env:Path = "$HermesHome\node;$env:Path"
-        Write-Success "Node.js $version found (Hermes-managed)"
+        $env:Path = "$ElevateHome\node;$env:Path"
+        Write-Success "Node.js $version found (Elevate-managed)"
         $script:HasNode = $true
         return $true
     }
@@ -244,7 +245,7 @@ function Test-Node {
         } catch { }
     }
 
-    # Fallback: download binary zip to ~/.hermes/node/
+    # Fallback: download binary zip to ~/.elevate/node/
     Write-Info "Downloading Node.js $NodeVersion binary..."
     try {
         $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
@@ -255,7 +256,7 @@ function Test-Node {
         if ($zipName) {
             $downloadUrl = "${indexUrl}${zipName}"
             $tmpZip = "$env:TEMP\$zipName"
-            $tmpDir = "$env:TEMP\hermes-node-extract"
+            $tmpDir = "$env:TEMP\elevate-node-extract"
 
             Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpZip -UseBasicParsing
             if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
@@ -263,12 +264,12 @@ function Test-Node {
 
             $extractedDir = Get-ChildItem $tmpDir -Directory | Select-Object -First 1
             if ($extractedDir) {
-                if (Test-Path "$HermesHome\node") { Remove-Item -Recurse -Force "$HermesHome\node" }
-                Move-Item $extractedDir.FullName "$HermesHome\node"
-                $env:Path = "$HermesHome\node;$env:Path"
+                if (Test-Path "$ElevateHome\node") { Remove-Item -Recurse -Force "$ElevateHome\node" }
+                Move-Item $extractedDir.FullName "$ElevateHome\node"
+                $env:Path = "$ElevateHome\node;$env:Path"
 
-                $version = & "$HermesHome\node\node.exe" --version
-                Write-Success "Node.js $version installed to ~/.hermes/node/"
+                $version = & "$ElevateHome\node\node.exe" --version
+                Write-Success "Node.js $version installed to ~/.elevate/node/"
                 $script:HasNode = $true
 
                 Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
@@ -411,7 +412,7 @@ function Install-SystemPackages {
 
 function Install-Repository {
     Write-Info "Installing to $InstallDir..."
-    
+
     if (Test-Path $InstallDir) {
         if (Test-Path "$InstallDir\.git") {
             Write-Info "Existing installation found, updating..."
@@ -446,7 +447,7 @@ function Install-Repository {
             if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
         } catch { }
         $env:GIT_SSH_COMMAND = $null
-        
+
         if (-not $cloneSuccess) {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
             Write-Info "SSH failed, trying HTTPS..."
@@ -461,21 +462,21 @@ function Install-Repository {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
             Write-Warn "Git clone failed — downloading ZIP archive instead..."
             try {
-                $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
-                $zipPath = "$env:TEMP\hermes-agent-$Branch.zip"
-                $extractPath = "$env:TEMP\hermes-agent-extract"
-                
+                $zipUrl = "https://github.com/CtrlStrategies/elevate/archive/refs/heads/$Branch.zip"
+                $zipPath = "$env:TEMP\elevate-$Branch.zip"
+                $extractPath = "$env:TEMP\elevate-extract"
+
                 Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
                 if (Test-Path $extractPath) { Remove-Item -Recurse -Force $extractPath }
                 Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-                
+
                 # GitHub ZIPs extract to repo-branch/ subdirectory
                 $extractedDir = Get-ChildItem $extractPath -Directory | Select-Object -First 1
                 if ($extractedDir) {
                     New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) -ErrorAction SilentlyContinue | Out-Null
                     Move-Item $extractedDir.FullName $InstallDir -Force
                     Write-Success "Downloaded and extracted"
-                    
+
                     # Initialize git repo so updates work later
                     Push-Location $InstallDir
                     git -c windows.appendAtomically=false init 2>$null
@@ -483,10 +484,10 @@ function Install-Repository {
                     git remote add origin $RepoUrlHttps 2>$null
                     Pop-Location
                     Write-Success "Git repo initialized for future updates"
-                    
+
                     $cloneSuccess = $true
                 }
-                
+
                 # Cleanup temp files
                 Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
                 Remove-Item -Recurse -Force $extractPath -ErrorAction SilentlyContinue
@@ -499,7 +500,7 @@ function Install-Repository {
             throw "Failed to download repository (tried git clone SSH, HTTPS, and ZIP)"
         }
     }
-    
+
     # Set per-repo config (harmless if it fails)
     Push-Location $InstallDir
     git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
@@ -513,7 +514,7 @@ function Install-Repository {
         Write-Success "Submodules ready"
     }
     Pop-Location
-    
+
     Write-Success "Repository ready"
 }
 
@@ -522,43 +523,45 @@ function Install-Venv {
         Write-Info "Skipping virtual environment (-NoVenv)"
         return
     }
-    
+
     Write-Info "Creating virtual environment with Python $PythonVersion..."
-    
+
     Push-Location $InstallDir
-    
+
     if (Test-Path "venv") {
         Write-Info "Virtual environment already exists, recreating..."
         Remove-Item -Recurse -Force "venv"
     }
-    
+
     # uv creates the venv and pins the Python version in one step
     & $UvCmd venv venv --python $PythonVersion
-    
+
     Pop-Location
-    
+
     Write-Success "Virtual environment ready (Python $PythonVersion)"
 }
 
 function Install-Dependencies {
     Write-Info "Installing dependencies..."
-    
-    Push-Location $InstallDir
-    
+
+    # Repo root is the parent of cli/ — pyproject.toml lives in cli/
+    $cliDir = "$InstallDir\cli"
+    Push-Location $cliDir
+
     if (-not $NoVenv) {
         # Tell uv to install into our venv (no activation needed)
         $env:VIRTUAL_ENV = "$InstallDir\venv"
     }
-    
+
     # Install main package with all extras
     try {
         & $UvCmd pip install -e ".[all]" 2>&1 | Out-Null
     } catch {
         & $UvCmd pip install -e "." | Out-Null
     }
-    
+
     Write-Success "Main package installed"
-    
+
     # Install optional submodules
     Write-Info "Installing tinker-atropos (RL training backend)..."
     if (Test-Path "tinker-atropos\pyproject.toml") {
@@ -571,104 +574,104 @@ function Install-Dependencies {
     } else {
         Write-Warn "tinker-atropos not found (run: git submodule update --init)"
     }
-    
+
     Pop-Location
-    
+
     Write-Success "All dependencies installed"
 }
 
 function Set-PathVariable {
-    Write-Info "Setting up hermes command..."
-    
+    Write-Info "Setting up elevate command..."
+
     if ($NoVenv) {
-        $hermesBin = "$InstallDir"
+        $elevateBin = "$InstallDir"
     } else {
-        $hermesBin = "$InstallDir\venv\Scripts"
+        $elevateBin = "$InstallDir\venv\Scripts"
     }
-    
-    # Add the venv Scripts dir to user PATH so hermes is globally available
-    # On Windows, the hermes.exe in venv\Scripts\ has the venv Python baked in
+
+    # Add the venv Scripts dir to user PATH so elevate is globally available
+    # On Windows, the elevate.exe in venv\Scripts\ has the venv Python baked in
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    
-    if ($currentPath -notlike "*$hermesBin*") {
+
+    if ($currentPath -notlike "*$elevateBin*") {
         [Environment]::SetEnvironmentVariable(
             "Path",
-            "$hermesBin;$currentPath",
+            "$elevateBin;$currentPath",
             "User"
         )
-        Write-Success "Added to user PATH: $hermesBin"
+        Write-Success "Added to user PATH: $elevateBin"
     } else {
         Write-Info "PATH already configured"
     }
-    
-    # Set HERMES_HOME so the Python code finds config/data in the right place.
-    # Only needed on Windows where we install to %LOCALAPPDATA%\hermes instead
-    # of the Unix default ~/.hermes
-    $currentHermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
-    if (-not $currentHermesHome -or $currentHermesHome -ne $HermesHome) {
-        [Environment]::SetEnvironmentVariable("HERMES_HOME", $HermesHome, "User")
-        Write-Success "Set HERMES_HOME=$HermesHome"
+
+    # Set ELEVATE_HOME so the Python code finds config/data in the right place.
+    # Only needed on Windows where we install to %LOCALAPPDATA%\elevate instead
+    # of the Unix default ~/.elevate
+    $currentElevateHome = [Environment]::GetEnvironmentVariable("ELEVATE_HOME", "User")
+    if (-not $currentElevateHome -or $currentElevateHome -ne $ElevateHome) {
+        [Environment]::SetEnvironmentVariable("ELEVATE_HOME", $ElevateHome, "User")
+        Write-Success "Set ELEVATE_HOME=$ElevateHome"
     }
-    $env:HERMES_HOME = $HermesHome
-    
+    $env:ELEVATE_HOME = $ElevateHome
+
     # Update current session
-    $env:Path = "$hermesBin;$env:Path"
-    
-    Write-Success "hermes command ready"
+    $env:Path = "$elevateBin;$env:Path"
+
+    Write-Success "elevate command ready"
 }
 
 function Copy-ConfigTemplates {
     Write-Info "Setting up configuration files..."
-    
-    # Create ~/.hermes directory structure
-    New-Item -ItemType Directory -Force -Path "$HermesHome\cron" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\sessions" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\logs" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\pairing" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\hooks" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\image_cache" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\audio_cache" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\memories" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$HermesHome\skills" | Out-Null
 
-    
+    # Create ~/.elevate directory structure
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\cron" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\sessions" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\logs" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\pairing" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\hooks" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\image_cache" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\audio_cache" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\memories" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$ElevateHome\skills" | Out-Null
+
+
     # Create .env
-    $envPath = "$HermesHome\.env"
+    $envPath = "$ElevateHome\.env"
     if (-not (Test-Path $envPath)) {
-        $examplePath = "$InstallDir\.env.example"
+        $examplePath = "$InstallDir\cli\.env.example"
         if (Test-Path $examplePath) {
             Copy-Item $examplePath $envPath
-            Write-Success "Created ~/.hermes/.env from template"
+            Write-Success "Created ~/.elevate/.env from template"
         } else {
             New-Item -ItemType File -Force -Path $envPath | Out-Null
-            Write-Success "Created ~/.hermes/.env"
+            Write-Success "Created ~/.elevate/.env"
         }
     } else {
-        Write-Info "~/.hermes/.env already exists, keeping it"
+        Write-Info "~/.elevate/.env already exists, keeping it"
     }
-    
+
     # Create config.yaml
-    $configPath = "$HermesHome\config.yaml"
+    $configPath = "$ElevateHome\config.yaml"
     if (-not (Test-Path $configPath)) {
-        $examplePath = "$InstallDir\cli-config.yaml.example"
+        $examplePath = "$InstallDir\cli\cli-config.yaml.example"
         if (Test-Path $examplePath) {
             Copy-Item $examplePath $configPath
-            Write-Success "Created ~/.hermes/config.yaml from template"
+            Write-Success "Created ~/.elevate/config.yaml from template"
         }
     } else {
-        Write-Info "~/.hermes/config.yaml already exists, keeping it"
+        Write-Info "~/.elevate/config.yaml already exists, keeping it"
     }
-    
+
     # Create SOUL.md if it doesn't exist (global persona file)
-    $soulPath = "$HermesHome\SOUL.md"
+    $soulPath = "$ElevateHome\SOUL.md"
     if (-not (Test-Path $soulPath)) {
         @"
-# Hermes Agent Persona
+# Elevate Persona
 
-<!-- 
+<!--
 This file defines the agent's personality and tone.
 The agent will embody whatever you write here.
-Edit this to customize how Hermes communicates with you.
+Edit this to customize how Elevate communicates with you.
 
 Examples:
   - "You are a warm, playful assistant who uses kaomoji occasionally."
@@ -679,25 +682,25 @@ This file is loaded fresh each message -- no restart needed.
 Delete the contents (or this file) to use the default personality.
 -->
 "@ | Set-Content -Path $soulPath -Encoding UTF8
-        Write-Success "Created ~/.hermes/SOUL.md (edit to customize personality)"
+        Write-Success "Created ~/.elevate/SOUL.md (edit to customize personality)"
     }
-    
-    Write-Success "Configuration directory ready: ~/.hermes/"
-    
-    # Seed bundled skills into ~/.hermes/skills/ (manifest-based, one-time per skill)
-    Write-Info "Syncing bundled skills to ~/.hermes/skills/ ..."
+
+    Write-Success "Configuration directory ready: ~/.elevate/"
+
+    # Seed bundled skills into ~/.elevate/skills/ (manifest-based, one-time per skill)
+    Write-Info "Syncing bundled skills to ~/.elevate/skills/ ..."
     $pythonExe = "$InstallDir\venv\Scripts\python.exe"
     if (Test-Path $pythonExe) {
         try {
-            & $pythonExe "$InstallDir\tools\skills_sync.py" 2>$null
-            Write-Success "Skills synced to ~/.hermes/skills/"
+            & $pythonExe "$InstallDir\cli\tools\skills_sync.py" 2>$null
+            Write-Success "Skills synced to ~/.elevate/skills/"
         } catch {
             # Fallback: simple directory copy
-            $bundledSkills = "$InstallDir\skills"
-            $userSkills = "$HermesHome\skills"
+            $bundledSkills = "$InstallDir\cli\skills"
+            $userSkills = "$ElevateHome\skills"
             if ((Test-Path $bundledSkills) -and -not (Get-ChildItem $userSkills -Exclude '.bundled_manifest' -ErrorAction SilentlyContinue)) {
                 Copy-Item -Path "$bundledSkills\*" -Destination $userSkills -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Success "Skills copied to ~/.hermes/skills/"
+                Write-Success "Skills copied to ~/.elevate/skills/"
             }
         }
     }
@@ -708,9 +711,10 @@ function Install-NodeDeps {
         Write-Info "Skipping Node.js dependencies (Node not installed)"
         return
     }
-    
-    Push-Location $InstallDir
-    
+
+    $cliDir = "$InstallDir\cli"
+    Push-Location $cliDir
+
     if (Test-Path "package.json") {
         Write-Info "Installing Node.js dependencies (browser tools)..."
         try {
@@ -720,9 +724,9 @@ function Install-NodeDeps {
             Write-Warn "npm install failed (browser tools may not work)"
         }
     }
-    
+
     # Install TUI dependencies
-    $tuiDir = "$InstallDir\ui-tui"
+    $tuiDir = "$cliDir\ui-tui"
     if (Test-Path "$tuiDir\package.json") {
         Write-Info "Installing TUI dependencies..."
         Push-Location $tuiDir
@@ -730,13 +734,13 @@ function Install-NodeDeps {
             npm install --silent 2>&1 | Out-Null
             Write-Success "TUI dependencies installed"
         } catch {
-            Write-Warn "TUI npm install failed (hermes --tui may not work)"
+            Write-Warn "TUI npm install failed (elevate --tui may not work)"
         }
         Pop-Location
     }
 
 
-    
+
     Pop-Location
 }
 
@@ -745,25 +749,25 @@ function Invoke-SetupWizard {
         Write-Info "Skipping setup wizard (-SkipSetup)"
         return
     }
-    
+
     Write-Host ""
     Write-Info "Starting setup wizard..."
     Write-Host ""
-    
+
     Push-Location $InstallDir
-    
-    # Run hermes setup using the venv Python directly (no activation needed)
+
+    # Run elevate setup using the venv Python directly (no activation needed)
     if (-not $NoVenv) {
-        & ".\venv\Scripts\python.exe" -m hermes_cli.main setup
+        & ".\venv\Scripts\python.exe" -m elevate_cli.main setup
     } else {
-        python -m hermes_cli.main setup
+        python -m elevate_cli.main setup
     }
-    
+
     Pop-Location
 }
 
 function Start-GatewayIfConfigured {
-    $envPath = "$HermesHome\.env"
+    $envPath = "$ElevateHome\.env"
     if (-not (Test-Path $envPath)) { return }
 
     $hasMessaging = $false
@@ -775,23 +779,23 @@ function Start-GatewayIfConfigured {
 
     if (-not $hasMessaging) { return }
 
-    $hermesCmd = "$InstallDir\venv\Scripts\hermes.exe"
-    if (-not (Test-Path $hermesCmd)) {
-        $hermesCmd = "hermes"
+    $elevateCmd = "$InstallDir\venv\Scripts\elevate.exe"
+    if (-not (Test-Path $elevateCmd)) {
+        $elevateCmd = "elevate"
     }
 
     # If WhatsApp is enabled but not yet paired, run foreground for QR scan
     $whatsappEnabled = $content | Where-Object { $_ -match "^WHATSAPP_ENABLED=true" }
-    $whatsappSession = "$HermesHome\whatsapp\session\creds.json"
+    $whatsappSession = "$ElevateHome\whatsapp\session\creds.json"
     if ($whatsappEnabled -and -not (Test-Path $whatsappSession)) {
         Write-Host ""
         Write-Info "WhatsApp is enabled but not yet paired."
-        Write-Info "Running 'hermes whatsapp' to pair via QR code..."
+        Write-Info "Running 'elevate whatsapp' to pair via QR code..."
         Write-Host ""
         $response = Read-Host "Pair WhatsApp now? [Y/n]"
         if ($response -eq "" -or $response -match "^[Yy]") {
             try {
-                & $hermesCmd whatsapp
+                & $elevateCmd whatsapp
             } catch {
                 # Expected after pairing completes
             }
@@ -807,19 +811,19 @@ function Start-GatewayIfConfigured {
     if ($response -eq "" -or $response -match "^[Yy]") {
         Write-Info "Starting gateway in background..."
         try {
-            $logFile = "$HermesHome\logs\gateway.log"
-            Start-Process -FilePath $hermesCmd -ArgumentList "gateway" `
+            $logFile = "$ElevateHome\logs\gateway.log"
+            Start-Process -FilePath $elevateCmd -ArgumentList "gateway" `
                 -RedirectStandardOutput $logFile `
-                -RedirectStandardError "$HermesHome\logs\gateway-error.log" `
+                -RedirectStandardError "$ElevateHome\logs\gateway-error.log" `
                 -WindowStyle Hidden
             Write-Success "Gateway started! Your bot is now online."
             Write-Info "Logs: $logFile"
             Write-Info "To stop: close the gateway process from Task Manager"
         } catch {
-            Write-Warn "Failed to start gateway. Run manually: hermes gateway"
+            Write-Warn "Failed to start gateway. Run manually: elevate gateway"
         }
     } else {
-        Write-Info "Skipped. Start the gateway later with: hermes gateway"
+        Write-Info "Skipped. Start the gateway later with: elevate gateway"
     }
 }
 
@@ -829,50 +833,50 @@ function Write-Completion {
     Write-Host "│              ✓ Installation Complete!                   │" -ForegroundColor Green
     Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Green
     Write-Host ""
-    
+
     # Show file locations
     Write-Host "📁 Your files:" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "   Config:    " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\config.yaml"
+    Write-Host "$ElevateHome\config.yaml"
     Write-Host "   API Keys:  " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\.env"
+    Write-Host "$ElevateHome\.env"
     Write-Host "   Data:      " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\cron\, sessions\, logs\"
+    Write-Host "$ElevateHome\cron\, sessions\, logs\"
     Write-Host "   Code:      " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\hermes-agent\"
+    Write-Host "$InstallDir\"
     Write-Host ""
-    
+
     Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "🚀 Commands:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "   hermes              " -NoNewline -ForegroundColor Green
+    Write-Host "   elevate              " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
-    Write-Host "   hermes setup        " -NoNewline -ForegroundColor Green
+    Write-Host "   elevate setup        " -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
-    Write-Host "   hermes config       " -NoNewline -ForegroundColor Green
+    Write-Host "   elevate config       " -NoNewline -ForegroundColor Green
     Write-Host "View/edit configuration"
-    Write-Host "   hermes config edit  " -NoNewline -ForegroundColor Green
+    Write-Host "   elevate config edit  " -NoNewline -ForegroundColor Green
     Write-Host "Open config in editor"
-    Write-Host "   hermes gateway      " -NoNewline -ForegroundColor Green
+    Write-Host "   elevate gateway      " -NoNewline -ForegroundColor Green
     Write-Host "Start messaging gateway (Telegram, Discord, etc.)"
-    Write-Host "   hermes update       " -NoNewline -ForegroundColor Green
+    Write-Host "   elevate update       " -NoNewline -ForegroundColor Green
     Write-Host "Update to latest version"
     Write-Host ""
-    
+
     Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "⚡ Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
     Write-Host ""
-    
+
     if (-not $HasNode) {
         Write-Host "Note: Node.js could not be installed automatically." -ForegroundColor Yellow
         Write-Host "Browser tools need Node.js. Install manually:" -ForegroundColor Yellow
         Write-Host "  https://nodejs.org/en/download/" -ForegroundColor Yellow
         Write-Host ""
     }
-    
+
     if (-not $HasRipgrep) {
         Write-Host "Note: ripgrep (rg) was not installed. For faster file search:" -ForegroundColor Yellow
         Write-Host "  winget install BurntSushi.ripgrep.MSVC" -ForegroundColor Yellow
@@ -886,13 +890,13 @@ function Write-Completion {
 
 function Main {
     Write-Banner
-    
+
     if (-not (Install-Uv)) { throw "uv installation failed — cannot continue" }
     if (-not (Test-Python)) { throw "Python $PythonVersion not available — cannot continue" }
     if (-not (Test-Git)) { throw "Git not found — install from https://git-scm.com/download/win" }
     Test-Node              # Auto-installs if missing
     Install-SystemPackages  # ripgrep + ffmpeg in one step
-    
+
     Install-Repository
     Install-Venv
     Install-Dependencies
@@ -901,7 +905,7 @@ function Main {
     Copy-ConfigTemplates
     Invoke-SetupWizard
     Start-GatewayIfConfigured
-    
+
     Write-Completion
 }
 
@@ -915,7 +919,7 @@ try {
     Write-Err "Installation failed: $_"
     Write-Host ""
     Write-Info "If the error is unclear, try downloading and running the script directly:"
-    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
+    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/CtrlStrategies/elevate/main/cli/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
     Write-Host "  .\install.ps1" -ForegroundColor Yellow
     Write-Host ""
 }

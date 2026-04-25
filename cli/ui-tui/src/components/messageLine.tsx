@@ -1,4 +1,4 @@
-import { Ansi, Box, NoSelect, Text } from '@hermes/ink'
+import { Ansi, Box, NoSelect, Text } from '@elevate/ink'
 import { memo } from 'react'
 
 import { sectionMode } from '../domain/details.js'

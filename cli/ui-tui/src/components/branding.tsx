@@ -1,4 +1,4 @@
-import { Box, Text, useStdout } from '@hermes/ink'
+import { Box, Text, useStdout } from '@elevate/ink'
 
 import { artWidth, logo, LOGO_WIDTH, peak, PEAK_WIDTH } from '../banner.js'
 import { flat } from '../lib/text.js'

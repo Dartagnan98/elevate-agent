@@ -41,6 +41,6 @@ if (process.env.ELEVATE_HEAPDUMP_ON_START === '1') {
 
 process.on('beforeExit', () => stopMemoryMonitor())
 
-const [{ render }, { App }] = await Promise.all([import('@hermes/ink'), import('./app.js')])
+const [{ render }, { App }] = await Promise.all([import('@elevate/ink'), import('./app.js')])
 
 render(<App gw={gw} />, { exitOnCtrlC: false })

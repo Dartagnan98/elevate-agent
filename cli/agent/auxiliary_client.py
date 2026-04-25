@@ -164,7 +164,7 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
 
 # OpenRouter app attribution headers
 _OR_HEADERS = {
-    "HTTP-Referer": "https://elevate.nousresearch.com",
+    "HTTP-Referer": "https://elevate.ctrlstrategies.com",
     "X-OpenRouter-Title": "Elevate",
     "X-OpenRouter-Categories": "productivity,cli-agent",
 }
@@ -174,7 +174,7 @@ _OR_HEADERS = {
 from elevate_cli import __version__ as _ELEVATE_VERSION
 
 _AI_GATEWAY_HEADERS = {
-    "HTTP-Referer": "https://elevate.nousresearch.com",
+    "HTTP-Referer": "https://elevate.ctrlstrategies.com",
     "X-Title": "Elevate",
     "User-Agent": f"ElevateAgent/{_ELEVATE_VERSION}",
 }

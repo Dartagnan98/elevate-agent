@@ -6,20 +6,20 @@
 { inputs, ... }: {
   perSystem = { pkgs, system, lib, ... }:
     let
-      hermes-agent = inputs.self.packages.${system}.default;
-      hermesVenv = pkgs.callPackage ./python.nix {
+      elevate = inputs.self.packages.${system}.default;
+      elevateVenv = pkgs.callPackage ./python.nix {
         inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
       };
 
       configMergeScript = pkgs.callPackage ./configMergeScript.nix { };
 
       # Auto-generated config key reference — always in sync with Python
-      configKeys = pkgs.runCommand "hermes-config-keys" {} ''
+      configKeys = pkgs.runCommand "elevate-config-keys" {} ''
         set -euo pipefail
         export HOME=$TMPDIR
-        ${hermesVenv}/bin/python3 -c '
+        ${elevateVenv}/bin/python3 -c '
 import json, sys
-from hermes_cli.config import DEFAULT_CONFIG
+from elevate_cli.config import DEFAULT_CONFIG
 
 def leaf_paths(d, prefix=""):
     paths = []
@@ -51,7 +51,7 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
           results = map (sys: { inherit sys; result = tryEvalPkg sys; }) targetSystems;
           failures = builtins.filter (r: !r.result.success) results;
           failMsg = lib.concatMapStringsSep "\n" (r: "  - ${r.sys}") failures;
-        in pkgs.runCommand "hermes-cross-eval" { } (
+        in pkgs.runCommand "elevate-cross-eval" { } (
           if failures != [] then
             builtins.throw "Package fails to evaluate on:\n${failMsg}"
           else ''
@@ -62,15 +62,15 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
         );
       } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         # Verify binaries exist and are executable
-        package-contents = pkgs.runCommand "hermes-package-contents" { } ''
+        package-contents = pkgs.runCommand "elevate-package-contents" { } ''
           set -e
           echo "=== Checking binaries ==="
-          test -x ${hermes-agent}/bin/hermes || (echo "FAIL: hermes binary missing"; exit 1)
-          test -x ${hermes-agent}/bin/hermes-agent || (echo "FAIL: hermes-agent binary missing"; exit 1)
+          test -x ${elevate}/bin/elevate || (echo "FAIL: elevate binary missing"; exit 1)
+          test -x ${elevate}/bin/elevate-agent || (echo "FAIL: elevate-agent binary missing"; exit 1)
           echo "PASS: All binaries present"
 
           echo "=== Checking version ==="
-          ${hermes-agent}/bin/hermes version 2>&1 | grep -qi "hermes" || (echo "FAIL: version check"; exit 1)
+          ${elevate}/bin/elevate version 2>&1 | grep -qi "elevate" || (echo "FAIL: version check"; exit 1)
           echo "PASS: Version check"
 
           echo "=== All checks passed ==="
@@ -79,11 +79,11 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
         '';
 
         # Verify every pyproject.toml [project.scripts] entry has a wrapped binary
-        entry-points-sync = pkgs.runCommand "hermes-entry-points-sync" { } ''
+        entry-points-sync = pkgs.runCommand "elevate-entry-points-sync" { } ''
           set -e
           echo "=== Checking entry points match pyproject.toml [project.scripts] ==="
-          for bin in hermes hermes-agent hermes-acp; do
-            test -x ${hermes-agent}/bin/$bin || (echo "FAIL: $bin binary missing from Nix package"; exit 1)
+          for bin in elevate elevate-agent elevate-acp; do
+            test -x ${elevate}/bin/$bin || (echo "FAIL: $bin binary missing from Nix package"; exit 1)
             echo "PASS: $bin present"
           done
 
@@ -92,13 +92,13 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
         '';
 
         # Verify CLI subcommands are accessible
-        cli-commands = pkgs.runCommand "hermes-cli-commands" { } ''
+        cli-commands = pkgs.runCommand "elevate-cli-commands" { } ''
           set -e
           export HOME=$(mktemp -d)
 
-          echo "=== Checking hermes --help ==="
-          ${hermes-agent}/bin/hermes --help 2>&1 | grep -q "gateway" || (echo "FAIL: gateway subcommand missing"; exit 1)
-          ${hermes-agent}/bin/hermes --help 2>&1 | grep -q "config" || (echo "FAIL: config subcommand missing"; exit 1)
+          echo "=== Checking elevate --help ==="
+          ${elevate}/bin/elevate --help 2>&1 | grep -q "gateway" || (echo "FAIL: gateway subcommand missing"; exit 1)
+          ${elevate}/bin/elevate --help 2>&1 | grep -q "config" || (echo "FAIL: config subcommand missing"; exit 1)
           echo "PASS: All subcommands accessible"
 
           echo "=== All CLI checks passed ==="
@@ -107,19 +107,19 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
         '';
 
         # Verify bundled skills are present in the package
-        bundled-skills = pkgs.runCommand "hermes-bundled-skills" { } ''
+        bundled-skills = pkgs.runCommand "elevate-bundled-skills" { } ''
           set -e
           echo "=== Checking bundled skills ==="
-          test -d ${hermes-agent}/share/hermes-agent/skills || (echo "FAIL: skills directory missing"; exit 1)
+          test -d ${elevate}/share/elevate/skills || (echo "FAIL: skills directory missing"; exit 1)
           echo "PASS: skills directory exists"
 
-          SKILL_COUNT=$(find ${hermes-agent}/share/hermes-agent/skills -name "SKILL.md" | wc -l)
+          SKILL_COUNT=$(find ${elevate}/share/elevate/skills -name "SKILL.md" | wc -l)
           test "$SKILL_COUNT" -gt 0 || (echo "FAIL: no SKILL.md files found in skills directory"; exit 1)
           echo "PASS: $SKILL_COUNT bundled skills found"
 
-          grep -q "HERMES_BUNDLED_SKILLS" ${hermes-agent}/bin/hermes || \
-            (echo "FAIL: HERMES_BUNDLED_SKILLS not in wrapper"; exit 1)
-          echo "PASS: HERMES_BUNDLED_SKILLS set in wrapper"
+          grep -q "ELEVATE_BUNDLED_SKILLS" ${elevate}/bin/elevate || \
+            (echo "FAIL: ELEVATE_BUNDLED_SKILLS not in wrapper"; exit 1)
+          echo "PASS: ELEVATE_BUNDLED_SKILLS set in wrapper"
 
           echo "=== All bundled skills checks passed ==="
           mkdir -p $out
@@ -127,66 +127,66 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
         '';
 
         # Verify bundled TUI is present and compiled
-        bundled-tui = pkgs.runCommand "hermes-bundled-tui" { } ''
+        bundled-tui = pkgs.runCommand "elevate-bundled-tui" { } ''
           set -e
           echo "=== Checking bundled TUI ==="
-          test -d ${hermes-agent}/ui-tui || (echo "FAIL: ui-tui directory missing"; exit 1)
+          test -d ${elevate}/ui-tui || (echo "FAIL: ui-tui directory missing"; exit 1)
           echo "PASS: ui-tui directory exists"
 
-          test -f ${hermes-agent}/ui-tui/dist/entry.js || (echo "FAIL: compiled entry.js missing"; exit 1)
+          test -f ${elevate}/ui-tui/dist/entry.js || (echo "FAIL: compiled entry.js missing"; exit 1)
           echo "PASS: compiled entry.js present"
 
-          test -d ${hermes-agent}/ui-tui/node_modules || (echo "FAIL: node_modules missing"; exit 1)
+          test -d ${elevate}/ui-tui/node_modules || (echo "FAIL: node_modules missing"; exit 1)
           echo "PASS: node_modules present"
 
-          grep -q "HERMES_TUI_DIR" ${hermes-agent}/bin/hermes || \
-            (echo "FAIL: HERMES_TUI_DIR not in wrapper"; exit 1)
-          echo "PASS: HERMES_TUI_DIR set in wrapper"
+          grep -q "ELEVATE_TUI_DIR" ${elevate}/bin/elevate || \
+            (echo "FAIL: ELEVATE_TUI_DIR not in wrapper"; exit 1)
+          echo "PASS: ELEVATE_TUI_DIR set in wrapper"
 
           echo "=== All bundled TUI checks passed ==="
           mkdir -p $out
           echo "ok" > $out/result
         '';
 
-        # Verify HERMES_NODE is set in wrapper and points to Node 20+
+        # Verify ELEVATE_NODE is set in wrapper and points to Node 20+
         # (string-width uses the /v regex flag which requires Node 20+)
-        hermes-node = pkgs.runCommand "hermes-node-version" { } ''
+        elevate-node = pkgs.runCommand "elevate-node-version" { } ''
           set -e
-          echo "=== Checking HERMES_NODE in wrapper ==="
-          grep -q "HERMES_NODE" ${hermes-agent}/bin/hermes || \
-            (echo "FAIL: HERMES_NODE not set in wrapper"; exit 1)
-          echo "PASS: HERMES_NODE present in wrapper"
+          echo "=== Checking ELEVATE_NODE in wrapper ==="
+          grep -q "ELEVATE_NODE" ${elevate}/bin/elevate || \
+            (echo "FAIL: ELEVATE_NODE not set in wrapper"; exit 1)
+          echo "PASS: ELEVATE_NODE present in wrapper"
 
-          HERMES_NODE=$(sed -n "s/^export HERMES_NODE='\(.*\)'/\1/p" ${hermes-agent}/bin/hermes)
-          test -x "$HERMES_NODE" || (echo "FAIL: HERMES_NODE=$HERMES_NODE not executable"; exit 1)
-          echo "PASS: HERMES_NODE executable at $HERMES_NODE"
+          ELEVATE_NODE=$(sed -n "s/^export ELEVATE_NODE='\(.*\)'/\1/p" ${elevate}/bin/elevate)
+          test -x "$ELEVATE_NODE" || (echo "FAIL: ELEVATE_NODE=$ELEVATE_NODE not executable"; exit 1)
+          echo "PASS: ELEVATE_NODE executable at $ELEVATE_NODE"
 
-          NODE_MAJOR=$("$HERMES_NODE" --version | sed 's/^v//' | cut -d. -f1)
+          NODE_MAJOR=$("$ELEVATE_NODE" --version | sed 's/^v//' | cut -d. -f1)
           test "$NODE_MAJOR" -ge 20 || \
             (echo "FAIL: Node v$NODE_MAJOR < 20, TUI needs /v regex flag support"; exit 1)
           echo "PASS: Node v$NODE_MAJOR >= 20"
 
-          echo "=== All HERMES_NODE checks passed ==="
+          echo "=== All ELEVATE_NODE checks passed ==="
           mkdir -p $out
           echo "ok" > $out/result
         '';
 
-        # Verify HERMES_MANAGED guard works on all mutation commands
-        managed-guard = pkgs.runCommand "hermes-managed-guard" { } ''
+        # Verify ELEVATE_MANAGED guard works on all mutation commands
+        managed-guard = pkgs.runCommand "elevate-managed-guard" { } ''
           set -e
           export HOME=$(mktemp -d)
 
           check_blocked() {
             local label="$1"
             shift
-            OUTPUT=$(HERMES_MANAGED=true "$@" 2>&1 || true)
+            OUTPUT=$(ELEVATE_MANAGED=true "$@" 2>&1 || true)
             echo "$OUTPUT" | grep -q "managed by NixOS" || (echo "FAIL: $label not guarded"; echo "$OUTPUT"; exit 1)
             echo "PASS: $label blocked in managed mode"
           }
 
-          echo "=== Checking HERMES_MANAGED guards ==="
-          check_blocked "config set" ${hermes-agent}/bin/hermes config set model foo
-          check_blocked "config edit" ${hermes-agent}/bin/hermes config edit
+          echo "=== Checking ELEVATE_MANAGED guards ==="
+          check_blocked "config set" ${elevate}/bin/elevate config set model foo
+          check_blocked "config edit" ${elevate}/bin/elevate config edit
 
           echo "=== All guard checks passed ==="
           mkdir -p $out
@@ -253,7 +253,7 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
                 - USER_VAR
           '';
 
-        in pkgs.runCommand "hermes-config-roundtrip" {
+        in pkgs.runCommand "elevate-config-roundtrip" {
           nativeBuildInputs = [ pkgs.jq ];
         } ''
           set -e
@@ -264,12 +264,12 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
 
           # Helper: run merge then load with Python, output merged JSON
           merge_and_load() {
-            local hermes_home="$1"
-            export HERMES_HOME="$hermes_home"
-            ${configMergeScript} ${nixSettings} "$hermes_home/config.yaml"
-            ${hermesVenv}/bin/python3 -c '
+            local elevate_home="$1"
+            export ELEVATE_HOME="$elevate_home"
+            ${configMergeScript} ${nixSettings} "$elevate_home/config.yaml"
+            ${elevateVenv}/bin/python3 -c '
 import json, sys
-from hermes_cli.config import load_config
+from elevate_cli.config import load_config
 json.dump(load_config(), sys.stdout, default=str)
 '
           }

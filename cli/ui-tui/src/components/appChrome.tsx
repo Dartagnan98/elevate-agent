@@ -1,4 +1,4 @@
-import { Box, type ScrollBoxHandle, Text } from '@hermes/ink'
+import { Box, type ScrollBoxHandle, Text } from '@elevate/ink'
 import { useStore } from '@nanostores/react'
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 

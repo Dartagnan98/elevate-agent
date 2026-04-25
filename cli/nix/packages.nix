@@ -1,19 +1,19 @@
-# nix/packages.nix — Hermes Agent package built with uv2nix
+# nix/packages.nix — Elevate package built with uv2nix
 { inputs, ... }:
 {
   perSystem =
     { pkgs, inputs', ... }:
     let
-      hermesVenv = pkgs.callPackage ./python.nix {
+      elevateVenv = pkgs.callPackage ./python.nix {
         inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
       };
 
-      hermesNpmLib = pkgs.callPackage ./lib.nix {
+      elevateNpmLib = pkgs.callPackage ./lib.nix {
         npm-lockfile-fix = inputs'.npm-lockfile-fix.packages.default;
       };
 
-      hermesTui = pkgs.callPackage ./tui.nix {
-        inherit hermesNpmLib;
+      elevateTui = pkgs.callPackage ./tui.nix {
+        inherit elevateNpmLib;
       };
 
       # Import bundled skills, excluding runtime caches
@@ -22,8 +22,8 @@
         filter = path: _type: !(pkgs.lib.hasInfix "/index-cache/" path);
       };
 
-      hermesWeb = pkgs.callPackage ./web.nix {
-        inherit hermesNpmLib;
+      elevateWeb = pkgs.callPackage ./web.nix {
+        inherit elevateNpmLib;
       };
 
       runtimeDeps = with pkgs; [
@@ -48,7 +48,7 @@
     {
       packages = {
         default = pkgs.stdenv.mkDerivation {
-          pname = "hermes-agent";
+          pname = "elevate";
           version = (fromTOML (builtins.readFile ../pyproject.toml)).project.version;
 
           dontUnpack = true;
@@ -58,28 +58,28 @@
           installPhase = ''
             runHook preInstall
 
-            mkdir -p $out/share/hermes-agent $out/bin
-            cp -r ${bundledSkills} $out/share/hermes-agent/skills
-            cp -r ${hermesWeb} $out/share/hermes-agent/web_dist
+            mkdir -p $out/share/elevate $out/bin
+            cp -r ${bundledSkills} $out/share/elevate/skills
+            cp -r ${elevateWeb} $out/share/elevate/web_dist
 
             # copy pre-built TUI (same layout as dev: ui-tui/dist/ + node_modules/)
             mkdir -p $out/ui-tui
-            cp -r ${hermesTui}/lib/hermes-tui/* $out/ui-tui/
+            cp -r ${elevateTui}/lib/elevate-tui/* $out/ui-tui/
 
             ${pkgs.lib.concatMapStringsSep "\n"
               (name: ''
-                makeWrapper ${hermesVenv}/bin/${name} $out/bin/${name} \
+                makeWrapper ${elevateVenv}/bin/${name} $out/bin/${name} \
                   --suffix PATH : "${runtimePath}" \
-                  --set HERMES_BUNDLED_SKILLS $out/share/hermes-agent/skills \
-                  --set HERMES_WEB_DIST $out/share/hermes-agent/web_dist \
-                  --set HERMES_TUI_DIR $out/ui-tui \
-                  --set HERMES_PYTHON ${hermesVenv}/bin/python3 \
-                  --set HERMES_NODE ${pkgs.nodejs_22}/bin/node
+                  --set ELEVATE_BUNDLED_SKILLS $out/share/elevate/skills \
+                  --set ELEVATE_WEB_DIST $out/share/elevate/web_dist \
+                  --set ELEVATE_TUI_DIR $out/ui-tui \
+                  --set ELEVATE_PYTHON ${elevateVenv}/bin/python3 \
+                  --set ELEVATE_NODE ${pkgs.nodejs_22}/bin/node
               '')
               [
-                "hermes"
-                "hermes-agent"
-                "hermes-acp"
+                "elevate"
+                "elevate-agent"
+                "elevate-acp"
               ]
             }
 
@@ -87,10 +87,10 @@
           '';
 
           passthru.devShellHook = ''
-            STAMP=".nix-stamps/hermes-agent"
+            STAMP=".nix-stamps/elevate"
             STAMP_VALUE="${pyprojectHash}:${uvLockHash}"
             if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$STAMP_VALUE" ]; then
-              echo "hermes-agent: installing Python dependencies..."
+              echo "elevate: installing Python dependencies..."
               uv venv .venv --python ${pkgs.python312}/bin/python3 2>/dev/null || true
               source .venv/bin/activate
               uv pip install -e ".[all]"
@@ -100,24 +100,24 @@
               echo "$STAMP_VALUE" > "$STAMP"
             else
               source .venv/bin/activate
-              export HERMES_PYTHON=${hermesVenv}/bin/python3
+              export ELEVATE_PYTHON=${elevateVenv}/bin/python3
             fi
           '';
 
           meta = with pkgs.lib; {
             description = "AI agent with advanced tool-calling capabilities";
-            homepage = "https://github.com/NousResearch/hermes-agent";
-            mainProgram = "hermes";
+            homepage = "https://elevate.ctrlstrategies.com";
+            mainProgram = "elevate";
             license = licenses.mit;
             platforms = platforms.unix;
           };
         };
 
-        tui = hermesTui;
-        web = hermesWeb;
+        tui = elevateTui;
+        web = elevateWeb;
 
-        fix-lockfiles = hermesNpmLib.mkFixLockfiles {
-          packages = [ hermesTui hermesWeb ];
+        fix-lockfiles = elevateNpmLib.mkFixLockfiles {
+          packages = [ elevateTui elevateWeb ];
         };
       };
     };

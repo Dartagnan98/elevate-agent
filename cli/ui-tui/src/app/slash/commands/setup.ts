@@ -1,4 +1,4 @@
-import { withInkSuspended } from '@hermes/ink'
+import { withInkSuspended } from '@elevate/ink'
 
 import { launchElevateCommand } from '../../../lib/externalCli.js'
 import { runExternalSetup } from '../../setupHandoff.js'

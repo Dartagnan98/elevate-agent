@@ -66,7 +66,7 @@ type WeightProps =
 export type Props = BaseProps & WeightProps
 
 export function shouldUseAnsiDim(env: NodeJS.ProcessEnv = process.env): boolean {
-  const override = (env.HERMES_TUI_DIM ?? '').trim()
+  const override = (env.ELEVATE_TUI_DIM ?? '').trim()
 
   if (ENV_ON_RE.test(override)) {
     return true

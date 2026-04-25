@@ -1,5 +1,5 @@
-# nix/web.nix — Hermes Web Dashboard (Vite/React) frontend build
-{ pkgs, hermesNpmLib, ... }:
+# nix/web.nix — Elevate Web Dashboard (Vite/React) frontend build
+{ pkgs, elevateNpmLib, ... }:
 let
   src = ../web;
   npmDeps = pkgs.fetchNpmDeps {
@@ -7,10 +7,10 @@ let
     hash = "sha256-TS/vrCHbdvXkPcAPxImKzAd2pdDCrKlgYZkXBMQ+TEg=";
   };
 
-  npm = hermesNpmLib.mkNpmPassthru { folder = "web"; attr = "web"; pname = "hermes-web"; };
+  npm = elevateNpmLib.mkNpmPassthru { folder = "web"; attr = "web"; pname = "elevate-web"; };
 in
 pkgs.buildNpmPackage (npm // {
-  pname = "hermes-web";
+  pname = "elevate-web";
   version = "0.0.0";
   inherit src npmDeps;
 

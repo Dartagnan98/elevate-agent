@@ -8,7 +8,7 @@ version = "0.11.0"
 description = "AI chief of staff for real estate agents. Forked from Hermes-Agent (Nous Research, MIT)."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Nous Research" }]
+authors = [{ name = "Elevation Real Estate HQ" }]
 license = { text = "MIT" }
 dependencies = [
   # Core — pinned to known-good ranges to limit supply chain attack surface

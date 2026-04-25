@@ -1,4 +1,4 @@
-import { Box, NoSelect, Text } from '@hermes/ink'
+import { Box, NoSelect, Text } from '@elevate/ink'
 import { memo, useEffect, useMemo, useState, type ReactNode } from 'react'
 import spinners, { type BrailleSpinnerName } from 'unicode-animations'
 

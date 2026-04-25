@@ -12,7 +12,7 @@ describe('shouldUseAnsiDim', () => {
   })
 
   it('honors explicit env override', () => {
-    expect(shouldUseAnsiDim({ HERMES_TUI_DIM: '1', VTE_VERSION: '7603' } as NodeJS.ProcessEnv)).toBe(true)
-    expect(shouldUseAnsiDim({ HERMES_TUI_DIM: '0' } as NodeJS.ProcessEnv)).toBe(false)
+    expect(shouldUseAnsiDim({ ELEVATE_TUI_DIM: '1', VTE_VERSION: '7603' } as NodeJS.ProcessEnv)).toBe(true)
+    expect(shouldUseAnsiDim({ ELEVATE_TUI_DIM: '0' } as NodeJS.ProcessEnv)).toBe(false)
   })
 })

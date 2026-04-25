@@ -95,6 +95,6 @@ let
         pythonPackageOverrides
       ]);
 in
-pythonSet.mkVirtualEnv "hermes-agent-env" {
-  hermes-agent = [ "all" ];
+pythonSet.mkVirtualEnv "elevate-env" {
+  elevate = [ "all" ];
 }
