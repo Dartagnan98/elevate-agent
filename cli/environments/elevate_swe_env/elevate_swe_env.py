@@ -13,7 +13,7 @@ Usage:
     # Phase 1: OpenAI server type
     vllm serve YourModel --tool-parser elevate
     run-api
-    python environments/elevate_swe_env.py serve \\
+    python environments/elevate_swe_env/elevate_swe_env.py serve \\
         --openai.base_url http://localhost:8000/v1 \\
         --openai.model_name YourModel \\
         --openai.server_type openai \\
@@ -21,7 +21,7 @@ Usage:
         --env.terminal_backend modal
 
     # Phase 2: VLLM server type (full RL training)
-    python environments/elevate_swe_env.py serve \\
+    python environments/elevate_swe_env/elevate_swe_env.py serve \\
         --openai.base_url http://localhost:8000/v1 \\
         --openai.model_name YourModel \\
         --openai.server_type vllm \\

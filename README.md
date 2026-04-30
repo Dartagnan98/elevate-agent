@@ -42,13 +42,43 @@ psql $SUPABASE_DB_URL -f db/002_password_hash.sql
 ### CLI
 
 ```bash
-cd cli
+git clone YOUR_ELEVATE_REPO_URL elevate
+cd elevate/cli
 ./setup-elevate.sh            # creates venv, installs, symlinks elevate bin
-elevate subscribe              # log in with email+password → license.json
+elevate subscribe              # log in with email+password -> license.json
+elevate model                  # choose model/provider
 elevate license status         # check token state
 elevate cloud-skills list      # list skills at your tier
 elevate cloud-skills fetch <name>
 ELEVATE_BACKEND_URL=http://localhost:3000 elevate  # point CLI at local backend
+```
+
+Replace `YOUR_ELEVATE_REPO_URL` with the published Elevate repository URL.
+For a local checkout, start from this repo and run `cd cli && ./setup-elevate.sh`.
+
+Existing Hermes installs are migrated safely by `setup-elevate.sh` when
+`~/.hermes/config.yaml` exists and `~/.elevate/config.yaml` does not. Set
+`ELEVATE_MIGRATE_HERMES=0` to skip migration, or
+`ELEVATE_FORCE_HERMES_MIGRATION=1` to overwrite an existing Elevate config after
+writing a timestamped backup under `~/.elevate/migration-backups/`.
+
+### Uninstall
+
+```bash
+elevate uninstall --full --dry-run  # preview full removal
+elevate uninstall --full --yes      # remove gateway, command links, profiles, and ~/.elevate
+elevate uninstall --yes             # remove command links/install copy but keep ~/.elevate data
+```
+
+Source checkouts are protected by default. Add `--delete-source-checkout` only
+when you intentionally want the uninstaller to delete the Git checkout too.
+
+### Harness
+
+```bash
+cli/scripts/elevate-harness.sh audit    # fail on non-allowlisted legacy coupling
+cli/scripts/elevate-harness.sh smoke    # syntax, compile, launcher, uninstall dry-run
+cli/scripts/elevate-harness.sh all      # temp install, migration, and uninstall rehearsal
 ```
 
 Dev flag to bypass the subscription gate while building: `ELEVATE_DEV_MODE=1 elevate`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenClaw -> Elevate migration helper.
+"""OpenClaw to Elevate migration helper.
 
 This script migrates the parts of an OpenClaw user footprint that map cleanly
 into Elevate, archives selected unmapped docs for manual review, and

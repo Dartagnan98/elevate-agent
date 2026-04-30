@@ -2,7 +2,7 @@
 
 Renders any content as colored ASCII character video. Audio, video, images, text, or pure math in, MP4/GIF/PNG sequence out. Full RGB color per character cell, 1080p 24fps default. No GPU.
 
-Built for [Elevate](https://github.com/NousResearch/elevate). Usable in any coding agent. Canonical source lives here; synced to [`NousResearch/elevate/skills/creative/ascii-video`](https://github.com/NousResearch/elevate/tree/main/skills/creative/ascii-video) via PR.
+Built for [Elevate](https://github.com/ctrlstrategies/elevate). Usable in any coding agent. Canonical source lives here; synced to [`ctrlstrategies/elevate/skills/creative/ascii-video`](https://github.com/ctrlstrategies/elevate/tree/main/skills/creative/ascii-video) via PR.
 
 ## What this is
 

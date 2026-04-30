@@ -11,16 +11,50 @@ Paid subscription unlocks access to the Ctrl Strategies skill library: CMA gener
 ## Install
 
 ```bash
-cd cli
+git clone YOUR_ELEVATE_REPO_URL elevate
+cd elevate/cli
 ./setup-elevate.sh
 ```
+
+Replace `YOUR_ELEVATE_REPO_URL` with the published Elevate repository URL.
+For a local checkout, run `cd cli && ./setup-elevate.sh` from the repository
+root.
+
+`setup-elevate.sh` creates a local virtual environment, installs the default
+desktop bundle, links `elevate` into `~/.local/bin`, syncs bundled skills, and
+seeds `~/.elevate/SOUL.md` when missing.
+
+If an older Hermes install exists at `~/.hermes`, setup can migrate config,
+auth, sessions, skills, memories, cron jobs, and secrets into `~/.elevate`.
+Migration is automatic when no Elevate config exists. Use
+`ELEVATE_MIGRATE_HERMES=0 ./setup-elevate.sh` to skip it.
 
 ## First run
 
 ```bash
-elevate login           # authenticate with your subscription
-elevate config llm      # point to your anthropic/openai key
-elevate start           # start chatting
+elevate subscribe       # authenticate with your Elevate subscription
+elevate model           # choose model/provider
+elevate                 # start chatting
+elevate gateway install # optional: run Telegram/Discord/cron in the background
+```
+
+## Uninstall
+
+```bash
+elevate uninstall --full --dry-run  # preview full removal
+elevate uninstall --full --yes      # remove gateway, command links, profiles, and ~/.elevate
+elevate uninstall --yes             # remove command links/install copy but keep ~/.elevate data
+```
+
+Source checkouts are protected by default. Add `--delete-source-checkout` only
+when you intentionally want the uninstaller to delete the Git checkout too.
+
+## Harness
+
+```bash
+./scripts/elevate-harness.sh audit    # fail on non-allowlisted legacy coupling
+./scripts/elevate-harness.sh smoke    # syntax, compile, launcher, uninstall dry-run
+./scripts/elevate-harness.sh all      # temp install, migration, and uninstall rehearsal
 ```
 
 ## Architecture

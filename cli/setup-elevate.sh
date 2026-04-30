@@ -13,8 +13,9 @@
 # 2. Creates a Python 3.11 virtual environment
 # 3. Installs the appropriate dependency set for the platform
 # 4. Creates .env from template (if not exists)
-# 5. Symlinks the 'elevate' CLI command into a user-facing bin dir
-# 6. Runs the setup wizard (optional)
+# 5. Safely migrates an existing ~/.hermes install when present
+# 6. Symlinks the 'elevate' CLI command into a user-facing bin dir
+# 7. Runs the setup wizard (optional)
 # ============================================================================
 
 set -e
@@ -49,6 +50,187 @@ get_command_link_display_dir() {
     else
         echo '~/.local/bin'
     fi
+}
+
+can_prompt() {
+    [ -t 0 ]
+}
+
+prompt_yes_no() {
+    local prompt="$1"
+    local default="${2:-Y}"
+    local reply=""
+
+    if ! can_prompt; then
+        [ "$default" = "Y" ]
+        return
+    fi
+
+    read -p "$prompt" -n 1 -r reply || reply=""
+    echo
+
+    if [ -z "$reply" ]; then
+        [ "$default" = "Y" ]
+        return
+    fi
+
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+get_elevate_home_dir() {
+    echo "${ELEVATE_HOME:-$HOME/.elevate}"
+}
+
+rewrite_hermes_config_names() {
+    local config_file="$1"
+    perl -0pi -e '
+        s/hermes-cli/elevate-cli/g;
+        s/hermes-telegram/elevate-telegram/g;
+        s/hermes-discord/elevate-discord/g;
+        s/hermes-whatsapp/elevate-whatsapp/g;
+        s/hermes-slack/elevate-slack/g;
+        s/hermes-signal/elevate-signal/g;
+        s/hermes-homeassistant/elevate-homeassistant/g;
+        s/hermes-qqbot/elevate-qqbot/g;
+        s/stop\/restart hermes gateway/stop\/restart elevate gateway/g;
+        s/hermes update/elevate update/g;
+    ' "$config_file"
+}
+
+ensure_elevate_soul() {
+    local elevate_home="$1"
+    mkdir -p "$elevate_home"
+    if [ -s "$elevate_home/SOUL.md" ]; then
+        return
+    fi
+
+    cat > "$elevate_home/SOUL.md" <<'EOF'
+You are Elevate, the AI chief of staff for real estate agents, built by Ctrl Strategies. You know the agent's business: listings, buyers, CMAs, outreach, vendor coordination, compliance paperwork. You help them move faster on the right things and ignore the noise.
+
+Style: direct, grounded, no fluff. Short sentences. No corporate AI language ("Certainly!", "I'd be happy to", "As an AI"). Don't narrate what you're about to do — just do it. If you don't know something, say so plainly. If the agent is chasing the wrong thing, tell them.
+
+Priorities: (1) act on what the agent asked, (2) surface the thing that would make them more money this week, (3) protect their time. Assume they are solo or small-team and their hours matter. Give clear next actions, not menus of options. Be targeted and efficient in exploration.
+EOF
+    echo -e "${GREEN}✓${NC} Created default Elevate persona at $elevate_home/SOUL.md"
+}
+
+migrate_hermes_home() {
+    local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+    local elevate_home
+    local mode="${ELEVATE_MIGRATE_HERMES:-auto}"
+    local force="${ELEVATE_FORCE_HERMES_MIGRATION:-0}"
+    local should_migrate=false
+
+    elevate_home="$(get_elevate_home_dir)"
+
+    if [ ! -d "$hermes_home" ] || [ ! -f "$hermes_home/config.yaml" ]; then
+        return
+    fi
+
+    if [ -f "$elevate_home/config.yaml" ] && [ "$force" != "1" ]; then
+        echo -e "${GREEN}✓${NC} Existing Elevate config found; skipping Hermes migration"
+        return
+    fi
+
+    case "$mode" in
+        0|false|False|no|No)
+            echo -e "${YELLOW}⚠${NC} Hermes install detected; migration skipped by ELEVATE_MIGRATE_HERMES=$mode"
+            return
+            ;;
+        1|true|True|yes|Yes)
+            should_migrate=true
+            ;;
+        auto|"")
+            if can_prompt; then
+                if prompt_yes_no "Existing Hermes install found. Migrate config/auth/sessions to Elevate? [Y/n] " "Y"; then
+                    should_migrate=true
+                fi
+            else
+                should_migrate=true
+            fi
+            ;;
+        *)
+            echo -e "${YELLOW}⚠${NC} Unknown ELEVATE_MIGRATE_HERMES=$mode; skipping Hermes migration"
+            return
+            ;;
+    esac
+
+    if [ "$should_migrate" != true ]; then
+        echo -e "${YELLOW}⚠${NC} Hermes migration skipped"
+        return
+    fi
+
+    local ts
+    local backup_dir
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup_dir="$elevate_home/migration-backups/pre-hermes-migration-$ts"
+    mkdir -p "$backup_dir"
+
+    echo -e "${CYAN}→${NC} Migrating Hermes data into Elevate..."
+
+    for item in config.yaml .env auth.json channel_directory.json state.db state.db-shm state.db-wal SOUL.md; do
+        if [ -e "$elevate_home/$item" ]; then
+            cp -p "$elevate_home/$item" "$backup_dir/$item"
+        fi
+    done
+
+    for dir in skills memories sessions cron secrets plugins; do
+        if [ -e "$elevate_home/$dir" ]; then
+            mkdir -p "$backup_dir/$dir"
+            cp -a "$elevate_home/$dir/." "$backup_dir/$dir/" 2>/dev/null || true
+        fi
+    done
+
+    mkdir -p "$elevate_home"
+    cp -p "$hermes_home/config.yaml" "$elevate_home/config.yaml"
+    rewrite_hermes_config_names "$elevate_home/config.yaml"
+
+    for item in .env auth.json channel_directory.json; do
+        if [ -e "$hermes_home/$item" ]; then
+            cp -p "$hermes_home/$item" "$elevate_home/$item"
+        fi
+    done
+
+    for dir in skills memories sessions cron secrets plugins; do
+        if [ -d "$hermes_home/$dir" ]; then
+            mkdir -p "$elevate_home/$dir"
+            cp -a "$hermes_home/$dir/." "$elevate_home/$dir/"
+        fi
+    done
+
+    if [ -f "$hermes_home/state.db" ]; then
+        rm -f "$elevate_home/state.db-shm" "$elevate_home/state.db-wal"
+        if command -v sqlite3 >/dev/null 2>&1; then
+            sqlite3 "$hermes_home/state.db" ".backup '$elevate_home/state.db'"
+        else
+            cp -p "$hermes_home/state.db" "$elevate_home/state.db"
+            [ -e "$hermes_home/state.db-shm" ] && cp -p "$hermes_home/state.db-shm" "$elevate_home/state.db-shm"
+            [ -e "$hermes_home/state.db-wal" ] && cp -p "$hermes_home/state.db-wal" "$elevate_home/state.db-wal"
+        fi
+    fi
+
+    chmod 600 "$elevate_home/.env" "$elevate_home/auth.json" "$elevate_home/config.yaml" 2>/dev/null || true
+    ensure_elevate_soul "$elevate_home"
+    echo -e "${GREEN}✓${NC} Hermes migration complete (backup: $backup_dir)"
+}
+
+ensure_elevate_config() {
+    local elevate_home="$1"
+    local config_file="$elevate_home/config.yaml"
+
+    if [ -f "$config_file" ]; then
+        return
+    fi
+
+    ELEVATE_HOME="$elevate_home" "$SETUP_PYTHON" - <<'PY'
+from elevate_cli.config import DEFAULT_CONFIG, ensure_elevate_home, get_config_path, save_config
+
+ensure_elevate_home()
+path = get_config_path()
+if not path.exists():
+    save_config(DEFAULT_CONFIG)
+PY
+    echo -e "${GREEN}✓${NC} Created default config at $config_file"
 }
 
 echo ""
@@ -177,20 +359,23 @@ if is_termux; then
     fi
     echo -e "${GREEN}✓${NC} Dependencies installed"
 else
-    # Prefer uv sync with lockfile (hash-verified installs) when available,
-    # fall back to pip install for compatibility or when lockfile is stale.
-    if [ -f "uv.lock" ]; then
-        echo -e "${CYAN}→${NC} Using uv.lock for hash-verified installation..."
-        UV_PROJECT_ENVIRONMENT="$SCRIPT_DIR/venv" $UV_CMD sync --all-extras --locked 2>/dev/null && \
-            echo -e "${GREEN}✓${NC} Dependencies installed (lockfile verified)" || {
-            echo -e "${YELLOW}⚠${NC} Lockfile install failed (may be outdated), falling back to pip install..."
-            $UV_CMD pip install -e ".[all]" || $UV_CMD pip install -e "."
-            echo -e "${GREEN}✓${NC} Dependencies installed"
-        }
+    DEFAULT_EXTRAS="messaging,cron,cli,pty,mcp,acp,honcho,web"
+    if [ "${ELEVATE_INSTALL_EXTRAS+x}" = "x" ]; then
+        INSTALL_EXTRAS="$ELEVATE_INSTALL_EXTRAS"
     else
-        $UV_CMD pip install -e ".[all]" || $UV_CMD pip install -e "."
-        echo -e "${GREEN}✓${NC} Dependencies installed"
+        INSTALL_EXTRAS="$DEFAULT_EXTRAS"
     fi
+    if [ -n "$INSTALL_EXTRAS" ]; then
+        INSTALL_SPEC=".[${INSTALL_EXTRAS}]"
+    else
+        INSTALL_SPEC="."
+    fi
+    echo -e "${CYAN}→${NC} Installing package spec: $INSTALL_SPEC"
+    $UV_CMD pip install --python "$SETUP_PYTHON" -e "$INSTALL_SPEC" || {
+        echo -e "${YELLOW}⚠${NC} Extra install failed, falling back to base package..."
+        $UV_CMD pip install --python "$SETUP_PYTHON" -e "."
+    }
+    echo -e "${GREEN}✓${NC} Dependencies installed"
 fi
 
 # ============================================================================
@@ -220,9 +405,7 @@ if command -v rg &> /dev/null; then
     echo -e "${GREEN}✓${NC} ripgrep found"
 else
     echo -e "${YELLOW}⚠${NC} ripgrep not found (file search will use grep fallback)"
-    read -p "Install ripgrep for faster search? [Y/n] " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+    if prompt_yes_no "Install ripgrep for faster search? [Y/n] " "Y"; then
         INSTALLED=false
 
         if is_termux; then
@@ -269,14 +452,32 @@ fi
 # Environment file
 # ============================================================================
 
-if [ ! -f ".env" ]; then
+ELEVATE_HOME_DIR="$(get_elevate_home_dir)"
+mkdir -p "$ELEVATE_HOME_DIR"
+ELEVATE_ENV_FILE="$ELEVATE_HOME_DIR/.env"
+
+if [ ! -f "$ELEVATE_ENV_FILE" ]; then
     if [ -f ".env.example" ]; then
-        cp .env.example .env
-        echo -e "${GREEN}✓${NC} Created .env from template"
+        cp .env.example "$ELEVATE_ENV_FILE"
+        chmod 600 "$ELEVATE_ENV_FILE" 2>/dev/null || true
+        echo -e "${GREEN}✓${NC} Created $ELEVATE_ENV_FILE from template"
     fi
 else
-    echo -e "${GREEN}✓${NC} .env exists"
+    echo -e "${GREEN}✓${NC} $ELEVATE_ENV_FILE exists"
 fi
+
+if [ "${ELEVATE_CREATE_PROJECT_ENV:-0}" = "1" ] && [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    cp .env.example .env
+    echo -e "${GREEN}✓${NC} Created project .env from template"
+fi
+
+# ============================================================================
+# Existing Hermes migration
+# ============================================================================
+
+migrate_hermes_home
+ensure_elevate_soul "$ELEVATE_HOME_DIR"
+ensure_elevate_config "$ELEVATE_HOME_DIR"
 
 # ============================================================================
 # PATH setup — symlink elevate into a user-facing bin dir
@@ -390,10 +591,12 @@ echo "  elevate doctor        # Diagnose issues"
 echo ""
 
 # Ask if they want to run setup wizard now
-read -p "Would you like to run the setup wizard now? [Y/n] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+if [ "${ELEVATE_SKIP_SETUP_PROMPT:-0}" = "1" ]; then
+    echo "Skipping setup wizard because ELEVATE_SKIP_SETUP_PROMPT=1"
+elif prompt_yes_no "Would you like to run the setup wizard now? [Y/n] " "Y"; then
     echo ""
     # Run directly with venv Python (no activation needed)
     "$SCRIPT_DIR/venv/bin/python" -m elevate_cli.main setup
+else
+    echo "Skipping setup wizard. Run 'elevate setup' when ready."
 fi

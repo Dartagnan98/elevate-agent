@@ -1588,13 +1588,20 @@ class ChatConsole:
         """
         yield self
 
-# ASCII Art - ELEVATE-AGENT logo (full width, single line - requires ~95 char terminal)
-ELEVATE_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
+# ASCII Art - ELEVATE AGENT logo (kept in sync with elevate_cli.banner)
+ELEVATE_AGENT_LOGO = """[bold #FFD700]███████╗██╗     ███████╗██╗   ██╗ █████╗ ████████╗███████╗[/]
+[bold #FFD700]██╔════╝██║     ██╔════╝██║   ██║██╔══██╗╚══██╔══╝██╔════╝[/]
+[#FFBF00]█████╗  ██║     █████╗  ██║   ██║███████║   ██║   █████╗  [/]
+[#FFBF00]██╔══╝  ██║     ██╔══╝  ╚██╗ ██╔╝██╔══██║   ██║   ██╔══╝  [/]
+[#CD7F32]███████╗███████╗███████╗ ╚████╔╝ ██║  ██║   ██║   ███████╗[/]
+[#CD7F32]╚══════╝╚══════╝╚══════╝  ╚═══╝  ╚═╝  ╚═╝   ╚═╝   ╚══════╝[/]
+[#FFD700] █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
+[#FFD700]██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
+[#FFBF00]███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   [/]
+[#FFBF00]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   [/]
+[#CD7F32]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   [/]
+[#CD7F32]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   [/]
+[dim #B8860B]REAL ESTATE AI CHIEF OF STAFF · CTRL STRATEGIES[/]"""
 
 # ASCII Art - Elevate Peak (compact, fits in left panel)
 ELEVATE_PEAK = """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
@@ -1629,18 +1636,18 @@ def _build_compact_banner() -> str:
     dim_color = _skin.get_color("banner_dim", "#B8860B") if _skin else "#B8860B"
 
     if skin_name == "default":
-        line1 = "▲ ELEVATE - AI Agent Framework"
-        tiny_line = "▲ ELEVATE"
+        line1 = "▲ ELEVATE AGENT - Real Estate AI Chief of Staff"
+        tiny_line = "▲ ELEVATE AGENT"
     else:
-        agent_name = _skin.get_branding("agent_name", "Elevate") if _skin else "Elevate"
-        line1 = f"{agent_name} - AI Agent Framework"
+        agent_name = _skin.get_branding("agent_name", "Elevate Agent") if _skin else "Elevate Agent"
+        line1 = f"{agent_name} - Real Estate AI Chief of Staff"
         tiny_line = agent_name
 
     version_line = format_banner_version_label()
 
     w = min(shutil.get_terminal_size().columns - 2, 88)
     if w < 30:
-        return f"\n[{title_color}]{tiny_line}[/] [dim {dim_color}]- Nous Research[/]\n"
+        return f"\n[{title_color}]{tiny_line}[/] [dim {dim_color}]- Ctrl Strategies[/]\n"
 
     inner = w - 2  # inside the box border
     bar = "═" * w

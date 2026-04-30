@@ -79,7 +79,7 @@ def _discord_request(
         headers={
             "Authorization": f"Bot {token}",
             "Content-Type": "application/json",
-            "User-Agent": "Elevate (https://github.com/NousResearch/elevate)",
+            "User-Agent": "Elevate (https://github.com/ctrlstrategies/elevate)",
         },
     )
 

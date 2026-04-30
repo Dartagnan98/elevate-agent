@@ -1,7 +1,7 @@
 class Elevate < Formula
   include Language::Python::Virtualenv
 
-  desc "AI chief of staff for real estate. Forked from Hermes-Agent (MIT)"
+  desc "AI chief of staff for real estate"
   homepage "https://elevate.ctrlstrategies.com"
   # Stable source should point at the semver-named sdist asset attached by
   # scripts/release.py, not the CalVer tag tarball.

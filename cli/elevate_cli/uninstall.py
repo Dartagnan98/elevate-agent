@@ -3,7 +3,7 @@ Elevate Uninstaller.
 
 Provides options for:
 - Full uninstall: Remove everything including configs and data
-- Keep data: Remove code but keep ~/.elevate/ (configs, sessions, logs)
+- Keep data: Remove install links/code but keep ~/.elevate/ (configs, sessions, logs)
 """
 
 import os
@@ -27,6 +27,74 @@ def log_warn(msg: str):
 def get_project_root() -> Path:
     """Get the project installation directory."""
     return Path(__file__).parent.parent.resolve()
+
+
+def _path_contains_git_checkout(path: Path) -> bool:
+    """Return True when path is inside a Git checkout.
+
+    Running ``elevate uninstall`` from a developer checkout should not delete
+    the source tree by default. Packaged/copied installs normally do not include
+    Git metadata and remain removable.
+    """
+    try:
+        resolved = path.resolve()
+        home = Path.home().resolve()
+    except Exception:
+        resolved = path
+        home = Path.home()
+
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".git").exists():
+            return True
+        if candidate == home:
+            break
+    return False
+
+
+def _is_obviously_unsafe_code_path(path: Path) -> bool:
+    """Guard against catastrophic path detection failures."""
+    try:
+        resolved = path.resolve()
+        home = Path.home().resolve()
+    except Exception:
+        return True
+
+    unsafe = {
+        Path("/").resolve(),
+        home,
+        home / ".local",
+        home / ".local" / "bin",
+        home / ".elevate",
+    }
+    return resolved in unsafe
+
+
+def should_remove_project_root(
+    project_root: Path,
+    elevate_home: Path,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """Decide whether uninstall may remove the code directory."""
+    if force:
+        return True, "forced by --delete-source-checkout"
+
+    if _is_obviously_unsafe_code_path(project_root):
+        return False, "path is too broad to remove automatically"
+
+    try:
+        project_resolved = project_root.resolve()
+        home_resolved = elevate_home.resolve()
+    except Exception:
+        project_resolved = project_root
+        home_resolved = elevate_home
+
+    if _path_contains_git_checkout(project_resolved):
+        return False, "source checkout detected"
+
+    if home_resolved in project_resolved.parents or project_resolved.parent == home_resolved:
+        return True, "installed under ELEVATE_HOME"
+
+    return True, "standalone copied install"
 
 
 def find_shell_configs() -> list:
@@ -288,6 +356,17 @@ def run_uninstall(args):
     """
     project_root = get_project_root()
     elevate_home = get_elevate_home()
+    dry_run = bool(getattr(args, "dry_run", False))
+    assume_yes = bool(getattr(args, "yes", False))
+    arg_full = bool(getattr(args, "full", False))
+    arg_all_profiles = bool(getattr(args, "all_profiles", False))
+    arg_keep_profiles = bool(getattr(args, "keep_profiles", False))
+    arg_delete_source_checkout = bool(getattr(args, "delete_source_checkout", False))
+    remove_project_root, project_root_reason = should_remove_project_root(
+        project_root,
+        elevate_home,
+        force=arg_delete_source_checkout,
+    )
 
     # Detect named profiles when uninstalling from the default root —
     # offer to clean them up too instead of leaving zombie ELEVATE_HOMEs
@@ -297,7 +376,7 @@ def run_uninstall(args):
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA, Colors.BOLD))
-    print(color("│            ▲ Elevate Uninstaller                  │", Colors.MAGENTA, Colors.BOLD))
+    print(color("│          ▲ Elevate Agent Uninstaller              │", Colors.MAGENTA, Colors.BOLD))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.MAGENTA, Colors.BOLD))
     print()
     
@@ -315,32 +394,61 @@ def run_uninstall(args):
             running = " (gateway running)" if getattr(p, "gateway_running", False) else ""
             print(f"  • {p.name}{running}: {p.path}")
         print()
-    
-    # Ask for confirmation
-    print(color("Uninstall Options:", Colors.YELLOW, Colors.BOLD))
-    print()
-    print("  1) " + color("Keep data", Colors.GREEN) + " - Remove code only, keep configs/sessions/logs")
-    print("     (Recommended - you can reinstall later with your settings intact)")
-    print()
-    print("  2) " + color("Full uninstall", Colors.RED) + " - Remove everything including all data")
-    print("     (Warning: This deletes all configs, sessions, and logs permanently)")
-    print()
-    print("  3) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
-    print()
-    
-    try:
-        choice = input(color("Select option [1/2/3]: ", Colors.BOLD)).strip()
-    except (KeyboardInterrupt, EOFError):
+
+    if dry_run:
+        print(color("Dry Run Plan:", Colors.YELLOW, Colors.BOLD))
+        print("  - Stop and uninstall the Elevate gateway service")
+        print("  - Kill standalone Elevate gateway processes")
+        print("  - Remove Elevate PATH entries from shell config files")
+        print("  - Remove elevate command links from ~/.local/bin and /usr/local/bin")
+        if remove_project_root:
+            print(f"  - Remove installation directory: {project_root} ({project_root_reason})")
+        else:
+            print(f"  - Keep source code directory: {project_root} ({project_root_reason})")
+            print("    Use --delete-source-checkout to remove this directory too.")
+        if arg_full:
+            print(f"  - Remove Elevate data directory: {elevate_home}")
+            if named_profiles and not arg_keep_profiles:
+                profile_names = ", ".join(p.name for p in named_profiles)
+                print(f"  - Remove named profiles: {profile_names}")
+        else:
+            print(f"  - Keep Elevate data directory: {elevate_home}")
         print()
-        print("Cancelled.")
+        print("No changes made.")
         return
     
-    if choice == "3" or choice.lower() in ("c", "cancel", "q", "quit", "n", "no"):
+    if assume_yes:
+        full_uninstall = arg_full
+    elif arg_full:
+        full_uninstall = True
+    else:
+        # Ask for confirmation
+        print(color("Uninstall Options:", Colors.YELLOW, Colors.BOLD))
         print()
-        print("Uninstall cancelled.")
-        return
-    
-    full_uninstall = (choice == "2")
+        print("  1) " + color("Keep data", Colors.GREEN) + " - Remove code only, keep configs/sessions/logs")
+        if not remove_project_root:
+            print("     Source checkout will be kept unless --delete-source-checkout is used")
+        print("     (Recommended - you can reinstall later with your settings intact)")
+        print()
+        print("  2) " + color("Full uninstall", Colors.RED) + " - Remove everything including all data")
+        print("     (Warning: This deletes all configs, sessions, and logs permanently)")
+        print()
+        print("  3) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
+        print()
+
+        try:
+            choice = input(color("Select option [1/2/3]: ", Colors.BOLD)).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            print("Cancelled.")
+            return
+
+        if choice == "3" or choice.lower() in ("c", "cancel", "q", "quit", "n", "no"):
+            print()
+            print("Uninstall cancelled.")
+            return
+
+        full_uninstall = (choice == "2")
 
     # When doing a full uninstall from the default profile, also offer to
     # remove any named profiles — stopping their gateway services, unlinking
@@ -348,21 +456,26 @@ def run_uninstall(args):
     # those leave zombie services and data behind.
     remove_profiles = False
     if full_uninstall and named_profiles:
-        print()
-        print(color("Other profiles will NOT be removed by default.", Colors.YELLOW))
-        print(f"Found {len(named_profiles)} named profile(s): " +
-              ", ".join(p.name for p in named_profiles))
-        print()
-        try:
-            resp = input(color(
-                f"Also stop and remove these {len(named_profiles)} profile(s)? [y/N]: ",
-                Colors.BOLD
-            )).strip().lower()
-        except (KeyboardInterrupt, EOFError):
+        if arg_keep_profiles:
+            remove_profiles = False
+        elif assume_yes or arg_all_profiles:
+            remove_profiles = True
+        else:
             print()
-            print("Cancelled.")
-            return
-        remove_profiles = resp in ("y", "yes")
+            print(color("Other profiles will NOT be removed by default.", Colors.YELLOW))
+            print(f"Found {len(named_profiles)} named profile(s): " +
+                  ", ".join(p.name for p in named_profiles))
+            print()
+            try:
+                resp = input(color(
+                    f"Also stop and remove these {len(named_profiles)} profile(s)? [y/N]: ",
+                    Colors.BOLD
+                )).strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                print("Cancelled.")
+                return
+            remove_profiles = resp in ("y", "yes")
 
     # Final confirmation
     print()
@@ -376,20 +489,24 @@ def run_uninstall(args):
                 Colors.RED
             ))
     else:
-        print("This will remove the Elevate code but keep your configuration and data.")
+        if remove_project_root:
+            print("This will remove the Elevate code but keep your configuration and data.")
+        else:
+            print("This will remove Elevate commands/services but keep your source checkout and data.")
     
     print()
-    try:
-        confirm = input(f"Type '{color('yes', Colors.YELLOW)}' to confirm: ").strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        print("Cancelled.")
-        return
-    
-    if confirm != "yes":
-        print()
-        print("Uninstall cancelled.")
-        return
+    if not assume_yes:
+        try:
+            confirm = input(f"Type '{color('yes', Colors.YELLOW)}' to confirm: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            print("Cancelled.")
+            return
+
+        if confirm != "yes":
+            print()
+            print("Uninstall cancelled.")
+            return
     
     print()
     print(color("Uninstalling...", Colors.CYAN, Colors.BOLD))
@@ -418,13 +535,13 @@ def run_uninstall(args):
     else:
         log_info("No wrapper script found")
     
-    # 4. Remove installation directory (code)
-    log_info("Removing installation directory...")
+    # 4. Remove installation directory (code) when it is an installed copy.
+    log_info("Checking installation directory...")
     
     # Check if we're running from within the install dir
     # We need to be careful here
     try:
-        if project_root.exists():
+        if project_root.exists() and remove_project_root:
             # If the install is inside ~/.elevate/, just remove the elevate subdir
             if elevate_home in project_root.parents or project_root.parent == elevate_home:
                 shutil.rmtree(project_root)
@@ -433,6 +550,8 @@ def run_uninstall(args):
                 # Installation is somewhere else entirely
                 shutil.rmtree(project_root)
                 log_success(f"Removed {project_root}")
+        elif project_root.exists():
+            log_info(f"Keeping {project_root} ({project_root_reason})")
     except Exception as e:
         log_warn(f"Could not fully remove {project_root}: {e}")
         log_info("You may need to manually remove it")
@@ -471,7 +590,7 @@ def run_uninstall(args):
         print(f"  {elevate_home}/")
         print()
         print("To reinstall later with your existing settings:")
-        print(color("  curl -fsSL https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.sh | bash", Colors.DIM))
+        print(color("  cd path/to/elevate/cli && ./setup-elevate.sh", Colors.DIM))
         print()
     
     print(color("Reload your shell to complete the process:", Colors.YELLOW))

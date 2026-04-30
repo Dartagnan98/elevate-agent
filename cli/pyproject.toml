@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "elevate"
 version = "0.11.0"
-description = "AI chief of staff for real estate agents. Forked from Hermes-Agent (Nous Research, MIT)."
+description = "AI chief of staff for real estate agents."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Elevation Real Estate HQ" }]

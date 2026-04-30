@@ -6,7 +6,7 @@
 # Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ctrlstrategies/elevate/main/cli/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -26,8 +26,8 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:NousResearch/elevate.git"
-REPO_URL_HTTPS="https://github.com/NousResearch/elevate.git"
+REPO_URL_SSH="${ELEVATE_REPO_URL_SSH:-git@github.com:ctrlstrategies/elevate.git}"
+REPO_URL_HTTPS="${ELEVATE_REPO_URL_HTTPS:-https://github.com/ctrlstrategies/elevate.git}"
 ELEVATE_HOME="${ELEVATE_HOME:-$HOME/.elevate}"
 INSTALL_DIR="${ELEVATE_INSTALL_DIR:-$ELEVATE_HOME/elevate}"
 PYTHON_VERSION="3.11"
@@ -101,7 +101,7 @@ print_banner() {
     echo "┌─────────────────────────────────────────────────────────┐"
     echo "│             ▲ Elevate Installer                    │"
     echo "├─────────────────────────────────────────────────────────┤"
-    echo "│  An open source AI agent by Nous Research.              │"
+    echo "│  Real estate AI chief of staff by Ctrl Strategies.      │"
     echo "└─────────────────────────────────────────────────────────┘"
     echo -e "${NC}"
 }
@@ -217,7 +217,7 @@ detect_os() {
             OS="windows"
             DISTRO="windows"
             log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  irm https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.ps1 | iex"
+            log_info "  irm https://raw.githubusercontent.com/ctrlstrategies/elevate/main/cli/scripts/install.ps1 | iex"
             exit 1
             ;;
         *)

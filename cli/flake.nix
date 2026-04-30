@@ -1,5 +1,5 @@
 {
-  description = "Elevate - AI chief of staff for real estate (forked from Hermes-Agent)";
+  description = "Elevate - AI chief of staff for real estate";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

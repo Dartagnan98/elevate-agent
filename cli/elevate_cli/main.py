@@ -4578,7 +4578,8 @@ def cmd_version(args):
 
 def cmd_uninstall(args):
     """Uninstall Elevate."""
-    _require_tty("uninstall")
+    if not getattr(args, "yes", False) and not getattr(args, "dry_run", False):
+        _require_tty("uninstall")
     from elevate_cli.uninstall import run_uninstall
 
     run_uninstall(args)
@@ -4715,8 +4716,9 @@ def _update_via_zip(args):
     from urllib.request import urlretrieve
 
     branch = "main"
-    zip_url = (
-        f"https://github.com/NousResearch/elevate/archive/refs/heads/{branch}.zip"
+    zip_url = os.getenv(
+        "ELEVATE_REPO_ARCHIVE_URL",
+        f"https://github.com/ctrlstrategies/elevate/archive/refs/heads/{branch}.zip",
     )
 
     print("→ Downloading latest version...")
@@ -5030,13 +5032,16 @@ def _restore_stashed_changes(
 # Fork detection and upstream management for `elevate update`
 # =========================================================================
 
+OFFICIAL_REPO_URL = os.getenv(
+    "ELEVATE_OFFICIAL_REPO_URL",
+    "https://github.com/ctrlstrategies/elevate.git",
+)
 OFFICIAL_REPO_URLS = {
-    "https://github.com/NousResearch/elevate.git",
-    "git@github.com:NousResearch/elevate.git",
-    "https://github.com/NousResearch/elevate",
-    "git@github.com:NousResearch/elevate",
+    OFFICIAL_REPO_URL,
+    OFFICIAL_REPO_URL[:-4] if OFFICIAL_REPO_URL.endswith(".git") else OFFICIAL_REPO_URL,
+    "git@github.com:ctrlstrategies/elevate.git",
+    "git@github.com:ctrlstrategies/elevate",
 }
-OFFICIAL_REPO_URL = "https://github.com/NousResearch/elevate.git"
 SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 
 
@@ -5170,7 +5175,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         # Ask user if they want to add upstream
         print()
         print("ℹ Your fork is not tracking the official Elevate repository.")
-        print("  This means you may miss updates from NousResearch/elevate.")
+        print(f"  This means you may miss updates from {OFFICIAL_REPO_URL}.")
         print()
         try:
             response = (
@@ -5183,16 +5188,14 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         if response in ("", "y", "yes"):
             print("→ Adding upstream remote...")
             if _add_upstream_remote(git_cmd, cwd):
-                print(
-                    "  ✓ Added upstream: https://github.com/NousResearch/elevate.git"
-                )
+                print(f"  ✓ Added upstream: {OFFICIAL_REPO_URL}")
                 has_upstream = True
             else:
                 print("  ✗ Failed to add upstream remote. Skipping upstream sync.")
                 return
         else:
             print(
-                "  Skipped. Run 'git remote add upstream https://github.com/NousResearch/elevate.git' to add later."
+                f"  Skipped. Run 'git remote add upstream {OFFICIAL_REPO_URL}' to add later."
             )
             _mark_skip_upstream_prompt()
             return
@@ -5635,7 +5638,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         else:
             print("✗ Not a git repository. Please reinstall:")
             print(
-                "  curl -fsSL https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.sh | bash"
+                "  git clone YOUR_ELEVATE_REPO_URL elevate && cd elevate/cli && ./setup-elevate.sh"
             )
             sys.exit(1)
 
@@ -8822,6 +8825,26 @@ Examples:
         "--full",
         action="store_true",
         help="Full uninstall - remove everything including configs and data",
+    )
+    uninstall_parser.add_argument(
+        "--all-profiles",
+        action="store_true",
+        help="With --full, remove all named profiles in interactive mode",
+    )
+    uninstall_parser.add_argument(
+        "--keep-profiles",
+        action="store_true",
+        help="With --full, keep named profiles; by default --full --yes removes them",
+    )
+    uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without changing anything",
+    )
+    uninstall_parser.add_argument(
+        "--delete-source-checkout",
+        action="store_true",
+        help="Also delete the source checkout when uninstall is run from a Git repo",
     )
     uninstall_parser.add_argument(
         "--yes", "-y", action="store_true", help="Skip confirmation prompts"

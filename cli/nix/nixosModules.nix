@@ -30,7 +30,7 @@
     cfg = config.services.elevate;
     elevate = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
-    # Deep-merge config type (from upstream 0xrsydn/nix-hermes-agent)
+    # Deep-merge config type (from upstream nix module patterns)
     deepConfigType = lib.types.mkOptionType {
       name = "elevate-config-attrs";
       description = "Elevate YAML config (attrset), merged deeply via lib.recursiveUpdate.";

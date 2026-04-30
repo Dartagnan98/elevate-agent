@@ -2,7 +2,7 @@
 Elevate tool call parser.
 
 Format: <tool_call>{"name": "func", "arguments": {...}}</tool_call>
-Based on VLLM's Elevate2ProToolParser.extract_tool_calls()
+Based on Elevate's tool-call XML/JSON format.
 """
 
 import json
