@@ -18,6 +18,8 @@ Usage:
     elevate cron list           # List cron jobs
     elevate cron status         # Check if cron scheduler is running
     elevate doctor              # Check configuration and dependencies
+    elevate harness status      # Show gateway/orchestration/memory/safety posture
+    elevate harness benchmark   # Measure wrapper prompt/tool payload size
     elevate honcho setup                    # Configure Honcho AI memory integration
     elevate honcho status                   # Show Honcho config and connection status
     elevate honcho sessions                 # List directory → session name mappings
@@ -4502,6 +4504,13 @@ def cmd_doctor(args):
     run_doctor(args)
 
 
+def cmd_harness(args):
+    """Show or stress-test the Elevate harness posture."""
+    from elevate_cli.harness import cmd_harness as _cmd_harness
+
+    raise SystemExit(_cmd_harness(args))
+
+
 def cmd_dump(args):
     """Dump setup summary for support/debugging."""
     from elevate_cli.dump import run_dump
@@ -7800,6 +7809,94 @@ For more help on a command:
         "--fix", action="store_true", help="Attempt to fix issues automatically"
     )
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    # =========================================================================
+    # harness command
+    # =========================================================================
+    harness_parser = subparsers.add_parser(
+        "harness",
+        help="Inspect and stress-test the Elevate agent harness",
+        description=(
+            "Show the local gateway/server, orchestration, memory, safety, "
+            "skill/tool manifest, and prompt-efficiency posture."
+        ),
+    )
+    harness_sub = harness_parser.add_subparsers(dest="harness_action")
+    harness_status = harness_sub.add_parser("status", help="Show compact harness status")
+    harness_status.add_argument("--json", action="store_true", help="Emit JSON")
+    harness_status.add_argument(
+        "--no-profiles",
+        action="store_true",
+        help="Skip static prompt/tool profile measurement",
+    )
+    harness_status.set_defaults(func=cmd_harness)
+
+    harness_benchmark = harness_sub.add_parser(
+        "benchmark",
+        help="Measure focused tool-profile prompt payloads without live model calls",
+    )
+    harness_benchmark.add_argument(
+        "--baseline-toolsets",
+        default="elevate-cli",
+        help="Comma-separated baseline toolsets (default: elevate-cli)",
+    )
+    harness_benchmark.add_argument("--model", default="gpt-5", help="Model name for prompt guidance")
+    harness_benchmark.add_argument(
+        "--include-local-context",
+        action="store_true",
+        help="Include local context files in measurement",
+    )
+    harness_benchmark.add_argument(
+        "--include-memory",
+        action="store_true",
+        help="Include memory prompt blocks in measurement",
+    )
+    harness_benchmark.add_argument("--json", action="store_true", help="Emit JSON")
+    harness_benchmark.add_argument("--no-assert", action="store_true", help="Do not fail on thresholds")
+    harness_benchmark.add_argument("--stress", action="store_true", help="Run stress matrix")
+    harness_benchmark.add_argument(
+        "--models",
+        default="gpt-5,codex-mini,gemini-2.5-pro,claude-opus-4.6",
+        help="Comma-separated models for --stress",
+    )
+    harness_benchmark.add_argument(
+        "--repetitions",
+        type=int,
+        default=2,
+        help="Stress repetitions per model (default: 2)",
+    )
+    harness_benchmark.set_defaults(func=cmd_harness)
+
+    harness_adv = harness_sub.add_parser(
+        "adversarial",
+        help="Run bounded hostile prompt/tool/schema probes without live tool execution",
+    )
+    harness_adv.add_argument(
+        "--baseline-toolsets",
+        default="elevate-cli",
+        help="Comma-separated baseline toolsets (default: elevate-cli)",
+    )
+    harness_adv.add_argument("--model", default="gpt-5", help="Model name for prompt guidance")
+    harness_adv.add_argument(
+        "--models",
+        default="gpt-5,codex-mini,gemini-2.5-pro,claude-opus-4.6",
+        help="Comma-separated models for stress rows",
+    )
+    harness_adv.add_argument(
+        "--include-memory",
+        action="store_true",
+        help="Include memory prompt blocks in measurement",
+    )
+    harness_adv.add_argument("--json", action="store_true", help="Emit JSON")
+    harness_adv.add_argument("--no-assert", action="store_true", help="Do not fail on savings thresholds")
+    harness_adv.add_argument(
+        "--max-adversarial-request-tokens",
+        type=int,
+        default=60_000,
+        help="Fail if a measured request payload exceeds this rough token count",
+    )
+    harness_adv.set_defaults(func=cmd_harness)
+    harness_parser.set_defaults(func=cmd_harness)
 
     # =========================================================================
     # dump command

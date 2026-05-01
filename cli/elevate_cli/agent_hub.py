@@ -618,6 +618,23 @@ def build_agent_hub_snapshot() -> dict[str, Any]:
     sessions = _session_summary()
     access = load_access_config(config)
     orchestration = _orchestration_summary()
+    memory = _memory_summary(config)
+    skills = _skills_summary(config)
+    toolsets = _toolsets_summary(config)
+    try:
+        from elevate_cli.harness import build_harness_snapshot
+
+        harness = build_harness_snapshot(
+            config=config,
+            sessions=sessions,
+            memory=memory,
+            skills=skills,
+            toolsets=toolsets,
+            orchestration=orchestration,
+            include_profiles=True,
+        )
+    except Exception as exc:
+        harness = {"error": str(exc), "available": False}
 
     return {
         "generated_at": time.time(),
@@ -647,10 +664,11 @@ def build_agent_hub_snapshot() -> dict[str, Any]:
         "orchestration": orchestration,
         "platforms": _platform_summary(runtime),
         "sessions": sessions,
-        "memory": _memory_summary(config),
+        "memory": memory,
         "cron": _cron_summary(),
-        "skills": _skills_summary(config),
-        "toolsets": _toolsets_summary(config),
+        "skills": skills,
+        "toolsets": toolsets,
+        "harness": harness,
         "redaction": {
             "example": redact_key("sk-example-secret"),
             "raw_secrets_returned": False,

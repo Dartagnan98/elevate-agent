@@ -222,6 +222,7 @@ export const api = {
 
   // Agent Hub
   getAgentHub: () => fetchJSON<AgentHubSnapshot>("/api/agent-hub"),
+  getHarness: () => fetchJSON<HarnessSnapshot>("/api/harness"),
 };
 
 export interface ActionResponse {
@@ -424,6 +425,78 @@ export interface AgentHubSnapshot {
     }>;
     error: string;
   };
+  harness?: HarnessSnapshot | { error?: string; available?: boolean };
+}
+
+export interface HarnessProfile {
+  name: string;
+  toolsets: string[];
+  loaded_tools: number;
+  requested_tools: number;
+  system_prompt_tokens: number;
+  tool_schema_tokens: number;
+  request_tokens: number;
+  savings_pct: number | null;
+  issues: number;
+}
+
+export interface HarnessSnapshot {
+  generated_at: string;
+  elevate_home: string;
+  server: {
+    pattern: string;
+    gateway_running: boolean;
+    gateway_pid: number | null;
+    clients: Array<{ id: string; label: string; connected: boolean }>;
+  };
+  orchestration: {
+    visible: boolean;
+    coordinator: string;
+    agent_states: string[];
+    total_agents: number;
+    active_runs: number;
+    recent_runs: number;
+    route_labeled_runs: number;
+    lifecycle_states: string[];
+  };
+  skills: {
+    mode: string;
+    index_visible: boolean;
+    enabled: number;
+    total: number;
+    details_loaded_on_demand: boolean;
+    tool_index_visible: boolean;
+    enabled_toolsets: string[];
+  };
+  memory: {
+    mode: string;
+    provider: string;
+    embeddings_enabled: boolean;
+    embedding_provider: string;
+    embedding_model: string;
+    pending_turns: number;
+    processed_turns: number;
+    session_segments: number;
+    graph_nodes: number;
+    graph_edges: number;
+  };
+  safety: {
+    dangerous_command_mode: string;
+    external_actions_policy: string;
+    human_communication_requires_review: boolean;
+    send_message_available: boolean;
+    approval_surfaces: string[];
+  };
+  performance: {
+    available: boolean;
+    error: string;
+    model?: string;
+    baseline_request_tokens?: number;
+    best_profile?: HarnessProfile | null;
+    worst_profile?: HarnessProfile | null;
+    profiles: HarnessProfile[];
+  };
+  recommendations: string[];
 }
 
 export interface SessionInfo {

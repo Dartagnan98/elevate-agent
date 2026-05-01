@@ -55,6 +55,9 @@ when you intentionally want the uninstaller to delete the Git checkout too.
 ## Harness
 
 ```bash
+elevate harness status        # gateway/client/orchestration/memory/safety posture
+elevate harness benchmark     # focused wrapper payload check, no live model calls
+elevate harness adversarial   # bounded hostile prompt/tool/schema stress
 ./scripts/elevate-harness.sh audit    # fail on non-allowlisted legacy coupling
 ./scripts/elevate-harness.sh smoke    # syntax, compile, launcher, uninstall dry-run
 ./scripts/elevate-harness.sh memory   # local SQLite + embedding retrieval smoke
@@ -69,6 +72,12 @@ when you intentionally want the uninstaller to delete the Git checkout too.
 Elevate's local memory store uses Python's built-in SQLite. Semantic
 embeddings are optional and can use OpenAI, Ollama, or an OpenAI-compatible
 provider.
+
+The local Agent Hub also exposes this posture through `/api/harness` and the
+Harness card. The product target is one local gateway/server with visible
+agent lifecycle state, compact skill/tool manifests, async memory, and a clear
+approval posture for outbound human communication. See
+`docs/elevate-harness.md`.
 
 ## Architecture
 

@@ -24,6 +24,7 @@ import type {
   AgentHubMemoryNode,
   AgentHubPlatform,
   AgentHubSnapshot,
+  HarnessSnapshot,
 } from "@/lib/api";
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -279,6 +280,93 @@ function PlatformRow({ platform }: { platform: AgentHubPlatform }) {
   );
 }
 
+function isHarnessSnapshot(value: AgentHubSnapshot["harness"]): value is HarnessSnapshot {
+  return Boolean(value && "server" in value && "orchestration" in value);
+}
+
+function formatSavings(value: number | null | undefined) {
+  if (typeof value !== "number") return "-";
+  return `${value.toFixed(1)}%`;
+}
+
+function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
+  if (!isHarnessSnapshot(harness)) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Harness</CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          Harness snapshot unavailable
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const best = harness.performance.best_profile;
+  const worst = harness.performance.worst_profile;
+  const connectedClients = harness.server.clients.filter((client) => client.connected);
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle>Harness</CardTitle>
+          <Badge variant={harness.server.gateway_running ? "success" : "warning"}>
+            {harness.server.pattern}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <MiniMetric label="Clients" value={`${connectedClients.length}/${harness.server.clients.length}`} />
+          <MiniMetric label="Routed" value={harness.orchestration.route_labeled_runs} />
+          <MiniMetric label="Safety" value={harness.safety.external_actions_policy} />
+          <MiniMetric label="Skill Mode" value="Index" />
+        </div>
+        {harness.performance.available ? (
+          <div className="border border-border bg-muted/20 p-2 text-xs">
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">Baseline</span>
+              <span>{harness.performance.baseline_request_tokens ?? 0} tokens</span>
+            </div>
+            <div className="mt-1 flex justify-between gap-2">
+              <span className="text-muted-foreground">Best profile</span>
+              <span>
+                {best?.name ?? "-"} / {formatSavings(best?.savings_pct)}
+              </span>
+            </div>
+            <div className="mt-1 flex justify-between gap-2">
+              <span className="text-muted-foreground">Weakest profile</span>
+              <span>
+                {worst?.name ?? "-"} / {formatSavings(worst?.savings_pct)}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="border border-border bg-muted/20 p-2 text-xs text-muted-foreground">
+            {harness.performance.error || "Performance profiles skipped"}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-1">
+          {harness.orchestration.lifecycle_states.slice(0, 7).map((state) => (
+            <Badge key={state} variant="outline">
+              {state}
+            </Badge>
+          ))}
+        </div>
+        {harness.recommendations.length > 0 && (
+          <div className="space-y-1 text-xs text-muted-foreground">
+            {harness.recommendations.slice(0, 2).map((item) => (
+              <div key={item}>- {item}</div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AgentHubPage() {
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -441,6 +529,8 @@ export default function AgentHubPage() {
               <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
             </CardContent>
           </Card>
+
+          <HarnessCard harness={snapshot.harness} />
         </div>
 
         <div className="flex flex-col gap-4">

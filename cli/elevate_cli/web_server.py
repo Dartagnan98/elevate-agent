@@ -599,6 +599,18 @@ async def get_agent_hub():
         raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")
 
 
+@app.get("/api/harness")
+async def get_harness():
+    """Return the compact local harness health snapshot."""
+    try:
+        from elevate_cli.harness import build_harness_snapshot
+
+        return build_harness_snapshot()
+    except Exception as exc:
+        _log.exception("GET /api/harness failed")
+        raise HTTPException(status_code=500, detail=f"Harness snapshot failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
 #
