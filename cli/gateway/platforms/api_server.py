@@ -46,6 +46,10 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from gateway.orchestration import (
+    OrchestrationValidationError,
+    get_orchestration_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +390,7 @@ class ResponseStore:
 # ---------------------------------------------------------------------------
 
 _CORS_HEADERS = {
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
 }
 
@@ -587,6 +591,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._orchestration_store: Optional[Any] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -697,6 +702,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.debug("SessionDB unavailable for API server: %s", e)
         return self._session_db
 
+    def _ensure_orchestration_store(self):
+        """Lazily initialise the durable local orchestration registry."""
+        if self._orchestration_store is None:
+            self._orchestration_store = get_orchestration_store()
+        return self._orchestration_store
+
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -772,16 +783,174 @@ class APIServerAdapter(BasePlatformAdapter):
         from gateway.status import read_runtime_status
 
         runtime = read_runtime_status() or {}
+        orchestration = {}
+        try:
+            orchestration = {
+                key: value
+                for key, value in self._ensure_orchestration_store().stats().items()
+                if key != "db_path"
+            }
+        except Exception as exc:
+            orchestration = {"error": str(exc)}
         return web.json_response({
             "status": "ok",
             "platform": "elevate",
             "gateway_state": runtime.get("gateway_state"),
             "platforms": runtime.get("platforms", {}),
             "active_agents": runtime.get("active_agents", 0),
+            "orchestration": orchestration,
+            "runtime_brain": runtime.get("runtime_brain", {}),
             "exit_reason": runtime.get("exit_reason"),
             "updated_at": runtime.get("updated_at"),
             "pid": os.getpid(),
         })
+
+    async def _handle_tools_snapshot(self, request: "web.Request") -> "web.Response":
+        """GET /api/tools — configured and focused runtime toolsets.
+
+        This gives local dashboards a runtime source of truth for code tools.
+        Agent inbox settings may show only bus/memory helpers, while the live
+        gateway can still expose terminal/file/patch/git-capable profiles.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS, _get_platform_tools
+            from gateway.status import read_runtime_status
+            from gateway.run import (
+                GatewayRunner,
+                _FOCUSED_GATEWAY_DEFAULT_PLATFORMS,
+                _GATEWAY_TOOL_PROFILES,
+                _load_gateway_config,
+            )
+        except Exception as exc:
+            logger.exception("[api_server] tools snapshot import failed")
+            return self._orchestration_error(exc, status=500)
+
+        try:
+            user_config = _load_gateway_config()
+            runtime = read_runtime_status() or {}
+            runtime_brain = runtime.get("runtime_brain") if isinstance(runtime, dict) else {}
+            if not isinstance(runtime_brain, dict):
+                runtime_brain = {}
+            latest_decision = runtime_brain.get("latest_tool_decision")
+            if not isinstance(latest_decision, dict):
+                latest_decision = None
+            configured_platforms = user_config.get("platform_toolsets") or {}
+            if not isinstance(configured_platforms, dict):
+                configured_platforms = {}
+
+            labels: Dict[str, Dict[str, str]] = {}
+            for item in CONFIGURABLE_TOOLSETS:
+                try:
+                    name, label, summary = item
+                except ValueError:
+                    continue
+                labels[str(name)] = {
+                    "label": str(label),
+                    "summary": str(summary),
+                }
+
+            platform_names = sorted({
+                "api_server",
+                "cli",
+                "telegram",
+                *[str(name) for name in configured_platforms.keys()],
+            })
+            platforms: Dict[str, Dict[str, Any]] = {}
+            for platform in platform_names:
+                try:
+                    resolved = sorted(str(name) for name in _get_platform_tools(user_config, platform))
+                except Exception as exc:
+                    platforms[platform] = {
+                        "configured_toolsets": [],
+                        "resolved_toolsets": [],
+                        "error": str(exc),
+                    }
+                    continue
+
+                raw_toolsets = configured_platforms.get(platform)
+                configured_toolsets = (
+                    [str(name) for name in raw_toolsets]
+                    if isinstance(raw_toolsets, list)
+                    else []
+                )
+                platforms[platform] = {
+                    "configured_toolsets": configured_toolsets,
+                    "resolved_toolsets": resolved,
+                    "resolved": [
+                        {"name": name, **labels.get(name, {"label": name, "summary": ""})}
+                        for name in resolved
+                    ],
+                }
+
+            profile_platform = request.query.get("platform") or "telegram"
+            profile_configured = set(platforms.get(profile_platform, {}).get("resolved_toolsets") or [])
+            profiles: Dict[str, Dict[str, Any]] = {}
+            for profile, requested in _GATEWAY_TOOL_PROFILES.items():
+                effective = sorted(profile_configured & {str(name) for name in requested})
+                profiles[profile] = {
+                    "requested_toolsets": [str(name) for name in requested],
+                    "effective_toolsets": effective,
+                    "effective": [
+                        {"name": name, **labels.get(name, {"label": name, "summary": ""})}
+                        for name in effective
+                    ],
+                }
+
+            message = request.query.get("message") or ""
+            decision = (
+                GatewayRunner._gateway_tool_profile_decision(
+                    user_config,
+                    profile_platform,
+                    message,
+                )
+                if message.strip()
+                else None
+            )
+            selected_profile = decision.get("selected_profile") if decision else None
+            selected_toolsets = decision.get("selected_toolsets", []) if decision else []
+            router_probes = {
+                "followup": GatewayRunner._gateway_tool_profile_decision(
+                    user_config,
+                    profile_platform,
+                    "can you see your tools now",
+                ),
+                "code_patch": GatewayRunner._gateway_tool_profile_decision(
+                    user_config,
+                    profile_platform,
+                    "patch the local repo",
+                ),
+                "skill_run": GatewayRunner._gateway_tool_profile_decision(
+                    user_config,
+                    profile_platform,
+                    "run the cma skill",
+                ),
+                "scheduled_task": GatewayRunner._gateway_tool_profile_decision(
+                    user_config,
+                    profile_platform,
+                    "run this tomorrow at 9am",
+                ),
+            }
+
+            return web.json_response({
+                "platforms": platforms,
+                "focused_auto": {
+                    "default_platforms": sorted(_FOCUSED_GATEWAY_DEFAULT_PLATFORMS),
+                    "profile_platform": profile_platform,
+                    "profiles": profiles,
+                    "selected_profile": selected_profile,
+                    "selected_toolsets": selected_toolsets,
+                    "decision": decision,
+                    "latest_decision": latest_decision,
+                    "router_probes": router_probes,
+                },
+            })
+        except Exception as exc:
+            logger.exception("[api_server] tools snapshot failed")
+            return self._orchestration_error(exc, status=500)
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return elevate as an available model."""
@@ -1884,6 +2053,228 @@ class APIServerAdapter(BasePlatformAdapter):
         })
 
     # ------------------------------------------------------------------
+    # Agent orchestration API
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _query_limit(request: "web.Request", *, default: int = 50, cap: int = 200) -> int:
+        try:
+            return max(1, min(int(request.query.get("limit", str(default))), cap))
+        except (TypeError, ValueError):
+            return default
+
+    async def _read_json_body(self, request: "web.Request") -> Dict[str, Any]:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise OrchestrationValidationError("Invalid JSON body") from exc
+        if not isinstance(body, dict):
+            raise OrchestrationValidationError("JSON body must be an object")
+        return body
+
+    @staticmethod
+    def _orchestration_error(exc: Exception, *, status: int = 400) -> "web.Response":
+        return web.json_response({"error": str(exc)}, status=status)
+
+    async def _handle_orchestration_snapshot(self, request: "web.Request") -> "web.Response":
+        """GET /api/orchestration — visible local agent/run snapshot."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            org = request.query.get("org") or None
+            limit = self._query_limit(request, default=50, cap=200)
+            return web.json_response(self._ensure_orchestration_store().snapshot(org=org, run_limit=limit))
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] orchestration snapshot failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_list_agents(self, request: "web.Request") -> "web.Response":
+        """GET /api/agents — list visible gateway-managed agents."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            org = request.query.get("org") or None
+            include_disabled = request.query.get("include_disabled", "true").lower() not in {"0", "false", "no"}
+            agents = self._ensure_orchestration_store().list_agents(org=org, include_disabled=include_disabled)
+            return web.json_response({"agents": agents})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] list agents failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_create_agent(self, request: "web.Request") -> "web.Response":
+        """POST /api/agents — create or update an orchestration agent."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await self._read_json_body(request)
+            agent = self._ensure_orchestration_store().upsert_agent(body)
+            return web.json_response({"agent": agent}, status=201)
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] create agent failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_get_agent(self, request: "web.Request") -> "web.Response":
+        """GET /api/agents/{agent_id} — get one orchestration agent."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            agent = self._ensure_orchestration_store().get_agent(request.match_info["agent_id"])
+            if not agent:
+                return web.json_response({"error": "Agent not found"}, status=404)
+            return web.json_response({"agent": agent})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] get agent failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_update_agent(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/agents/{agent_id} — update one orchestration agent."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await self._read_json_body(request)
+            agent = self._ensure_orchestration_store().update_agent(request.match_info["agent_id"], body)
+            if not agent:
+                return web.json_response({"error": "Agent not found"}, status=404)
+            return web.json_response({"agent": agent})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] update agent failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_list_agent_runs(self, request: "web.Request") -> "web.Response":
+        """GET /api/agent-runs — list visible orchestration runs."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            runs = self._ensure_orchestration_store().list_runs(
+                agent_id=request.query.get("agent_id") or None,
+                status=request.query.get("status") or None,
+                limit=self._query_limit(request, default=50, cap=200),
+            )
+            return web.json_response({"runs": runs})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] list agent runs failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_create_agent_run(self, request: "web.Request") -> "web.Response":
+        """POST /api/agent-runs — create a visible run record.
+
+        This endpoint intentionally registers work; it does not silently spawn a
+        hidden agent process. Runtime executors can claim/update the run through
+        the same API so the dashboard always sees the lifecycle.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await self._read_json_body(request)
+            task = body.get("task") or body.get("goal") or body.get("prompt")
+            run = self._ensure_orchestration_store().create_run(
+                agent_id=body.get("agent_id") or body.get("agent") or "executive-assistant",
+                task=task,
+                run_id=body.get("run_id"),
+                status=body.get("status") or "queued",
+                mode=body.get("mode") or "manual",
+                parent_run_id=body.get("parent_run_id"),
+                parent_session_key=body.get("parent_session_key"),
+                session_key=body.get("session_key"),
+                metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+            )
+            return web.json_response({"run": run}, status=201)
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] create agent run failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_get_agent_run(self, request: "web.Request") -> "web.Response":
+        """GET /api/agent-runs/{run_id} — get one visible run."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            run = self._ensure_orchestration_store().get_run(request.match_info["run_id"])
+            if not run:
+                return web.json_response({"error": "Run not found"}, status=404)
+            return web.json_response({"run": run})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] get agent run failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_update_agent_run(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/agent-runs/{run_id} — update run status/details."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await self._read_json_body(request)
+            run = self._ensure_orchestration_store().update_run(request.match_info["run_id"], body)
+            if not run:
+                return web.json_response({"error": "Run not found"}, status=404)
+            return web.json_response({"run": run})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] update agent run failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_list_agent_run_events(self, request: "web.Request") -> "web.Response":
+        """GET /api/agent-runs/{run_id}/events — list run lifecycle events."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            events = self._ensure_orchestration_store().list_events(
+                request.match_info["run_id"],
+                limit=self._query_limit(request, default=100, cap=500),
+            )
+            return web.json_response({"events": events})
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] list agent run events failed")
+            return self._orchestration_error(exc, status=500)
+
+    async def _handle_create_agent_run_event(self, request: "web.Request") -> "web.Response":
+        """POST /api/agent-runs/{run_id}/events — append a lifecycle event."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await self._read_json_body(request)
+            event = self._ensure_orchestration_store().append_event(
+                request.match_info["run_id"],
+                body.get("type") or "event",
+                body.get("message"),
+                body.get("data") if isinstance(body.get("data"), dict) else {},
+            )
+            return web.json_response({"event": event}, status=201)
+        except OrchestrationValidationError as exc:
+            return self._orchestration_error(exc)
+        except Exception as exc:
+            logger.exception("[api_server] create agent run event failed")
+            return self._orchestration_error(exc, status=500)
+
+    # ------------------------------------------------------------------
     # Cron jobs API
     # ------------------------------------------------------------------
 
@@ -2498,6 +2889,19 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+            # Visible local agent orchestration registry
+            self._app.router.add_get("/api/tools", self._handle_tools_snapshot)
+            self._app.router.add_get("/api/orchestration", self._handle_orchestration_snapshot)
+            self._app.router.add_get("/api/agents", self._handle_list_agents)
+            self._app.router.add_post("/api/agents", self._handle_create_agent)
+            self._app.router.add_get("/api/agents/{agent_id}", self._handle_get_agent)
+            self._app.router.add_patch("/api/agents/{agent_id}", self._handle_update_agent)
+            self._app.router.add_get("/api/agent-runs", self._handle_list_agent_runs)
+            self._app.router.add_post("/api/agent-runs", self._handle_create_agent_run)
+            self._app.router.add_get("/api/agent-runs/{run_id}/events", self._handle_list_agent_run_events)
+            self._app.router.add_post("/api/agent-runs/{run_id}/events", self._handle_create_agent_run_event)
+            self._app.router.add_get("/api/agent-runs/{run_id}", self._handle_get_agent_run)
+            self._app.router.add_patch("/api/agent-runs/{run_id}", self._handle_update_agent_run)
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)

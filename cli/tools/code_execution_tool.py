@@ -1501,19 +1501,41 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
     else:
         import_str = "..."
 
-    # Mode-specific CWD guidance. Project mode is the default and matches
-    # terminal()'s filesystem/interpreter; strict mode retains the isolated
-    # temp-dir staging and elevate's own python.
+    terminal_enabled = "terminal" in enabled_sandbox_tools
+    read_file_enabled = "read_file" in enabled_sandbox_tools
+
+    # Mode-specific CWD guidance. Project mode is the default and matches the
+    # session working directory; strict mode retains the isolated temp-dir
+    # staging and elevate's own python.
     if mode == "strict":
+        file_hint = " or read_file()" if read_file_enabled else ""
+        terminal_hint = " or terminal()" if terminal_enabled else ""
         cwd_note = (
             "Scripts run in their own temp dir, not the session's CWD — use absolute paths "
-            "(os.path.expanduser('~/.elevate/.env')) or terminal()/read_file() for user files."
+            f"(os.path.expanduser('~/.elevate/.env')){terminal_hint}{file_hint} for user files."
         )
     else:
+        terminal_hint = " like in terminal()" if terminal_enabled else "."
         cwd_note = (
             "Scripts run in the session's working directory with the active venv's python, "
-            "so project deps (pandas, etc.) and relative paths work like in terminal()."
+            f"so project deps (pandas, etc.) and relative paths work{terminal_hint}"
         )
+
+    terminal_limit = (
+        " terminal() is foreground-only (no background or pty)."
+        if terminal_enabled
+        else ""
+    )
+    json_parse_hint = (
+        "terminal() output"
+        if terminal_enabled
+        else "tool output"
+    )
+    shell_quote_hint = (
+        "use when interpolating dynamic strings into shell commands"
+        if terminal_enabled
+        else "use when preparing shell-safe strings for generated commands"
+    )
 
     description = (
         "Run a Python script that can call Elevate tools programmatically. "
@@ -1526,14 +1548,14 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         "or the task requires interactive user input.\n\n"
         f"Available via `from elevate_tools import ...`:\n\n"
         f"{tool_lines}\n\n"
-        "Limits: 5-minute timeout, 50KB stdout cap, max 50 tool calls per script. "
-        "terminal() is foreground-only (no background or pty).\n\n"
+        "Limits: 5-minute timeout, 50KB stdout cap, max 50 tool calls per script."
+        f"{terminal_limit}\n\n"
         f"{cwd_note}\n\n"
         "Print your final result to stdout. Use Python stdlib (json, re, math, csv, "
         "datetime, collections, etc.) for processing between tool calls.\n\n"
         "Also available (no import needed — built into elevate_tools):\n"
-        "  json_parse(text: str) — json.loads with strict=False; use for terminal() output with control chars\n"
-        "  shell_quote(s: str) — shlex.quote(); use when interpolating dynamic strings into shell commands\n"
+        f"  json_parse(text: str) — json.loads with strict=False; use for {json_parse_hint} with control chars\n"
+        f"  shell_quote(s: str) — shlex.quote(); {shell_quote_hint}\n"
         "  retry(fn, max_attempts=3, delay=2) — retry with exponential backoff for transient failures"
     )
 

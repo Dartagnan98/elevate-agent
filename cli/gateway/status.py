@@ -399,6 +399,7 @@ def write_runtime_status(
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
+    tool_decision: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
@@ -417,6 +418,14 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
+    if tool_decision is not _UNSET:
+        runtime_brain = payload.get("runtime_brain")
+        if not isinstance(runtime_brain, dict):
+            runtime_brain = {}
+        if isinstance(tool_decision, dict):
+            runtime_brain["latest_tool_decision"] = tool_decision
+            runtime_brain["updated_at"] = _utc_now_iso()
+        payload["runtime_brain"] = runtime_brain
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})

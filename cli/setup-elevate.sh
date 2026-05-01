@@ -25,6 +25,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
+NAVY='\033[38;5;24m'
+ORANGE='\033[38;5;209m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,6 +84,60 @@ get_elevate_home_dir() {
     echo "${ELEVATE_HOME:-$HOME/.elevate}"
 }
 
+print_elevation_text_banner() {
+    echo -e "${NAVY}${BOLD}"
+    cat <<'EOF'
+███████╗██╗     ███████╗██╗   ██╗ █████╗ ████████╗██╗ ██████╗ ███╗   ██╗
+██╔════╝██║     ██╔════╝██║   ██║██╔══██╗╚══██╔══╝██║██╔═══██╗████╗  ██║
+█████╗  ██║     █████╗  ██║   ██║███████║   ██║   ██║██║   ██║██╔██╗ ██║
+██╔══╝  ██║     ██╔══╝  ╚██╗ ██╔╝██╔══██║   ██║   ██║██║   ██║██║╚██╗██║
+███████╗███████╗███████╗ ╚████╔╝ ██║  ██║   ██║   ██║╚██████╔╝██║ ╚████║
+╚══════╝╚══════╝╚══════╝  ╚═══╝  ╚═╝  ╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
+EOF
+    echo -e "${ORANGE}${BOLD}                         ▲ Elevate Agent Installer${NC}"
+}
+
+print_inline_image_banner() {
+    local image_file="$SCRIPT_DIR/assets/elevation-install-banner.png"
+    local term_program="${TERM_PROGRAM:-}"
+    local term_name="${TERM:-}"
+    local data
+
+    [ "${ELEVATE_INSTALL_IMAGE_BANNER:-1}" != "0" ] || return 1
+    [ -t 1 ] || return 1
+    [ -f "$image_file" ] || return 1
+
+    if [ "$term_program" = "iTerm.app" ]; then
+        data="$(base64 < "$image_file" | tr -d '\n')" || return 1
+        printf '\033]1337;File=name=elevation-install-banner.png;inline=1;width=60%%;preserveAspectRatio=1:%s\a\n' "$data"
+        return 0
+    fi
+
+    if [ "$term_program" = "WezTerm" ] && command -v wezterm >/dev/null 2>&1; then
+        wezterm imgcat --width 60 "$image_file" 2>/dev/null && return 0
+    fi
+
+    if [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1; then
+        kitten icat --align left --transfer-mode=file "$image_file" 2>/dev/null && return 0
+    fi
+
+    if command -v imgcat >/dev/null 2>&1 && [[ "$term_name" != "dumb" ]]; then
+        imgcat "$image_file" 2>/dev/null && return 0
+    fi
+
+    return 1
+}
+
+print_install_banner() {
+    echo ""
+    if [ -t 1 ]; then
+        print_inline_image_banner || print_elevation_text_banner
+    else
+        echo -e "${CYAN}▲ Elevate Setup${NC}"
+    fi
+    echo ""
+}
+
 rewrite_hermes_config_names() {
     local config_file="$1"
     perl -0pi -e '
@@ -117,7 +174,7 @@ EOF
 migrate_hermes_home() {
     local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
     local elevate_home
-    local mode="${ELEVATE_MIGRATE_HERMES:-auto}"
+    local mode="${ELEVATE_MIGRATE_HERMES:-prompt}"
     local force="${ELEVATE_FORCE_HERMES_MIGRATION:-0}"
     local should_migrate=false
 
@@ -140,13 +197,18 @@ migrate_hermes_home() {
         1|true|True|yes|Yes)
             should_migrate=true
             ;;
-        auto|"")
+        auto)
+            should_migrate=true
+            ;;
+        prompt|ask|"")
             if can_prompt; then
-                if prompt_yes_no "Existing Hermes install found. Migrate config/auth/sessions to Elevate? [Y/n] " "Y"; then
+                if prompt_yes_no "Existing Hermes install found. Migrate config/auth/sessions to Elevate? [y/N] " "N"; then
                     should_migrate=true
                 fi
             else
-                should_migrate=true
+                echo -e "${YELLOW}⚠${NC} Hermes install detected; migration skipped in non-interactive setup"
+                echo -e "  Set ELEVATE_MIGRATE_HERMES=1 to import it explicitly."
+                return
             fi
             ;;
         *)
@@ -182,32 +244,240 @@ migrate_hermes_home() {
     done
 
     mkdir -p "$elevate_home"
-    cp -p "$hermes_home/config.yaml" "$elevate_home/config.yaml"
-    rewrite_hermes_config_names "$elevate_home/config.yaml"
+    ELEVATE_HERMES_HOME="$hermes_home" \
+    ELEVATE_HOME="$elevate_home" \
+    ELEVATE_MIGRATION_BACKUP="$backup_dir" \
+    "$SETUP_PYTHON" - <<'PY'
+import filecmp
+import json
+import os
+import shutil
+import sqlite3
+import sys
+from pathlib import Path
 
-    for item in .env auth.json channel_directory.json; do
-        if [ -e "$hermes_home/$item" ]; then
-            cp -p "$hermes_home/$item" "$elevate_home/$item"
-        fi
-    done
+source = Path(os.environ["ELEVATE_HERMES_HOME"]).expanduser()
+target = Path(os.environ["ELEVATE_HOME"]).expanduser()
+backup = Path(os.environ["ELEVATE_MIGRATION_BACKUP"]).expanduser()
 
-    for dir in skills memories sessions cron secrets plugins; do
-        if [ -d "$hermes_home/$dir" ]; then
-            mkdir -p "$elevate_home/$dir"
-            cp -a "$hermes_home/$dir/." "$elevate_home/$dir/"
-        fi
-    done
+excluded_dirs = {"__pycache__", ".git", "node_modules"}
+excluded_names = {"gateway.pid", "cron.pid"}
+excluded_suffixes = (".pyc", ".pyo")
+special_names = {"config.yaml", "state.db", "state.db-shm", "state.db-wal"}
+config_rewrites = {
+    "hermes-cli": "elevate-cli",
+    "hermes-telegram": "elevate-telegram",
+    "hermes-discord": "elevate-discord",
+    "hermes-whatsapp": "elevate-whatsapp",
+    "hermes-slack": "elevate-slack",
+    "hermes-signal": "elevate-signal",
+    "hermes-homeassistant": "elevate-homeassistant",
+    "hermes-qqbot": "elevate-qqbot",
+    "stop/restart hermes gateway": "stop/restart elevate gateway",
+    "hermes update": "elevate update",
+}
+config_forbidden = tuple(config_rewrites)
 
-    if [ -f "$hermes_home/state.db" ]; then
-        rm -f "$elevate_home/state.db-shm" "$elevate_home/state.db-wal"
-        if command -v sqlite3 >/dev/null 2>&1; then
-            sqlite3 "$hermes_home/state.db" ".backup '$elevate_home/state.db'"
-        else
-            cp -p "$hermes_home/state.db" "$elevate_home/state.db"
-            [ -e "$hermes_home/state.db-shm" ] && cp -p "$hermes_home/state.db-shm" "$elevate_home/state.db-shm"
-            [ -e "$hermes_home/state.db-wal" ] && cp -p "$hermes_home/state.db-wal" "$elevate_home/state.db-wal"
-        fi
-    fi
+report = {
+    "source": str(source),
+    "target": str(target),
+    "backup": str(backup),
+    "copied_files": [],
+    "created_dirs": [],
+    "skipped": [],
+    "verified": [],
+    "warnings": [],
+    "errors": [],
+}
+
+
+def rel(path: Path) -> Path:
+    return path.relative_to(source)
+
+
+def should_skip(path: Path) -> bool:
+    relative = rel(path)
+    if any(part in excluded_dirs for part in relative.parts):
+        return True
+    if relative.name in excluded_names:
+        return True
+    return relative.name.endswith(excluded_suffixes)
+
+
+def quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def sqlite_summary(db_path: Path) -> tuple[str, dict[str, int]]:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        ]
+        counts = {
+            table: int(conn.execute(f"SELECT COUNT(*) FROM {quote_ident(table)}").fetchone()[0])
+            for table in tables
+        }
+        return str(integrity), counts
+    finally:
+        conn.close()
+
+
+def copy_regular_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        else:
+            dst.unlink()
+    shutil.copy2(src, dst, follow_symlinks=True)
+    report["copied_files"].append(str(rel(src)))
+
+
+def migrate_config() -> None:
+    src = source / "config.yaml"
+    if not src.exists():
+        return
+    dst = target / "config.yaml"
+    text = src.read_text(encoding="utf-8", errors="replace")
+    for old, new in config_rewrites.items():
+        text = text.replace(old, new)
+    dst.write_text(text, encoding="utf-8")
+    try:
+        shutil.copystat(src, dst)
+    except OSError:
+        pass
+    report["copied_files"].append("config.yaml")
+
+
+def migrate_state_db() -> None:
+    src = source / "state.db"
+    if not src.exists():
+        return
+    dst = target / "state.db"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-shm", "-wal"):
+        path = target / f"state.db{suffix}"
+        if path.exists():
+            path.unlink()
+    try:
+        src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+        report["copied_files"].append("state.db")
+    except Exception as exc:
+        report["warnings"].append(f"sqlite backup failed, falling back to file copy: {exc}")
+        copy_regular_file(src, dst)
+        for suffix in ("-shm", "-wal"):
+            sidecar = source / f"state.db{suffix}"
+            if sidecar.exists():
+                copy_regular_file(sidecar, target / sidecar.name)
+
+
+def migrate_tree() -> None:
+    for root, dirnames, filenames in os.walk(source, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = [
+            name for name in dirnames
+            if not should_skip(root_path / name)
+        ]
+        if root_path != source and not should_skip(root_path):
+            dst_dir = target / rel(root_path)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            report["created_dirs"].append(str(rel(root_path)))
+        for name in filenames:
+            src = root_path / name
+            if should_skip(src):
+                report["skipped"].append(str(rel(src)))
+                continue
+            if str(rel(src)) in special_names:
+                continue
+            copy_regular_file(src, target / rel(src))
+
+
+def verify() -> None:
+    config = target / "config.yaml"
+    if (source / "config.yaml").exists():
+        if not config.exists():
+            report["errors"].append("config.yaml missing after migration")
+        else:
+            text = config.read_text(encoding="utf-8", errors="replace")
+            leftovers = [token for token in config_forbidden if token in text]
+            if leftovers:
+                report["errors"].append(
+                    "config.yaml still has legacy command names: " + ", ".join(leftovers)
+                )
+            report["verified"].append("config.yaml")
+
+    if (source / "state.db").exists():
+        dst_db = target / "state.db"
+        if not dst_db.exists():
+            report["errors"].append("state.db missing after migration")
+        else:
+            try:
+                src_integrity, src_counts = sqlite_summary(source / "state.db")
+                dst_integrity, dst_counts = sqlite_summary(dst_db)
+                if dst_integrity.lower() != "ok":
+                    report["errors"].append(f"state.db integrity check failed: {dst_integrity}")
+                if src_counts != dst_counts:
+                    report["errors"].append(
+                        f"state.db table counts differ: source={src_counts} target={dst_counts}"
+                    )
+                report["verified"].append("state.db")
+            except Exception as exc:
+                report["errors"].append(f"state.db verification failed: {exc}")
+
+    for root, dirnames, filenames in os.walk(source, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = [
+            name for name in dirnames
+            if not should_skip(root_path / name)
+        ]
+        for name in filenames:
+            src = root_path / name
+            if should_skip(src) or str(rel(src)) in special_names:
+                continue
+            dst = target / rel(src)
+            if not dst.exists():
+                report["errors"].append(f"{rel(src)} missing after migration")
+                continue
+            if not filecmp.cmp(src, dst, shallow=False):
+                report["errors"].append(f"{rel(src)} differs after migration")
+                continue
+            report["verified"].append(str(rel(src)))
+
+
+migrate_tree()
+migrate_config()
+migrate_state_db()
+verify()
+
+report_path = backup / "migration-report.json"
+report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+if report["errors"]:
+    for error in report["errors"]:
+        print(f"Migration verification failed: {error}", file=sys.stderr)
+    print(f"Migration report: {report_path}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(
+    "Migration verified: "
+    f"{len(report['verified'])} file/state checks passed "
+    f"({len(report['copied_files'])} copied, {len(report['skipped'])} skipped)."
+)
+print(f"Migration report: {report_path}")
+PY
 
     chmod 600 "$elevate_home/.env" "$elevate_home/auth.json" "$elevate_home/config.yaml" 2>/dev/null || true
     ensure_elevate_soul "$elevate_home"
@@ -217,8 +487,16 @@ migrate_hermes_home() {
 ensure_elevate_config() {
     local elevate_home="$1"
     local config_file="$elevate_home/config.yaml"
+    local template_file="$SCRIPT_DIR/cli-config.yaml.example"
 
     if [ -f "$config_file" ]; then
+        return
+    fi
+
+    if [ -f "$template_file" ]; then
+        cp "$template_file" "$config_file"
+        chmod 600 "$config_file" 2>/dev/null || true
+        echo -e "${GREEN}✓${NC} Created default config at $config_file"
         return
     fi
 
@@ -233,9 +511,7 @@ PY
     echo -e "${GREEN}✓${NC} Created default config at $config_file"
 }
 
-echo ""
-echo -e "${CYAN}▲ Elevate Setup${NC}"
-echo ""
+print_install_banner
 
 # ============================================================================
 # Install / locate uv

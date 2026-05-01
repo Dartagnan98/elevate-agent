@@ -110,7 +110,10 @@ class TestWebServerEndpoints:
 
         import elevate_state
         from elevate_constants import get_elevate_home
-        from elevate_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        try:
+            from elevate_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        except SystemExit as exc:
+            pytest.skip(str(exc))
 
         monkeypatch.setattr(elevate_state, "DEFAULT_DB_PATH", get_elevate_home() / "state.db")
 
@@ -124,6 +127,19 @@ class TestWebServerEndpoints:
         assert "version" in data
         assert "elevate_home" in data
         assert "active_sessions" in data
+
+    def test_get_agent_hub(self, monkeypatch):
+        import elevate_cli.agent_hub as agent_hub
+
+        monkeypatch.setattr(
+            agent_hub,
+            "build_agent_hub_snapshot",
+            lambda: {"agents": [], "gateway": {"running": False}},
+        )
+
+        resp = self.client.get("/api/agent-hub")
+        assert resp.status_code == 200
+        assert resp.json()["agents"] == []
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config

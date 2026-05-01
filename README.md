@@ -56,11 +56,15 @@ ELEVATE_BACKEND_URL=http://localhost:3000 elevate  # point CLI at local backend
 Replace `YOUR_ELEVATE_REPO_URL` with the published Elevate repository URL.
 For a local checkout, start from this repo and run `cd cli && ./setup-elevate.sh`.
 
-Existing Hermes installs are migrated safely by `setup-elevate.sh` when
-`~/.hermes/config.yaml` exists and `~/.elevate/config.yaml` does not. Set
-`ELEVATE_MIGRATE_HERMES=0` to skip migration, or
-`ELEVATE_FORCE_HERMES_MIGRATION=1` to overwrite an existing Elevate config after
-writing a timestamped backup under `~/.elevate/migration-backups/`.
+Existing Hermes installs are not imported automatically. To migrate an old
+`~/.hermes` profile into Elevate, run
+`ELEVATE_MIGRATE_HERMES=1 ./setup-elevate.sh`. Set
+`ELEVATE_FORCE_HERMES_MIGRATION=1` only when you intentionally want to overwrite
+an existing Elevate config after writing a timestamped backup under
+`~/.elevate/migration-backups/`. The migrator copies all non-ephemeral Hermes
+profile files, rewrites legacy toolset names in `config.yaml`, safely backs up
+`state.db`, and writes `migration-report.json`; setup fails if verification
+finds missing files or mismatched SQLite table counts.
 
 ### Uninstall
 
@@ -78,8 +82,18 @@ when you intentionally want the uninstaller to delete the Git checkout too.
 ```bash
 cli/scripts/elevate-harness.sh audit    # fail on non-allowlisted legacy coupling
 cli/scripts/elevate-harness.sh smoke    # syntax, compile, launcher, uninstall dry-run
+cli/scripts/elevate-harness.sh memory   # local SQLite + embedding retrieval smoke
+cli/scripts/elevate-harness.sh memory-stress # local embedding volume/concurrency stress
+cli/scripts/elevate-harness.sh memory-openai # live OpenAI embedding smoke with API key
+cli/scripts/elevate-harness.sh context-efficiency # focused wrapper payload check
+cli/scripts/elevate-harness.sh context-stress # prompt/schema ghost-tool stress
+cli/scripts/elevate-harness.sh adversarial # bounded hostile prompt/tool/schema stress
 cli/scripts/elevate-harness.sh all      # temp install, migration, and uninstall rehearsal
 ```
+
+Elevate's local memory store uses Python's built-in SQLite. Semantic
+embeddings are optional and can use OpenAI, Ollama, or an OpenAI-compatible
+provider.
 
 Dev flag to bypass the subscription gate while building: `ELEVATE_DEV_MODE=1 elevate`.
 

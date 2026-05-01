@@ -9,7 +9,7 @@ Flow:
     elevate subscribe         -> POST /api/auth/login, stores license.json
     elevate license status    -> show current license
     elevate license logout    -> delete license.json
-    ensure_valid_license()   -> called from chat entry, refreshes JWT if expired
+    ensure_valid_license()   -> used by premium/cloud skill commands
 
 License file layout (~/.elevate/license.json):
     {

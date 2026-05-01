@@ -289,6 +289,25 @@ class TestGatewayRuntimeStatus:
         assert payload["platforms"]["discord"]["error_code"] is None
         assert payload["platforms"]["discord"]["error_message"] is None
 
+    def test_write_runtime_status_records_runtime_brain_decision(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+
+        status.write_runtime_status(
+            tool_decision={
+                "platform": "telegram",
+                "selected_profile": "coding-edit",
+                "reason": "matched coding-edit intent",
+                "selected_toolsets": ["terminal", "file"],
+            },
+        )
+
+        payload = status.read_runtime_status()
+        latest = payload["runtime_brain"]["latest_tool_decision"]
+        assert latest["platform"] == "telegram"
+        assert latest["selected_profile"] == "coding-edit"
+        assert latest["selected_toolsets"] == ["terminal", "file"]
+        assert payload["runtime_brain"]["updated_at"]
+
 
 class TestTerminatePid:
     def test_force_uses_taskkill_on_windows(self, monkeypatch):

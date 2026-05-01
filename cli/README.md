@@ -26,8 +26,11 @@ seeds `~/.elevate/SOUL.md` when missing.
 
 If an older Hermes install exists at `~/.hermes`, setup can migrate config,
 auth, sessions, skills, memories, cron jobs, and secrets into `~/.elevate`.
-Migration is automatic when no Elevate config exists. Use
-`ELEVATE_MIGRATE_HERMES=0 ./setup-elevate.sh` to skip it.
+Migration is opt-in for standalone Elevate installs. Use
+`ELEVATE_MIGRATE_HERMES=1 ./setup-elevate.sh` when you intentionally want to
+import the old profile. Setup copies all non-ephemeral Hermes profile files,
+rewrites legacy toolset names in `config.yaml`, safely backs up `state.db`, and
+writes a `migration-report.json`; verification failures stop the install.
 
 ## First run
 
@@ -54,8 +57,18 @@ when you intentionally want the uninstaller to delete the Git checkout too.
 ```bash
 ./scripts/elevate-harness.sh audit    # fail on non-allowlisted legacy coupling
 ./scripts/elevate-harness.sh smoke    # syntax, compile, launcher, uninstall dry-run
+./scripts/elevate-harness.sh memory   # local SQLite + embedding retrieval smoke
+./scripts/elevate-harness.sh memory-stress # local embedding volume/concurrency stress
+./scripts/elevate-harness.sh memory-openai # live OpenAI embedding smoke with API key
+./scripts/elevate-harness.sh context-efficiency # focused wrapper payload check
+./scripts/elevate-harness.sh context-stress # prompt/schema ghost-tool stress
+./scripts/elevate-harness.sh adversarial # bounded hostile prompt/tool/schema stress
 ./scripts/elevate-harness.sh all      # temp install, migration, and uninstall rehearsal
 ```
+
+Elevate's local memory store uses Python's built-in SQLite. Semantic
+embeddings are optional and can use OpenAI, Ollama, or an OpenAI-compatible
+provider.
 
 ## Architecture
 

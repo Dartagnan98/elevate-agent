@@ -193,6 +193,8 @@ export const api = {
   },
 
   // Gateway / update actions
+  startGateway: () =>
+    fetchJSON<ActionResponse>("/api/gateway/start", { method: "POST" }),
   restartGateway: () =>
     fetchJSON<ActionResponse>("/api/gateway/restart", { method: "POST" }),
   updateElevate: () =>
@@ -217,6 +219,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+
+  // Agent Hub
+  getAgentHub: () => fetchJSON<AgentHubSnapshot>("/api/agent-hub"),
 };
 
 export interface ActionResponse {
@@ -256,6 +261,169 @@ export interface StatusResponse {
   latest_config_version: number;
   release_date: string;
   version: string;
+}
+
+export interface AgentHubAgent {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  enabled: boolean;
+  platforms: string[];
+  session_sources: string[];
+  skills: string[];
+  toolsets: string[];
+  status: "online" | "ready" | "offline" | "disabled" | "needs_model" | string;
+  session_count: number;
+  active_session_count: number;
+  has_prompt: boolean;
+}
+
+export interface AgentHubPlatform {
+  name: string;
+  enabled: boolean;
+  configured: boolean;
+  token_configured: boolean;
+  api_key_configured: boolean;
+  home_channel: { platform: string; chat_id: string; name: string } | null;
+  reply_to_mode: string;
+  runtime?: PlatformStatus;
+  approved_users: number;
+  pending_pairings: Array<{
+    code: string;
+    user_id: string;
+    user_name: string;
+    age_minutes: number;
+  }>;
+  error?: string;
+}
+
+export interface AgentHubMemoryNode {
+  id: string;
+  label: string;
+  type: "entity" | "fact" | string;
+  weight: number;
+  category?: string;
+}
+
+export interface AgentHubMemoryEdge {
+  source: string;
+  target: string;
+  type: string;
+}
+
+export interface AgentHubSessionSummary {
+  total: number;
+  active: number;
+  recent: Array<{
+    id: string;
+    title: string;
+    source: string;
+    started_at: number;
+    last_active: number;
+    is_active: boolean;
+    message_count: number;
+    tool_call_count: number;
+    model: string;
+  }>;
+  by_source: Record<string, number>;
+  by_day: Record<string, number>;
+  error: string;
+}
+
+export interface AgentHubSnapshot {
+  generated_at: number;
+  config_path: string;
+  elevate_home: string;
+  gateway: {
+    running: boolean;
+    pid: number | null;
+    state: string | null;
+    updated_at: string | null;
+    active_agents: number;
+    exit_reason: string | null;
+  };
+  model: {
+    model: string;
+    provider: string;
+    base_url_configured: boolean;
+    api_key_configured: boolean;
+    configured: boolean;
+  };
+  access: {
+    profile: string;
+    label: string;
+    affiliation: Record<string, unknown>;
+    entitlements: Record<string, { status?: string; owned_snapshot?: boolean }>;
+  };
+  agents: AgentHubAgent[];
+  platforms: AgentHubPlatform[];
+  sessions: AgentHubSessionSummary;
+  memory: {
+    provider: string;
+    db_path: string;
+    db_exists: boolean;
+    facts: number;
+    entities: number;
+    embeddings: number;
+    indexed_facts: number;
+    journal: {
+      total: number;
+      pending: number;
+      processed: number;
+      failed: number;
+      active_session_count: number;
+      session_segment_count: number;
+      sessions: Array<{
+        session_id: string;
+        session_day: string;
+        total: number;
+        pending: number;
+        processed: number;
+        failed: number;
+        latest_created_at: string | null;
+      }>;
+    };
+    embedding: {
+      enabled: boolean;
+      provider: string;
+      model: string;
+      api_key_env: string;
+    };
+    graph: { nodes: AgentHubMemoryNode[]; edges: AgentHubMemoryEdge[] };
+    error: string;
+  };
+  cron: {
+    total: number;
+    enabled: number;
+    paused: number;
+    recent: Array<{
+      id: string;
+      name: string;
+      schedule: unknown;
+      enabled: boolean;
+      deliver: string;
+    }>;
+    error: string;
+  };
+  skills: {
+    total: number;
+    enabled: number;
+    disabled: number;
+    categories: Record<string, number>;
+    error: string;
+  };
+  toolsets: {
+    total: number;
+    enabled: string[];
+    known: Array<{
+      name: string;
+      label: string;
+      description: string;
+      enabled: boolean;
+    }>;
+    error: string;
+  };
 }
 
 export interface SessionInfo {

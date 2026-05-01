@@ -91,6 +91,133 @@ def _make_adapter(platform_val="telegram"):
 class TestBusySessionAck:
     """User sends a message while agent is running — should get acknowledgment."""
 
+    def test_code_profile_wins_for_cma_patch_requests(self):
+        """CMA code fixes need local repo tools, not the narrow skill runner."""
+        from gateway.run import GatewayRunner
+
+        assert (
+            GatewayRunner._select_gateway_tool_profile("can you see your tools now")
+            == "gateway-followup"
+        )
+        assert (
+            GatewayRunner._select_gateway_tool_profile("Patch the CMA photo QA code")
+            == "coding-edit"
+        )
+        assert (
+            GatewayRunner._select_gateway_tool_profile("Run the CMA skill")
+            == "skill-runner"
+        )
+
+    def test_profile_decision_explains_lazy_code_route(self):
+        """Runtime brain decisions should be inspectable by API/dashboard clients."""
+        from gateway.run import GatewayRunner
+
+        decision = GatewayRunner._gateway_tool_profile_decision(
+            {"toolsets": ["elevate-cli"]},
+            "telegram",
+            "Patch the CMA photo QA code in the local repo",
+        )
+
+        assert decision["mode"] == "auto"
+        assert decision["requested_profile"] == "coding-edit"
+        assert decision["selected_profile"] == "coding-edit"
+        assert "patch" in decision["matched_keywords"]
+        assert {"terminal", "file", "delegation", "code_execution"} <= set(
+            decision["selected_toolsets"]
+        )
+
+    def test_lazy_tool_catalog_mentions_on_demand_code_tools(self):
+        """Lightweight turns should still advertise code tools as lazy-loadable."""
+        from gateway.run import GatewayRunner
+
+        prompt = GatewayRunner._build_gateway_lazy_tool_catalog_prompt(
+            {"toolsets": ["elevate-cli"]},
+            "telegram",
+            ["memory", "session_search", "todo", "messaging"],
+        )
+
+        assert "Loaded this turn" in prompt
+        assert "available on demand" in prompt
+        assert "coding-edit" in prompt
+        assert "terminal" in prompt
+        assert "file" in prompt
+        assert "lazy-load" in prompt
+
+    def test_status_query_classifier_is_conservative(self):
+        """Only obvious status/debug questions should bypass interruption."""
+        from gateway.run import _is_busy_status_query
+
+        assert _is_busy_status_query("what exactly are you doing")
+        assert _is_busy_status_query("what is going on?")
+        assert _is_busy_status_query("why are you doing it again")
+        assert _is_busy_status_query("where are you running this what browser??")
+        assert not _is_busy_status_query("Are you working?")
+        assert not _is_busy_status_query("add this comp to the CMA")
+
+    @pytest.mark.asyncio
+    async def test_status_question_reports_without_interrupt_or_queue(self):
+        """Status questions during a busy turn must not become a new turn."""
+        runner, sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+
+        event = _make_event(text="what exactly are you doing")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 22,
+            "max_iterations": 60,
+            "current_tool": "terminal",
+            "last_activity_ts": time.time(),
+            "last_activity_desc": "terminal",
+            "seconds_since_activity": 2.0,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 360
+        runner.adapters[event.source.platform] = adapter
+
+        result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+        adapter._send_with_retry.assert_called_once()
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "Current task is still running" in content
+        assert "22/60" in content
+        assert "terminal" in content
+        assert "not interrupting" in content
+
+    @pytest.mark.asyncio
+    async def test_status_question_bypasses_busy_ack_cooldown(self):
+        """Repeated status checks should get live answers, not a silent debounce."""
+        runner, sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+
+        event = _make_event(text="what is going on")
+        sk = build_session_key(event.source)
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 1,
+            "max_iterations": 60,
+            "current_tool": "process",
+            "last_activity_desc": "process",
+            "seconds_since_activity": 1.0,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 30
+        runner.adapters[event.source.platform] = adapter
+        runner._busy_ack_ts[sk] = time.time()
+
+        await runner._handle_active_session_busy_message(event, sk)
+        await runner._handle_active_session_busy_message(event, sk)
+
+        assert adapter._send_with_retry.call_count == 2
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+
     @pytest.mark.asyncio
     async def test_sends_ack_when_agent_running(self):
         """First message during busy session should get a status ack."""

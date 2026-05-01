@@ -415,6 +415,7 @@ class InsightsEngine:
         total_cache_read = sum(s.get("cache_read_tokens") or 0 for s in sessions)
         total_cache_write = sum(s.get("cache_write_tokens") or 0 for s in sessions)
         total_tokens = total_input + total_output + total_cache_read + total_cache_write
+        total_fresh_tokens = total_input + total_output + total_cache_write
         total_tool_calls = sum(s.get("tool_call_count") or 0 for s in sessions)
         total_messages = sum(s.get("message_count") or 0 for s in sessions)
 
@@ -465,6 +466,7 @@ class InsightsEngine:
             "total_cache_read_tokens": total_cache_read,
             "total_cache_write_tokens": total_cache_write,
             "total_tokens": total_tokens,
+            "total_fresh_tokens": total_fresh_tokens,
             "estimated_cost": total_cost,
             "actual_cost": actual_cost,
             "total_hours": total_hours,
@@ -762,7 +764,12 @@ class InsightsEngine:
         lines.append(f"  Sessions:          {o['total_sessions']:<12}  Messages:        {o['total_messages']:,}")
         lines.append(f"  Tool calls:        {o['total_tool_calls']:<12,}  User messages:   {o['user_messages']:,}")
         lines.append(f"  Input tokens:      {o['total_input_tokens']:<12,}  Output tokens:   {o['total_output_tokens']:,}")
-        lines.append(f"  Total tokens:      {o['total_tokens']:,}")
+        lines.append(f"  Processed tokens:  {o['total_tokens']:,}")
+        if o.get("total_cache_read_tokens"):
+            lines.append(
+                f"  Fresh tokens:      {o.get('total_fresh_tokens', 0):,}  "
+                f"Cache read:      {o['total_cache_read_tokens']:,}"
+            )
         if o["total_hours"] > 0:
             lines.append(f"  Active time:       ~{_format_duration(o['total_hours'] * 3600):<11}  Avg session:     ~{_format_duration(o['avg_session_duration'])}")
         lines.append(f"  Avg msgs/session:  {o['avg_messages_per_session']:.1f}")
@@ -877,7 +884,15 @@ class InsightsEngine:
 
         # Overview
         lines.append(f"**Sessions:** {o['total_sessions']} | **Messages:** {o['total_messages']:,} | **Tool calls:** {o['total_tool_calls']:,}")
-        lines.append(f"**Tokens:** {o['total_tokens']:,} (in: {o['total_input_tokens']:,} / out: {o['total_output_tokens']:,})")
+        if o.get("total_cache_read_tokens"):
+            lines.append(
+                f"**Tokens processed:** {o['total_tokens']:,} | "
+                f"**Fresh tokens:** {o.get('total_fresh_tokens', 0):,} "
+                f"(in: {o['total_input_tokens']:,} / out: {o['total_output_tokens']:,} / "
+                f"cache read: {o['total_cache_read_tokens']:,})"
+            )
+        else:
+            lines.append(f"**Tokens:** {o['total_tokens']:,} (in: {o['total_input_tokens']:,} / out: {o['total_output_tokens']:,})")
         if o["total_hours"] > 0:
             lines.append(f"**Active time:** ~{_format_duration(o['total_hours'] * 3600)} | **Avg session:** ~{_format_duration(o['avg_session_duration'])}")
         lines.append("")

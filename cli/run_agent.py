@@ -84,7 +84,7 @@ from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
-    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
@@ -98,7 +98,17 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import (
+    build_skills_system_prompt,
+    build_context_files_prompt,
+    build_environment_hints,
+    build_memory_guidance,
+    load_soul_md,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    build_google_model_operational_guidance,
+    build_openai_model_execution_guidance,
+)
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -4204,7 +4214,7 @@ class AIAgent:
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
         if "memory" in self.valid_tool_names:
-            tool_guidance.append(MEMORY_GUIDANCE)
+            tool_guidance.append(build_memory_guidance(self.valid_tool_names))
         if "session_search" in self.valid_tool_names:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
@@ -4242,11 +4252,11 @@ class AIAgent:
                 # Google model operational guidance (conciseness, absolute
                 # paths, parallel tool calls, verify-before-edit, etc.)
                 if "gemini" in _model_lower or "gemma" in _model_lower:
-                    prompt_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+                    prompt_parts.append(build_google_model_operational_guidance(self.valid_tool_names))
                 # OpenAI GPT/Codex execution discipline (tool persistence,
                 # prerequisite checks, verification, anti-hallucination).
                 if "gpt" in _model_lower or "codex" in _model_lower:
-                    prompt_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                    prompt_parts.append(build_openai_model_execution_guidance(self.valid_tool_names))
 
         # so it can refer the user to them rather than reinventing answers.
 
@@ -7905,6 +7915,12 @@ class AIAgent:
             goal=function_args.get("goal"),
             context=function_args.get("context"),
             toolsets=function_args.get("toolsets"),
+            agent_id=function_args.get("agent_id") or function_args.get("agent"),
+            expected_return=function_args.get("expected_return"),
+            handoff_reason=function_args.get("handoff_reason"),
+            priority=function_args.get("priority"),
+            artifacts=function_args.get("artifacts"),
+            parent_run_id=function_args.get("parent_run_id"),
             tasks=function_args.get("tasks"),
             max_iterations=function_args.get("max_iterations"),
             acp_command=function_args.get("acp_command"),
@@ -12186,8 +12202,15 @@ class AIAgent:
         # injected skill content that bloats / breaks provider queries.
         if self._memory_manager and final_response and original_user_message:
             try:
-                self._memory_manager.sync_all(original_user_message, final_response)
-                self._memory_manager.queue_prefetch_all(original_user_message)
+                self._memory_manager.sync_all(
+                    original_user_message,
+                    final_response,
+                    session_id=self.session_id or "",
+                )
+                self._memory_manager.queue_prefetch_all(
+                    original_user_message,
+                    session_id=self.session_id or "",
+                )
             except Exception:
                 pass
 

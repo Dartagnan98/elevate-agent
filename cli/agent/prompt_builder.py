@@ -161,6 +161,31 @@ MEMORY_GUIDANCE = (
     "workflows belong in skills, not memory."
 )
 
+
+def build_memory_guidance(valid_tool_names: "set[str] | None") -> str:
+    """Return memory guidance scoped to the tools loaded in this session."""
+    valid = set(valid_tool_names or set())
+    guidance = MEMORY_GUIDANCE
+    if "session_search" not in valid:
+        guidance = guidance.replace(
+            "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
+            "state to memory; use session_search to recall those from past transcripts. ",
+            "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
+            "state to memory. ",
+        )
+    if "skill_manage" not in valid:
+        guidance = guidance.replace(
+            "If you've discovered a new way to do something, solved a problem that could be "
+            "necessary later, save it as a skill with the skill tool.\n",
+            "",
+        )
+        guidance = guidance.replace(
+            "Procedures and workflows belong in skills, not memory.",
+            "Procedures and workflows do not belong in compact memory.",
+        )
+    return guidance
+
+
 SESSION_SEARCH_GUIDANCE = (
     "When the user references something from a past conversation or you suspect "
     "relevant cross-session context exists, use session_search to recall it before "
@@ -259,6 +284,161 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "</missing_context>"
 )
 
+
+def _tool_choice(valid_tool_names: "set[str] | None", *tool_names: str) -> str:
+    valid = set(valid_tool_names or set())
+    available = [name for name in tool_names if name in valid]
+    if not available:
+        return ""
+    if len(available) == 1:
+        return available[0]
+    return " or ".join([", ".join(available[:-1]), available[-1]])
+
+
+def build_openai_model_execution_guidance(valid_tool_names: "set[str] | None") -> str:
+    """Build OpenAI/Codex execution guidance scoped to the loaded tools.
+
+    The static guidance intentionally names concrete tools, but focused Elevate
+    profiles may omit shell, web, or file access.  This builder prevents prompt
+    ghost references that nudge the model toward unavailable tool calls.
+    """
+    valid = set(valid_tool_names or set())
+    mandatory_lines = []
+
+    calc_tool = _tool_choice(valid, "terminal", "execute_code")
+    if calc_tool:
+        mandatory_lines.append(f"- Arithmetic, math, calculations -> use {calc_tool}")
+
+    hash_tool = _tool_choice(valid, "terminal", "execute_code")
+    if hash_tool:
+        mandatory_lines.append(f"- Hashes, encodings, checksums -> use {hash_tool}")
+
+    if "terminal" in valid:
+        mandatory_lines.extend([
+            "- Current time, date, timezone -> use terminal (e.g. date)",
+            "- System state: OS, CPU, memory, disk, ports, processes -> use terminal",
+            "- Git history, branches, diffs -> use terminal",
+        ])
+
+    file_tool = _tool_choice(valid, "read_file", "search_files", "terminal")
+    if file_tool:
+        mandatory_lines.append(f"- File contents, sizes, line counts -> use {file_tool}")
+
+    if "web_search" in valid:
+        mandatory_lines.append("- Current facts (weather, news, versions) -> use web_search")
+
+    lookup_tool = _tool_choice(
+        valid,
+        "search_files",
+        "read_file",
+        "web_search",
+        "web_extract",
+        "session_search",
+        "memory",
+    )
+
+    if mandatory_lines:
+        inventory_lines = []
+        if {"terminal", "read_file", "write_file", "patch", "search_files"} & valid:
+            loaded_code_tools = [
+                name for name in (
+                    "terminal",
+                    "process",
+                    "read_file",
+                    "write_file",
+                    "patch",
+                    "search_files",
+                    "execute_code",
+                    "delegate_task",
+                )
+                if name in valid
+            ]
+            inventory_lines.append(
+                "Current runtime local/code tools loaded: "
+                + ", ".join(loaded_code_tools)
+                + ". If the user asks what tools you can see or whether local "
+                "code tools are available, answer from this current runtime list "
+                "instead of repeating earlier session history."
+            )
+
+        mandatory_block = (
+            "<mandatory_tool_use>\n"
+            "NEVER answer these from memory or mental computation when the listed "
+            "tool is loaded — use the available tool instead:\n"
+            + "\n".join(mandatory_lines)
+            + "\n"
+        )
+        if inventory_lines:
+            mandatory_block += "\n".join(inventory_lines) + "\n"
+        if "memory" in valid:
+            mandatory_block += (
+                "Your memory and user profile describe the USER, not the system you are "
+                "running on. The execution environment may differ from what the user profile "
+                "says about their personal setup.\n"
+            )
+        mandatory_block += "</mandatory_tool_use>"
+    else:
+        mandatory_block = (
+            "<mandatory_tool_use>\n"
+            "This focused profile has no live shell, file, code-execution, or web lookup "
+            "tools loaded. Do not claim you checked live system, file, web, or git state. "
+            "Use the provided context and loaded recall/planning tools, and label "
+            "assumptions when live verification is unavailable.\n"
+            "</mandatory_tool_use>"
+        )
+
+    act_default = (
+        "<act_dont_ask>\n"
+        "When a question has an obvious default interpretation and the needed tool "
+        "is available, act on it immediately instead of asking for clarification. "
+        "Only ask for clarification when the ambiguity genuinely changes what tool "
+        "you would call or cannot be resolved with the loaded tools.\n"
+        "</act_dont_ask>"
+    )
+
+    if lookup_tool:
+        missing_context = (
+            "<missing_context>\n"
+            "- If required context is missing, do NOT guess or hallucinate an answer.\n"
+            f"- Use the appropriate loaded lookup tool when missing information is retrievable ({lookup_tool}).\n"
+            "- Ask a clarifying question only when the information cannot be retrieved by loaded tools.\n"
+            "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+            "</missing_context>"
+        )
+    else:
+        missing_context = (
+            "<missing_context>\n"
+            "- If required context is missing, do NOT guess or hallucinate an answer.\n"
+            "- Ask a clarifying question when the information cannot be inferred from provided context.\n"
+            "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+            "</missing_context>"
+        )
+
+    return (
+        "# Execution discipline\n"
+        "<tool_persistence>\n"
+        "- Use loaded tools whenever they improve correctness, completeness, or grounding.\n"
+        "- Do not stop early when another available tool call would materially improve the result.\n"
+        "- If a loaded tool returns empty or partial results, retry with a different query or strategy before giving up.\n"
+        "- Keep calling loaded tools until: (1) the task is complete, AND (2) you have verified the result.\n"
+        "</tool_persistence>\n\n"
+        f"{mandatory_block}\n\n"
+        f"{act_default}\n\n"
+        "<prerequisite_checks>\n"
+        "- Before taking an action, check whether prerequisite discovery, lookup, or context-gathering steps are needed.\n"
+        "- Do not skip prerequisite steps just because the final action seems obvious.\n"
+        "- If a task depends on output from a prior step, resolve that dependency first.\n"
+        "</prerequisite_checks>\n\n"
+        "<verification>\n"
+        "Before finalizing your response:\n"
+        "- Correctness: does the output satisfy every stated requirement?\n"
+        "- Grounding: are factual claims backed by tool outputs or provided context?\n"
+        "- Formatting: does the output match the requested format or schema?\n"
+        "- Safety: if the next step has side effects (file writes, commands, API calls), confirm scope before executing.\n"
+        "</verification>\n\n"
+        f"{missing_context}"
+    )
+
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
 GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
@@ -280,6 +460,40 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "- **Keep going:** Work autonomously until the task is fully resolved. "
     "Don't stop with a plan — execute it.\n"
 )
+
+
+def build_google_model_operational_guidance(valid_tool_names: "set[str] | None") -> str:
+    """Build Gemini/Gemma guidance without naming unavailable tools."""
+    valid = set(valid_tool_names or set())
+    lines = ["# Google model operational directives", "Follow these operational rules strictly:"]
+
+    if {"read_file", "write_file", "patch", "search_files", "terminal"} & valid:
+        lines.append(
+            "- **Absolute paths:** Always construct and use absolute file paths for file system operations."
+        )
+    if {"read_file", "search_files"} & valid:
+        check_tools = _tool_choice(valid, "read_file", "search_files")
+        lines.append(
+            f"- **Verify first:** Use {check_tools} to check file contents and project structure before making changes."
+        )
+    if {"read_file", "search_files", "terminal"} & valid:
+        lines.append(
+            "- **Dependency checks:** Never assume a library is available. Check project dependency files before importing."
+        )
+
+    lines.append(
+        "- **Conciseness:** Keep explanatory text brief — a few sentences, not paragraphs. Focus on actions and results over narration."
+    )
+    if len(valid) > 1:
+        lines.append(
+            "- **Parallel tool calls:** When you need multiple independent operations, make the tool calls in a single response when safe."
+        )
+    if "terminal" in valid:
+        lines.append(
+            "- **Non-interactive commands:** Use flags like -y, --yes, --non-interactive to prevent CLI tools from hanging on prompts."
+        )
+    lines.append("- **Keep going:** Work autonomously until the task is fully resolved. Don't stop with a plan — execute it.")
+    return "\n".join(lines) + "\n"
 
 # Model name substrings that should use the 'developer' role instead of
 # 'system' for the system prompt.  OpenAI's newer models (GPT-5, Codex)
@@ -466,7 +680,7 @@ CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-_SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_SNAPSHOT_VERSION = 2
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -554,6 +768,14 @@ def _build_snapshot_entry(
     if isinstance(platforms, str):
         platforms = [platforms]
 
+    required_entitlements: list[str] = []
+    try:
+        from elevate_cli.access import required_entitlements_from_frontmatter
+
+        required_entitlements = required_entitlements_from_frontmatter(frontmatter)
+    except Exception:
+        logger.debug("Could not extract skill access metadata", exc_info=True)
+
     return {
         "skill_name": skill_name,
         "category": category,
@@ -561,6 +783,7 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "required_entitlements": required_entitlements,
     }
 
 
@@ -618,6 +841,38 @@ def _skill_should_show(
     return True
 
 
+def _access_cache_key() -> str:
+    try:
+        from elevate_cli.access import load_access_config
+
+        return json.dumps(load_access_config(), sort_keys=True)
+    except Exception:
+        return ""
+
+
+def _required_entitlements_allowed(required: list[str] | tuple[str, ...] | None) -> bool:
+    if not required:
+        return True
+    try:
+        from elevate_cli.access import is_entitlement_active, load_access_config
+
+        access_config = load_access_config()
+        return all(is_entitlement_active(entitlement, access_config) for entitlement in required)
+    except Exception:
+        logger.debug("Could not evaluate skill entitlement filter", exc_info=True)
+        return False
+
+
+def _skill_access_should_show(frontmatter: dict) -> bool:
+    try:
+        from elevate_cli.access import evaluate_skill_access
+
+        return evaluate_skill_access(frontmatter).allowed
+    except Exception:
+        logger.debug("Could not evaluate skill access", exc_info=True)
+        return True
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -659,6 +914,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        _access_cache_key(),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -685,6 +941,8 @@ def build_skills_system_prompt(
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue
+            if not _required_entitlements_allowed(entry.get("required_entitlements") or []):
+                continue
             if not _skill_should_show(
                 entry.get("conditions") or {},
                 available_tools,
@@ -709,6 +967,8 @@ def build_skills_system_prompt(
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
+                continue
+            if not _skill_access_should_show(frontmatter):
                 continue
             if not _skill_should_show(
                 extract_skill_conditions(frontmatter),
@@ -765,6 +1025,8 @@ def build_skills_system_prompt(
                     continue
                 if frontmatter_name in disabled or skill_name in disabled:
                     continue
+                if not _skill_access_should_show(frontmatter):
+                    continue
                 if not _skill_should_show(
                     extract_skill_conditions(frontmatter),
                     available_tools,
@@ -813,18 +1075,29 @@ def build_skills_system_prompt(
                 else:
                     index_lines.append(f"    - {name}")
 
+        basic_tools = [
+            name for name in ("web_search", "terminal", "read_file", "search_files")
+            if name in (available_tools or set())
+        ]
+        if basic_tools:
+            basic_tool_phrase = "basic loaded tools like " + " or ".join(basic_tools[:2])
+        else:
+            basic_tool_phrase = "general-purpose reasoning alone"
+
         result = (
-            "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
+            "## Skills (selective)\n"
+            "Before doing specialized work, scan the skills below. Load a skill with "
+            "skill_view(name) when the user explicitly names that skill, asks you to run "
+            "a skill/workflow, or the task clearly depends on specialized commands, files, "
+            "pitfalls, or user-specific conventions that are not already in the prompt. "
+            "For status checks, direct questions, simple follow-ups, meta/debug messages, "
+            "and small tasks that are fully answerable with the currently loaded context, "
+            "do not load a skill unless the user asks for it. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
+            "and proven workflows that outperform general-purpose approaches when the task "
+            f"actually needs them. If a skill is relevant but {basic_tool_phrase} is enough "
+            "to answer or verify the user's immediate question, answer directly and avoid "
+            "the extra skill_view round-trip.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
@@ -834,7 +1107,8 @@ def build_skills_system_prompt(
             + "\n".join(index_lines) + "\n"
             "</available_skills>\n"
             "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
+            "Proceed without loading a skill whenever a skill would not materially improve "
+            "the current answer or action."
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────

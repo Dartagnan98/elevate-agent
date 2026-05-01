@@ -789,6 +789,37 @@ DEFAULT_CONFIG = {
     # injected at the start of every API call for few-shot priming.
     # Never saved to sessions, logs, or trajectories.
     "prefill_messages_file": "",
+
+    # Access profiles and local entitlement gates.
+    # Core Elevate stays local and available. Premium skill packs can mark
+    # SKILL.md frontmatter with access.entitlement to require one of these.
+    "access": {
+        "profile": "standalone",  # standalone | exp | skyleigh_downline
+        "offline_grace_days": 14,
+        "affiliation": {
+            "brokerage": "",
+            "team": "",
+            "status": "active",
+        },
+        "entitlements": {
+            "elevate_core": {
+                "status": "active",
+                "owned_snapshot": True,
+                "description": "Core local Elevate runtime and personal data.",
+            },
+            "exp_agent_pack": {
+                "status": "locked",
+                "owned_snapshot": False,
+                "description": "Direct eXp real estate skill pack.",
+            },
+            "skyleigh_team_pack": {
+                "status": "locked",
+                "owned_snapshot": False,
+                "requires_active_affiliation": True,
+                "description": "Skyleigh downline/team-only skill pack.",
+            },
+        },
+    },
     
     # Skills — external skill directories for sharing skills across tools/agents.
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
@@ -2225,7 +2256,7 @@ def check_config_version() -> Tuple[int, int]:
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "display", "compression", "delegation",
+    "agent", "terminal", "display", "compression", "delegation", "access",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
     "sessions",
 }

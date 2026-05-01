@@ -79,6 +79,13 @@ def _write_skill(root: Path, name: str, body: str, manifest: dict) -> None:
     tags = manifest.get("tags")
     if tags:
         front.append(f"tags: [{', '.join(tags)}]")
+    entitlement = (
+        manifest.get("entitlement")
+        or manifest.get("requires_entitlement")
+        or manifest.get("required_entitlement")
+    )
+    if entitlement:
+        front.extend(["access:", f"  entitlement: {entitlement}"])
     front.append("---")
     content = "\n".join(front) + "\n\n" + body
     (skill_dir / "SKILL.md").write_text(content)

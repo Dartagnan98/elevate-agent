@@ -171,6 +171,17 @@ def _normalize_string_set(values) -> Set[str]:
 # ── External skills directories ──────────────────────────────────────────
 
 
+def _split_extra_skill_paths(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    # os.pathsep is ':' on macOS/Linux and ';' on Windows. Accept commas too
+    # because env vars often get copied from docs or dashboards.
+    parts: list[str] = []
+    for chunk in str(raw).split(os.pathsep):
+        parts.extend(piece.strip() for piece in chunk.split(","))
+    return [part for part in parts if part]
+
+
 def get_external_skills_dirs() -> List[Path]:
     """Read ``skills.external_dirs`` from config.yaml and return validated paths.
 
@@ -178,23 +189,26 @@ def get_external_skills_dirs() -> List[Path]:
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.elevate/skills/`` are silently skipped.
     """
+    raw_dirs: list[str] = []
     config_path = get_config_path()
-    if not config_path.exists():
-        return []
-    try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(parsed, dict):
-        return []
+    if config_path.exists():
+        try:
+            parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            skills_cfg = parsed.get("skills")
+            if isinstance(skills_cfg, dict):
+                configured_dirs = skills_cfg.get("external_dirs")
+                if configured_dirs:
+                    if isinstance(configured_dirs, str):
+                        configured_dirs = [configured_dirs]
+                    if isinstance(configured_dirs, list):
+                        raw_dirs.extend(str(item) for item in configured_dirs)
 
-    skills_cfg = parsed.get("skills")
-    if not isinstance(skills_cfg, dict):
-        return []
+    raw_dirs.extend(_split_extra_skill_paths(os.getenv("ELEVATE_EXTRA_SKILLS_PATH")))
+    raw_dirs.extend(_split_extra_skill_paths(os.getenv("ELEVATE_EXTRA_SKILLS_DIRS")))
 
-    raw_dirs = skills_cfg.get("external_dirs")
-    if not raw_dirs:
-        return []
     if isinstance(raw_dirs, str):
         raw_dirs = [raw_dirs]
     if not isinstance(raw_dirs, list):

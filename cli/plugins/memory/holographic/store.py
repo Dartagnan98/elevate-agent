@@ -3,10 +3,20 @@ SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Elevate memory store plugin.
 """
 
+import json
 import re
 import sqlite3
 import threading
+from datetime import datetime
 from pathlib import Path
+
+from .embeddings import (
+    BaseEmbeddingClient,
+    blob_to_vector,
+    content_hash,
+    cosine_similarity,
+    vector_to_blob,
+)
 
 try:
     from . import holographic as hrr
@@ -73,6 +83,45 @@ CREATE TABLE IF NOT EXISTS memory_banks (
     fact_count INTEGER DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_type  TEXT NOT NULL,
+    target_id    INTEGER NOT NULL,
+    provider     TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    dimensions   INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    vector       BLOB NOT NULL,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(target_type, target_id, provider, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_target
+    ON memory_embeddings(target_type, target_id);
+
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_provider_model
+    ON memory_embeddings(provider, model);
+
+CREATE TABLE IF NOT EXISTS memory_turn_journal (
+    turn_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT DEFAULT '',
+    session_day       TEXT NOT NULL DEFAULT CURRENT_DATE,
+    turn_hash         TEXT NOT NULL UNIQUE,
+    user_content      TEXT NOT NULL,
+    assistant_content TEXT NOT NULL,
+    status            TEXT DEFAULT 'pending',
+    extracted_count   INTEGER DEFAULT 0,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at      TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_journal_status
+    ON memory_turn_journal(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_journal_session
+    ON memory_turn_journal(session_id, session_day, status);
 """
 
 # Trust adjustment constants
@@ -103,6 +152,7 @@ class MemoryStore:
         db_path: "str | Path | None" = None,
         default_trust: float = 0.5,
         hrr_dim: int = 1024,
+        embedding_client: BaseEmbeddingClient | None = None,
     ) -> None:
         if db_path is None:
             from elevate_constants import get_elevate_home
@@ -111,6 +161,7 @@ class MemoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.default_trust = _clamp_trust(default_trust)
         self.hrr_dim = hrr_dim
+        self.embedding_client = embedding_client
         self._hrr_available = hrr._HAS_NUMPY
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self.db_path),
@@ -133,6 +184,20 @@ class MemoryStore:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
+        journal_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(memory_turn_journal)").fetchall()
+        }
+        if "session_day" not in journal_columns:
+            self._conn.execute(
+                "ALTER TABLE memory_turn_journal ADD COLUMN session_day TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.execute(
+                """
+                UPDATE memory_turn_journal
+                SET session_day = substr(COALESCE(created_at, CURRENT_DATE), 1, 10)
+                WHERE session_day = ''
+                """
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -171,7 +236,9 @@ class MemoryStore:
                 row = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ?", (content,)
                 ).fetchone()
-                return int(row["fact_id"])
+                fact_id = int(row["fact_id"])
+                self._embed_fact(fact_id, content)
+                return fact_id
 
             # Entity extraction and linking
             for name in self._extract_entities(content):
@@ -180,6 +247,7 @@ class MemoryStore:
 
             # Compute HRR vector after entity linking
             self._compute_hrr_vector(fact_id, content)
+            self._embed_fact(fact_id, content)
             self._rebuild_bank(category)
 
             return fact_id
@@ -291,6 +359,7 @@ class MemoryStore:
             # Recompute HRR vector if content changed
             if content is not None:
                 self._compute_hrr_vector(fact_id, content)
+                self._embed_fact(fact_id, content)
             # Rebuild bank for relevant category
             cat = category or self._conn.execute(
                 "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
@@ -310,6 +379,10 @@ class MemoryStore:
 
             self._conn.execute(
                 "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM memory_embeddings WHERE target_type = 'fact' AND target_id = ?",
+                (fact_id,),
             )
             self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._conn.commit()
@@ -345,6 +418,192 @@ class MemoryStore:
             """
             rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_dict(r) for r in rows]
+
+    def recent_turns(
+        self,
+        session_id: str | None = None,
+        session_day: str | None = None,
+        query: str | None = None,
+        limit: int = 6,
+        include_assistant: bool = False,
+    ) -> list[dict]:
+        """Return recent journal turns, optionally reranked by query overlap."""
+        with self._lock:
+            params: list = []
+            clauses: list[str] = []
+            if session_id:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+            if session_day:
+                clauses.append("session_day = ?")
+                params.append(session_day)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            fetch_limit = max(1, int(limit)) * 4
+            rows = self._conn.execute(
+                f"""
+                SELECT turn_id, session_id, session_day, user_content,
+                       assistant_content, status, extracted_count,
+                       created_at, processed_at
+                FROM memory_turn_journal
+                {where}
+                ORDER BY created_at DESC, turn_id DESC
+                LIMIT ?
+                """,
+                params + [fetch_limit],
+            ).fetchall()
+            turns = [self._row_to_dict(r) for r in rows]
+
+        query_tokens = self._tokens(query or "")
+        if query_tokens:
+            for turn in turns:
+                text = turn.get("user_content", "")
+                if include_assistant:
+                    text += " " + turn.get("assistant_content", "")
+                overlap = len(query_tokens & self._tokens(text))
+                turn["_score"] = overlap
+            matching = [t for t in turns if t.get("_score", 0) > 0]
+            if matching:
+                turns = sorted(
+                    matching,
+                    key=lambda t: (t.get("_score", 0), t.get("created_at") or "", t.get("turn_id") or 0),
+                    reverse=True,
+                )
+
+        selected = turns[: max(1, int(limit))]
+        selected.sort(key=lambda t: (t.get("created_at") or "", t.get("turn_id") or 0))
+        for turn in selected:
+            turn.pop("_score", None)
+            if not include_assistant:
+                turn.pop("assistant_content", None)
+        return selected
+
+    def entity_candidates(self, query: str, limit: int = 5) -> list[str]:
+        """Find entity names likely relevant to a query."""
+        query = str(query or "").strip()
+        if not query:
+            return []
+
+        seen: set[str] = set()
+        candidates: list[str] = []
+
+        def add(name: str) -> None:
+            key = name.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                candidates.append(name.strip())
+
+        for name in self._extract_entities(query):
+            add(name)
+
+        tokens = [t for t in self._tokens(query) if len(t) >= 4]
+        with self._lock:
+            for token in tokens[:8]:
+                rows = self._conn.execute(
+                    """
+                    SELECT name
+                    FROM entities
+                    WHERE lower(name) LIKE ?
+                       OR lower(aliases) LIKE ?
+                    ORDER BY length(name) ASC, name ASC
+                    LIMIT ?
+                    """,
+                    (f"%{token.lower()}%", f"%{token.lower()}%", max(1, int(limit))),
+                ).fetchall()
+                for row in rows:
+                    add(row["name"])
+                    if len(candidates) >= limit:
+                        return candidates[:limit]
+        return candidates[:limit]
+
+    def entity_wiki(self, entity: str, limit: int = 8) -> dict:
+        """Return a wiki-style entity page with backlinks and connected facts."""
+        entity = str(entity or "").strip()
+        if not entity:
+            raise ValueError("entity must not be empty")
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT entity_id, name, entity_type, aliases, created_at
+                FROM entities
+                WHERE lower(name) = lower(?)
+                   OR ',' || lower(aliases) || ',' LIKE '%,' || lower(?) || ',%'
+                ORDER BY CASE WHEN lower(name) = lower(?) THEN 0 ELSE 1 END,
+                         length(name) ASC
+                LIMIT 1
+                """,
+                (entity, entity, entity),
+            ).fetchone()
+
+            if row is None:
+                like = f"%{entity.lower()}%"
+                row = self._conn.execute(
+                    """
+                    SELECT entity_id, name, entity_type, aliases, created_at
+                    FROM entities
+                    WHERE lower(name) LIKE ?
+                       OR lower(aliases) LIKE ?
+                    ORDER BY length(name) ASC, name ASC
+                    LIMIT 1
+                    """,
+                    (like, like),
+                ).fetchone()
+
+            if row is None:
+                return {
+                    "entity": entity,
+                    "exists": False,
+                    "facts": [],
+                    "related_entities": [],
+                    "wiki_link": f"[[{entity}]]",
+                }
+
+            entity_id = int(row["entity_id"])
+            fact_rows = self._conn.execute(
+                """
+                SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
+                       f.retrieval_count, f.helpful_count, f.created_at, f.updated_at
+                FROM facts f
+                JOIN fact_entities fe ON fe.fact_id = f.fact_id
+                WHERE fe.entity_id = ?
+                ORDER BY f.trust_score DESC, f.updated_at DESC, f.fact_id DESC
+                LIMIT ?
+                """,
+                (entity_id, max(1, int(limit))),
+            ).fetchall()
+            related_rows = self._conn.execute(
+                """
+                SELECT e.name, COUNT(*) AS shared_facts
+                FROM fact_entities mine
+                JOIN fact_entities other ON other.fact_id = mine.fact_id
+                JOIN entities e ON e.entity_id = other.entity_id
+                WHERE mine.entity_id = ?
+                  AND other.entity_id != ?
+                GROUP BY e.entity_id, e.name
+                ORDER BY shared_facts DESC, e.name ASC
+                LIMIT ?
+                """,
+                (entity_id, entity_id, max(1, int(limit))),
+            ).fetchall()
+
+        name = row["name"]
+        return {
+            "entity_id": entity_id,
+            "entity": name,
+            "entity_type": row["entity_type"],
+            "aliases": row["aliases"],
+            "exists": True,
+            "wiki_link": f"[[{name}]]",
+            "facts": [self._row_to_dict(r) for r in fact_rows],
+            "related_entities": [
+                {
+                    "entity": r["name"],
+                    "wiki_link": f"[[{r['name']}]]",
+                    "shared_facts": int(r["shared_facts"] or 0),
+                }
+                for r in related_rows
+            ],
+        }
 
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
         """Record user feedback and adjust trust asymmetrically.
@@ -386,6 +645,321 @@ class MemoryStore:
                 "new_trust":    new_trust,
                 "helpful_count": row["helpful_count"] + helpful_increment,
             }
+
+    def record_turn(
+        self,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        max_chars: int = 8000,
+        session_day: str | None = None,
+        created_at: str | datetime | None = None,
+    ) -> int:
+        """Record one completed turn in the local write-behind journal.
+
+        The journal is intentionally separate from facts. It lets the agent
+        capture turns cheaply, then promote only durable user facts in a later
+        organization pass.
+        """
+        user_content = self._trim_journal_text(user_content, max_chars)
+        assistant_content = self._trim_journal_text(assistant_content, max_chars)
+        if not user_content and not assistant_content:
+            raise ValueError("turn content must not be empty")
+
+        session_id = str(session_id or "")
+        created_at_text, session_day_text = self._journal_timestamp(
+            created_at=created_at,
+            session_day=session_day,
+        )
+        digest = content_hash(
+            json.dumps(
+                [session_id, session_day_text, user_content, assistant_content],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_turn_journal (
+                    session_id, session_day, turn_hash, user_content,
+                    assistant_content, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    session_day_text,
+                    digest,
+                    user_content,
+                    assistant_content,
+                    created_at_text,
+                ),
+            )
+            self._conn.commit()
+            if cur.rowcount:
+                return int(cur.lastrowid)
+
+            row = self._conn.execute(
+                "SELECT turn_id FROM memory_turn_journal WHERE turn_hash = ?",
+                (digest,),
+            ).fetchone()
+            return int(row["turn_id"]) if row is not None else 0
+
+    def pending_turns(
+        self,
+        session_id: str | None = None,
+        session_day: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return pending journal rows, oldest first."""
+        with self._lock:
+            params: list = []
+            where = "status = 'pending'"
+            if session_id:
+                where += " AND session_id = ?"
+                params.append(session_id)
+            if session_day:
+                where += " AND session_day = ?"
+                params.append(session_day)
+
+            limit_clause = ""
+            if limit is not None:
+                safe_limit = max(1, int(limit))
+                limit_clause = "LIMIT ?"
+                params.append(safe_limit)
+
+            rows = self._conn.execute(
+                f"""
+                SELECT turn_id, session_id, turn_hash, user_content,
+                       session_day, assistant_content, status, extracted_count,
+                       created_at, processed_at
+                FROM memory_turn_journal
+                WHERE {where}
+                ORDER BY created_at ASC, turn_id ASC
+                {limit_clause}
+                """,
+                params,
+            ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
+
+    def mark_turn_processed(self, turn_id: int, extracted_count: int = 0) -> None:
+        """Mark a journal row as organized."""
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE memory_turn_journal
+                SET status = 'processed',
+                    extracted_count = ?,
+                    processed_at = CURRENT_TIMESTAMP
+                WHERE turn_id = ?
+                """,
+                (max(0, int(extracted_count)), int(turn_id)),
+            )
+            self._conn.commit()
+
+    def journal_status(
+        self,
+        session_id: str | None = None,
+        session_day: str | None = None,
+    ) -> dict:
+        """Return turn-journal health and backlog counts."""
+        with self._lock:
+            params: list = []
+            clauses: list[str] = []
+            if session_id:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+            if session_day:
+                clauses.append("session_day = ?")
+                params.append(session_day)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+            rows = self._conn.execute(
+                f"""
+                SELECT status, COUNT(*) AS count
+                FROM memory_turn_journal
+                {where}
+                GROUP BY status
+                """,
+                params,
+            ).fetchall()
+            counts = {str(row["status"]): int(row["count"]) for row in rows}
+            total = sum(counts.values())
+            latest = self._conn.execute(
+                f"SELECT MAX(created_at) AS latest FROM memory_turn_journal {where}",
+                params,
+            ).fetchone()
+            session_rows = self._conn.execute(
+                f"""
+                SELECT session_id,
+                       session_day,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END) AS processed,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                       MIN(created_at) AS first_created_at,
+                       MAX(created_at) AS latest_created_at
+                FROM memory_turn_journal
+                {where}
+                GROUP BY session_id, session_day
+                ORDER BY latest_created_at DESC, session_id ASC, session_day DESC
+                """,
+                params,
+            ).fetchall()
+            sessions = [
+                {
+                    "session_id": row["session_id"],
+                    "session_day": row["session_day"],
+                    "total": int(row["total"] or 0),
+                    "pending": int(row["pending"] or 0),
+                    "processed": int(row["processed"] or 0),
+                    "failed": int(row["failed"] or 0),
+                    "first_created_at": row["first_created_at"],
+                    "latest_created_at": row["latest_created_at"],
+                }
+                for row in session_rows
+            ]
+            unique_sessions = {entry["session_id"] for entry in sessions}
+            return {
+                "total": total,
+                "pending": counts.get("pending", 0),
+                "processed": counts.get("processed", 0),
+                "failed": counts.get("failed", 0),
+                "latest_created_at": latest["latest"] if latest else None,
+                "active_session_count": len(unique_sessions),
+                "session_segment_count": len(sessions),
+                "sessions": sessions,
+            }
+
+    def embeddings_enabled(self) -> bool:
+        return self.embedding_client is not None
+
+    def embedding_status(self) -> dict:
+        """Return local embedding index status for facts."""
+        with self._lock:
+            fact_count = self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+            indexed_facts = 0
+            if self.embedding_client:
+                indexed_facts = self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM memory_embeddings
+                    WHERE target_type = 'fact'
+                      AND provider = ?
+                      AND model = ?
+                    """,
+                    (self.embedding_client.provider, self.embedding_client.model),
+                ).fetchone()[0]
+            else:
+                indexed_facts = self._conn.execute(
+                    "SELECT COUNT(*) FROM memory_embeddings WHERE target_type = 'fact'"
+                ).fetchone()[0]
+            status = {
+                "enabled": self.embeddings_enabled(),
+                "facts": int(fact_count),
+                "indexed_facts": int(indexed_facts),
+                "missing_or_stale": 0,
+            }
+            if self.embedding_client:
+                status.update({
+                    "provider": self.embedding_client.provider,
+                    "model": self.embedding_client.model,
+                    "dimensions": self.embedding_client.dimensions,
+                })
+                missing = 0
+                rows = self._conn.execute(
+                    "SELECT fact_id, content FROM facts"
+                ).fetchall()
+                for row in rows:
+                    if not self._embedding_current(row["fact_id"], row["content"]):
+                        missing += 1
+                status["missing_or_stale"] = missing
+            return status
+
+    def backfill_embeddings(self, limit: int | None = None) -> dict:
+        """Embed facts that are missing or stale for the active embedding backend."""
+        if not self.embedding_client:
+            return {"enabled": False, "indexed": 0, "skipped": 0}
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT fact_id, content FROM facts ORDER BY updated_at DESC, fact_id DESC"
+            ).fetchall()
+            indexed = 0
+            skipped = 0
+            for row in rows:
+                if limit is not None and indexed >= limit:
+                    break
+                if self._embedding_current(row["fact_id"], row["content"]):
+                    skipped += 1
+                    continue
+                self._embed_fact(row["fact_id"], row["content"])
+                indexed += 1
+            return {
+                "enabled": True,
+                "provider": self.embedding_client.provider,
+                "model": self.embedding_client.model,
+                "indexed": indexed,
+                "skipped": skipped,
+            }
+
+    def semantic_search(
+        self,
+        query: str,
+        category: str | None = None,
+        min_trust: float = 0.3,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Search facts with the active embedding backend."""
+        if not self.embedding_client or not query.strip():
+            return []
+
+        query_result = self.embedding_client.embed(query.strip())
+        query_vec = query_result.vector
+        params: list = [
+            "fact",
+            self.embedding_client.provider,
+            self.embedding_client.model,
+            min_trust,
+        ]
+        category_clause = ""
+        if category:
+            category_clause = "AND f.category = ?"
+            params.append(category)
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
+                       f.retrieval_count, f.helpful_count, f.created_at, f.updated_at,
+                       e.dimensions, e.vector
+                FROM memory_embeddings e
+                JOIN facts f ON f.fact_id = e.target_id
+                WHERE e.target_type = ?
+                  AND e.provider = ?
+                  AND e.model = ?
+                  AND f.trust_score >= ?
+                  {category_clause}
+                """,
+                params,
+            ).fetchall()
+
+            scored = []
+            for row in rows:
+                fact = self._row_to_dict(row)
+                try:
+                    vec = blob_to_vector(fact.pop("vector"), int(fact.pop("dimensions")))
+                except Exception:
+                    continue
+                sim = max(0.0, cosine_similarity(query_vec, vec))
+                trust_score = float(fact.get("trust_score") or 0.0)
+                fact["semantic_score"] = sim
+                fact["score"] = sim * trust_score
+                scored.append(fact)
+
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return scored[:limit]
 
     # ------------------------------------------------------------------
     # Entity helpers
@@ -491,6 +1065,53 @@ class MemoryStore:
             )
             self._conn.commit()
 
+    def _embedding_current(self, fact_id: int, content: str) -> bool:
+        if not self.embedding_client:
+            return False
+        row = self._conn.execute(
+            """
+            SELECT content_hash FROM memory_embeddings
+            WHERE target_type = 'fact'
+              AND target_id = ?
+              AND provider = ?
+              AND model = ?
+            """,
+            (fact_id, self.embedding_client.provider, self.embedding_client.model),
+        ).fetchone()
+        return bool(row and row["content_hash"] == content_hash(content))
+
+    def _embed_fact(self, fact_id: int, content: str) -> None:
+        """Create or update the semantic embedding for a fact."""
+        if not self.embedding_client:
+            return
+        digest = content_hash(content)
+        if self._embedding_current(fact_id, content):
+            return
+        result = self.embedding_client.embed(content)
+        self._conn.execute(
+            """
+            INSERT INTO memory_embeddings (
+                target_type, target_id, provider, model, dimensions,
+                content_hash, vector, updated_at
+            )
+            VALUES ('fact', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(target_type, target_id, provider, model) DO UPDATE SET
+                dimensions = excluded.dimensions,
+                content_hash = excluded.content_hash,
+                vector = excluded.vector,
+                updated_at = excluded.updated_at
+            """,
+            (
+                fact_id,
+                result.provider,
+                result.model,
+                result.dimensions,
+                digest,
+                vector_to_blob(result.vector),
+            ),
+        )
+        self._conn.commit()
+
     def _rebuild_bank(self, category: str) -> None:
         """Full rebuild of a category's memory bank from all its fact vectors."""
         with self._lock:
@@ -562,6 +1183,41 @@ class MemoryStore:
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         """Convert a sqlite3.Row to a plain dict."""
         return dict(row)
+
+    @staticmethod
+    def _trim_journal_text(text: str, max_chars: int) -> str:
+        text = str(text or "").strip()
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "\n[truncated]"
+
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        return {
+            token.lower()
+            for token in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_\-]{2,}", str(text or ""))
+        }
+
+    @staticmethod
+    def _journal_timestamp(
+        created_at: str | datetime | None = None,
+        session_day: str | None = None,
+    ) -> tuple[str, str]:
+        if isinstance(created_at, datetime):
+            created_text = created_at.astimezone().isoformat(sep=" ", timespec="seconds")
+            derived_day = created_at.astimezone().date().isoformat()
+        elif isinstance(created_at, str) and created_at.strip():
+            created_text = created_at.strip()
+            derived_day = created_text[:10]
+        else:
+            now = datetime.now().astimezone()
+            created_text = now.isoformat(sep=" ", timespec="seconds")
+            derived_day = now.date().isoformat()
+
+        day = str(session_day or derived_day).strip()[:10]
+        if not day:
+            day = datetime.now().astimezone().date().isoformat()
+        return created_text, day
 
     def close(self) -> None:
         """Close the database connection."""

@@ -22,6 +22,7 @@ Public API (signatures preserved from the original 2,400-line version):
 
 import json
 import asyncio
+import copy
 import logging
 import threading
 from typing import Dict, Any, List, Optional, Tuple
@@ -332,6 +333,176 @@ def get_tool_definitions(
                         "function": {**td["function"], "description": desc},
                     }
                     break
+
+    # Strip cross-tool guidance from file schemas when the referenced tool is
+    # not actually loaded in this focused profile.  Otherwise narrowed wrapper
+    # profiles still nudge the model toward unavailable tool names.
+    if "terminal" not in available_tool_names or "vision_analyze" not in available_tool_names:
+        _schema_replacements = {}
+        if "terminal" not in available_tool_names:
+            _schema_replacements.update({
+                "read_file": [
+                    (" Use this instead of cat/head/tail in terminal.", ""),
+                ],
+                "write_file": [
+                    (" Use this instead of echo/cat heredoc in terminal.", ""),
+                ],
+                "patch": [
+                    (" Use this instead of sed/awk in terminal.", ""),
+                ],
+                "search_files": [
+                    (" Use this instead of grep/rg/find/ls in terminal.", ""),
+                    (" Also use this instead of ls — results sorted by modification time.", " Results are sorted by modification time."),
+                ],
+            })
+        if "vision_analyze" not in available_tool_names:
+            _schema_replacements.setdefault("read_file", []).append(
+                (" NOTE: Cannot read images or binary files — use vision_analyze for images.", " NOTE: Cannot read images or binary files.")
+            )
+
+        for i, td in enumerate(filtered_tools):
+            name = td.get("function", {}).get("name")
+            replacements = _schema_replacements.get(name)
+            if not replacements:
+                continue
+            fn = dict(td.get("function", {}))
+            desc = fn.get("description", "")
+            for old, new in replacements:
+                desc = desc.replace(old, new)
+            fn["description"] = desc
+            filtered_tools[i] = {"type": "function", "function": fn}
+
+    # A few schemas intentionally mention companion tools when those tools are
+    # present. In narrow profiles, remove those cross-references so the model
+    # does not try to call tools the runtime filtered out.
+    _profile_replacements = {}
+    if "terminal" in available_tool_names:
+        terminal_replacements = []
+        if "read_file" not in available_tool_names:
+            terminal_replacements.append(
+                ("Do NOT use cat/head/tail to read files — use read_file instead.\n", "")
+            )
+        if "search_files" not in available_tool_names:
+            terminal_replacements.extend(
+                [
+                    ("Do NOT use grep/rg/find to search — use search_files instead.\n", ""),
+                    ("Do NOT use ls to list directories — use search_files(target='files') instead.\n", ""),
+                ]
+            )
+        if "write_file" not in available_tool_names:
+            terminal_replacements.append(
+                ("Do NOT use echo/cat heredoc to create files — use write_file instead.\n", "")
+            )
+        if terminal_replacements:
+            _profile_replacements["terminal"] = terminal_replacements
+
+    if "clarify" in available_tool_names and "terminal" not in available_tool_names:
+        _profile_replacements["clarify"] = [
+            (
+                "commands (the terminal tool handles that). Prefer making a reasonable ",
+                "commands. Prefer making a reasonable ",
+            )
+        ]
+
+    if "memory" in available_tool_names and "session_search" not in available_tool_names:
+        _profile_replacements["memory"] = [
+            (
+                "state to memory; use session_search to recall those from past transcripts.\n",
+                "state to memory.\n",
+            ),
+            (
+                "If you've discovered a new way to do something, solved a problem that could be "
+                "necessary later, save it as a skill with the skill tool.\n\n",
+                "",
+            )
+            if "skill_manage" not in available_tool_names
+            else ("", ""),
+        ]
+
+    if _profile_replacements:
+        for i, td in enumerate(filtered_tools):
+            name = td.get("function", {}).get("name")
+            replacements = _profile_replacements.get(name)
+            if not replacements:
+                continue
+            fn = copy.deepcopy(td.get("function", {}))
+            desc = fn.get("description", "")
+            for old, new in replacements:
+                if old:
+                    desc = desc.replace(old, new)
+            fn["description"] = desc
+            filtered_tools[i] = {"type": "function", "function": fn}
+
+    # Delegate schemas need profile-aware toolset hints.  The static schema
+    # lists all built-in subagent toolsets, which is misleading after
+    # enabled_toolsets narrowed the parent session.
+    if "delegate_task" in available_tool_names:
+        try:
+            from toolsets import get_all_toolsets
+            from tools.delegate_tool import DELEGATE_BLOCKED_TOOLS
+
+            excluded = {"debugging", "safe", "delegation", "moa", "rl"}
+            available_child_toolsets = []
+            for toolset_name in sorted(get_all_toolsets()):
+                if toolset_name in excluded or toolset_name.startswith("elevate-"):
+                    continue
+                resolved = set(resolve_toolset(toolset_name))
+                if not resolved:
+                    continue
+                if not (resolved & available_tool_names):
+                    continue
+                if resolved <= set(DELEGATE_BLOCKED_TOOLS):
+                    continue
+                available_child_toolsets.append(toolset_name)
+
+            if available_child_toolsets:
+                toolset_hint = ", ".join(f"'{name}'" for name in available_child_toolsets)
+            else:
+                toolset_hint = "inherit the current focused profile"
+            child_terminal_available = "terminal" in available_child_toolsets
+
+            for i, td in enumerate(filtered_tools):
+                if td.get("function", {}).get("name") != "delegate_task":
+                    continue
+                fn = copy.deepcopy(td.get("function", {}))
+                if not child_terminal_available:
+                    desc = fn.get("description", "")
+                    desc = desc.replace(
+                        "Each subagent gets its own conversation, terminal session, and toolset. ",
+                        "Each subagent gets its own conversation and focused toolset. ",
+                    )
+                    desc = desc.replace(
+                        "- Each subagent gets its own terminal session (separate working directory and state).\n",
+                        "",
+                    )
+                    desc = desc.replace(
+                        "Each gets its own subagent with isolated context and terminal session. ",
+                        "Each gets its own subagent with isolated context. ",
+                    )
+                    fn["description"] = desc
+                props = (fn.get("parameters") or {}).get("properties") or {}
+                if not child_terminal_available and "tasks" in props:
+                    task_desc = props["tasks"].get("description", "")
+                    props["tasks"]["description"] = task_desc.replace(
+                        "Each gets its own subagent with isolated context and terminal session. ",
+                        "Each gets its own subagent with isolated context. ",
+                    )
+                if "toolsets" in props:
+                    props["toolsets"]["description"] = (
+                        "Toolsets to enable for this subagent. "
+                        "Default: inherits your enabled toolsets. "
+                        f"Available loaded child toolsets: {toolset_hint}."
+                    )
+                task_props = (((props.get("tasks") or {}).get("items") or {}).get("properties") or {})
+                if "toolsets" in task_props:
+                    task_props["toolsets"]["description"] = (
+                        "Toolsets for this specific task. "
+                        f"Available loaded child toolsets: {toolset_hint}."
+                    )
+                filtered_tools[i] = {"type": "function", "function": fn}
+                break
+        except Exception as e:
+            logger.debug("delegate_task dynamic schema skipped: %s", e)
 
     if not quiet_mode:
         if filtered_tools:

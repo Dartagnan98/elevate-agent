@@ -29,9 +29,10 @@ from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
     as_completed,
 )
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from toolsets import TOOLSETS
+from toolsets import TOOLSETS, get_all_toolsets, resolve_toolset
 from tools import file_state
 from utils import base_url_hostname, is_truthy_value
 
@@ -90,6 +91,106 @@ _active_subagents_lock = threading.Lock()
 # subagent_id -> mutable record tracking the live child agent.  Stays only
 # for the lifetime of the run; _run_single_child is the owner.
 _active_subagents: Dict[str, Dict[str, Any]] = {}
+
+_KNOWN_VISIBLE_AGENT_HINTS = {
+    "executive-assistant",
+    "admin",
+    "outreach",
+    "marketing",
+    "social-media",
+}
+_HANDOFF_PRIORITIES = {"low", "normal", "high", "urgent"}
+_AGENT_MARKDOWN_CONTEXT_FILES = (
+    ("identity_md", "IDENTITY.md", 1000),
+    ("soul_md", "SOUL.md", 1800),
+    ("agents_md", "AGENTS.md", 2200),
+    ("goals_md", "GOALS.md", 1200),
+)
+_DEFAULT_HANDOFF_ROUTES = {
+    "executive-assistant": {"admin", "outreach", "marketing", "social-media"},
+    "outreach": {"admin", "marketing", "executive-assistant"},
+    "marketing": {"social-media", "admin", "outreach", "executive-assistant"},
+    "social-media": {"marketing", "executive-assistant"},
+    "admin": {"executive-assistant", "outreach", "marketing"},
+}
+_AGENT_JOB_PROFILES = {
+    "executive-assistant": {
+        "job": "Main talking agent, daily-update owner, supervisor, router, and final-response owner for cross-domain work.",
+        "owns": [
+            "main chat",
+            "daily updates",
+            "request triage",
+            "task decomposition",
+            "agent routing",
+            "final synthesis",
+            "user-facing decisions",
+        ],
+        "not_for": ["deep specialist production when a narrower agent owns the work"],
+        "default_expected_return": "Return a concise update, routed plan, decision, or synthesized final answer.",
+    },
+    "admin": {
+        "job": "Operations support for paperwork, scheduling, checklists, listing status, transaction steps, and follow-through.",
+        "owns": [
+            "calendar/admin ops",
+            "paperwork/checklists",
+            "listing status tracking",
+            "transaction coordination",
+            "CRM hygiene",
+            "ops follow-through",
+        ],
+        "not_for": ["sales copy", "brand strategy", "social captions unless asked for ops support"],
+        "default_expected_return": "Return current status, checklist items, blockers, next steps, and any required owner/date.",
+    },
+    "outreach": {
+        "job": "Dedicated outreach lane for lead follow-up, client communication, relationship touchpoints, and nurture sequencing.",
+        "owns": [
+            "lead follow-up",
+            "client follow-ups",
+            "client touchpoints",
+            "relationship notes",
+            "nurture messaging",
+            "conversation strategy",
+        ],
+        "not_for": ["transaction paperwork", "long-form campaign strategy", "platform-specific social formatting"],
+        "default_expected_return": "Return the recommended outreach message, timing, and next follow-up action.",
+    },
+    "marketing": {
+        "job": "Marketing router and production lane for campaigns, emails, graphics direction, listing positioning, newsletters, and offer framing.",
+        "owns": [
+            "campaign planning",
+            "listing positioning",
+            "email/newsletter copy",
+            "marketing emails",
+            "graphics/creative direction",
+            "market update framing",
+            "offer/message strategy",
+            "social-media routing",
+        ],
+        "not_for": ["routine scheduling", "CRM cleanup", "transaction checklist ownership"],
+        "default_expected_return": "Return campaign direction, core message, email/creative plan, draft copy, and next production step.",
+    },
+    "social-media": {
+        "job": "Optional production lane for short-form content, hooks, captions, posting plans, and platform adaptation under Marketing.",
+        "owns": [
+            "short-form posts",
+            "caption variants",
+            "hooks",
+            "platform adaptation",
+            "posting schedule ideas",
+            "campaign-to-social adaptation",
+        ],
+        "not_for": ["paperwork", "transaction operations", "full campaign strategy unless Marketing asks"],
+        "default_expected_return": "Return platform-ready captions/hooks, format notes, and posting recommendation.",
+    },
+}
+
+_VISIBLE_AGENT_JOB_HINT = (
+    "Built-in Elevate job lanes: executive-assistant=main chat, daily updates, routing, final synthesis; "
+    "admin=paperwork, scheduling, checklists, listing/transaction status; "
+    "outreach=lead/client follow-up, client touchpoints, nurture messaging; "
+    "marketing=campaigns, listing positioning, emails/newsletters, graphics/creative direction, social routing; "
+    "social-media=optional platform production under Marketing for hooks, captions, posts, adaptations."
+)
 
 
 def set_spawn_paused(paused: bool) -> bool:
@@ -156,6 +257,447 @@ def list_active_subagents() -> List[Dict[str, Any]]:
             {k: v for k, v in r.items() if k != "agent"}
             for r in _active_subagents.values()
         ]
+
+
+def _orchestration_store_or_none():
+    """Best-effort access to the durable gateway orchestration registry."""
+    try:
+        from gateway.orchestration import get_orchestration_store
+
+        return get_orchestration_store()
+    except Exception:
+        logger.debug("Orchestration store unavailable for delegate_task", exc_info=True)
+        return None
+
+
+def _parent_orchestration_agent_id(parent_agent) -> str:
+    """Return the visible lane this parent is currently acting as."""
+    raw = getattr(parent_agent, "_orchestration_agent_id", None)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().lower()
+    return "executive-assistant"
+
+
+def _clean_handoff_text(value: Any, *, max_chars: int = 1200) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:max_chars]
+
+
+def _clean_optional_handoff_id(value: Any, *, max_chars: int = 128) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text[:max_chars] if text else None
+
+
+def _clean_handoff_artifacts(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    cleaned: List[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            cleaned.append(text[:500])
+        if len(cleaned) >= 12:
+            break
+    return cleaned
+
+
+def _expand_local_path(raw: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+
+
+def _candidate_elevateos_roots() -> List[Path]:
+    roots: List[Path] = []
+    seen: set[str] = set()
+    env_names = (
+        "ELEVATE_FRAMEWORK_ROOT",
+        "CTX_FRAMEWORK_ROOT",
+        "ELEVATEOS_ROOT",
+        "CTX_PROJECT_ROOT",
+        "ELEVATE_PROJECT_ROOT",
+    )
+    for name in env_names:
+        value = os.getenv(name)
+        if value:
+            roots.append(_expand_local_path(value))
+
+    cwd = Path.cwd().resolve()
+    for candidate in (
+        cwd,
+        cwd.parent,
+        Path.home() / "elevateos",
+        Path.home() / "claudeclaw" / "elevateos",
+    ):
+        roots.append(candidate.resolve())
+
+    unique: List[Path] = []
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (root / "orgs").exists() or (root / "templates").exists():
+            unique.append(root)
+    return unique
+
+
+def _agent_markdown_dir(agent_id: str, record: Optional[Dict[str, Any]]) -> Optional[Path]:
+    metadata = record.get("metadata") if isinstance(record, dict) else None
+    if isinstance(metadata, dict):
+        for key in ("agent_dir", "path", "workspace", "workspace_dir"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                candidate = _expand_local_path(value)
+                if candidate.exists():
+                    return candidate
+
+    orgs: List[str] = []
+    if isinstance(record, dict):
+        org = record.get("org")
+        if isinstance(org, str) and org.strip():
+            orgs.append(org.strip())
+
+    for root in _candidate_elevateos_roots():
+        for org in orgs:
+            candidate = root / "orgs" / org / "agents" / agent_id
+            if candidate.exists():
+                return candidate
+        orgs_dir = root / "orgs"
+        if orgs_dir.exists():
+            try:
+                for org_dir in sorted(orgs_dir.iterdir()):
+                    candidate = org_dir / "agents" / agent_id
+                    if candidate.exists():
+                        return candidate
+            except OSError:
+                pass
+        candidate = root / "agents" / agent_id
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _scan_agent_markdown(content: str, filename: str) -> str:
+    try:
+        from agent.prompt_builder import _scan_context_content
+
+        return _scan_context_content(content, filename)
+    except Exception:
+        return content
+
+
+def _read_agent_markdown_context(agent_dir: Optional[Path]) -> Dict[str, str]:
+    if not agent_dir:
+        return {}
+    context: Dict[str, str] = {"agent_dir": str(agent_dir)}
+    for key, filename, max_chars in _AGENT_MARKDOWN_CONTEXT_FILES:
+        path = agent_dir / filename
+        if not path.exists():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not content:
+            continue
+        content = _scan_agent_markdown(content, filename)
+        context[key] = _clean_handoff_text(content, max_chars=max_chars) or ""
+    return {key: value for key, value in context.items() if value}
+
+
+def _agent_job_profile(agent_id: str, *, store: Any = None) -> Dict[str, Any]:
+    """Return the handoff-facing job profile for a visible agent lane."""
+    profile = dict(_AGENT_JOB_PROFILES.get(agent_id, {}))
+    record = None
+    if store is not None:
+        try:
+            record = store.get_agent(agent_id)
+        except Exception:
+            record = None
+
+    metadata_profile = None
+    if record and isinstance(record.get("metadata"), dict):
+        raw_profile = record["metadata"].get("job_profile")
+        if isinstance(raw_profile, dict):
+            metadata_profile = raw_profile
+    if metadata_profile:
+        profile.update(metadata_profile)
+
+    if record:
+        profile.setdefault("job", record.get("role") or record.get("lane") or agent_id)
+        profile.setdefault("display_name", record.get("display_name") or record.get("name") or agent_id)
+    else:
+        profile.setdefault("display_name", agent_id.replace("-", " ").title())
+    agent_dir = _agent_markdown_dir(agent_id, record if isinstance(record, dict) else None)
+    markdown_context = _read_agent_markdown_context(agent_dir)
+    if markdown_context:
+        profile["local_context"] = markdown_context
+    return profile
+
+
+def _handoff_routing_label(target_agent_id: str, target_profile: Optional[Dict[str, Any]] = None) -> str:
+    """Human-readable label used by dashboards and progress breakdowns."""
+    profile = target_profile if isinstance(target_profile, dict) else {}
+    label = profile.get("display_name") if isinstance(profile.get("display_name"), str) else None
+    if not label:
+        label = str(target_agent_id or "agent").replace("_", "-").replace("-", " ").title()
+    label = _clean_handoff_text(label, max_chars=80) or "Agent"
+    return f"Agent Routing ({label})"
+
+
+def _handoff_route_error(
+    *,
+    source_agent_id: str,
+    target_agent_id: str,
+    explicit_target: bool,
+    store: Any,
+) -> Optional[str]:
+    """Return an operator-facing error when a visible handoff is unsafe.
+
+    Generic delegate_task calls without an explicit target remain available as
+    focused subagents. Route policy only applies once the model names a visible
+    team lane via agent_id/agent.
+    """
+    if not explicit_target:
+        return None
+    if target_agent_id == source_agent_id:
+        return (
+            f"Refusing self-handoff from {source_agent_id} to itself. "
+            "Do the work directly or choose a different agent_id."
+        )
+
+    source_agent = None
+    target_agent = None
+    if store is not None:
+        try:
+            source_agent = store.get_agent(source_agent_id)
+            target_agent = store.get_agent(target_agent_id)
+        except Exception:
+            source_agent = None
+            target_agent = None
+        if target_agent is None:
+            return (
+                f"Unknown handoff target agent_id={target_agent_id!r}. "
+                "Create the agent first or use one of the configured agent lanes."
+            )
+        if target_agent.get("enabled") is False or target_agent.get("status") == "disabled":
+            return f"Handoff target agent_id={target_agent_id!r} is disabled."
+
+    if source_agent_id == "executive-assistant" or target_agent_id == "executive-assistant":
+        return None
+
+    allowed = _DEFAULT_HANDOFF_ROUTES.get(source_agent_id, set())
+    if target_agent_id in allowed:
+        return None
+
+    # Custom teams: allow manager/child handoffs via reports_to relationships,
+    # but keep arbitrary lateral fan-out blocked until a route is explicit.
+    if source_agent and target_agent:
+        if target_agent.get("reports_to") == source_agent_id:
+            return None
+        if source_agent.get("reports_to") == target_agent_id:
+            return None
+        if (
+            source_agent.get("reports_to")
+            and source_agent.get("reports_to") == target_agent.get("reports_to")
+            and source_agent.get("reports_to") == "executive-assistant"
+        ):
+            # Built-in siblings still need the explicit allowlist above; for
+            # custom siblings under Executive Assistant, allow team collaboration.
+            if source_agent_id not in _KNOWN_VISIBLE_AGENT_HINTS or target_agent_id not in _KNOWN_VISIBLE_AGENT_HINTS:
+                return None
+
+    return (
+        f"Handoff route {source_agent_id} -> {target_agent_id} is not allowed. "
+        "Use Executive Assistant as the supervisor, or add an explicit route before enabling this lateral handoff."
+    )
+
+
+def _build_handoff_packet(
+    *,
+    source_agent_id: str,
+    target_agent_id: str,
+    task: str,
+    context: Optional[str],
+    expected_return: Any = None,
+    handoff_reason: Any = None,
+    priority: Any = None,
+    artifacts: Any = None,
+    parent_run_id: Optional[str] = None,
+    target_profile: Optional[Dict[str, Any]] = None,
+    visible_handoff: bool = True,
+) -> Dict[str, Any]:
+    priority_text = str(priority or "normal").strip().lower()
+    if priority_text not in _HANDOFF_PRIORITIES:
+        priority_text = "normal"
+    target_profile = dict(target_profile or {})
+    default_expected = target_profile.get("default_expected_return")
+    return {
+        "from_agent": source_agent_id,
+        "to_agent": target_agent_id,
+        "visible_handoff": bool(visible_handoff),
+        "routing_label": _handoff_routing_label(target_agent_id, target_profile) if visible_handoff else None,
+        "priority": priority_text,
+        "task": _clean_handoff_text(task, max_chars=2000) or "",
+        "handoff_reason": _clean_handoff_text(handoff_reason),
+        "expected_return": _clean_handoff_text(expected_return)
+        or _clean_handoff_text(default_expected)
+        or "Return a concise summary, decision, next action, and any artifact/file references.",
+        "artifact_refs": _clean_handoff_artifacts(artifacts),
+        "parent_run_id": parent_run_id,
+        "context_preview": _clean_handoff_text(context, max_chars=700),
+        "target_profile": target_profile,
+    }
+
+
+def _context_with_handoff_packet(context: Optional[str], packet: Dict[str, Any]) -> str:
+    lines = [
+        "HANDOFF PACKET:",
+        f"- from_agent: {packet['from_agent']}",
+        f"- to_agent: {packet['to_agent']}",
+        f"- priority: {packet['priority']}",
+        f"- task: {packet['task']}",
+        f"- expected_return: {packet['expected_return']}",
+    ]
+    if packet.get("routing_label"):
+        lines.insert(3, f"- routing_label: {packet['routing_label']}")
+    if packet.get("handoff_reason"):
+        lines.append(f"- handoff_reason: {packet['handoff_reason']}")
+    if packet.get("parent_run_id"):
+        lines.append(f"- parent_run_id: {packet['parent_run_id']}")
+    artifacts = packet.get("artifact_refs") or []
+    if artifacts:
+        lines.append("- artifact_refs:")
+        lines.extend(f"  - {item}" for item in artifacts)
+    target_profile = packet.get("target_profile") if isinstance(packet.get("target_profile"), dict) else {}
+    if target_profile:
+        lines.extend(["", "TARGET AGENT JOB PROFILE:"])
+        if target_profile.get("display_name"):
+            lines.append(f"- display_name: {target_profile['display_name']}")
+        if target_profile.get("job"):
+            lines.append(f"- job: {target_profile['job']}")
+        owns = target_profile.get("owns")
+        if isinstance(owns, list) and owns:
+            lines.append("- owns:")
+            lines.extend(f"  - {str(item)[:180]}" for item in owns[:10])
+        not_for = target_profile.get("not_for")
+        if isinstance(not_for, list) and not_for:
+            lines.append("- not_for:")
+            lines.extend(f"  - {str(item)[:180]}" for item in not_for[:8])
+        local_context = target_profile.get("local_context")
+        if isinstance(local_context, dict):
+            source_dir = local_context.get("agent_dir")
+            if source_dir:
+                lines.append(f"- agent_dir: {source_dir}")
+            file_labels = (
+                ("identity_md", "IDENTITY.md"),
+                ("soul_md", "SOUL.md"),
+                ("agents_md", "AGENTS.md"),
+                ("goals_md", "GOALS.md"),
+            )
+            loaded_any = False
+            for key, label in file_labels:
+                content = local_context.get(key)
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                if not loaded_any:
+                    lines.extend(["", "TARGET AGENT LOCAL CONTEXT:"])
+                    loaded_any = True
+                lines.extend([f"## {label}", content.strip()])
+    lines.extend(
+        [
+            "",
+            "HANDOFF RULES:",
+            "- Stay inside your assigned agent lane and tool scope.",
+            "- Use only the context needed to complete this packet.",
+            "- Do not re-delegate unless your role is orchestrator and the subtask truly requires another agent.",
+            "- Return a short result for the parent agent; do not dump your full working transcript.",
+        ]
+    )
+    if context and str(context).strip():
+        lines.extend(["", "ORIGINAL CONTEXT:", str(context).strip()])
+    return "\n".join(lines)
+
+
+def _start_orchestration_run(child, parent_agent, *, task_index: int, goal: str) -> None:
+    """Record this delegated child as a visible gateway run when possible."""
+    store = _orchestration_store_or_none()
+    if store is None:
+        return
+    subagent_id = getattr(child, "_subagent_id", None)
+    if not isinstance(subagent_id, str) or not subagent_id:
+        return
+    agent_id = getattr(child, "_orchestration_agent_id", None)
+    if not isinstance(agent_id, str) or not agent_id:
+        agent_id = "executive-assistant"
+    try:
+        run = store.create_run(
+            agent_id=agent_id,
+            task=goal,
+            run_id=subagent_id,
+            status="running",
+            mode="delegated",
+            parent_run_id=_clean_optional_handoff_id(getattr(child, "_parent_orchestration_run_id", None))
+            or _clean_optional_handoff_id(getattr(parent_agent, "_orchestration_run_id", None)),
+            parent_session_key=getattr(parent_agent, "session_id", None),
+            session_key=getattr(child, "session_id", None),
+            metadata={
+                "task_index": task_index,
+                "delegate_role": getattr(child, "_delegate_role", None),
+                "parent_subagent_id": getattr(child, "_parent_subagent_id", None),
+                "handoff": getattr(child, "_handoff_packet", None) or {},
+            },
+        )
+        child._orchestration_run_id = run.get("run_id")
+    except Exception:
+        logger.debug("Failed to create orchestration run for subagent", exc_info=True)
+
+
+def _finish_orchestration_run(
+    child,
+    *,
+    status: str,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    run_id = getattr(child, "_orchestration_run_id", None)
+    if not isinstance(run_id, str) or not run_id:
+        return
+    store = _orchestration_store_or_none()
+    if store is None:
+        return
+    mapped_status = {
+        "completed": "completed",
+        "failed": "failed",
+        "error": "failed",
+        "timeout": "timeout",
+        "interrupted": "interrupted",
+        "cancelled": "cancelled",
+    }.get(status, "failed")
+    try:
+        store.update_run(
+            run_id,
+            {
+                "status": mapped_status,
+                "summary": summary,
+                "error": error,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to finish orchestration run for subagent", exc_info=True)
 
 
 def _extract_output_tail(
@@ -579,6 +1121,24 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     return [t for t in toolsets if t not in blocked_toolset_names]
 
 
+def _derive_available_child_toolsets(parent_agent, fallback_toolsets: set[str]) -> set[str]:
+    """Return child-requestable toolsets that cannot exceed the parent tools."""
+    available_tool_names = set(getattr(parent_agent, "valid_tool_names", []) or [])
+    if not available_tool_names:
+        return set(fallback_toolsets)
+
+    available_child_toolsets: set[str] = set()
+    for toolset_name in sorted(get_all_toolsets()):
+        if toolset_name in _EXCLUDED_TOOLSET_NAMES or toolset_name.startswith("elevate-"):
+            continue
+        resolved = set(resolve_toolset(toolset_name))
+        allowed_tools = resolved - DELEGATE_BLOCKED_TOOLS
+        if allowed_tools & available_tool_names:
+            available_child_toolsets.add(toolset_name)
+
+    return available_child_toolsets
+
+
 def _build_child_progress_callback(
     task_index: int,
     goal: str,
@@ -843,10 +1403,14 @@ def _build_child_agent(
 
     if toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks
-        child_toolsets = [t for t in toolsets if t in parent_toolsets]
+        parent_child_toolsets = _derive_available_child_toolsets(
+            parent_agent,
+            parent_toolsets,
+        )
+        child_toolsets = [t for t in toolsets if t in parent_child_toolsets]
         if _get_inherit_mcp_toolsets():
             child_toolsets = _preserve_parent_mcp_toolsets(
-                child_toolsets, parent_toolsets
+                child_toolsets, parent_child_toolsets
             )
         child_toolsets = _strip_blocked_tools(child_toolsets)
     elif parent_agent and parent_enabled is not None:
@@ -1314,6 +1878,8 @@ def _run_single_child(
             }
         )
 
+    _start_orchestration_run(child, parent_agent, task_index=task_index, goal=goal)
+
     try:
         if child_progress_cb:
             try:
@@ -1432,7 +1998,7 @@ def _run_single_child(
             else:
                 _err = str(_timeout_exc)
 
-            return {
+            timeout_entry = {
                 "task_index": task_index,
                 "status": "timeout" if is_timeout else "error",
                 "summary": None,
@@ -1443,6 +2009,12 @@ def _run_single_child(
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
             }
+            _finish_orchestration_run(
+                child,
+                status=timeout_entry["status"],
+                error=timeout_entry["error"],
+            )
+            return timeout_entry
         finally:
             # Shut down executor without waiting — if the child thread
             # is stuck on blocking I/O, wait=True would hang forever.
@@ -1640,6 +2212,12 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback completion failed: %s", e)
 
+        _finish_orchestration_run(
+            child,
+            status=status,
+            summary=summary if summary else None,
+            error=entry.get("error"),
+        )
         return entry
 
     except Exception as exc:
@@ -1656,7 +2234,7 @@ def _run_single_child(
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)
-        return {
+        error_entry = {
             "task_index": task_index,
             "status": "error",
             "summary": None,
@@ -1665,6 +2243,8 @@ def _run_single_child(
             "duration_seconds": duration,
             "_child_role": getattr(child, "_delegate_role", None),
         }
+        _finish_orchestration_run(child, status="error", error=str(exc))
+        return error_entry
 
     finally:
         # Stop the heartbeat thread so it doesn't keep touching parent activity
@@ -1719,6 +2299,12 @@ def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    agent_id: Optional[str] = None,
+    expected_return: Optional[str] = None,
+    handoff_reason: Optional[str] = None,
+    priority: Optional[str] = None,
+    artifacts: Optional[List[str]] = None,
+    parent_run_id: Optional[str] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
@@ -1811,7 +2397,18 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "agent_id": agent_id,
+                "expected_return": expected_return,
+                "handoff_reason": handoff_reason,
+                "priority": priority,
+                "artifacts": artifacts,
+                "parent_run_id": parent_run_id,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -1823,6 +2420,49 @@ def delegate_task(
     for i, task in enumerate(task_list):
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+
+    store = _orchestration_store_or_none()
+    source_agent_id = _parent_orchestration_agent_id(parent_agent)
+    prepared_tasks: List[Dict[str, Any]] = []
+    for i, raw_task in enumerate(task_list):
+        task = dict(raw_task)
+        explicit_agent = task.get("agent_id") or task.get("agent") or agent_id
+        target_agent_id = str(explicit_agent or "executive-assistant").strip().lower()
+        route_error = _handoff_route_error(
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            explicit_target=bool(explicit_agent),
+            store=store,
+        )
+        if route_error:
+            return tool_error(f"Task {i}: {route_error}")
+
+        task_parent_run_id = (
+            _clean_optional_handoff_id(task.get("parent_run_id"))
+            or _clean_optional_handoff_id(parent_run_id)
+            or _clean_optional_handoff_id(getattr(parent_agent, "_orchestration_run_id", None))
+        )
+        packet = _build_handoff_packet(
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            task=task["goal"],
+            context=task.get("context"),
+            expected_return=task.get("expected_return") or expected_return,
+            handoff_reason=task.get("handoff_reason") or handoff_reason,
+            priority=task.get("priority") or priority,
+            artifacts=task.get("artifacts") or artifacts,
+            parent_run_id=task_parent_run_id,
+            target_profile=_agent_job_profile(target_agent_id, store=store),
+            visible_handoff=bool(explicit_agent),
+        )
+        task["agent_id"] = target_agent_id
+        task["_explicit_agent_id"] = bool(explicit_agent)
+        task["_handoff_packet"] = packet
+        task["_parent_orchestration_run_id"] = task_parent_run_id
+        task["context"] = _context_with_handoff_packet(task.get("context"), packet)
+        prepared_tasks.append(task)
+
+    task_list = prepared_tasks
 
     overall_start = time.monotonic()
     results = []
@@ -1871,6 +2511,11 @@ def delegate_task(
                 ),
                 role=effective_role,
             )
+            child._orchestration_agent_id = (
+                t.get("agent_id") or t.get("agent") or agent_id or "executive-assistant"
+            )
+            child._handoff_packet = t.get("_handoff_packet") or {}
+            child._parent_orchestration_run_id = t.get("_parent_orchestration_run_id")
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
@@ -2251,6 +2896,14 @@ DELEGATE_TASK_SCHEMA = {
         "(default 2) and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
+        "- Use agent_id when the work belongs to a visible team lane like "
+        "'executive-assistant', 'admin', 'outreach', 'marketing', or "
+        "'social-media'. Elevate records that run in the local "
+        "orchestration registry for dashboards.\n"
+        f"- Choose visible lanes by job ownership. {_VISIBLE_AGENT_JOB_HINT}\n"
+        "- For visible agent-to-agent handoffs, include expected_return and "
+        "handoff_reason so the receiving agent gets a tight task packet "
+        "instead of broad chat history.\n"
         "- Results are always returned as an array, one entry per task."
     ),
     "parameters": {
@@ -2284,6 +2937,51 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "agent_id": {
+                "type": "string",
+                "description": (
+                    "Optional visible team lane for this delegation. Use one "
+                    "of the configured Elevate agents such as "
+                    "'executive-assistant', 'admin', 'outreach', 'marketing', "
+                    "or 'social-media'. This labels the run in the local "
+                    f"orchestration registry. {_VISIBLE_AGENT_JOB_HINT}"
+                ),
+            },
+            "expected_return": {
+                "type": "string",
+                "description": (
+                    "For visible handoffs, describe the exact result the "
+                    "target agent should return, e.g. '5-bullet checklist "
+                    "and next action' or 'draft caption plus posting plan'."
+                ),
+            },
+            "handoff_reason": {
+                "type": "string",
+                "description": (
+                    "Why this task belongs with the target agent instead of "
+                    "the current agent. Keep it short and operational."
+                ),
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["low", "normal", "high", "urgent"],
+                "description": "Visible handoff priority. Defaults to normal.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional file paths, URLs, task IDs, listing IDs, or "
+                    "other artifact references the target agent should use."
+                ),
+            },
+            "parent_run_id": {
+                "type": "string",
+                "description": (
+                    "Optional visible parent orchestration run id. Usually "
+                    "filled automatically for nested agent handoffs."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -2298,6 +2996,36 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": f"Visible Elevate agent lane for this task, e.g. 'marketing' or 'outreach'. {_VISIBLE_AGENT_JOB_HINT}",
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Alias for agent_id.",
+                        },
+                        "expected_return": {
+                            "type": "string",
+                            "description": "Task-specific expected return/result contract.",
+                        },
+                        "handoff_reason": {
+                            "type": "string",
+                            "description": "Task-specific reason for this handoff.",
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "normal", "high", "urgent"],
+                            "description": "Task-specific priority.",
+                        },
+                        "artifacts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Task-specific artifact references.",
+                        },
+                        "parent_run_id": {
+                            "type": "string",
+                            "description": "Task-specific visible parent run id.",
                         },
                         "acp_command": {
                             "type": "string",
@@ -2322,7 +3050,8 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Batch mode: tasks to run in parallel (limit configurable via delegation.max_concurrent_children, default 3). Each gets "
                     "its own subagent with isolated context and terminal session. "
-                    "When provided, top-level goal/context/toolsets are ignored."
+                    "When provided, top-level goal/context/toolsets are ignored. "
+                    f"{_VISIBLE_AGENT_JOB_HINT}"
                 ),
             },
             "role": {
@@ -2372,6 +3101,12 @@ registry.register(
         goal=args.get("goal"),
         context=args.get("context"),
         toolsets=args.get("toolsets"),
+        agent_id=args.get("agent_id") or args.get("agent"),
+        expected_return=args.get("expected_return"),
+        handoff_reason=args.get("handoff_reason"),
+        priority=args.get("priority"),
+        artifacts=args.get("artifacts"),
+        parent_run_id=args.get("parent_run_id"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),

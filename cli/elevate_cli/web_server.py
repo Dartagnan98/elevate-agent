@@ -587,6 +587,18 @@ async def get_status():
     }
 
 
+@app.get("/api/agent-hub")
+async def get_agent_hub():
+    """Return the local Agent Hub snapshot for the dashboard."""
+    try:
+        from elevate_cli.agent_hub import build_agent_hub_snapshot
+
+        return build_agent_hub_snapshot()
+    except Exception as exc:
+        _log.exception("GET /api/agent-hub failed")
+        raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
 #
@@ -601,6 +613,7 @@ _ACTION_LOG_DIR: Path = get_elevate_home() / "logs"
 
 # Short ``name`` (from the URL) → absolute log file path.
 _ACTION_LOG_FILES: Dict[str, str] = {
+    "gateway-start": "gateway-start.log",
     "gateway-restart": "gateway-restart.log",
     "elevate-update": "elevate-update.log",
 }
@@ -672,6 +685,21 @@ async def restart_gateway():
         "ok": True,
         "pid": proc.pid,
         "name": "gateway-restart",
+    }
+
+
+@app.post("/api/gateway/start")
+async def start_gateway_action():
+    """Start a detached local gateway runner using the current interpreter."""
+    try:
+        proc = _spawn_elevate_action(["gateway", "run", "--replace"], "gateway-start")
+    except Exception as exc:
+        _log.exception("Failed to spawn gateway start")
+        raise HTTPException(status_code=500, detail=f"Failed to start gateway: {exc}")
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "name": "gateway-start",
     }
 
 

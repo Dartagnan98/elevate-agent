@@ -29,6 +29,7 @@ class FactRetriever:
         fts_weight: float = 0.4,
         jaccard_weight: float = 0.3,
         hrr_weight: float = 0.3,
+        embedding_weight: float = 0.0,
         hrr_dim: int = 1024,
     ):
         self.store = store
@@ -44,6 +45,7 @@ class FactRetriever:
         self.fts_weight = fts_weight
         self.jaccard_weight = jaccard_weight
         self.hrr_weight = hrr_weight
+        self.embedding_weight = embedding_weight
 
     def search(
         self,
@@ -62,8 +64,24 @@ class FactRetriever:
 
         Returns list of dicts with fact data + 'score' field, sorted by score desc.
         """
-        # Stage 1: Get FTS5 candidates (more than limit for reranking headroom)
+        # Stage 1: Get FTS5 and semantic candidates (more than limit for reranking headroom)
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
+        candidates_by_id = {c["fact_id"]: c for c in candidates}
+
+        if self.embedding_weight > 0 and self.store.embeddings_enabled():
+            for semantic in self.store.semantic_search(
+                query,
+                category=category,
+                min_trust=min_trust,
+                limit=limit * 3,
+            ):
+                existing = candidates_by_id.get(semantic["fact_id"])
+                if existing:
+                    existing["semantic_score"] = semantic.get("semantic_score", 0.0)
+                else:
+                    candidates_by_id[semantic["fact_id"]] = semantic
+
+        candidates = list(candidates_by_id.values())
 
         if not candidates:
             return []
@@ -79,6 +97,7 @@ class FactRetriever:
 
             jaccard = self._jaccard_similarity(query_tokens, all_tokens)
             fts_score = fact.get("fts_rank", 0.0)
+            semantic_score = fact.get("semantic_score", 0.0)
 
             # HRR similarity
             if self.hrr_weight > 0 and fact.get("hrr_vector"):
@@ -88,10 +107,19 @@ class FactRetriever:
             else:
                 hrr_sim = 0.5  # neutral
 
-            # Combine FTS5 + Jaccard + HRR
-            relevance = (self.fts_weight * fts_score
-                        + self.jaccard_weight * jaccard
-                        + self.hrr_weight * hrr_sim)
+            # Combine FTS5 + Jaccard + HRR + semantic embedding scores.
+            weight_total = (
+                self.fts_weight
+                + self.jaccard_weight
+                + self.hrr_weight
+                + self.embedding_weight
+            ) or 1.0
+            relevance = (
+                self.fts_weight * fts_score
+                + self.jaccard_weight * jaccard
+                + self.hrr_weight * hrr_sim
+                + self.embedding_weight * semantic_score
+            ) / weight_total
 
             # Trust weighting
             score = relevance * fact["trust_score"]
@@ -520,8 +548,16 @@ class FactRetriever:
         try:
             rows = conn.execute(sql, params).fetchall()
         except Exception:
-            # FTS5 MATCH can fail on malformed queries — fall back to empty
-            return []
+            rows = []
+
+        if not rows:
+            fallback_query = self._fallback_fts_query(query)
+            if fallback_query and fallback_query != query:
+                fallback_params = [fallback_query, *params[1:]]
+                try:
+                    rows = conn.execute(sql, fallback_params).fetchall()
+                except Exception:
+                    rows = []
 
         if not rows:
             return []
@@ -556,6 +592,25 @@ class FactRetriever:
             if cleaned:
                 tokens.add(cleaned)
         return tokens
+
+    @staticmethod
+    def _fallback_fts_query(query: str) -> str:
+        """Build a forgiving OR query for natural-language questions."""
+        stop = {
+            "a", "an", "and", "are", "can", "did", "does", "for", "how",
+            "is", "it", "of", "on", "or", "the", "this", "to", "use",
+            "what", "when", "where", "who", "why", "with",
+        }
+        tokens = []
+        for raw in query.lower().split():
+            token = raw.strip(".,;:!?\"'()[]{}#@<>")
+            if len(token) < 3 or token in stop:
+                continue
+            if not token.replace("-", "").replace("_", "").isalnum():
+                continue
+            tokens.append(token)
+        deduped = list(dict.fromkeys(tokens))
+        return " OR ".join(deduped[:12])
 
     @staticmethod
     def _jaccard_similarity(set_a: set, set_b: set) -> float:

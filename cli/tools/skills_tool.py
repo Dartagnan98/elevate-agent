@@ -68,6 +68,8 @@ Usage:
 
 import json
 import logging
+import hashlib
+from collections import OrderedDict
 
 from elevate_constants import get_elevate_home, display_elevate_home
 import os
@@ -102,6 +104,48 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
 _secret_capture_callback = None
+_SKILL_VIEW_SESSION_CACHE: "OrderedDict[str, set[tuple[str, str, str]]]" = OrderedDict()
+_SKILL_VIEW_CACHE_MAX_TASKS = 128
+_SKILL_VIEW_CACHE_MAX_ENTRIES_PER_TASK = 64
+
+
+def _skill_view_duplicate_payload(
+    *,
+    task_id: str = None,
+    name: str,
+    file_path: str = None,
+    content: str,
+    skill_dir: str = None,
+    rel_path: str = None,
+) -> Optional[dict]:
+    """Return a compact duplicate response for repeated skill_view calls."""
+    if not task_id or not isinstance(content, str):
+        return None
+    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+    task_key = str(task_id)
+    cache_key = (str(name or ""), str(file_path or ""), digest)
+    seen = _SKILL_VIEW_SESSION_CACHE.setdefault(task_key, set())
+    _SKILL_VIEW_SESSION_CACHE.move_to_end(task_key)
+    while len(_SKILL_VIEW_SESSION_CACHE) > _SKILL_VIEW_CACHE_MAX_TASKS:
+        _SKILL_VIEW_SESSION_CACHE.popitem(last=False)
+    if cache_key not in seen:
+        if len(seen) >= _SKILL_VIEW_CACHE_MAX_ENTRIES_PER_TASK:
+            seen.clear()
+        seen.add(cache_key)
+        return None
+    return {
+        "cached_duplicate": True,
+        "content": (
+            "This exact skill content was already returned earlier in this "
+            "session. Reuse the prior instructions instead of loading the same "
+            "skill again. If a specific linked file is needed, call skill_view "
+            "with that file_path."
+        ),
+        "content_chars": len(content),
+        "content_sha256": digest,
+        "path": rel_path,
+        "skill_dir": skill_dir,
+    }
 
 
 def load_env() -> Dict[str, str]:
@@ -124,6 +168,7 @@ class SkillReadinessStatus(str, Enum):
     AVAILABLE = "available"
     SETUP_NEEDED = "setup_needed"
     UNSUPPORTED = "unsupported"
+    LOCKED = "locked"
 
 
 # Prompt injection detection — shared by local-skill and plugin-skill paths.
@@ -543,6 +588,30 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
+def _evaluate_skill_access(frontmatter: Dict[str, Any]):
+    """Return the local access decision for a skill frontmatter block."""
+    try:
+        from elevate_cli.access import evaluate_skill_access
+
+        return evaluate_skill_access(frontmatter)
+    except Exception:
+        logger.debug("Could not evaluate skill access", exc_info=True)
+        return None
+
+
+def _locked_skill_response(name: str, decision) -> str:
+    payload = {
+        "success": False,
+        "error": (
+            f"Skill '{name}' is locked for the current Elevate access profile. "
+            f"{decision.reason}"
+        ),
+        "readiness_status": SkillReadinessStatus.LOCKED.value,
+        "access": decision.to_dict(),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     """Recursively find all skills in ~/.elevate/skills/ and external dirs.
 
@@ -586,6 +655,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if name in seen_names:
                     continue
                 if name in disabled:
+                    continue
+                access_decision = _evaluate_skill_access(frontmatter)
+                if access_decision is not None and not access_decision.allowed:
                     continue
 
                 description = frontmatter.get("description", "")
@@ -782,6 +854,10 @@ def _serve_plugin_skill(
             },
             ensure_ascii=False,
         )
+
+    access_decision = _evaluate_skill_access(parsed_frontmatter)
+    if access_decision is not None and not access_decision.allowed:
+        return _locked_skill_response(f"{namespace}:{bare}", access_decision)
 
     # Injection scan — log but still serve (matches local-skill behaviour)
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
@@ -1033,6 +1109,10 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                 },
                 ensure_ascii=False,
             )
+
+        access_decision = _evaluate_skill_access(parsed_frontmatter)
+        if access_decision is not None and not access_decision.allowed:
+            return _locked_skill_response(resolved_name, access_decision)
 
         # If a specific file path is requested, read that instead
         if file_path and skill_dir:
@@ -1286,7 +1366,6 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             "description": frontmatter.get("description", ""),
             "tags": tags,
             "related_skills": related_skills,
-            "content": content,
             "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
@@ -1333,6 +1412,19 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
+
+        duplicate_payload = _skill_view_duplicate_payload(
+            task_id=task_id,
+            name=skill_name,
+            file_path=file_path,
+            content=content,
+            skill_dir=str(skill_dir) if skill_dir else None,
+            rel_path=rel_path,
+        )
+        if duplicate_payload:
+            result.update(duplicate_payload)
+        else:
+            result["content"] = content
 
         return json.dumps(result, ensure_ascii=False)
 
@@ -1442,4 +1534,5 @@ registry.register(
     ),
     check_fn=check_skills_requirements,
     emoji="📚",
+    max_result_size_chars=40_000,
 )

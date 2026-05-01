@@ -329,6 +329,116 @@ async def test_active_session_bypass_commands_dispatch_without_interrupt(
     assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
 
 
+@pytest.mark.asyncio
+async def test_status_question_during_running_agent_does_not_interrupt_or_queue():
+    """Natural status questions should answer from gateway state mid-run."""
+    runner = _make_runner()
+    event = _make_event(text="what exactly are you doing")
+    session_key = build_session_key(event.source)
+
+    fake_agent = MagicMock()
+    fake_agent.get_activity_summary.return_value = {
+        "api_call_count": 22,
+        "max_iterations": 60,
+        "current_tool": "terminal",
+        "last_activity_desc": "terminal",
+        "seconds_since_activity": 1,
+    }
+    runner._running_agents[session_key] = fake_agent
+
+    result = await runner._handle_message(event)
+
+    assert result is not None
+    assert "still running" in result
+    assert "not interrupting" in result
+    fake_agent.interrupt.assert_not_called()
+    assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
+
+
+def test_telegram_default_uses_focused_followup_tool_profile():
+    runner = _make_runner()
+    cfg = {"platform_toolsets": {"telegram": ["elevate-telegram"]}}
+
+    toolsets = runner._resolve_gateway_enabled_toolsets(
+        cfg,
+        "telegram",
+        "what should I do next",
+    )
+
+    assert set(toolsets) == {"memory", "messaging", "session_search", "todo"}
+
+
+def test_telegram_cma_message_escalates_to_skill_runner_profile():
+    runner = _make_runner()
+    cfg = {"platform_toolsets": {"telegram": ["elevate-telegram"]}}
+
+    toolsets = runner._resolve_gateway_enabled_toolsets(
+        cfg,
+        "telegram",
+        "run the cma skill for 1872 red tail crescent",
+    )
+
+    assert {"skills", "terminal", "file", "todo"}.issubset(set(toolsets))
+    assert "browser" not in toolsets
+    assert "web" not in toolsets
+    assert "cronjob" not in toolsets
+    assert "image_gen" not in toolsets
+
+
+def test_explicit_platform_tool_config_is_respected():
+    runner = _make_runner()
+    cfg = {"platform_toolsets": {"telegram": ["web", "terminal"]}}
+
+    toolsets = runner._resolve_gateway_enabled_toolsets(
+        cfg,
+        "telegram",
+        "what should I do next",
+    )
+
+    assert toolsets == ["terminal", "web"]
+
+
+def test_repeated_skill_view_history_is_compacted():
+    content = "CMA instructions\n" + ("x" * 5000)
+    payload = {
+        "success": True,
+        "name": "cma",
+        "content": content,
+        "path": "cma/SKILL.md",
+        "skill_dir": "/tmp/skills/cma",
+    }
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "skill_view", "arguments": "{\"name\":\"cma\"}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": __import__("json").dumps(payload)},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_2",
+                    "function": {"name": "skill_view", "arguments": "{\"name\":\"cma\"}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_2", "content": __import__("json").dumps(payload)},
+    ]
+
+    compacted = GatewayRunner._compact_repeated_skill_view_history(history)
+
+    assert len(compacted[1]["content"]) > 5000
+    assert len(compacted[3]["content"]) < 1000
+    assert "cached_duplicate" in compacted[3]["content"]
+
+
 # ------------------------------------------------------------------
 # Test 6: /stop during sentinel force-cleans and unlocks session
 # ------------------------------------------------------------------
@@ -411,6 +521,33 @@ async def test_stop_hard_kills_running_agent():
     # Must return a confirmation
     assert result is not None
     assert "stopped" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_stop_evicts_cached_agent_resources():
+    """Hard stop should evict cached agent/tool resources for that session."""
+    from collections import OrderedDict
+    import threading
+
+    runner = _make_runner()
+    session_key = build_session_key(
+        SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm", user_id="u1")
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
+    runner._running_agents[session_key] = fake_agent
+    runner._agent_cache = OrderedDict({session_key: (fake_agent, "sig")})
+    runner._agent_cache_lock = threading.Lock()
+    runner._cleanup_agent_resources = MagicMock()
+
+    stop_event = _make_event(text="/stop")
+    result = await runner._handle_message(stop_event)
+
+    assert result is not None
+    assert "stopped" in result.lower()
+    runner._cleanup_agent_resources.assert_called_once_with(fake_agent)
+    assert session_key not in runner._agent_cache
 
 
 # ------------------------------------------------------------------

@@ -38,6 +38,7 @@ Usage:
     elevate update              Update to latest version
     elevate uninstall           Uninstall Elevate
     elevate acp                 Run as an ACP server for editor integration
+    elevate hub                 Launch the local Agent Hub dashboard
     elevate sessions browse     Interactive session picker with search
 
     elevate claw migrate --dry-run  # Preview migration without changes
@@ -1064,21 +1065,20 @@ def _launch_tui(resume_session_id: Optional[str] = None, tui_dev: bool = False):
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
-    # Subscription gate — skip only in dev mode.
+    # Core Elevate is local-first and should not require a subscription.
+    # A license only mounts/update-gates cloud or premium skill packs.
     if os.environ.get("ELEVATE_DEV_MODE") != "1":
         from elevate_cli import license as elevate_license
-        try:
-            elevate_license.ensure_valid()
-        except elevate_license.LicenseError as e:
-            print()
-            print(f"  {e}")
-            print()
-            sys.exit(2)
 
-        # Mount cloud skills into a session-ephemeral tmp dir.
         if os.environ.get("ELEVATE_SKIP_CLOUD_SKILLS") != "1":
-            from elevate_cli import cloud_skills as elevate_cloud_skills
-            elevate_cloud_skills.mount_all()
+            try:
+                if elevate_license.load() is not None:
+                    from elevate_cli import cloud_skills as elevate_cloud_skills
+
+                    elevate_cloud_skills.mount_all()
+            except Exception as exc:
+                logger.debug("cloud skill mount skipped", exc_info=True)
+                print(f"cloud skills unavailable: {exc}", file=sys.stderr)
 
     use_tui = getattr(args, "tui", False) or os.environ.get("ELEVATE_TUI") == "1"
 
@@ -6390,6 +6390,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "uninstall",
         "profile",
         "dashboard",
+        "hub",
         "honcho",
         "claw",
         "plugins",
@@ -6739,13 +6740,20 @@ def cmd_dashboard(args):
         print(
             f"Re-install the package into this interpreter so metadata updates apply:\n"
             f"  cd {PROJECT_ROOT}\n"
-            f"  {sys.executable} -m pip install -e .\n"
-            "If `pip` is missing in this venv, use:  uv pip install -e ."
+            f"  {sys.executable} -m pip install -e '.[web]'\n"
+            "If `pip` is missing in this venv, use:  uv pip install -e '.[web]'"
         )
         print(f"Import error: {e}")
         sys.exit(1)
 
-    if "ELEVATE_WEB_DIST" not in os.environ:
+    bundled_web_dist = PROJECT_ROOT / "elevate_cli" / "web_dist" / "index.html"
+    if (
+        "ELEVATE_WEB_DIST" not in os.environ
+        and (
+            getattr(args, "rebuild_web", False)
+            or not bundled_web_dist.exists()
+        )
+    ):
         if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
             sys.exit(1)
 
@@ -6759,6 +6767,12 @@ def cmd_dashboard(args):
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,
     )
+
+
+def cmd_hub(args):
+    """Start the Agent Hub dashboard with local chat support enabled."""
+    args.tui = True
+    cmd_dashboard(args)
 
 
 def cmd_completion(args, parser=None):
@@ -6819,6 +6833,7 @@ Examples:
     elevate config edit            Edit config in $EDITOR
     elevate config set model gpt-4 Set a config value
     elevate gateway                Run messaging gateway
+    elevate hub                    Launch local Agent Hub
     elevate -s elevate-dev,github-auth
     elevate -w                     Start in isolated git worktree
     elevate gateway install        Install gateway background service
@@ -7402,6 +7417,59 @@ For more help on a command:
     cloud_fetch.add_argument("name")
     cloud_fetch.add_argument("--json", action="store_true")
     cloud_fetch.set_defaults(func=elevate_cloud_skills.cmd_cloud_fetch)
+
+    from elevate_cli import access as elevate_access
+
+    access_parser = subparsers.add_parser(
+        "access",
+        help="Manage local access profile and premium skill entitlements",
+    )
+    access_sub = access_parser.add_subparsers(dest="access_action")
+    access_status = access_sub.add_parser("status", help="Show current access profile")
+    access_status.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    access_profile = access_sub.add_parser(
+        "profile",
+        help="Set profile: standalone, exp, or skyleigh_downline",
+    )
+    access_profile.add_argument("profile", choices=elevate_access.PROFILE_CHOICES)
+
+    access_unlock = access_sub.add_parser(
+        "unlock",
+        help="Mark a local skill-pack entitlement active",
+    )
+    access_unlock.add_argument("entitlement", help="Entitlement id, e.g. exp_agent_pack")
+    access_unlock.add_argument(
+        "--owned-snapshot",
+        action="store_true",
+        default=None,
+        help="Treat as a purchased/lifetime local snapshot",
+    )
+
+    access_lock = access_sub.add_parser(
+        "lock",
+        help="Lock a local skill-pack entitlement without deleting files",
+    )
+    access_lock.add_argument("entitlement", help="Entitlement id")
+    access_lock.add_argument(
+        "--status",
+        default="locked",
+        help="Lock status/reason (locked, expired, revoked, left_team)",
+    )
+    access_lock.add_argument(
+        "--clear-owned-snapshot",
+        action="store_true",
+        help="Also remove owned-snapshot access for this entitlement",
+    )
+
+    access_affiliation = access_sub.add_parser(
+        "affiliation",
+        help="Update brokerage/team affiliation status",
+    )
+    access_affiliation.add_argument("--brokerage", default=None)
+    access_affiliation.add_argument("--team", default=None)
+    access_affiliation.add_argument("--status", default=None)
+    access_parser.set_defaults(func=elevate_access.cmd_access)
 
     auth_parser = subparsers.add_parser(
         "auth",
@@ -8206,6 +8274,52 @@ Examples:
         "setup", help="Interactive provider selection and configuration"
     )
     memory_sub.add_parser("status", help="Show current memory provider config")
+    _memory_organize_parser = memory_sub.add_parser(
+        "organize",
+        help="Promote pending holographic turn-journal entries into durable facts",
+    )
+    _memory_organize_parser.add_argument(
+        "--session-id",
+        help="Only organize one session id",
+    )
+    _memory_organize_parser.add_argument(
+        "--session-day",
+        help="Only organize one YYYY-MM-DD journal day",
+    )
+    _memory_organize_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Max pending turns per organization batch",
+    )
+    _memory_organize_parser.add_argument(
+        "--drain",
+        action="store_true",
+        help="Keep organizing batches until pending turns are drained or the cap is hit",
+    )
+    _memory_organize_parser.add_argument(
+        "--max-batches",
+        type=int,
+        help="Max batches when --drain is used",
+    )
+    _memory_organize_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON",
+    )
+    _memory_daily_parser = memory_sub.add_parser(
+        "daily",
+        help="Run due daily holographic memory maintenance",
+    )
+    _memory_daily_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run even if today's maintenance marker already exists",
+    )
+    _memory_daily_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON",
+    )
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset",
@@ -9008,7 +9122,38 @@ Examples:
             "Alternatively set ELEVATE_DASHBOARD_TUI=1."
         ),
     )
+    dashboard_parser.add_argument(
+        "--rebuild-web",
+        action="store_true",
+        help="Rebuild the bundled web UI before starting",
+    )
     dashboard_parser.set_defaults(func=cmd_dashboard)
+
+    hub_parser = subparsers.add_parser(
+        "hub",
+        help="Start the local Agent Hub",
+        description="Launch the Elevate Agent Hub for agents, memory, connections, and local chat",
+    )
+    hub_parser.add_argument(
+        "--port", type=int, default=9119, help="Port (default 9119)"
+    )
+    hub_parser.add_argument(
+        "--host", default="127.0.0.1", help="Host (default 127.0.0.1)"
+    )
+    hub_parser.add_argument(
+        "--no-open", action="store_true", help="Don't open browser automatically"
+    )
+    hub_parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Allow binding to non-localhost (DANGEROUS: exposes API keys on the network)",
+    )
+    hub_parser.add_argument(
+        "--rebuild-web",
+        action="store_true",
+        help="Rebuild the bundled web UI before starting",
+    )
+    hub_parser.set_defaults(func=cmd_hub)
 
     # =========================================================================
     # logs command

@@ -455,6 +455,112 @@ def _is_control_interrupt_message(message: Optional[str]) -> bool:
     return normalized in _CONTROL_INTERRUPT_MESSAGES
 
 
+_BUSY_STATUS_EXACT_MESSAGES = frozenset(
+    {
+        "status",
+        "progress",
+        "what is going on",
+        "whats going on",
+        "what's going on",
+        "what exactly are you doing",
+        "what are you doing",
+        "what is it doing",
+        "whats it doing",
+        "what's it doing",
+    }
+)
+
+_BUSY_STATUS_PHRASES = (
+    "what are you doing",
+    "what exactly are you doing",
+    "what is going on",
+    "whats going on",
+    "what's going on",
+    "what is it doing",
+    "whats it doing",
+    "what's it doing",
+    "why are you doing it again",
+    "why is it doing it again",
+    "why are you running it again",
+    "why is it running again",
+    "are you still working",
+    "still working",
+    "where are you running",
+    "what browser",
+)
+
+
+def _normalize_busy_status_text(message: Optional[str]) -> str:
+    if not message:
+        return ""
+    normalized = str(message).strip().lower()
+    normalized = re.sub(r"[\s\u00a0]+", " ", normalized)
+    normalized = re.sub(r"[?!.,;:]+$", "", normalized).strip()
+    return normalized
+
+
+def _is_busy_status_query(message: Optional[str]) -> bool:
+    """Return True for natural-language status checks during a busy turn."""
+    normalized = _normalize_busy_status_text(message)
+    if not normalized:
+        return False
+    if normalized in _BUSY_STATUS_EXACT_MESSAGES:
+        return True
+    return any(phrase in normalized for phrase in _BUSY_STATUS_PHRASES)
+
+
+_FOCUSED_GATEWAY_DEFAULT_PLATFORMS = {"telegram"}
+
+_GATEWAY_TOOL_PROFILES = {
+    "gateway-followup": ("memory", "session_search", "todo", "messaging"),
+    "skill-runner": ("skills", "terminal", "file", "todo", "memory", "session_search"),
+    "coding-edit": ("terminal", "file", "todo", "delegation", "code_execution", "web", "memory", "session_search"),
+    "research-browser": ("web", "browser", "file", "todo", "memory", "session_search"),
+    "creative-vision": ("vision", "image_gen", "file", "todo", "memory"),
+    "cron-automation": ("cronjob", "skills", "terminal", "file", "todo", "memory", "session_search"),
+}
+
+_GATEWAY_PROFILE_KEYWORDS = {
+    # Check coding-edit before skill-runner. Real estate skill work often
+    # mentions CMA/listings while asking to patch or debug the underlying code.
+    "coding-edit": (
+        "code", "repo", "git", "patch", "patch/edit", "edit", "file",
+        "read/write", "read write", "fix", "debug", "install", "test",
+        "pytest", "npm", "python", "terminal", "shell", "script", "error",
+        "stack trace", "local code tools", "local repo", "repo execution",
+        "subagent", "sub-agent", "delegate", "claude code",
+    ),
+    "skill-runner": (
+        "skill", "cma", "comparative market", "comps",
+        "listing", "xposure", "matrix", "mls", "interior bc",
+    ),
+    "research-browser": (
+        "browser", "website", "webpage", "login", "click", "screenshot",
+        "search", "look up", "research", "open the site", "navigate",
+    ),
+    "creative-vision": (
+        "image", "photo", "picture", "screenshot", "vision", "analyze this",
+        "generate an image", "make an image",
+    ),
+    "cron-automation": (
+        "cron", "schedule", "daily", "every day", "automation",
+        "reminder", "recurring", "run at",
+    ),
+}
+
+_GATEWAY_CONFIGURED_TOOL_PHRASES = (
+    "full tools", "all tools", "use everything", "unrestricted tools",
+    "complete toolset", "entire toolset",
+)
+
+
+def _normalize_gateway_profile_text(message: Optional[str], channel_prompt: Optional[str] = None) -> str:
+    text = " ".join(part for part in (message or "", channel_prompt or "") if part)
+    text = text.lower()
+    text = re.sub(r"[\s\u00a0]+", " ", text)
+    return text.strip()
+
+
 def _check_unavailable_skill(command_name: str) -> str | None:
     """Check if a command matches a known-but-inactive skill.
 
@@ -1552,6 +1658,390 @@ class GatewayRunner:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
+    @staticmethod
+    def _gateway_tool_profile_mode(user_config: dict, platform_key: str) -> str:
+        """Return focused-tool routing mode for gateway turns.
+
+        Modes:
+          - auto: select a small profile from the user's message
+          - full/off/configured: keep the platform's configured toolsets
+        """
+        env_mode = os.getenv("ELEVATE_GATEWAY_TOOL_PROFILE")
+        raw_mode = env_mode
+        if not raw_mode:
+            agent_cfg = user_config.get("agent", {}) if isinstance(user_config, dict) else {}
+            display_cfg = user_config.get("display", {}) if isinstance(user_config, dict) else {}
+            raw_mode = (
+                agent_cfg.get("gateway_tool_profile")
+                if isinstance(agent_cfg, dict)
+                else None
+            ) or (
+                display_cfg.get("gateway_tool_profile")
+                if isinstance(display_cfg, dict)
+                else None
+            )
+        mode = str(raw_mode or "").strip().lower()
+        if mode in {"auto", "focused", "focus"}:
+            return "auto"
+        if mode in {"full", "off", "disabled", "configured"}:
+            return "configured"
+        return "auto" if platform_key in _FOCUSED_GATEWAY_DEFAULT_PLATFORMS else "configured"
+
+    @staticmethod
+    def _has_explicit_platform_tool_config(user_config: dict, platform_key: str) -> bool:
+        """True when the user explicitly picked platform tool categories."""
+        try:
+            raw = (user_config.get("platform_toolsets") or {}).get(platform_key)
+            if not isinstance(raw, list):
+                return False
+            from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS
+            configurable = {name for name, _, _ in CONFIGURABLE_TOOLSETS}
+            return any(str(item) in configurable for item in raw)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _select_gateway_tool_profile(message: str, channel_prompt: str | None = None) -> str:
+        text = _normalize_gateway_profile_text(message, channel_prompt)
+        if not text:
+            return "gateway-followup"
+        if any(phrase in text for phrase in _GATEWAY_CONFIGURED_TOOL_PHRASES):
+            return "configured"
+        for profile, keywords in _GATEWAY_PROFILE_KEYWORDS.items():
+            if any(keyword in text for keyword in keywords):
+                return profile
+        return "gateway-followup"
+
+    @staticmethod
+    def _gateway_tool_profile_decision(
+        user_config: dict,
+        platform_key: str,
+        message: str,
+        *,
+        channel_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Return an inspectable focused-tool routing decision.
+
+        The gateway uses this as the small "runtime brain" for tool loading:
+        it keeps the lightweight profile fast, but records enough structured
+        detail for dashboards/tests to explain why heavier code or browser
+        tools did or did not load.
+        """
+        from elevate_cli.tools_config import _get_platform_tools
+
+        configured = sorted(str(name) for name in _get_platform_tools(user_config, platform_key))
+        configured_set = set(configured)
+        mode = GatewayRunner._gateway_tool_profile_mode(user_config, platform_key)
+        explicit_platform_config = GatewayRunner._has_explicit_platform_tool_config(
+            user_config,
+            platform_key,
+        )
+        text = _normalize_gateway_profile_text(message, channel_prompt)
+
+        requested_profile = "gateway-followup"
+        matched_keywords: list[str] = []
+        reason = "default lightweight follow-up"
+
+        if not text:
+            reason = "empty message"
+        elif any(phrase in text for phrase in _GATEWAY_CONFIGURED_TOOL_PHRASES):
+            requested_profile = "configured"
+            matched_keywords = [
+                phrase for phrase in _GATEWAY_CONFIGURED_TOOL_PHRASES if phrase in text
+            ]
+            reason = "explicit full-tool request"
+        else:
+            for profile, keywords in _GATEWAY_PROFILE_KEYWORDS.items():
+                matched = [keyword for keyword in keywords if keyword in text]
+                if matched:
+                    requested_profile = profile
+                    matched_keywords = matched[:8]
+                    reason = f"matched {profile} intent"
+                    break
+
+        selected_profile = requested_profile
+        if mode != "auto":
+            selected_profile = "configured"
+            reason = f"gateway_tool_profile={mode}"
+        elif explicit_platform_config:
+            selected_profile = "configured"
+            reason = "explicit platform_toolsets configured"
+
+        if selected_profile == "configured":
+            selected_toolsets = configured
+            requested_toolsets = configured
+        else:
+            requested_toolsets = [
+                str(name) for name in _GATEWAY_TOOL_PROFILES.get(selected_profile, ())
+            ]
+            selected_toolsets = sorted(configured_set & set(requested_toolsets))
+
+        available_profiles: dict[str, dict[str, Any]] = {}
+        for profile, requested in _GATEWAY_TOOL_PROFILES.items():
+            requested_names = [str(name) for name in requested]
+            effective = sorted(configured_set & set(requested_names))
+            available_profiles[profile] = {
+                "requested_toolsets": requested_names,
+                "effective_toolsets": effective,
+                "lazy_toolsets": sorted(set(effective) - set(selected_toolsets)),
+            }
+
+        return {
+            "mode": mode,
+            "platform": platform_key,
+            "requested_profile": requested_profile,
+            "selected_profile": selected_profile,
+            "reason": reason,
+            "matched_keywords": matched_keywords,
+            "explicit_platform_config": explicit_platform_config,
+            "configured_toolsets": configured,
+            "requested_toolsets": requested_toolsets,
+            "selected_toolsets": selected_toolsets,
+            "available_profiles": available_profiles,
+        }
+
+    def _resolve_gateway_enabled_toolsets(
+        self,
+        user_config: dict,
+        platform_key: str,
+        message: str,
+        *,
+        channel_prompt: str | None = None,
+    ) -> list[str]:
+        """Resolve a live gateway tool profile without widening user config.
+
+        Telegram's default platform toolset used to expand into almost every
+        core tool every turn. In auto mode, use a small intent profile and
+        intersect it with the platform's configured toolsets so user-disabled
+        capabilities stay disabled.
+        """
+        decision = self._gateway_tool_profile_decision(
+            user_config,
+            platform_key,
+            message,
+            channel_prompt=channel_prompt,
+        )
+
+        # Preserve explicitly configured MCP/custom toolsets only when the user
+        # asks for the configured/full profile. Otherwise they can dominate the
+        # request wrapper and defeat the focused path.
+        logger.debug(
+            "Gateway tool profile: platform=%s profile=%s reason=%s toolsets=%s",
+            platform_key,
+            decision.get("selected_profile"),
+            decision.get("reason"),
+            decision.get("selected_toolsets"),
+        )
+        return list(decision.get("selected_toolsets") or [])
+
+    @staticmethod
+    def _build_gateway_lazy_tool_catalog_prompt(
+        user_config: dict,
+        platform_key: str,
+        enabled_toolsets: list[str],
+    ) -> str:
+        """Describe focused loaded tools plus heavier on-demand profiles."""
+        try:
+            from elevate_cli.tools_config import _get_platform_tools
+
+            configured = set(_get_platform_tools(user_config, platform_key))
+        except Exception:
+            return ""
+
+        loaded = set(enabled_toolsets or [])
+        if not configured or loaded >= configured:
+            return ""
+
+        profile_lines: list[str] = []
+        for profile in (
+            "coding-edit",
+            "skill-runner",
+            "research-browser",
+            "creative-vision",
+            "cron-automation",
+        ):
+            effective = [
+                toolset
+                for toolset in _GATEWAY_TOOL_PROFILES.get(profile, ())
+                if toolset in configured and toolset not in loaded
+            ]
+            if effective:
+                profile_lines.append(f"- {profile}: {', '.join(effective)}")
+
+        if not profile_lines:
+            return ""
+
+        loaded_text = ", ".join(sorted(loaded)) or "none"
+        return (
+            "# Lazy Tool Availability\n"
+            f"Loaded this turn: {loaded_text}.\n"
+            "Additional gateway tools are available on demand and lazy-load when "
+            "the user's message asks for that kind of work:\n"
+            + "\n".join(profile_lines)
+            + "\nIf the user asks what tools you can see, distinguish loaded now "
+            "from available on demand. Do not say local code tools are impossible "
+            "when they are listed here; say they lazy-load for code/edit/git tasks. "
+            "This supersedes older conversation history about missing tools. "
+            "If the user asks you to patch, inspect files, run git, or execute repo "
+            "commands, proceed with the loaded tools when present; otherwise ask them "
+            "to send that concrete task so the gateway can load the code profile."
+        )
+
+    @staticmethod
+    def _compact_repeated_skill_view_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Replace duplicate skill_view tool outputs with compact references."""
+        if not history:
+            return history
+
+        call_names: dict[str, str] = {}
+        call_args: dict[str, dict[str, Any]] = {}
+        seen: dict[tuple[str, str, str], dict[str, Any]] = {}
+        compacted: list[dict[str, Any]] = []
+
+        for msg in history:
+            role = msg.get("role")
+            if role == "assistant":
+                for call in msg.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = str(call.get("id") or call.get("call_id") or "")
+                    fn = call.get("function") or {}
+                    name = fn.get("name")
+                    if call_id and isinstance(name, str):
+                        call_names[call_id] = name
+                        raw_args = fn.get("arguments")
+                        parsed_args = {}
+                        if isinstance(raw_args, str):
+                            try:
+                                parsed_args = json.loads(raw_args)
+                            except Exception:
+                                parsed_args = {}
+                        elif isinstance(raw_args, dict):
+                            parsed_args = raw_args
+                        call_args[call_id] = parsed_args
+                compacted.append(msg)
+                continue
+
+            if role != "tool":
+                compacted.append(msg)
+                continue
+
+            call_id = str(msg.get("tool_call_id") or "")
+            if call_names.get(call_id) != "skill_view":
+                compacted.append(msg)
+                continue
+
+            content = msg.get("content")
+            if not isinstance(content, str) or len(content) < 4000:
+                compacted.append(msg)
+                continue
+            try:
+                payload = json.loads(content)
+            except Exception:
+                compacted.append(msg)
+                continue
+            if not isinstance(payload, dict) or not payload.get("success"):
+                compacted.append(msg)
+                continue
+
+            skill_name = str(payload.get("name") or call_args.get(call_id, {}).get("name") or "")
+            file_path = str(payload.get("file") or call_args.get(call_id, {}).get("file_path") or "")
+            skill_content = payload.get("content")
+            if not skill_name or not isinstance(skill_content, str):
+                compacted.append(msg)
+                continue
+
+            import hashlib
+
+            digest = hashlib.sha256(skill_content.encode("utf-8", errors="replace")).hexdigest()[:16]
+            key = (skill_name, file_path, digest)
+            if key not in seen:
+                seen[key] = {
+                    "chars": len(skill_content),
+                    "path": payload.get("path"),
+                    "skill_dir": payload.get("skill_dir"),
+                }
+                compacted.append(msg)
+                continue
+
+            prior = seen[key]
+            compact_payload = {
+                "success": True,
+                "name": skill_name,
+                "file": file_path or None,
+                "cached_duplicate": True,
+                "content": (
+                    "Repeated skill_view output elided. The same skill content "
+                    "was already loaded earlier in this session; reuse that "
+                    "instruction block instead of calling skill_view again."
+                ),
+                "content_chars": prior["chars"],
+                "content_sha256_prefix": digest,
+                "path": prior.get("path"),
+                "skill_dir": prior.get("skill_dir"),
+            }
+            compact_msg = dict(msg)
+            compact_msg["content"] = json.dumps(compact_payload, ensure_ascii=False)
+            compacted.append(compact_msg)
+
+        return compacted
+
+    def _format_busy_status_message(
+        self,
+        session_key: str,
+        running_agent: Any,
+        *,
+        now: float | None = None,
+    ) -> str:
+        """Build a read-only status reply without interrupting the active turn."""
+        now = now or time.time()
+        if running_agent is _AGENT_PENDING_SENTINEL:
+            return (
+                "⏳ Current task is still starting.\n"
+                "I'm treating this as a status check, so I'm not interrupting "
+                "or starting another turn. Send /stop to cancel it."
+            )
+
+        status_parts: list[str] = []
+        last_activity = ""
+        try:
+            summary = (
+                running_agent.get_activity_summary()
+                if running_agent and hasattr(running_agent, "get_activity_summary")
+                else {}
+            )
+            iteration = summary.get("api_call_count", 0)
+            max_iter = summary.get("max_iterations", 0)
+            current_tool = summary.get("current_tool")
+            last_desc = summary.get("last_activity_desc") or ""
+            seconds_since = summary.get("seconds_since_activity")
+            start_ts = self._running_agents_ts.get(session_key, 0)
+            if start_ts:
+                elapsed = max(0, int(now - start_ts))
+                if elapsed >= 60:
+                    status_parts.append(f"{elapsed // 60} min elapsed")
+                else:
+                    status_parts.append(f"{elapsed}s elapsed")
+            if max_iter:
+                status_parts.append(f"iteration {iteration}/{max_iter}")
+            if current_tool:
+                status_parts.append(f"running: {current_tool}")
+            if last_desc:
+                if isinstance(seconds_since, (int, float)) and seconds_since >= 0:
+                    last_activity = f"\nLast activity: {last_desc} ({int(seconds_since)}s ago)."
+                else:
+                    last_activity = f"\nLast activity: {last_desc}."
+        except Exception:
+            pass
+
+        status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+        return (
+            f"⏳ Current task is still running{status_detail}."
+            f"{last_activity}\n"
+            "I'm treating this as a status check, so I'm not interrupting "
+            "or starting another turn. Send /stop to cancel it."
+        )
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -1579,6 +2069,20 @@ class GatewayRunner:
         if not adapter:
             return False  # let default path handle it
 
+        running_agent = self._running_agents.get(session_key)
+        if _is_busy_status_query(event.text):
+            thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            try:
+                await adapter._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=self._format_busy_status_message(session_key, running_agent),
+                    reply_to=event.message_id,
+                    metadata=thread_meta,
+                )
+            except Exception as e:
+                logger.debug("Failed to send busy status reply: %s", e)
+            return True
+
         # Store the message so it's processed as the next turn after the
         # current run finishes (or is interrupted).
         from gateway.platforms.base import merge_pending_message_event
@@ -1589,7 +2093,6 @@ class GatewayRunner:
         # If not in queue mode, interrupt the running agent immediately.
         # This aborts in-flight tool calls and causes the agent loop to exit
         # at the next check point.
-        running_agent = self._running_agents.get(session_key)
         if not is_queue_mode and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 running_agent.interrupt(event.text)
@@ -3382,6 +3885,7 @@ class GatewayRunner:
                     source,
                     interrupt_reason=_INTERRUPT_REASON_STOP,
                     invalidation_reason="stop_command",
+                    teardown_agent_resources=True,
                 )
                 logger.info("STOP for session %s — agent interrupted, session lock released", _quick_key[:20])
                 return "⚡ Stopped. You can continue this session."
@@ -3530,6 +4034,10 @@ class GatewayRunner:
                     f"⏳ Agent is running — `/{_cmd_def_inner.name}` can't run "
                     f"mid-turn. Wait for the current response or `/stop` first."
                 )
+
+            if _is_busy_status_query(event.text):
+                running_agent = self._running_agents.get(_quick_key)
+                return self._format_busy_status_message(_quick_key, running_agent)
 
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key[:20])
@@ -5286,6 +5794,7 @@ class GatewayRunner:
                 source,
                 interrupt_reason=_INTERRUPT_REASON_STOP,
                 invalidation_reason="stop_command_pending",
+                teardown_agent_resources=True,
             )
             logger.info("STOP (pending) for session %s — sentinel cleared", session_key[:20])
             return "⚡ Stopped. The agent hadn't started yet — you can continue this session."
@@ -5297,6 +5806,7 @@ class GatewayRunner:
                 source,
                 interrupt_reason=_INTERRUPT_REASON_STOP,
                 invalidation_reason="stop_command_handler",
+                teardown_agent_resources=True,
             )
             return "⚡ Stopped. You can continue this session."
         else:
@@ -6536,8 +7046,11 @@ class GatewayRunner:
 
             platform_key = _platform_config_key(source.platform)
 
-            from elevate_cli.tools_config import _get_platform_tools
-            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            enabled_toolsets = self._resolve_gateway_enabled_toolsets(
+                user_config,
+                platform_key,
+                prompt,
+            )
 
             pr = self._provider_routing
             max_iterations = int(os.getenv("ELEVATE_MAX_ITERATIONS", "90"))
@@ -8820,11 +9333,26 @@ class GatewayRunner:
         interrupt_reason: str,
         invalidation_reason: str,
         release_running_state: bool = True,
+        teardown_agent_resources: bool = False,
     ) -> None:
         """Interrupt the current run and clear queued session state consistently."""
         if not session_key:
             return
         running_agent = self._running_agents.get(session_key)
+        cached_agent = None
+        if teardown_agent_resources:
+            _cache = getattr(self, "_agent_cache", None)
+            _cache_lock = getattr(self, "_agent_cache_lock", None)
+            if _cache is not None:
+                try:
+                    if _cache_lock:
+                        with _cache_lock:
+                            _cached = _cache.get(session_key)
+                    else:
+                        _cached = _cache.get(session_key)
+                    cached_agent = _cached[0] if isinstance(_cached, tuple) else _cached
+                except Exception:
+                    cached_agent = None
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             running_agent.interrupt(interrupt_reason)
         self._invalidate_session_run_generation(session_key, reason=invalidation_reason)
@@ -8836,13 +9364,31 @@ class GatewayRunner:
         self._pending_messages.pop(session_key, None)
         if release_running_state:
             self._release_running_agent_state(session_key)
+        if teardown_agent_resources:
+            cleaned: list[int] = []
+            for agent in (running_agent, cached_agent):
+                if not agent or agent is _AGENT_PENDING_SENTINEL:
+                    continue
+                if id(agent) in cleaned:
+                    continue
+                cleaned.append(id(agent))
+                try:
+                    self._cleanup_agent_resources(agent)
+                except Exception as exc:
+                    logger.debug("Failed to clean stopped agent resources: %s", exc)
+            self._evict_cached_agent(session_key)
 
     def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
         _lock = getattr(self, "_agent_cache_lock", None)
+        _cache = getattr(self, "_agent_cache", None)
+        if _cache is None:
+            return
         if _lock:
             with _lock:
-                self._agent_cache.pop(session_key, None)
+                _cache.pop(session_key, None)
+        else:
+            _cache.pop(session_key, None)
 
     def _release_evicted_agent_soft(self, agent: Any) -> None:
         """Soft cleanup for cache-evicted agents — preserves session tool state.
@@ -9335,8 +9881,30 @@ class GatewayRunner:
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
-        from elevate_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        tool_profile_decision = self._gateway_tool_profile_decision(
+            user_config,
+            platform_key,
+            message,
+            channel_prompt=channel_prompt,
+        )
+        enabled_toolsets = list(tool_profile_decision.get("selected_toolsets") or [])
+        try:
+            from gateway.status import write_runtime_status
+
+            write_runtime_status(
+                tool_decision={
+                    **tool_profile_decision,
+                    "session_id": session_id,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                },
+            )
+        except Exception:
+            pass
+        lazy_tool_catalog_prompt = self._build_gateway_lazy_tool_catalog_prompt(
+            user_config,
+            platform_key,
+            enabled_toolsets,
+        )
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
@@ -9678,6 +10246,8 @@ class GatewayRunner:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
             if self._ephemeral_system_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
+            if lazy_tool_catalog_prompt:
+                combined_ephemeral = (combined_ephemeral + "\n\n" + lazy_tool_catalog_prompt).strip()
 
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart).
@@ -9990,6 +10560,8 @@ class GatewayRunner:
                                 if _rval:
                                     entry[_rkey] = _rval
                         agent_history.append(entry)
+
+            agent_history = self._compact_repeated_skill_view_history(agent_history)
             
             # Collect MEDIA paths already in history so we can exclude them
             # from the current turn's extraction. This is compression-safe:
@@ -10118,23 +10690,47 @@ class GatewayRunner:
                     if _reason == "shutdown_timeout"
                     else "a gateway interruption"
                 )
-                message = (
-                    f"[System note: Your previous turn in this session was interrupted "
-                    f"by {_reason_phrase}. The conversation history below is intact. "
-                    f"If it contains unfinished tool result(s), process them first and "
-                    f"summarize what was accomplished, then address the user's new "
-                    f"message below.]\n\n"
-                    + message
-                )
+                if _is_busy_status_query(message):
+                    message = (
+                        f"[System note: Your previous turn in this session was interrupted "
+                        f"by {_reason_phrase}, and the user's new message is asking for "
+                        f"status/debug rather than asking to continue the work. Do not "
+                        f"rerun tools or repeat the previous command. Summarize what the "
+                        f"last visible tool result showed, explain that the prior turn "
+                        f"was interrupted before a final summary, then answer the user's "
+                        f"status question.]\n\n"
+                        + message
+                    )
+                else:
+                    message = (
+                        f"[System note: Your previous turn in this session was interrupted "
+                        f"by {_reason_phrase}. The conversation history below is intact. "
+                        f"If it contains unfinished tool result(s), process them first and "
+                        f"summarize what was accomplished, then address the user's new "
+                        f"message below.]\n\n"
+                        + message
+                    )
             elif agent_history and agent_history[-1].get("role") == "tool":
-                message = (
-                    "[System note: Your previous turn was interrupted before you could "
-                    "process the last tool result(s). The conversation history contains "
-                    "tool outputs you haven't responded to yet. Please finish processing "
-                    "those results and summarize what was accomplished, then address the "
-                    "user's new message below.]\n\n"
-                    + message
-                )
+                if _is_busy_status_query(message):
+                    message = (
+                        "[System note: Your previous turn was interrupted before you could "
+                        "process the last tool result(s), and the user's new message is "
+                        "asking for status/debug rather than asking to continue the work. "
+                        "Do not rerun tools or repeat the previous command. Summarize what "
+                        "the last visible tool result showed, explain that the prior turn "
+                        "was interrupted before a final summary, then answer the user's "
+                        "status question.]\n\n"
+                        + message
+                    )
+                else:
+                    message = (
+                        "[System note: Your previous turn was interrupted before you could "
+                        "process the last tool result(s). The conversation history contains "
+                        "tool outputs you haven't responded to yet. Please finish processing "
+                        "those results and summarize what was accomplished, then address the "
+                        "user's new message below.]\n\n"
+                        + message
+                    )
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
@@ -10891,6 +11487,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
 
     IMAGE_CACHE_EVERY = 60   # ticks — once per hour at default 60s interval
     CHANNEL_DIR_EVERY = 5    # ticks — every 5 minutes
+    MEMORY_MAINTENANCE_EVERY = 15  # ticks — every 15 minutes
 
     logger.info("Cron ticker started (interval=%ds)", interval)
     tick_count = 0
@@ -10908,6 +11505,21 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
                 build_channel_directory(adapters)
             except Exception as e:
                 logger.debug("Channel directory refresh error: %s", e)
+
+        if tick_count == 1 or tick_count % MEMORY_MAINTENANCE_EVERY == 0:
+            try:
+                from elevate_cli.memory_maintenance import run_due_daily_memory_maintenance
+
+                result = run_due_daily_memory_maintenance()
+                if result.get("ran"):
+                    logger.info(
+                        "Daily memory maintenance organized %s turn(s), promoted %s fact(s), pending=%s",
+                        result.get("processed", 0),
+                        result.get("promoted", 0),
+                        result.get("pending", 0),
+                    )
+            except Exception as e:
+                logger.debug("Daily memory maintenance error: %s", e)
 
         if tick_count % IMAGE_CACHE_EVERY == 0:
             try:

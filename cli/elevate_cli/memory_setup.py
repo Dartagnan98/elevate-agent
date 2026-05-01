@@ -8,6 +8,7 @@ the provider's config schema. Writes config to config.yaml + .env.
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import sys
 from pathlib import Path
@@ -384,6 +385,54 @@ def _write_env_vars(env_path: Path, env_writes: dict) -> None:
 # Status
 # ---------------------------------------------------------------------------
 
+def _print_holographic_journal_status(config: dict) -> None:
+    """Show local journal backlog for the bundled holographic provider."""
+    try:
+        from plugins.memory.holographic.store import MemoryStore
+    except Exception as exc:
+        print(f"\n  Turn journal: unavailable ({exc})")
+        return
+
+    elevate_home = str(get_elevate_home())
+    plugin_config = (config.get("plugins") or {}).get("elevate-memory-store") or {}
+    db_path = str(plugin_config.get("db_path") or f"{elevate_home}/memory_store.db")
+    db_path = db_path.replace("$ELEVATE_HOME", elevate_home)
+    db_path = db_path.replace("${ELEVATE_HOME}", elevate_home)
+
+    try:
+        store = MemoryStore(db_path=db_path)
+        status = store.journal_status()
+        store.close()
+    except Exception as exc:
+        print(f"\n  Turn journal: unavailable ({exc})")
+        return
+
+    print("\n  Turn journal:")
+    print(
+        f"    Turns: {status['total']} total, "
+        f"{status['pending']} pending, {status['processed']} processed"
+    )
+    print(
+        f"    Active sessions: {status['active_session_count']} "
+        f"({status['session_segment_count']} session/day segments)"
+    )
+
+    sessions = status.get("sessions") or []
+    if not sessions:
+        return
+    print("    Recent segments:")
+    for segment in sessions[:8]:
+        latest = segment.get("latest_created_at") or "unknown"
+        print(
+            "      - "
+            f"{segment.get('session_id') or '(none)'} @ {segment.get('session_day')}: "
+            f"{segment.get('total')} total, {segment.get('pending')} pending, "
+            f"{segment.get('processed')} processed, latest {latest}"
+        )
+    if len(sessions) > 8:
+        print(f"      ... {len(sessions) - 8} more")
+
+
 def cmd_status(args) -> None:
     """Show current memory provider config."""
     from elevate_cli.config import load_config
@@ -411,6 +460,8 @@ def cmd_status(args) -> None:
                 if pname == provider_name:
                     if p.is_available():
                         print(f"  Status:    available ✓")
+                        if provider_name == "holographic":
+                            _print_holographic_journal_status(config)
                     else:
                         print(f"  Status:    not available ✗")
                         schema = p.get_config_schema() if hasattr(p, "get_config_schema") else []
@@ -442,6 +493,60 @@ def cmd_status(args) -> None:
     print()
 
 
+def _print_organize_result(title: str, result: dict, *, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    print(f"\n{title}\n" + "─" * 40)
+    if not result.get("ran"):
+        print(f"  Skipped: {result.get('reason', 'not due')}")
+        if result.get("target_day"):
+            print(f"  Target day: {result['target_day']}")
+        print()
+        return
+
+    print(f"  Processed turns: {result.get('processed', 0)}")
+    print(f"  Promoted facts:   {result.get('promoted', 0)}")
+    print(f"  Pending turns:    {result.get('pending', 0)}")
+    print(f"  Batches:          {result.get('batches', 0)}")
+    if result.get("target_day"):
+        print(f"  Target day:       {result['target_day']}")
+    if result.get("limited"):
+        print("  Note: daily batch cap was reached; pending turns remain.")
+    print()
+
+
+def cmd_organize(args) -> None:
+    """Organize pending holographic turn-journal entries now."""
+    from elevate_cli.memory_maintenance import organize_holographic_journal
+
+    result = organize_holographic_journal(
+        session_id=getattr(args, "session_id", None),
+        session_day=getattr(args, "session_day", None),
+        limit=getattr(args, "limit", None),
+        drain=getattr(args, "drain", False),
+        max_batches=getattr(args, "max_batches", None),
+    )
+    _print_organize_result(
+        "Memory journal organization",
+        result,
+        as_json=getattr(args, "json", False),
+    )
+
+
+def cmd_daily(args) -> None:
+    """Run the due daily holographic journal organization pass."""
+    from elevate_cli.memory_maintenance import run_due_daily_memory_maintenance
+
+    result = run_due_daily_memory_maintenance(force=getattr(args, "force", False))
+    _print_organize_result(
+        "Daily memory maintenance",
+        result,
+        as_json=getattr(args, "json", False),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -453,5 +558,9 @@ def memory_command(args) -> None:
         cmd_setup(args)
     elif sub == "status":
         cmd_status(args)
+    elif sub == "organize":
+        cmd_organize(args)
+    elif sub == "daily":
+        cmd_daily(args)
     else:
         cmd_status(args)

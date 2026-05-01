@@ -10,6 +10,12 @@ Config in $ELEVATE_HOME/config.yaml (profile-scoped):
     elevate-memory-store:
       db_path: $ELEVATE_HOME/memory_store.db   # omit to use the default
       auto_extract: false
+      turn_journal_enabled: true
+      organize_on_session_end: true
+      organize_every_n_turns: 0
+      daily_organize_enabled: true
+      daily_organize_hour: 23
+      daily_organize_minute: 55
       default_trust: 0.5
       min_trust_threshold: 0.3
       temporal_decay_half_life: 0
@@ -24,6 +30,7 @@ from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+from .embeddings import EmbeddingError, build_embedding_client, parse_bool
 from .store import MemoryStore
 from .retrieval import FactRetriever
 
@@ -47,6 +54,13 @@ FACT_STORE_SCHEMA = {
         "• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n"
+        "• embedding_status — Inspect semantic embedding index health.\n"
+        "• embedding_backfill — Build missing semantic embeddings.\n"
+        "• journal_status — Inspect the local turn-journal backlog.\n"
+        "• organize_journal — Promote pending turn notes into durable facts.\n"
+        "• recent — Recall recent session turns from the local journal.\n"
+        "• wiki — Open an entity page with facts and backlinks.\n"
+        "• layered_recall — Return the same routed memory lanes used by prefetch.\n"
         "• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
@@ -55,18 +69,59 @@ FACT_STORE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
+                "enum": [
+                    "add",
+                    "search",
+                    "probe",
+                    "related",
+                    "reason",
+                    "contradict",
+                    "embedding_status",
+                    "embedding_backfill",
+                    "journal_status",
+                    "organize_journal",
+                    "recent",
+                    "wiki",
+                    "layered_recall",
+                    "update",
+                    "remove",
+                    "list",
+                ],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
             "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
-            "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general"]},
+            "category": {
+                "type": "string",
+                "enum": [
+                    "user_pref",
+                    "project",
+                    "tool",
+                    "general",
+                    "contact",
+                    "lead",
+                    "client",
+                    "vendor",
+                    "property",
+                    "deal",
+                    "listing",
+                    "buyer_need",
+                    "showing",
+                    "transaction",
+                    "task",
+                    "market",
+                    "follow_up",
+                ],
+            },
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
             "min_trust": {"type": "number", "description": "Minimum trust filter (default: 0.3)."},
             "limit": {"type": "integer", "description": "Max results (default: 10)."},
+            "session_id": {"type": "string", "description": "Optional session scope for journal actions."},
+            "session_day": {"type": "string", "description": "Optional YYYY-MM-DD day scope for journal actions."},
+            "include_assistant": {"type": "boolean", "description": "Include assistant side for recent turn recall."},
         },
         "required": ["action"],
     },
@@ -107,6 +162,14 @@ def _load_plugin_config() -> dict:
         return {}
 
 
+def _parse_int(value: object, default: int, *, minimum: int = 0) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, parsed)
+
+
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
@@ -119,6 +182,65 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
+        self._embedding_error = ""
+        self._session_id = ""
+        self._auto_extract = parse_bool(self._config.get("auto_extract"), default=False)
+        self._turn_journal_enabled = parse_bool(
+            self._config.get("turn_journal_enabled"),
+            default=True,
+        )
+        self._organize_on_session_end = parse_bool(
+            self._config.get("organize_on_session_end"),
+            default=True,
+        )
+        self._organize_every_n_turns = _parse_int(
+            self._config.get("organize_every_n_turns"),
+            0,
+            minimum=0,
+        )
+        self._turn_journal_max_chars = _parse_int(
+            self._config.get("turn_journal_max_chars"),
+            8000,
+            minimum=1000,
+        )
+        self._organize_batch_limit = _parse_int(
+            self._config.get("organize_batch_limit"),
+            20,
+            minimum=1,
+        )
+        self._layered_prefetch_enabled = parse_bool(
+            self._config.get("layered_prefetch_enabled"),
+            default=True,
+        )
+        self._recent_recall_enabled = parse_bool(
+            self._config.get("recent_recall_enabled"),
+            default=True,
+        )
+        self._graph_recall_enabled = parse_bool(
+            self._config.get("graph_recall_enabled"),
+            default=True,
+        )
+        self._recent_recall_limit = _parse_int(
+            self._config.get("recent_recall_limit"),
+            4,
+            minimum=1,
+        )
+        self._durable_recall_limit = _parse_int(
+            self._config.get("durable_recall_limit"),
+            4,
+            minimum=1,
+        )
+        self._graph_recall_limit = _parse_int(
+            self._config.get("graph_recall_limit"),
+            2,
+            minimum=1,
+        )
+        self._recent_turn_max_chars = _parse_int(
+            self._config.get("recent_turn_max_chars"),
+            240,
+            minimum=80,
+        )
+        self._turns_since_organize = 0
 
     @property
     def name(self) -> str:
@@ -150,8 +272,30 @@ class HolographicMemoryProvider(MemoryProvider):
         return [
             {"key": "db_path", "description": "SQLite database path", "default": _default_db},
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
+            {"key": "turn_journal_enabled", "description": "Record completed turns locally for later memory organization", "default": "true", "choices": ["true", "false"]},
+            {"key": "organize_on_session_end", "description": "Organize pending turn-journal entries when a session ends", "default": "true", "choices": ["true", "false"]},
+            {"key": "organize_every_n_turns", "description": "Also organize pending journal entries every N completed turns (0 disables)", "default": "0"},
+            {"key": "daily_organize_enabled", "description": "Gateway runs a local daily journal organization pass even if sessions stay open", "default": "true", "choices": ["true", "false"]},
+            {"key": "daily_organize_hour", "description": "Local hour for daily journal organization", "default": "23"},
+            {"key": "daily_organize_minute", "description": "Local minute for daily journal organization", "default": "55"},
+            {"key": "daily_organize_max_batches", "description": "Max organization batches in one daily pass", "default": "50"},
+            {"key": "turn_journal_max_chars", "description": "Max characters saved per user/assistant side of a turn", "default": "8000"},
+            {"key": "organize_batch_limit", "description": "Max pending turns to organize in one pass", "default": "20"},
+            {"key": "layered_prefetch_enabled", "description": "Inject recent/durable/graph lanes instead of one flat memory list", "default": "true", "choices": ["true", "false"]},
+            {"key": "recent_recall_enabled", "description": "Include recent same-session journal recall", "default": "true", "choices": ["true", "false"]},
+            {"key": "graph_recall_enabled", "description": "Include wiki-style entity graph recall", "default": "true", "choices": ["true", "false"]},
+            {"key": "recent_recall_limit", "description": "Max recent turns in memory prefetch", "default": "4"},
+            {"key": "durable_recall_limit", "description": "Max durable facts in memory prefetch", "default": "4"},
+            {"key": "graph_recall_limit", "description": "Max entity wiki pages in memory prefetch", "default": "2"},
+            {"key": "recent_turn_max_chars", "description": "Max characters per recent turn in prefetch", "default": "240"},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
+            {"key": "embedding_enabled", "description": "Enable semantic embeddings", "default": "false", "choices": ["true", "false"]},
+            {"key": "embedding_provider", "description": "Embedding backend", "default": "openai", "choices": ["openai", "ollama", "openai_compatible"]},
+            {"key": "embedding_model", "description": "Embedding model name", "default": "text-embedding-3-small"},
+            {"key": "embedding_dimensions", "description": "Optional vector dimensions override", "default": ""},
+            {"key": "embedding_base_url", "description": "Optional provider base URL", "default": ""},
+            {"key": "embedding_api_key_env", "description": "API key environment variable", "default": "OPENAI_API_KEY"},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -168,13 +312,29 @@ class HolographicMemoryProvider(MemoryProvider):
         default_trust = float(self._config.get("default_trust", 0.5))
         hrr_dim = int(self._config.get("hrr_dim", 1024))
         hrr_weight = float(self._config.get("hrr_weight", 0.3))
+        embedding_weight = float(self._config.get("embedding_weight", 0.35))
         temporal_decay = int(self._config.get("temporal_decay_half_life", 0))
 
-        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, hrr_dim=hrr_dim)
+        embedding_client = None
+        self._embedding_error = ""
+        if parse_bool(self._config.get("embedding_enabled"), default=False):
+            try:
+                embedding_client = build_embedding_client(self._config)
+            except EmbeddingError as exc:
+                self._embedding_error = str(exc)
+                logger.warning("Embedding provider unavailable: %s", exc)
+
+        self._store = MemoryStore(
+            db_path=db_path,
+            default_trust=default_trust,
+            hrr_dim=hrr_dim,
+            embedding_client=embedding_client,
+        )
         self._retriever = FactRetriever(
             store=self._store,
             temporal_decay_half_life=temporal_decay,
             hrr_weight=hrr_weight,
+            embedding_weight=embedding_weight if embedding_client else 0.0,
             hrr_dim=hrr_dim,
         )
         self._session_id = session_id
@@ -188,16 +348,27 @@ class HolographicMemoryProvider(MemoryProvider):
             ).fetchone()[0]
         except Exception:
             total = 0
+        embedding_note = ""
+        try:
+            emb = self._store.embedding_status()
+            if emb.get("enabled"):
+                embedding_note = (
+                    f" Semantic embeddings active via {emb.get('provider')}:{emb.get('model')}."
+                )
+            elif self._embedding_error:
+                embedding_note = f" Semantic embeddings configured but unavailable: {self._embedding_error}."
+        except Exception:
+            pass
         if total == 0:
             return (
-                "# Holographic Memory\n"
-                "Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
+                "# Elevate Memory Core\n"
+                f"Active. Empty fact store.{embedding_note} Proactively add facts the user would expect you to remember.\n"
                 "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
                 "Use fact_feedback to rate facts after using them (trains trust scores)."
             )
         return (
-            f"# Holographic Memory\n"
-            f"Active. {total} facts stored with entity resolution and trust scoring.\n"
+            f"# Elevate Memory Core\n"
+            f"Active. {total} facts stored with entity resolution, trust scoring, and hybrid retrieval.{embedding_note}\n"
             f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
             f"Use fact_feedback to rate facts after using them (trains trust scores)."
         )
@@ -206,22 +377,54 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
+            if self._layered_prefetch_enabled:
+                return self._build_layered_context(query, session_id=session_id)
+
+            results = self._retriever.search(
+                query,
+                min_trust=self._min_trust,
+                limit=self._durable_recall_limit,
+            )
             if not results:
                 return ""
             lines = []
             for r in results:
                 trust = r.get("trust_score", r.get("trust", 0))
                 lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
-            return "## Holographic Memory\n" + "\n".join(lines)
+            return "## Elevate Memory Core\n" + "\n".join(lines)
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        # Holographic memory stores explicit facts via tools, not auto-sync.
-        # The on_session_end hook handles auto-extraction if configured.
-        pass
+        if not self._store or not self._turn_journal_enabled:
+            return
+        turn_session_id = session_id or self._session_id or ""
+        try:
+            self._store.record_turn(
+                turn_session_id,
+                user_content,
+                assistant_content,
+                max_chars=self._turn_journal_max_chars,
+            )
+        except Exception as exc:
+            logger.debug("Holographic turn journal write failed: %s", exc)
+            return
+
+        if self._organize_every_n_turns <= 0:
+            return
+        self._turns_since_organize += 1
+        if self._turns_since_organize < self._organize_every_n_turns:
+            return
+
+        self._turns_since_organize = 0
+        try:
+            self._organize_journal(
+                session_id=turn_session_id,
+                limit=self._organize_batch_limit,
+            )
+        except Exception as exc:
+            logger.debug("Holographic turn journal organization failed: %s", exc)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
@@ -234,11 +437,15 @@ class HolographicMemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        if not self._config.get("auto_extract", False):
+        if not self._store:
             return
-        if not self._store or not messages:
-            return
-        self._auto_extract_facts(messages)
+        if self._auto_extract and messages:
+            self._auto_extract_facts(messages)
+        if self._turn_journal_enabled and self._organize_on_session_end:
+            self._organize_journal(
+                session_id=self._session_id,
+                limit=self._organize_batch_limit,
+            )
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes as facts."""
@@ -250,6 +457,11 @@ class HolographicMemoryProvider(MemoryProvider):
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
+        if self._store:
+            try:
+                self._store.close()
+            except Exception:
+                pass
         self._store = None
         self._retriever = None
 
@@ -312,6 +524,57 @@ class HolographicMemoryProvider(MemoryProvider):
                 )
                 return json.dumps({"results": results, "count": len(results)})
 
+            elif action == "embedding_status":
+                return json.dumps(store.embedding_status())
+
+            elif action == "embedding_backfill":
+                limit = args.get("limit")
+                result = store.backfill_embeddings(
+                    limit=int(limit) if limit is not None else None,
+                )
+                return json.dumps(result)
+
+            elif action == "journal_status":
+                return json.dumps(
+                    store.journal_status(
+                        session_id=args.get("session_id"),
+                        session_day=args.get("session_day"),
+                    )
+                )
+
+            elif action == "organize_journal":
+                result = self._organize_journal(
+                    session_id=args.get("session_id"),
+                    session_day=args.get("session_day"),
+                    limit=int(args["limit"]) if args.get("limit") is not None else None,
+                )
+                return json.dumps(result)
+
+            elif action == "recent":
+                turns = store.recent_turns(
+                    session_id=args.get("session_id") or self._session_id,
+                    session_day=args.get("session_day"),
+                    query=args.get("query"),
+                    limit=int(args.get("limit", self._recent_recall_limit)),
+                    include_assistant=bool(args.get("include_assistant", False)),
+                )
+                return json.dumps({"turns": turns, "count": len(turns)})
+
+            elif action == "wiki":
+                result = store.entity_wiki(
+                    args.get("entity") or args.get("query") or "",
+                    limit=int(args.get("limit", 8)),
+                )
+                return json.dumps(result)
+
+            elif action == "layered_recall":
+                query = args.get("query") or args.get("content") or ""
+                context = self._build_layered_context(
+                    query,
+                    session_id=args.get("session_id") or self._session_id,
+                )
+                return json.dumps({"context": context, "empty": not bool(context.strip())})
+
             elif action == "update":
                 updated = store.update_fact(
                     int(args["fact_id"]),
@@ -353,47 +616,265 @@ class HolographicMemoryProvider(MemoryProvider):
         except Exception as exc:
             return tool_error(str(exc))
 
-    # -- Auto-extraction (on_session_end) ------------------------------------
+    # -- Layered recall ------------------------------------------------------
+
+    def _build_layered_context(self, query: str, *, session_id: str = "") -> str:
+        if not self._store or not self._retriever:
+            return ""
+
+        sections: list[str] = []
+
+        if self._recent_recall_enabled:
+            recent = self._store.recent_turns(
+                session_id=session_id or self._session_id,
+                query=query,
+                limit=self._recent_recall_limit,
+                include_assistant=False,
+            )
+            if recent:
+                lines = []
+                for turn in recent:
+                    text = self._clip(turn.get("user_content", ""), self._recent_turn_max_chars)
+                    lines.append(
+                        f"- ({turn.get('session_day')}, {turn.get('session_id')}) {text}"
+                    )
+                sections.append("### Recent Session\n" + "\n".join(lines))
+
+        durable = self._retriever.search(
+            query,
+            min_trust=self._min_trust,
+            limit=self._durable_recall_limit,
+        )
+        if durable:
+            lines = []
+            for fact in durable:
+                trust = float(fact.get("trust_score", fact.get("trust", 0.0)) or 0.0)
+                category = fact.get("category", "general")
+                lines.append(
+                    f"- [{category} trust={trust:.2f}] {self._clip(fact.get('content', ''), 320)}"
+                )
+            sections.append("### Durable + Semantic\n" + "\n".join(lines))
+
+        if self._graph_recall_enabled:
+            graph_lines = []
+            for entity in self._store.entity_candidates(query, limit=self._graph_recall_limit):
+                wiki = self._store.entity_wiki(entity, limit=3)
+                if not wiki.get("exists"):
+                    continue
+                related = ", ".join(
+                    rel["wiki_link"] for rel in wiki.get("related_entities", [])[:4]
+                )
+                fact_bits = [
+                    self._clip(f.get("content", ""), 180)
+                    for f in wiki.get("facts", [])[:2]
+                ]
+                suffix = f" Related: {related}." if related else ""
+                graph_lines.append(
+                    f"- {wiki.get('wiki_link')}: {'; '.join(fact_bits)}.{suffix}"
+                )
+            if graph_lines:
+                sections.append("### Graph Wiki\n" + "\n".join(graph_lines))
+
+        if not sections:
+            return ""
+        return "## Elevate Memory Core\n" + "\n\n".join(sections)
+
+    # -- Turn-journal organization / auto-extraction -------------------------
+
+    def _organize_journal(
+        self,
+        session_id: str | None = None,
+        session_day: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        if not self._store:
+            return {"processed": 0, "promoted": 0, "pending": 0}
+
+        scoped_session = session_id or None
+        scoped_day = session_day or None
+        batch_limit = limit if limit is not None else self._organize_batch_limit
+        rows = self._store.pending_turns(
+            session_id=scoped_session,
+            session_day=scoped_day,
+            limit=batch_limit,
+        )
+        processed = 0
+        promoted = 0
+
+        for row in rows:
+            row_promoted = 0
+            for fact in self._extract_fact_candidates(row.get("user_content", "")):
+                try:
+                    self._store.add_fact(
+                        fact["content"],
+                        category=fact["category"],
+                        tags=fact["tags"],
+                    )
+                    row_promoted += 1
+                except Exception as exc:
+                    logger.debug("Journal fact promotion failed: %s", exc)
+            try:
+                self._store.mark_turn_processed(row["turn_id"], row_promoted)
+            except Exception as exc:
+                logger.debug("Journal mark-processed failed: %s", exc)
+            processed += 1
+            promoted += row_promoted
+
+        status = self._store.journal_status(
+            session_id=scoped_session,
+            session_day=scoped_day,
+        )
+        return {
+            "processed": processed,
+            "promoted": promoted,
+            "pending": status.get("pending", 0),
+            "total": status.get("total", 0),
+        }
 
     def _auto_extract_facts(self, messages: list) -> None:
-        _PREF_PATTERNS = [
-            re.compile(r'\bI\s+(?:prefer|like|love|use|want|need)\s+(.+)', re.IGNORECASE),
-            re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+)', re.IGNORECASE),
-            re.compile(r'\bI\s+(?:always|never|usually)\s+(.+)', re.IGNORECASE),
-        ]
-        _DECISION_PATTERNS = [
-            re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+)', re.IGNORECASE),
-            re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)', re.IGNORECASE),
-        ]
-
         extracted = 0
         for msg in messages:
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")
-            if not isinstance(content, str) or len(content) < 10:
-                continue
-
-            for pattern in _PREF_PATTERNS:
-                if pattern.search(content):
-                    try:
-                        self._store.add_fact(content[:400], category="user_pref")
-                        extracted += 1
-                    except Exception:
-                        pass
-                    break
-
-            for pattern in _DECISION_PATTERNS:
-                if pattern.search(content):
-                    try:
-                        self._store.add_fact(content[:400], category="project")
-                        extracted += 1
-                    except Exception:
-                        pass
-                    break
+            for fact in self._extract_fact_candidates(content):
+                try:
+                    self._store.add_fact(
+                        fact["content"],
+                        category=fact["category"],
+                        tags=fact["tags"],
+                    )
+                    extracted += 1
+                except Exception:
+                    pass
 
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
+
+    def _extract_fact_candidates(self, content: str) -> list[dict]:
+        if not isinstance(content, str) or len(content.strip()) < 10:
+            return []
+
+        text = " ".join(content.strip().split())
+        candidates: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(raw: str, category: str, tags: str) -> None:
+            fact = self._clean_fact_text(raw)
+            if len(fact) < 8:
+                return
+            key = (fact.lower(), category)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append({
+                "content": fact,
+                "category": category,
+                "tags": tags,
+            })
+
+        sentence_end = r"(?:[.!?](?:\s|$)|$)"
+        explicit_patterns = [
+            re.compile(
+                rf"\b(?:remember(?: this| that)?|note(?: this)?|save this|store this)"
+                rf"(?:\s+for\s+later)?\s*[:\-]\s*(.+?){sentence_end}",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                rf"\bremember\s+(?!(?:this|that)\s*:)(?:this\s+|that\s+)?(.+?){sentence_end}",
+                re.IGNORECASE,
+            ),
+        ]
+        for pattern in explicit_patterns:
+            for match in pattern.finditer(text):
+                add(match.group(1), "general", "auto,journal,explicit")
+
+        preference_verbs = {
+            "prefer": "prefers",
+            "like": "likes",
+            "love": "loves",
+            "use": "uses",
+            "want": "wants",
+            "need": "needs",
+        }
+        pref_pattern = re.compile(
+            rf"\bI\s+(prefer|like|love|use|want|need)\s+(.+?){sentence_end}",
+            re.IGNORECASE,
+        )
+        for match in pref_pattern.finditer(text):
+            verb = preference_verbs.get(match.group(1).lower(), match.group(1).lower())
+            add(f"User {verb} {match.group(2)}", "user_pref", "auto,journal,preference")
+
+        my_pattern = re.compile(
+            rf"\bmy\s+(favorite|preferred|default)\s+(.+?)\s+is\s+(.+?){sentence_end}",
+            re.IGNORECASE,
+        )
+        for match in my_pattern.finditer(text):
+            add(
+                f"User's {match.group(1).lower()} {match.group(2)} is {match.group(3)}",
+                "user_pref",
+                "auto,journal,preference",
+            )
+
+        habit_pattern = re.compile(
+            rf"\bI\s+(always|never|usually)\s+(.+?){sentence_end}",
+            re.IGNORECASE,
+        )
+        for match in habit_pattern.finditer(text):
+            add(
+                f"User {match.group(1).lower()} {match.group(2)}",
+                "user_pref",
+                "auto,journal,preference",
+            )
+
+        decision_pattern = re.compile(
+            rf"\bwe\s+(decided|agreed|chose)\s+(?:to\s+)?(.+?){sentence_end}",
+            re.IGNORECASE,
+        )
+        for match in decision_pattern.finditer(text):
+            add(
+                f"Project decision: we {match.group(1).lower()} to {match.group(2)}",
+                "project",
+                "auto,journal,decision",
+            )
+
+        project_pattern = re.compile(
+            rf"\bthe\s+project\s+(uses|needs|requires)\s+(.+?){sentence_end}",
+            re.IGNORECASE,
+        )
+        for match in project_pattern.finditer(text):
+            add(
+                f"Project {match.group(1).lower()} {match.group(2)}",
+                "project",
+                "auto,journal,project",
+            )
+
+        agent_pattern = re.compile(
+            rf"\b(?:this|the|elevate)\s+agent\s+(uses|needs|requires|should)\s+(.+?){sentence_end}",
+            re.IGNORECASE,
+        )
+        for match in agent_pattern.finditer(text):
+            add(
+                f"Elevate agent {match.group(1).lower()} {match.group(2)}",
+                "project",
+                "auto,journal,agent",
+            )
+
+        return candidates
+
+    @staticmethod
+    def _clean_fact_text(text: str, max_chars: int = 400) -> str:
+        cleaned = " ".join(str(text or "").strip().strip("\"'` ").split())
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[:max_chars].rstrip() + "..."
+
+    @staticmethod
+    def _clip(text: str, max_chars: int) -> str:
+        clean = " ".join(str(text or "").strip().split())
+        if len(clean) <= max_chars:
+            return clean
+        return clean[:max_chars].rstrip() + "..."
 
 
 # ---------------------------------------------------------------------------

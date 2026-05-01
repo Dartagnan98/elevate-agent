@@ -18,6 +18,7 @@ import {
   Activity,
   BarChart3,
   BookOpen,
+  Bot,
   Clock,
   Code,
   Database,
@@ -59,6 +60,7 @@ import AnalyticsPage from "@/pages/AnalyticsPage";
 import CronPage from "@/pages/CronPage";
 import SkillsPage from "@/pages/SkillsPage";
 import ChatPage from "@/pages/ChatPage";
+import AgentHubPage from "@/pages/AgentHubPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -68,7 +70,7 @@ import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 
 function RootRedirect() {
-  return <Navigate to="/sessions" replace />;
+  return <Navigate to="/hub" replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -81,6 +83,7 @@ const CHAT_NAV_ITEM: NavItem = {
 /** Built-in routes except /chat (only with `elevate dashboard --tui`). */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
+  "/hub": AgentHubPage,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
   "/logs": LogsPage,
@@ -92,6 +95,11 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
 };
 
 const BUILTIN_NAV_REST: NavItem[] = [
+  {
+    path: "/hub",
+    label: "Agent Hub",
+    icon: Bot,
+  },
   {
     path: "/sessions",
     labelKey: "sessions",
@@ -512,10 +520,7 @@ export default function App() {
                   {routes.map(({ key, path, element }) => (
                     <Route key={key} path={path} element={element} />
                   ))}
-                  <Route
-                    path="*"
-                    element={<Navigate to="/sessions" replace />}
-                  />
+                  <Route path="*" element={<Navigate to="/hub" replace />} />
                 </Routes>
               </div>
               <PluginSlot name="post-main" />

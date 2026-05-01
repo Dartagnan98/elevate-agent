@@ -347,6 +347,14 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     # Respect user's disabled skills config
                     if name in disabled:
                         continue
+                    try:
+                        from elevate_cli.access import evaluate_skill_access
+
+                        access_decision = evaluate_skill_access(frontmatter)
+                        if not access_decision.allowed:
+                            continue
+                    except Exception:
+                        pass
                     description = frontmatter.get('description', '')
                     if not description:
                         for line in body.strip().split('\n'):

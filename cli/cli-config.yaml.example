@@ -494,6 +494,37 @@ skills:
   #   - /home/shared/team-skills
 
 # =============================================================================
+# Access Profile / Premium Skill Gates (optional)
+# =============================================================================
+# Core Elevate stays local and available. Premium skills can require an
+# entitlement in SKILL.md frontmatter, for example:
+#   access:
+#     entitlement: skyleigh_team_pack
+# Leave this unset for normal installs while premium skill packs are still being
+# built. Missing access config behaves as standalone core with premium packs
+# locked until explicitly unlocked.
+#
+# access:
+#   # standalone | exp | skyleigh_downline
+#   profile: standalone
+#   offline_grace_days: 14
+#   affiliation:
+#     brokerage: ""
+#     team: ""
+#     status: active
+#   entitlements:
+#     elevate_core:
+#       status: active
+#       owned_snapshot: true
+#     exp_agent_pack:
+#       status: locked
+#       owned_snapshot: false
+#     skyleigh_team_pack:
+#       status: locked
+#       owned_snapshot: false
+#       requires_active_affiliation: true
+
+# =============================================================================
 # Agent Behavior
 # =============================================================================
 agent:

@@ -12,9 +12,11 @@ Run with:  python -m pytest tests/test_delegate.py -v
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tools.delegate_tool import (
@@ -29,6 +31,11 @@ from tools.delegate_tool import (
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
+    _agent_job_profile,
+    _build_handoff_packet,
+    _context_with_handoff_packet,
+    _handoff_route_error,
+    _start_orchestration_run,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -1505,6 +1512,32 @@ class TestDelegationReasoningEffort(unittest.TestCase):
 class TestDispatchDelegateTask(unittest.TestCase):
     """Tests for the _dispatch_delegate_task helper and full param forwarding."""
 
+    @patch("tools.delegate_tool.delegate_task", return_value='{"results": []}')
+    def test_agent_id_forwarded_from_run_agent_dispatch(self, mock_delegate):
+        """Top-level agent_id reaches delegate_task via the central dispatch helper."""
+        from run_agent import AIAgent
+
+        parent = _make_mock_parent(depth=0)
+        result = AIAgent._dispatch_delegate_task(parent, {
+            "goal": "prepare listing campaign",
+            "agent_id": "marketing",
+            "expected_return": "draft campaign outline",
+            "handoff_reason": "marketing owns campaign strategy",
+            "priority": "high",
+            "artifacts": ["listing-123"],
+            "parent_run_id": "run-parent",
+        })
+
+        self.assertEqual(result, '{"results": []}')
+        _, kwargs = mock_delegate.call_args
+        self.assertEqual(kwargs["agent_id"], "marketing")
+        self.assertEqual(kwargs["expected_return"], "draft campaign outline")
+        self.assertEqual(kwargs["handoff_reason"], "marketing owns campaign strategy")
+        self.assertEqual(kwargs["priority"], "high")
+        self.assertEqual(kwargs["artifacts"], ["listing-123"])
+        self.assertEqual(kwargs["parent_run_id"], "run-parent")
+        self.assertIs(kwargs["parent_agent"], parent)
+
     @patch("tools.delegate_tool._load_config", return_value={})
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     def test_acp_args_forwarded(self, mock_creds, mock_cfg):
@@ -1800,9 +1833,170 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
         props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
         self.assertIn("role", props)
         self.assertEqual(props["role"]["enum"], ["leaf", "orchestrator"])
+        self.assertIn("agent_id", props)
+        self.assertIn("expected_return", props)
+        self.assertIn("handoff_reason", props)
+        self.assertIn("priority", props)
+        self.assertIn("artifacts", props)
         task_props = props["tasks"]["items"]["properties"]
         self.assertIn("role", task_props)
         self.assertEqual(task_props["role"]["enum"], ["leaf", "orchestrator"])
+        self.assertIn("agent_id", task_props)
+        self.assertIn("expected_return", task_props)
+        self.assertIn("handoff_reason", task_props)
+        self.assertIn("priority", task_props)
+        self.assertIn("artifacts", task_props)
+
+    def test_orchestration_run_records_parent_run_id(self):
+        """Nested visible handoffs are linked to the parent run, not just session text."""
+        store = MagicMock()
+        store.create_run.return_value = {"run_id": "child-run"}
+        child = MagicMock()
+        child._subagent_id = "child-run"
+        child._orchestration_agent_id = "admin"
+        child._delegate_role = "leaf"
+        child._parent_subagent_id = "parent-subagent"
+        child.session_id = "child-session"
+        parent = MagicMock()
+        parent.session_id = "parent-session"
+        parent._orchestration_run_id = "parent-run"
+
+        with patch("tools.delegate_tool._orchestration_store_or_none", return_value=store):
+            _start_orchestration_run(child, parent, task_index=0, goal="prep checklist")
+
+        _, kwargs = store.create_run.call_args
+        self.assertEqual(kwargs["agent_id"], "admin")
+        self.assertEqual(kwargs["parent_run_id"], "parent-run")
+        self.assertEqual(kwargs["parent_session_key"], "parent-session")
+
+    def test_handoff_packet_context_is_tight_and_structured(self):
+        target_profile = _agent_job_profile("admin")
+        packet = _build_handoff_packet(
+            source_agent_id="outreach",
+            target_agent_id="admin",
+            task="Prep buyer follow-up checklist",
+            context="Buyer wants condo under 650k.",
+            expected_return="5 bullets and next action",
+            handoff_reason="Admin owns checklist ops",
+            priority="high",
+            artifacts=["lead:123"],
+            parent_run_id="run-abc",
+            target_profile=target_profile,
+        )
+        context = _context_with_handoff_packet("Buyer wants condo under 650k.", packet)
+
+        self.assertEqual(packet["from_agent"], "outreach")
+        self.assertEqual(packet["to_agent"], "admin")
+        self.assertEqual(packet["routing_label"], "Agent Routing (Admin)")
+        self.assertEqual(packet["priority"], "high")
+        self.assertIn("operations", packet["target_profile"]["job"].lower())
+        self.assertIn("HANDOFF PACKET:", context)
+        self.assertIn("TARGET AGENT JOB PROFILE:", context)
+        self.assertIn("routing_label: Agent Routing (Admin)", context)
+        self.assertIn("expected_return: 5 bullets and next action", context)
+        self.assertIn("paperwork/checklists", context)
+        self.assertIn("lead:123", context)
+        self.assertIn("Do not re-delegate unless your role is orchestrator", context)
+
+    def test_handoff_packet_uses_target_default_expected_return(self):
+        packet = _build_handoff_packet(
+            source_agent_id="marketing",
+            target_agent_id="social-media",
+            task="Turn campaign into posts",
+            context=None,
+            target_profile=_agent_job_profile("social-media"),
+        )
+
+        self.assertIn("captions/hooks", packet["expected_return"])
+
+    def test_generic_delegate_packet_does_not_show_agent_routing_label(self):
+        packet = _build_handoff_packet(
+            source_agent_id="executive-assistant",
+            target_agent_id="executive-assistant",
+            task="Do focused research",
+            context=None,
+            target_profile=_agent_job_profile("executive-assistant"),
+            visible_handoff=False,
+        )
+        context = _context_with_handoff_packet(None, packet)
+
+        self.assertFalse(packet["visible_handoff"])
+        self.assertIsNone(packet["routing_label"])
+        self.assertNotIn("routing_label:", context)
+
+    def test_visible_agent_profile_loads_local_soul_and_agents_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent_dir = root / "orgs" / "skyleigh-elevate" / "agents" / "marketing"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "IDENTITY.md").write_text("## Name\nMarketing\n", encoding="utf-8")
+            (agent_dir / "SOUL.md").write_text("# Soul\nMarketing voice and autonomy rules.", encoding="utf-8")
+            (agent_dir / "AGENTS.md").write_text("# Agent Instructions\nOwn campaigns and email.", encoding="utf-8")
+            (agent_dir / "GOALS.md").write_text("# Goals\n- Launch seller campaign", encoding="utf-8")
+            store = MagicMock()
+            store.get_agent.return_value = {
+                "agent_id": "marketing",
+                "display_name": "Marketing",
+                "role": "Campaign lane",
+                "org": "skyleigh-elevate",
+                "metadata": {},
+            }
+
+            with patch.dict(os.environ, {"ELEVATE_FRAMEWORK_ROOT": str(root)}):
+                profile = _agent_job_profile("marketing", store=store)
+            packet = _build_handoff_packet(
+                source_agent_id="executive-assistant",
+                target_agent_id="marketing",
+                task="Draft campaign",
+                context=None,
+                target_profile=profile,
+            )
+            context = _context_with_handoff_packet(None, packet)
+
+        self.assertEqual(Path(profile["local_context"]["agent_dir"]).resolve(), agent_dir.resolve())
+        self.assertIn("Marketing voice", profile["local_context"]["soul_md"])
+        self.assertIn("TARGET AGENT LOCAL CONTEXT:", context)
+        self.assertIn("## SOUL.md", context)
+        self.assertIn("## AGENTS.md", context)
+        self.assertIn("Own campaigns and email", context)
+
+    def test_marketing_job_profile_owns_email_graphics_and_social_routing(self):
+        profile = _agent_job_profile("marketing")
+        self.assertIn("marketing emails", profile["owns"])
+        self.assertIn("graphics/creative direction", profile["owns"])
+        self.assertIn("social-media routing", profile["owns"])
+
+    def test_handoff_route_blocks_builtin_unapproved_lateral_handoff(self):
+        err = _handoff_route_error(
+            source_agent_id="outreach",
+            target_agent_id="social-media",
+            explicit_target=True,
+            store=None,
+        )
+        self.assertIn("not allowed", err)
+
+    def test_social_media_cannot_route_to_admin_directly(self):
+        err = _handoff_route_error(
+            source_agent_id="social-media",
+            target_agent_id="admin",
+            explicit_target=True,
+            store=None,
+        )
+        self.assertIn("not allowed", err)
+
+    def test_handoff_route_allows_supervisor_and_known_pair(self):
+        self.assertIsNone(_handoff_route_error(
+            source_agent_id="executive-assistant",
+            target_agent_id="social-media",
+            explicit_target=True,
+            store=None,
+        ))
+        self.assertIsNone(_handoff_route_error(
+            source_agent_id="outreach",
+            target_agent_id="admin",
+            explicit_target=True,
+            store=None,
+        ))
 
 
 # Sentinel used to distinguish "role kwarg omitted" from "role=None".
