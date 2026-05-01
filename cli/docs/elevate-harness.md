@@ -18,6 +18,14 @@ No client should invent its own session, memory, cron, skill, or agent registry.
 - `/api/agent-hub` includes the harness snapshot inline.
 - Agent Hub now shows a Harness card with gateway/client posture, route labels,
   skill manifest mode, safety posture, and best/worst focused profile savings.
+- Agent orchestration snapshots include a plan graph summary: ready, blocked,
+  active, completed, dependency cycles, missing dependency IDs, and next-ready
+  run IDs.
+- Agent orchestration snapshots expose the recent durable event tail, giving
+  the dashboard a lightweight status feed without starting hidden workers.
+- Memory snapshots include a jcode-style pipeline posture: search, verify,
+  inject, and maintain states derived from the local turn journal until a live
+  memory sidecar event stream exists.
 
 ## Operating Rules
 
@@ -44,3 +52,5 @@ No client should invent its own session, memory, cron, skill, or agent registry.
    result summary, and blocker.
 5. Promote focused tool profiles from benchmark-only into live routing once the
    manifest view proves agents can still discover tools reliably.
+6. Replace the derived memory pipeline with live per-turn memory events once
+   retrieval, verification, injection, and daily maintenance all emit status.

@@ -23,7 +23,8 @@ from elevate_constants import get_elevate_home
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted", "timeout"}
-_RUN_STATUSES = {"queued", "running", *_TERMINAL_STATUSES}
+_ACTIVE_RUN_STATUSES = {"queued", "running", "blocked", "waiting_for_approval"}
+_RUN_STATUSES = {*_ACTIVE_RUN_STATUSES, *_TERMINAL_STATUSES}
 _AGENT_STATUSES = {"ready", "online", "offline", "disabled", "running", "error"}
 _UNSET = object()
 
@@ -268,6 +269,154 @@ def _row_to_event(row: sqlite3.Row) -> Dict[str, Any]:
         "type": row["type"],
         "message": row["message"],
         "data": _json_loads(row["data_json"]),
+    }
+
+
+def _run_blockers(run: Dict[str, Any]) -> list[str]:
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    values = metadata.get("blocked_by") or metadata.get("depends_on") or []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return []
+    blockers = []
+    for value in values:
+        try:
+            blockers.append(_clean_run_id(value))
+        except OrchestrationValidationError:
+            continue
+    return blockers
+
+
+def _priority_rank(run: Dict[str, Any]) -> int:
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    priority = str(metadata.get("priority") or "normal").strip().lower()
+    return {
+        "urgent": 0,
+        "p0": 0,
+        "high": 1,
+        "p1": 1,
+        "normal": 2,
+        "medium": 2,
+        "p2": 2,
+        "low": 3,
+        "p3": 3,
+    }.get(priority, 2)
+
+
+def _cycle_run_ids(items: list[dict[str, Any]]) -> list[str]:
+    run_ids = {item["run_id"] for item in items}
+    indegree = {run_id: 0 for run_id in run_ids}
+    dependents: dict[str, list[str]] = {}
+    for item in items:
+        run_id = item["run_id"]
+        for dependency in item["blocked_by"]:
+            if dependency not in run_ids:
+                continue
+            indegree[run_id] += 1
+            dependents.setdefault(dependency, []).append(run_id)
+
+    queue = [run_id for run_id, degree in indegree.items() if degree == 0]
+    visited: set[str] = set()
+    while queue:
+        run_id = queue.pop()
+        if run_id in visited:
+            continue
+        visited.add(run_id)
+        for child in dependents.get(run_id, []):
+            indegree[child] = max(0, indegree[child] - 1)
+            if indegree[child] == 0:
+                queue.append(child)
+
+    return sorted(run_id for run_id, degree in indegree.items() if degree > 0 and run_id not in visited)
+
+
+def summarize_run_plan_graph(runs: list[Dict[str, Any]], *, next_limit: int = 8) -> Dict[str, Any]:
+    """Return a dependency summary for visible orchestration runs.
+
+    Inspired by jcode's swarm plan graph summary, but kept local to Elevate's
+    existing run registry. Dependencies live in run metadata as
+    ``blocked_by``/``depends_on`` run-id arrays.
+    """
+    items = [
+        {
+            "run_id": run["run_id"],
+            "status": str(run.get("status") or "queued").lower(),
+            "blocked_by": _run_blockers(run),
+            "priority_rank": _priority_rank(run),
+        }
+        for run in runs
+        if run.get("run_id")
+    ]
+    known_ids = {item["run_id"] for item in items}
+    completed_ids = {
+        item["run_id"]
+        for item in items
+        if item["status"] == "completed"
+    }
+    cycle_ids = _cycle_run_ids(items)
+    cycle_set = set(cycle_ids)
+
+    ready_ids: list[str] = []
+    blocked_ids: list[str] = []
+    active_ids: list[str] = []
+    terminal_ids: list[str] = []
+    unresolved_dependency_ids: set[str] = set()
+    dependency_blocked_ids: set[str] = set()
+
+    for item in items:
+        run_id = item["run_id"]
+        status = item["status"]
+        missing = [dependency for dependency in item["blocked_by"] if dependency not in known_ids]
+        incomplete = [
+            dependency
+            for dependency in item["blocked_by"]
+            if dependency in known_ids and dependency not in completed_ids
+        ]
+        unresolved_dependency_ids.update(missing)
+        dependency_blocked_ids.update(incomplete)
+
+        if status == "running":
+            active_ids.append(run_id)
+        if status in _TERMINAL_STATUSES:
+            terminal_ids.append(run_id)
+
+        has_blocker = bool(missing or incomplete or run_id in cycle_set)
+        if status == "queued" and not has_blocker:
+            ready_ids.append(run_id)
+        elif status == "blocked" or (
+            status not in _TERMINAL_STATUSES
+            and status != "running"
+            and has_blocker
+        ):
+            blocked_ids.append(run_id)
+
+    ready_ids.sort()
+    blocked_ids.sort()
+    active_ids.sort()
+    completed = sorted(completed_ids)
+    terminal_ids.sort()
+    unresolved = sorted(unresolved_dependency_ids)
+    dependency_blocked = sorted(dependency_blocked_ids)
+    next_ready_ids = [
+        item["run_id"]
+        for item in sorted(
+            (item for item in items if item["run_id"] in ready_ids),
+            key=lambda item: (item["priority_rank"], item["run_id"]),
+        )[: max(1, int(next_limit or 8))]
+    ]
+
+    return {
+        "item_count": len(items),
+        "ready_run_ids": ready_ids,
+        "blocked_run_ids": blocked_ids,
+        "active_run_ids": active_ids,
+        "completed_run_ids": completed,
+        "terminal_run_ids": terminal_ids,
+        "cycle_run_ids": cycle_ids,
+        "unresolved_dependency_ids": unresolved,
+        "dependency_blocked_run_ids": dependency_blocked,
+        "next_ready_run_ids": next_ready_ids,
     }
 
 
@@ -724,15 +873,29 @@ class OrchestrationStore:
             ).fetchall()
         return [_row_to_event(row) for row in rows]
 
+    def list_recent_events(self, *, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit or 50), 500))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM orchestration_events
+                ORDER BY event_seq DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
     def snapshot(self, *, org: Optional[str] = None, run_limit: int = 50) -> Dict[str, Any]:
         agents = self.list_agents(org=org)
         runs = self.list_runs(limit=run_limit)
-        active = [run for run in runs if run["status"] in {"queued", "running"}]
+        active = [run for run in runs if run["status"] in _ACTIVE_RUN_STATUSES]
         by_agent = {agent["agent_id"]: {"active_runs": 0, "recent_runs": 0} for agent in agents}
         for run in runs:
             entry = by_agent.setdefault(run["agent_id"], {"active_runs": 0, "recent_runs": 0})
             entry["recent_runs"] += 1
-            if run["status"] in {"queued", "running"}:
+            if run["status"] in _ACTIVE_RUN_STATUSES:
                 entry["active_runs"] += 1
         for agent in agents:
             agent["run_counts"] = by_agent.get(agent["agent_id"], {"active_runs": 0, "recent_runs": 0})
@@ -743,6 +906,8 @@ class OrchestrationStore:
             "runs": runs,
             "active_runs": len(active),
             "run_counts": by_agent,
+            "plan_graph": summarize_run_plan_graph(runs),
+            "recent_events": self.list_recent_events(limit=25),
         }
 
     def stats(self) -> Dict[str, Any]:

@@ -24,8 +24,19 @@ def test_harness_snapshot_without_profiles_is_stable(tmp_path, monkeypatch):
                 {"agent_id": "outreach", "tier": "specialist", "status": "running"},
             ],
             "runs": [
-                {"run_id": "r1", "status": "running", "route_label": "Agent Routing (Outreach)"}
+                {"run_id": "r1", "status": "running", "route_label": "Agent Routing (Outreach)"},
+                {"run_id": "r2", "status": "queued"},
+                {"run_id": "r3", "status": "queued", "metadata": {"blocked_by": ["r1"]}},
             ],
+            "plan_graph": {
+                "ready_run_ids": ["r2"],
+                "blocked_run_ids": ["r3"],
+                "active_run_ids": ["r1"],
+                "completed_run_ids": [],
+                "cycle_run_ids": [],
+                "unresolved_dependency_ids": [],
+                "next_ready_run_ids": ["r2"],
+            },
         },
         include_profiles=False,
     )
@@ -33,8 +44,12 @@ def test_harness_snapshot_without_profiles_is_stable(tmp_path, monkeypatch):
     assert snapshot["server"]["pattern"] == "single-local-gateway"
     assert snapshot["orchestration"]["coordinator"] == "executive-assistant"
     assert snapshot["orchestration"]["route_labeled_runs"] == 1
+    assert snapshot["orchestration"]["plan_graph"]["ready_runs"] == 1
+    assert snapshot["orchestration"]["plan_graph"]["blocked_runs"] == 1
     assert snapshot["skills"]["mode"] == "manifest-visible-detail-lazy"
     assert snapshot["memory"]["embeddings_enabled"] is True
+    assert snapshot["memory"]["pipeline"]["state"] == "backlog"
+    assert snapshot["memory"]["pipeline"]["search"] == "done"
     assert snapshot["safety"]["human_communication_requires_review"] is True
     assert snapshot["performance"]["available"] is False
 

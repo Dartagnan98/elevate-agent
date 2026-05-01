@@ -47,14 +47,17 @@ def test_orchestration_run_lifecycle_and_events(tmp_path):
         {"status": "completed", "summary": "Campaign drafted."},
     )
     events = store.list_events(run["run_id"])
+    recent_events = store.list_recent_events()
     snapshot = store.snapshot()
 
     assert updated["status"] == "completed"
     assert updated["completed_at"]
     assert events[0]["type"] == "run.running"
     assert events[-1]["type"] == "run.completed"
+    assert recent_events[0]["type"] == "run.completed"
     assert snapshot["active_runs"] == 0
     assert snapshot["run_counts"]["marketing"]["recent_runs"] == 1
+    assert snapshot["recent_events"][0]["type"] == "run.completed"
 
 
 def test_orchestration_run_surfaces_handoff_routing_label(tmp_path):
@@ -71,6 +74,79 @@ def test_orchestration_run_surfaces_handoff_routing_label(tmp_path):
     assert run["route_label"] == "Agent Routing (Marketing)"
     assert run["routing_label"] == "Agent Routing (Marketing)"
     assert store.get_run(run["run_id"])["route_label"] == "Agent Routing (Marketing)"
+
+
+def test_orchestration_snapshot_summarizes_run_plan_graph(tmp_path):
+    store = OrchestrationStore(tmp_path / "orchestration.db")
+
+    setup = store.create_run(
+        run_id="setup",
+        agent_id="admin",
+        task="Collect listing inputs.",
+        status="completed",
+        metadata={"priority": "high"},
+    )
+    ready = store.create_run(
+        run_id="ready",
+        agent_id="marketing",
+        task="Draft campaign.",
+        status="queued",
+        metadata={"blocked_by": [setup["run_id"]], "priority": "urgent"},
+    )
+    blocked = store.create_run(
+        run_id="blocked",
+        agent_id="outreach",
+        task="Send nurture follow-up.",
+        status="queued",
+        metadata={"blocked_by": [ready["run_id"]]},
+    )
+    missing = store.create_run(
+        run_id="missing",
+        agent_id="social-media",
+        task="Create social cutdowns.",
+        status="queued",
+        metadata={"blocked_by": ["does-not-exist"]},
+    )
+
+    graph = store.snapshot()["plan_graph"]
+
+    assert graph["ready_run_ids"] == [ready["run_id"]]
+    assert graph["blocked_run_ids"] == [blocked["run_id"], missing["run_id"]]
+    assert graph["completed_run_ids"] == [setup["run_id"]]
+    assert graph["unresolved_dependency_ids"] == ["does-not-exist"]
+    assert graph["next_ready_run_ids"] == [ready["run_id"]]
+
+
+def test_orchestration_snapshot_reports_dependency_cycles(tmp_path):
+    store = OrchestrationStore(tmp_path / "orchestration.db")
+
+    store.create_run(
+        run_id="a",
+        agent_id="admin",
+        task="A",
+        status="queued",
+        metadata={"blocked_by": ["c"]},
+    )
+    store.create_run(
+        run_id="b",
+        agent_id="marketing",
+        task="B",
+        status="queued",
+        metadata={"blocked_by": ["a"]},
+    )
+    store.create_run(
+        run_id="c",
+        agent_id="outreach",
+        task="C",
+        status="queued",
+        metadata={"blocked_by": ["b"]},
+    )
+
+    graph = store.snapshot()["plan_graph"]
+
+    assert graph["ready_run_ids"] == []
+    assert graph["blocked_run_ids"] == ["a", "b", "c"]
+    assert graph["cycle_run_ids"] == ["a", "b", "c"]
 
 
 def test_orchestration_run_hides_route_label_for_generic_delegates(tmp_path):

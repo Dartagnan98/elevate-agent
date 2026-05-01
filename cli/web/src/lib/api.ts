@@ -457,6 +457,22 @@ export interface HarnessSnapshot {
     active_runs: number;
     recent_runs: number;
     route_labeled_runs: number;
+    recent_events: number;
+    event_tail: Array<{
+      run_id?: string | null;
+      type?: string | null;
+      message?: string | null;
+      timestamp?: string | null;
+    }>;
+    plan_graph: {
+      ready_runs: number;
+      blocked_runs: number;
+      active_runs: number;
+      completed_runs: number;
+      cycle_runs: number;
+      unresolved_dependencies: number;
+      next_ready_run_ids: string[];
+    };
     lifecycle_states: string[];
   };
   skills: {
@@ -479,6 +495,19 @@ export interface HarnessSnapshot {
     session_segments: number;
     graph_nodes: number;
     graph_edges: number;
+    pipeline: {
+      derived_from_journal: boolean;
+      state: string;
+      search: string;
+      verify: string;
+      inject: string;
+      maintain: string;
+      active: boolean;
+      backlog: number;
+      failure_count: number;
+      indexed_facts: number;
+      facts: number;
+    };
   };
   safety: {
     dangerous_command_mode: string;

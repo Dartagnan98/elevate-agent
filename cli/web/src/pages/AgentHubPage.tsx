@@ -321,8 +321,11 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
         <div className="grid grid-cols-2 gap-2">
           <MiniMetric label="Clients" value={`${connectedClients.length}/${harness.server.clients.length}`} />
           <MiniMetric label="Routed" value={harness.orchestration.route_labeled_runs} />
+          <MiniMetric label="Events" value={harness.orchestration.recent_events} />
+          <MiniMetric label="Ready Runs" value={harness.orchestration.plan_graph.ready_runs} />
+          <MiniMetric label="Blocked" value={harness.orchestration.plan_graph.blocked_runs} />
           <MiniMetric label="Safety" value={harness.safety.external_actions_policy} />
-          <MiniMetric label="Skill Mode" value="Index" />
+          <MiniMetric label="Memory Flow" value={harness.memory.pipeline.state} />
         </div>
         {harness.performance.available ? (
           <div className="border border-border bg-muted/20 p-2 text-xs">

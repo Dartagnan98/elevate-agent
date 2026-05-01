@@ -43,6 +43,52 @@ def _safe_count(value: Any, key: str, default: int = 0) -> int:
     return default
 
 
+def _safe_list_count(value: Any, key: str) -> int:
+    if not isinstance(value, dict):
+        return 0
+    items = value.get(key)
+    return len(items) if isinstance(items, list) else 0
+
+
+def _memory_pipeline_summary(memory: dict[str, Any], embedding: dict[str, Any]) -> dict[str, Any]:
+    """Summarize the observable memory pipeline from local journal state.
+
+    Elevate does not yet expose a live per-turn memory sidecar event stream, so
+    this is intentionally marked as derived. It still gives the CLI and Agent
+    Hub the jcode-style shape we want: search, verify, inject, maintain.
+    """
+    journal = memory.get("journal") if isinstance(memory.get("journal"), dict) else {}
+    pending = _safe_count(journal, "pending")
+    processed = _safe_count(journal, "processed")
+    failed = _safe_count(journal, "failed")
+    embeddings_enabled = _truthy(embedding.get("enabled"))
+    indexed_facts = _safe_count(memory, "indexed_facts")
+    facts = _safe_count(memory, "facts")
+
+    if failed:
+        state = "error"
+    elif pending:
+        state = "backlog"
+    elif processed or indexed_facts:
+        state = "idle"
+    else:
+        state = "not_started"
+
+    return {
+        "derived_from_journal": True,
+        "state": state,
+        "search": "done" if embeddings_enabled else "skipped",
+        "verify": "pending" if pending else ("done" if processed else "skipped"),
+        "inject": "done" if indexed_facts or processed else "skipped",
+        "maintain": "error" if failed else ("pending" if pending else "done"),
+        "active": bool(pending or failed),
+        "backlog": pending,
+        "failure_count": failed,
+        "indexed_facts": indexed_facts,
+        "facts": facts,
+    }
+
+
 def _performance_profiles(config: dict[str, Any]) -> dict[str, Any]:
     """Measure static prompt/tool payload profiles without live model calls."""
     old_skip_mcp = os.environ.get("ELEVATE_SKIP_MCP_DISCOVERY")
@@ -177,8 +223,15 @@ def build_harness_snapshot(
 
     agents = orchestration.get("agents") if isinstance(orchestration.get("agents"), list) else []
     runs = orchestration.get("runs") if isinstance(orchestration.get("runs"), list) else []
+    recent_events = (
+        orchestration.get("recent_events")
+        if isinstance(orchestration.get("recent_events"), list)
+        else []
+    )
     active_runs = [
-        run for run in runs if str(run.get("status") or "").lower() in {"queued", "running"}
+        run
+        for run in runs
+        if str(run.get("status") or "").lower() in {"queued", "running", "blocked", "waiting_for_approval"}
     ]
     coordinator = next(
         (
@@ -195,6 +248,8 @@ def build_harness_snapshot(
     graph = memory.get("graph") if isinstance(memory.get("graph"), dict) else {}
     graph_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
     graph_edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    memory_pipeline = _memory_pipeline_summary(memory, embedding)
+    plan_graph = orchestration.get("plan_graph") if isinstance(orchestration.get("plan_graph"), dict) else {}
 
     approvals_cfg = config.get("approvals") if isinstance(config.get("approvals"), dict) else {}
     safety_cfg = config.get("safety") if isinstance(config.get("safety"), dict) else {}
@@ -219,6 +274,10 @@ def build_harness_snapshot(
         recommendations.append("Enable embeddings for semantic memory retrieval when memory 2.0 is ready.")
     if _safe_count(memory_journal, "pending") > 50:
         recommendations.append("Run memory organization; pending turn journal entries are building up.")
+    if plan_graph.get("cycle_run_ids"):
+        recommendations.append("Review orchestration plan graph; one or more task dependencies form a cycle.")
+    if plan_graph.get("unresolved_dependency_ids"):
+        recommendations.append("Review orchestration plan graph; some runs reference missing dependency IDs.")
 
     performance = _performance_profiles(config) if include_profiles else {
         "available": False,
@@ -260,6 +319,30 @@ def build_harness_snapshot(
             "active_runs": len(active_runs),
             "recent_runs": len(runs),
             "route_labeled_runs": len(route_labeled_runs),
+            "recent_events": len(recent_events),
+            "event_tail": [
+                {
+                    "run_id": event.get("run_id"),
+                    "type": event.get("type"),
+                    "message": event.get("message"),
+                    "timestamp": event.get("timestamp"),
+                }
+                for event in recent_events[:10]
+                if isinstance(event, dict)
+            ],
+            "plan_graph": {
+                "ready_runs": _safe_list_count(plan_graph, "ready_run_ids"),
+                "blocked_runs": _safe_list_count(plan_graph, "blocked_run_ids"),
+                "active_runs": _safe_list_count(plan_graph, "active_run_ids"),
+                "completed_runs": _safe_list_count(plan_graph, "completed_run_ids"),
+                "cycle_runs": _safe_list_count(plan_graph, "cycle_run_ids"),
+                "unresolved_dependencies": _safe_list_count(plan_graph, "unresolved_dependency_ids"),
+                "next_ready_run_ids": (
+                    plan_graph.get("next_ready_run_ids")
+                    if isinstance(plan_graph.get("next_ready_run_ids"), list)
+                    else []
+                ),
+            },
             "lifecycle_states": [
                 "ready",
                 "running",
@@ -290,6 +373,7 @@ def build_harness_snapshot(
             "session_segments": _safe_count(memory_journal, "session_segment_count"),
             "graph_nodes": len(graph_nodes),
             "graph_edges": len(graph_edges),
+            "pipeline": memory_pipeline,
         },
         "safety": {
             "dangerous_command_mode": approvals_cfg.get("mode") or "manual",
@@ -325,7 +409,14 @@ def format_harness_snapshot(snapshot: dict[str, Any]) -> str:
             "  Orchestration: "
             f"{orchestration.get('total_agents', 0)} agents, "
             f"{orchestration.get('active_runs', 0)} active runs, "
-            f"{orchestration.get('route_labeled_runs', 0)} routed runs"
+            f"{orchestration.get('route_labeled_runs', 0)} routed runs, "
+            f"{orchestration.get('recent_events', 0)} recent events"
+        ),
+        (
+            "  Plan Graph: "
+            f"ready={orchestration.get('plan_graph', {}).get('ready_runs', 0)}, "
+            f"blocked={orchestration.get('plan_graph', {}).get('blocked_runs', 0)}, "
+            f"cycles={orchestration.get('plan_graph', {}).get('cycle_runs', 0)}"
         ),
         (
             "  Skills: "
@@ -337,7 +428,8 @@ def format_harness_snapshot(snapshot: dict[str, Any]) -> str:
             f"{memory.get('provider')} provider, "
             f"embeddings={'on' if memory.get('embeddings_enabled') else 'off'}, "
             f"pending_turns={memory.get('pending_turns', 0)}, "
-            f"graph={memory.get('graph_nodes', 0)} nodes"
+            f"graph={memory.get('graph_nodes', 0)} nodes, "
+            f"pipeline={memory.get('pipeline', {}).get('state', 'unknown')}"
         ),
         (
             "  Safety: "
