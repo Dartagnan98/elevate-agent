@@ -509,7 +509,11 @@ def _is_busy_status_query(message: Optional[str]) -> bool:
     return any(phrase in normalized for phrase in _BUSY_STATUS_PHRASES)
 
 
-_FOCUSED_GATEWAY_DEFAULT_PLATFORMS = {"telegram"}
+# Focused gateway profiles are useful for token experiments, but they are a
+# bad default for production Telegram sessions: users expect local code tools
+# to be callable without phrasing the message exactly right. Keep the router
+# available behind `agent.gateway_tool_profile: auto`.
+_FOCUSED_GATEWAY_DEFAULT_PLATFORMS = set()
 
 _GATEWAY_TOOL_PROFILES = {
     "gateway-followup": ("memory", "session_search", "todo", "messaging"),
@@ -1810,10 +1814,9 @@ class GatewayRunner:
     ) -> list[str]:
         """Resolve a live gateway tool profile without widening user config.
 
-        Telegram's default platform toolset used to expand into almost every
-        core tool every turn. In auto mode, use a small intent profile and
-        intersect it with the platform's configured toolsets so user-disabled
-        capabilities stay disabled.
+        In auto mode, use a small intent profile and intersect it with the
+        platform's configured toolsets so user-disabled capabilities stay
+        disabled. Production defaults keep configured/full tools visible.
         """
         decision = self._gateway_tool_profile_decision(
             user_config,

@@ -355,7 +355,7 @@ async def test_status_question_during_running_agent_does_not_interrupt_or_queue(
     assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
 
 
-def test_telegram_default_uses_focused_followup_tool_profile():
+def test_telegram_default_uses_configured_tool_profile():
     runner = _make_runner()
     cfg = {"platform_toolsets": {"telegram": ["elevate-telegram"]}}
 
@@ -365,12 +365,16 @@ def test_telegram_default_uses_focused_followup_tool_profile():
         "what should I do next",
     )
 
-    assert set(toolsets) == {"memory", "messaging", "session_search", "todo"}
+    assert {"terminal", "file", "delegation", "code_execution"}.issubset(set(toolsets))
+    assert {"memory", "messaging", "session_search", "todo"}.issubset(set(toolsets))
 
 
-def test_telegram_cma_message_escalates_to_skill_runner_profile():
+def test_telegram_auto_mode_cma_message_escalates_to_skill_runner_profile():
     runner = _make_runner()
-    cfg = {"platform_toolsets": {"telegram": ["elevate-telegram"]}}
+    cfg = {
+        "agent": {"gateway_tool_profile": "auto"},
+        "platform_toolsets": {"telegram": ["elevate-telegram"]},
+    }
 
     toolsets = runner._resolve_gateway_enabled_toolsets(
         cfg,

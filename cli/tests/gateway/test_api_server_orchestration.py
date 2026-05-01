@@ -66,18 +66,18 @@ async def test_tools_snapshot_exposes_code_profile(tmp_path):
         )
         assert resp.status == 200
         body = await resp.json()
-        assert body["focused_auto"]["selected_profile"] == "coding-edit"
+        assert body["focused_auto"]["selected_profile"] == "configured"
         selected = set(body["focused_auto"]["selected_toolsets"])
         assert {"terminal", "file", "delegation", "code_execution"} <= selected
-        assert body["focused_auto"]["decision"]["reason"] == "matched coding-edit intent"
+        assert body["focused_auto"]["decision"]["reason"] == "gateway_tool_profile=configured"
         assert "patch" in body["focused_auto"]["decision"]["matched_keywords"]
         assert (
             body["focused_auto"]["router_probes"]["followup"]["selected_profile"]
-            == "gateway-followup"
+            == "configured"
         )
         assert (
             body["focused_auto"]["router_probes"]["code_patch"]["selected_profile"]
-            == "coding-edit"
+            == "configured"
         )
 
 

@@ -113,7 +113,10 @@ class TestBusySessionAck:
         from gateway.run import GatewayRunner
 
         decision = GatewayRunner._gateway_tool_profile_decision(
-            {"toolsets": ["elevate-cli"]},
+            {
+                "agent": {"gateway_tool_profile": "auto"},
+                "toolsets": ["elevate-cli"],
+            },
             "telegram",
             "Patch the CMA photo QA code in the local repo",
         )
