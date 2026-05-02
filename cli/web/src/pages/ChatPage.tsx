@@ -1021,6 +1021,13 @@ function artifactsFromText(text: string, source: string): ArtifactEntry[] {
   );
 }
 
+function artifactsFromMessages(messages: ChatMessage[]): ArtifactEntry[] {
+  return messages.flatMap((message) => {
+    if (!message.content.trim()) return [];
+    return artifactsFromText(message.content, `${message.role} history`);
+  });
+}
+
 function previewPriority(artifact: ArtifactEntry): number {
   if (!artifact.path) return -1;
   const ext = fileExtension(artifact.path);
@@ -1320,6 +1327,13 @@ export default function ChatPage() {
     }
   }, []);
 
+  const hydrateArtifactsFromMessages = useCallback(
+    (nextMessages: ChatMessage[]) => {
+      addArtifacts(artifactsFromMessages(nextMessages));
+    },
+    [addArtifacts],
+  );
+
   const openArtifactPreview = useCallback((artifact: ArtifactEntry) => {
     setPreviewArtifact(artifact);
   }, []);
@@ -1441,6 +1455,7 @@ export default function ChatPage() {
       if (cached) {
         historyHydratedRef.current = true;
         setMessages(cached);
+        hydrateArtifactsFromMessages(cached);
         setStatusText("Connecting live session...");
       }
 
@@ -1452,6 +1467,7 @@ export default function ChatPage() {
           rememberTranscript(response.session_id || resumeId, hydrated);
           rememberTranscript(resumeId, hydrated);
           setMessages(hydrated);
+          hydrateArtifactsFromMessages(hydrated);
           setStatusText("Connecting live session...");
         })
         .catch((error: Error) => {
@@ -1971,6 +1987,7 @@ export default function ChatPage() {
               Array.isArray(resumed.messages) ? resumed.messages : undefined,
             );
             setMessages(hydrated);
+            hydrateArtifactsFromMessages(hydrated);
             if (persistedSessionIdRef.current) {
               rememberTranscript(persistedSessionIdRef.current, hydrated);
             }
@@ -1997,6 +2014,7 @@ export default function ChatPage() {
     appendMessage,
     ensureAssistant,
     gw,
+    hydrateArtifactsFromMessages,
     newChatId,
     resumeId,
     updateAssistant,
@@ -2132,8 +2150,13 @@ export default function ChatPage() {
       setBanner(null);
       setAgentMenuOpen(false);
 
-      const previewTarget = bestSidePreviewArtifact(artifacts);
+      const historyArtifacts = artifacts.length ? [] : artifactsFromMessages(messages);
+      const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
+      const previewTarget = bestSidePreviewArtifact(availableArtifacts);
       if (previewTarget && isOpenPreviewIntent(trimmed)) {
+        if (historyArtifacts.length) {
+          addArtifacts(historyArtifacts);
+        }
         setPreviewArtifact(previewTarget);
         appendMessage("user", trimmed);
         appendMessage(
@@ -2176,7 +2199,7 @@ export default function ChatPage() {
 
       await submitGatewayPrompt(trimmed, routedText);
     },
-    [appendMessage, artifacts, busy, gw, selectedAgent, sessionId, submitGatewayPrompt],
+    [addArtifacts, appendMessage, artifacts, busy, gw, messages, selectedAgent, sessionId, submitGatewayPrompt],
   );
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
