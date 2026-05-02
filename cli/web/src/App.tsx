@@ -85,7 +85,7 @@ const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
   label: "Chat",
-  icon: Terminal,
+  icon: MessageSquare,
 };
 
 /** Built-in routes except /chat (only with `elevate dashboard --tui`). */
@@ -333,7 +333,7 @@ export default function App() {
   return (
     <div
       data-layout-variant={layoutVariant}
-      className="font-mondwest flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black uppercase text-midground antialiased"
+      className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-background-base font-sans normal-case text-midground antialiased"
     >
       <SelectionSwitcher />
       <Backdrop />
@@ -343,14 +343,9 @@ export default function App() {
         className={cn(
           "lg:hidden fixed top-0 left-0 right-0 z-40 h-12",
           "flex items-center gap-2 px-3",
-          "border-b border-current/20",
-          "bg-background-base/90 backdrop-blur-sm",
+          "border-b border-border",
+          "bg-background-base/92 backdrop-blur-sm",
         )}
-        style={{
-          background: "var(--component-header-background)",
-          borderImage: "var(--component-header-border-image)",
-          clipPath: "var(--component-header-clip-path)",
-        }}
       >
         <button
           type="button"
@@ -368,8 +363,7 @@ export default function App() {
         </button>
 
         <Typography
-          className="font-bold text-[0.95rem] leading-[0.95] tracking-[0.05em] text-midground"
-          style={{ mixBlendMode: "plus-lighter" }}
+          className="text-[0.95rem] font-semibold leading-none tracking-normal text-midground"
         >
           {t.app.brand}
         </Typography>
@@ -396,17 +390,12 @@ export default function App() {
             aria-label={t.app.navigation}
             className={cn(
               "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-80 max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
-              "border-r border-current/20",
-              "bg-background-base/95 backdrop-blur-sm",
+              "border-r border-border",
+              "bg-background-base/96 backdrop-blur-sm",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
             )}
-            style={{
-              background: "var(--component-sidebar-background)",
-              clipPath: "var(--component-sidebar-clip-path)",
-              borderImage: "var(--component-sidebar-border-image)",
-            }}
           >
             <DesktopSidebar
               embeddedChat={embeddedChat}
@@ -581,7 +570,7 @@ function DesktopSidebar({
 
   return (
     <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-sm tracking-normal text-midground">
-      <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-current/15 px-4">
+      <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-border px-4">
         <div className="flex items-center gap-2" aria-hidden>
           <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
           <span className="h-3 w-3 rounded-full bg-[#ffbd2e]" />
@@ -589,8 +578,7 @@ function DesktopSidebar({
         </div>
 
         <Typography
-          className="min-w-0 flex-1 truncate text-center font-semibold text-[0.95rem] leading-none text-midground"
-          style={{ mixBlendMode: "plus-lighter" }}
+          className="min-w-0 flex-1 truncate text-center text-[0.95rem] font-semibold leading-none text-midground"
         >
           Elevate Agent
         </Typography>
@@ -614,7 +602,7 @@ function DesktopSidebar({
           aria-label={t.app.closeNavigation}
           className={cn(
             "lg:hidden inline-flex h-8 w-8 shrink-0 items-center justify-center",
-            "rounded-md text-midground/70 hover:bg-foreground/10 hover:text-midground",
+            "rounded-lg text-muted-foreground hover:bg-accent hover:text-midground",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
         >
@@ -658,9 +646,9 @@ function DesktopSidebar({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search chats"
             className={cn(
-              "h-9 w-full rounded-md border border-border bg-background-base/35",
+              "h-9 w-full rounded-lg border border-border bg-card",
               "pl-9 pr-8 text-sm text-midground placeholder:text-muted-foreground",
-              "outline-none transition-colors focus:border-primary/40 focus:bg-background-base/55",
+              "outline-none transition-colors focus:border-primary/40 focus:bg-card",
             )}
           />
           {query && (
@@ -723,13 +711,13 @@ function DesktopSidebar({
 
       <SidebarSystemActions onNavigate={onNavigate} />
 
-      <div className="shrink-0 border-t border-current/15">
+      <div className="shrink-0 border-t border-border">
         <button
           type="button"
           onClick={() => go("/config")}
           className={cn(
             "flex w-full items-center gap-3 px-4 py-3 text-left text-sm",
-            "text-midground/80 transition-colors hover:bg-foreground/10 hover:text-midground",
+            "text-muted-foreground transition-colors hover:bg-accent hover:text-midground",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
         >
@@ -737,7 +725,7 @@ function DesktopSidebar({
           <span className="truncate">Settings</span>
         </button>
 
-        <div className="flex items-center justify-between gap-2 border-t border-current/10 px-3 py-2">
+        <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2">
           <div className="flex min-w-0 items-center gap-2">
             <PluginSlot name="header-right" />
             <ThemeSwitcher dropUp />
@@ -753,7 +741,7 @@ function DesktopSidebar({
 
 function SidebarSectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1 px-2 text-xs font-medium text-muted-foreground">
+    <div className="mb-1 px-2 text-xs font-medium normal-case text-muted-foreground">
       {children}
     </div>
   );
@@ -765,8 +753,8 @@ function sidebarActionClass(active: boolean, primary = false) {
     "cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
     primary && "font-medium",
     active
-      ? "bg-foreground/12 text-midground"
-      : "text-midground/78 hover:bg-foreground/10 hover:text-midground",
+      ? "bg-accent text-midground"
+      : "text-muted-foreground hover:bg-accent hover:text-midground",
   );
 }
 
@@ -870,14 +858,14 @@ function SessionListItem({
         "group relative flex min-h-11 items-center gap-2 rounded-lg px-3 py-2",
         "text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
         active
-          ? "bg-foreground/12 text-midground"
-          : "text-midground/82 hover:bg-foreground/10 hover:text-midground",
+          ? "bg-accent text-midground"
+          : "text-muted-foreground hover:bg-accent hover:text-midground",
       )}
     >
       <span
         className={cn(
           "h-2 w-2 shrink-0 rounded-full",
-          session.is_active ? "bg-success" : "bg-current/25",
+          session.is_active ? "bg-success" : "bg-current/30",
         )}
       />
       <span className="min-w-0 flex-1">
@@ -945,14 +933,14 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
     <div
       className={cn(
         "shrink-0 flex flex-col",
-        "border-t border-current/10",
+        "border-t border-border",
         "py-1",
       )}
     >
       <span
         className={cn(
           "px-5 pt-0.5 pb-0.5",
-          "font-mondwest text-[0.6rem] tracking-[0.15em] uppercase opacity-30",
+          "text-[0.68rem] font-medium tracking-normal text-muted-foreground",
         )}
       >
         {t.app.system}
@@ -979,7 +967,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
                 className={cn(
                   "group relative flex w-full items-center gap-3",
                   "px-5 py-1.5",
-                  "font-mondwest text-[0.75rem] tracking-[0.1em]",
+                  "text-sm font-medium tracking-normal",
                   "text-left whitespace-nowrap transition-opacity cursor-pointer",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
                   busy
@@ -1004,7 +992,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
 
                 <span
                   aria-hidden
-                  className="absolute inset-y-0.5 left-1.5 right-1.5 bg-midground opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-5"
+                  className="absolute inset-y-0.5 left-1.5 right-1.5 rounded-md bg-accent opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100"
                 />
 
                 {busy && (

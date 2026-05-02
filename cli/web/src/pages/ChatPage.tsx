@@ -21,9 +21,12 @@ import {
   FileCode2,
   FileText,
   Loader2,
+  Mic,
+  MicOff,
   PanelRight,
   RotateCcw,
   Send,
+  Shield,
   ShieldAlert,
   Square,
   X,
@@ -46,6 +49,43 @@ interface SessionInfo {
   model?: string;
   provider?: string;
 }
+
+interface BrowserSpeechRecognitionResult {
+  transcript: string;
+}
+
+type BrowserSpeechRecognitionResultItem =
+  ArrayLike<BrowserSpeechRecognitionResult> & { isFinal?: boolean };
+
+interface BrowserSpeechRecognitionEvent {
+  resultIndex: number;
+  results: ArrayLike<BrowserSpeechRecognitionResultItem>;
+}
+
+interface BrowserSpeechRecognitionErrorEvent {
+  error?: string;
+}
+
+interface BrowserSpeechRecognition {
+  abort(): void;
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onend: (() => void) | null;
+  onerror: ((event: BrowserSpeechRecognitionErrorEvent) => void) | null;
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
+  start(): void;
+  stop(): void;
+}
+
+interface BrowserSpeechRecognitionConstructor {
+  new (): BrowserSpeechRecognition;
+}
+
+type SpeechWindow = Window & {
+  SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+};
 
 interface GatewayTranscriptMessage {
   context?: string;
@@ -89,6 +129,13 @@ interface ArtifactEntry {
   source?: string;
   status?: "error" | "ok";
   title: string;
+}
+
+interface QueuedInput {
+  createdAt: number;
+  id: string;
+  status: "queued" | "error";
+  text: string;
 }
 
 type PendingPrompt =
@@ -176,6 +223,12 @@ function compactToolPayload(payload: unknown) {
   return (payload && typeof payload === "object"
     ? payload
     : {}) as Record<string, unknown>;
+}
+
+function speechRecognitionConstructor() {
+  if (typeof window === "undefined") return undefined;
+  const speechWindow = window as SpeechWindow;
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
 }
 
 function fileName(path: string): string {
@@ -315,13 +368,16 @@ export default function ChatPage() {
   const currentAssistantRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
 
   const [info, setInfo] = useState<SessionInfo>({});
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [input, setInput] = useState("");
+  const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
   const [statusText, setStatusText] = useState("Connecting...");
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
@@ -410,6 +466,13 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      recognitionRef.current?.abort();
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!mobilePanelOpen) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") setMobilePanelOpen(false);
@@ -462,6 +525,7 @@ export default function ChatPage() {
     setInfo({});
     setArtifacts([]);
     setTools([]);
+    setQueuedInputs([]);
     setPendingPrompt(null);
     setPromptValue("");
     setBusy(false);
@@ -604,6 +668,7 @@ export default function ChatPage() {
         }
         currentAssistantRef.current = null;
         setBusy(false);
+        setQueuedInputs([]);
         setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
       }),
     );
@@ -710,6 +775,7 @@ export default function ChatPage() {
         setBanner(message);
         appendMessage("system", message, { status: "error" });
         setBusy(false);
+        setQueuedInputs([]);
         setStatusText("Error");
       }),
     );
@@ -790,14 +856,26 @@ export default function ChatPage() {
       }
 
       if (busy) {
+        const queued: QueuedInput = {
+          createdAt: Date.now(),
+          id: id("queued"),
+          status: "queued",
+          text: trimmed,
+        };
+        setQueuedInputs((prev) => [...prev, queued].slice(-5));
+        setStatusText("Queued for current turn");
         try {
           await gw.request("session.steer", {
             session_id: sessionId,
             text: trimmed,
           });
-          appendMessage("system", "Added to the running turn.");
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          setQueuedInputs((prev) =>
+            prev.map((item) =>
+              item.id === queued.id ? { ...item, status: "error" } : item,
+            ),
+          );
           appendMessage("system", message, { status: "error" });
         }
         return;
@@ -842,6 +920,7 @@ export default function ChatPage() {
     try {
       await gw.request("session.interrupt", { session_id: sessionId });
       setBusy(false);
+      setQueuedInputs([]);
       setStatusText("Interrupted");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -884,6 +963,62 @@ export default function ChatPage() {
       appendMessage("system", message, { status: "error" });
     }
   };
+
+  const voiceSupported = Boolean(speechRecognitionConstructor());
+  const toggleVoiceInput = useCallback(() => {
+    const SpeechRecognition = speechRecognitionConstructor();
+    if (!SpeechRecognition) {
+      setBanner("Voice input is not available in this browser.");
+      return;
+    }
+
+    if (voiceListening) {
+      recognitionRef.current?.stop();
+      setVoiceListening(false);
+      setStatusText("Voice input stopped");
+      inputRef.current?.focus();
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognition.onresult = (event) => {
+      let finalText = "";
+      let interimText = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result?.[0]?.transcript?.trim() ?? "";
+        if (!transcript) continue;
+        if (result.isFinal) finalText = `${finalText} ${transcript}`.trim();
+        else interimText = `${interimText} ${transcript}`.trim();
+      }
+
+      if (finalText) {
+        setInput((prev) => [prev.trim(), finalText].filter(Boolean).join(" "));
+        setStatusText("Voice captured");
+      } else if (interimText) {
+        setStatusText(`Listening: ${interimText}`);
+      }
+    };
+    recognition.onerror = (event) => {
+      setBanner(`Voice input error: ${event.error ?? "unavailable"}`);
+      setVoiceListening(false);
+      recognitionRef.current = null;
+    };
+    recognition.onend = () => {
+      setVoiceListening(false);
+      recognitionRef.current = null;
+      inputRef.current?.focus();
+    };
+
+    recognitionRef.current = recognition;
+    setBanner(null);
+    setVoiceListening(true);
+    setStatusText("Listening...");
+    recognition.start();
+  }, [voiceListening]);
 
   const canSend = !!input.trim() && state === "open" && !!sessionId;
   const canPickModel = state === "open" && !!sessionId;
@@ -935,7 +1070,7 @@ export default function ChatPage() {
         <aside
           className={cn(
             "fixed right-0 top-0 z-[60] flex h-dvh w-[min(24rem,86vw)] flex-col",
-            "border-l border-[oklch(0.28_0.006_255)] bg-[oklch(0.16_0.006_255)] p-3 normal-case shadow-2xl",
+            "border-l border-[var(--chat-border)] bg-[var(--chat-bg)] p-3 normal-case shadow-2xl",
             mobilePanelOpen ? "translate-x-0" : "translate-x-full",
             "transition-transform duration-200 ease-out",
           )}
@@ -958,17 +1093,17 @@ export default function ChatPage() {
     );
 
   return (
-    <div className="relative -m-4 flex min-h-[calc(100vh-4.5rem)] flex-col overflow-hidden bg-[oklch(0.135_0.006_255)] text-[oklch(0.92_0.006_255)] normal-case sm:-m-6">
+    <div className="elevate-chat-shell relative -m-4 flex min-h-[calc(100vh-4.5rem)] flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6">
       <div className="relative grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_18rem] xl:grid-cols-[minmax(0,1fr)_20rem]">
         <section className="flex min-h-0 flex-col">
           <header className="mx-auto flex w-full max-w-[52rem] flex-wrap items-center justify-between gap-3 px-4 pb-4 pt-5 sm:px-6">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="truncate text-sm font-semibold text-[oklch(0.96_0.004_255)]">
+                <h1 className="truncate text-sm font-semibold text-[var(--chat-text)]">
                   {resumeId ? "Resumed session" : "Elevate Agent"}
                 </h1>
-                <span className="h-1 w-1 rounded-full bg-[oklch(0.47_0.006_255)]" />
-                <span className="truncate text-xs text-[oklch(0.65_0.006_255)]">
+                <span className="h-1 w-1 rounded-full bg-[var(--chat-border-strong)]" />
+                <span className="truncate text-xs text-[var(--chat-muted)]">
                   {modelLabel(info)}
                 </span>
               </div>
@@ -979,15 +1114,15 @@ export default function ChatPage() {
                 className={cn(
                   "inline-flex h-7 items-center rounded-full px-2.5 text-xs",
                   state === "open"
-                    ? "bg-[oklch(0.24_0.055_150)] text-[oklch(0.86_0.08_150)]"
-                    : "bg-[oklch(0.22_0.006_255)] text-[oklch(0.72_0.006_255)]",
+                    ? "bg-[color-mix(in_srgb,var(--chat-success)_18%,var(--chat-bg))] text-[var(--chat-success)]"
+                    : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
                 )}
               >
                 {STATE_LABEL[state]}
               </span>
               {busy && (
                 <button
-                  className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[oklch(0.34_0.006_255)] px-2.5 text-xs text-[oklch(0.78_0.006_255)] transition-colors hover:bg-[oklch(0.22_0.006_255)]"
+                  className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[var(--chat-border-strong)] px-2.5 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)]"
                   onClick={() => void interrupt()}
                   type="button"
                 >
@@ -996,7 +1131,7 @@ export default function ChatPage() {
                 </button>
               )}
               <button
-                className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[oklch(0.34_0.006_255)] px-2.5 text-xs text-[oklch(0.78_0.006_255)] transition-colors hover:bg-[oklch(0.22_0.006_255)]"
+                className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[var(--chat-border-strong)] px-2.5 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)]"
                 onClick={reconnect}
                 type="button"
               >
@@ -1028,15 +1163,29 @@ export default function ChatPage() {
           </div>
 
           <form
-            className="border-t border-[oklch(0.20_0.006_255)] bg-[oklch(0.135_0.006_255)] px-4 pb-5 pt-3 sm:px-6"
+            className="border-t border-[var(--chat-border)] bg-[var(--chat-bg)] px-4 pb-5 pt-3 sm:px-6"
             onSubmit={onSubmit}
           >
-            <div className="mx-auto flex max-w-[48rem] items-end gap-2 rounded-[1.4rem] border border-[oklch(0.28_0.006_255)] bg-[oklch(0.18_0.006_255)] p-2 shadow-[0_24px_80px_rgba(0,0,0,0.32)] focus-within:border-[oklch(0.43_0.05_255)]">
-              <div className="min-w-0 flex-1 px-2 pb-1 pt-1">
+            <div className="mx-auto max-w-[48rem]">
+              <QueuedInputStrip queuedInputs={queuedInputs} />
+
+              <div className="flex items-end gap-2 rounded-[1.4rem] border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-2 shadow-[0_24px_80px_rgba(0,0,0,0.22)] focus-within:border-[var(--chat-accent)]">
+                <div className="min-w-0 flex-1 px-2 pb-1 pt-1">
+                  <ComposerStatusBar
+                    canPickModel={canPickModel}
+                    info={info}
+                    onOpenModel={() => setModelOpen(true)}
+                    onToggleVoice={toggleVoiceInput}
+                    state={state}
+                    statusText={statusText}
+                    voiceListening={voiceListening}
+                    voiceSupported={voiceSupported}
+                  />
+
                 <textarea
                   ref={inputRef}
                   aria-label="Message Elevate Agent"
-                  className="max-h-40 min-h-12 w-full resize-none bg-transparent text-sm leading-6 text-[oklch(0.94_0.004_255)] outline-none placeholder:text-[oklch(0.58_0.006_255)]"
+                  className="mt-2 max-h-40 min-h-12 w-full resize-none bg-transparent text-sm leading-6 text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)]"
                   disabled={state !== "open" || !sessionId}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={onComposerKeyDown}
@@ -1048,18 +1197,14 @@ export default function ChatPage() {
                   rows={2}
                   value={input}
                 />
-                <div className="flex items-center justify-between gap-2 text-[0.68rem] text-[oklch(0.58_0.006_255)]">
-                  <span className="truncate">{statusText}</span>
-                  <span>{sessionId ?? "session pending"}</span>
-                </div>
               </div>
               <button
                 aria-label="Send message"
                 className={cn(
                   "mb-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors",
                   canSend
-                    ? "bg-[oklch(0.92_0.006_255)] text-[oklch(0.14_0.006_255)] hover:bg-[oklch(0.98_0.004_255)]"
-                    : "bg-[oklch(0.25_0.006_255)] text-[oklch(0.52_0.006_255)]",
+                    ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
+                    : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
                 )}
                 disabled={!canSend}
                 type="submit"
@@ -1070,6 +1215,7 @@ export default function ChatPage() {
                   <Send className="h-4 w-4" />
                 )}
               </button>
+              </div>
             </div>
           </form>
         </section>
@@ -1086,19 +1232,145 @@ export default function ChatPage() {
 function EmptyState({ state }: { state: ConnectionState }) {
   return (
     <div className="mx-auto flex min-h-[34rem] max-w-xl flex-col items-center justify-center text-center">
-      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-full border border-[oklch(0.30_0.006_255)] bg-[oklch(0.19_0.006_255)] text-[oklch(0.86_0.04_255)]">
+      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-full border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-accent)]">
         {state === "connecting" ? (
           <Loader2 className="h-5 w-5 animate-spin" />
         ) : (
           <Bot className="h-5 w-5" />
         )}
       </div>
-      <h2 className="text-xl font-semibold text-[oklch(0.96_0.004_255)]">
+      <h2 className="text-xl font-semibold text-[var(--chat-text)]">
         Elevate Agent
       </h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-[oklch(0.63_0.006_255)]">
+      <p className="mt-2 max-w-md text-sm leading-6 text-[var(--chat-muted)]">
         Executive Assistant is ready.
       </p>
+    </div>
+  );
+}
+
+function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
+  if (!queuedInputs.length) return null;
+
+  return (
+    <div className="mb-2 rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
+        <span className="font-medium text-[var(--chat-muted-strong)]">
+          Queued follow-ups
+        </span>
+        <span>{queuedInputs.length}</span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {queuedInputs.map((item) => (
+          <div
+            key={item.id}
+            className={cn(
+              "flex items-start gap-2 rounded-xl px-2.5 py-1.5 text-xs",
+              item.status === "error"
+                ? "bg-[color-mix(in_srgb,var(--chat-danger)_14%,var(--chat-bg))] text-[var(--chat-danger)]"
+                : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
+            )}
+          >
+            <span
+              className={cn(
+                "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                item.status === "error"
+                  ? "bg-[var(--chat-danger)]"
+                  : "bg-[var(--chat-accent)]",
+              )}
+            />
+            <span className="min-w-0 flex-1 truncate">{item.text}</span>
+            <span className="shrink-0 text-[0.65rem] text-[var(--chat-muted)]">
+              {item.status === "error" ? "error" : nowLabel(item.createdAt)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ComposerStatusBar({
+  canPickModel,
+  info,
+  onOpenModel,
+  onToggleVoice,
+  state,
+  statusText,
+  voiceListening,
+  voiceSupported,
+}: {
+  canPickModel: boolean;
+  info: SessionInfo;
+  onOpenModel(): void;
+  onToggleVoice(): void;
+  state: ConnectionState;
+  statusText: string;
+  voiceListening: boolean;
+  voiceSupported: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <span
+          className={cn(
+            "inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--chat-border)] px-2",
+            "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
+          )}
+          title="Tool access"
+        >
+          <Shield className="h-3 w-3" />
+          Full access
+        </span>
+
+        <button
+          type="button"
+          onClick={onOpenModel}
+          disabled={!canPickModel}
+          className={cn(
+            "inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--chat-border)] px-2",
+            "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
+            "hover:border-[var(--chat-border-strong)] hover:text-[var(--chat-text)]",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+          title="Change model"
+        >
+          <Bot className="h-3 w-3" />
+          {modelLabel(info)}
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleVoice}
+          disabled={!voiceSupported}
+          className={cn(
+            "inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--chat-border)] px-2",
+            "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
+            "hover:border-[var(--chat-border-strong)] hover:text-[var(--chat-text)]",
+            "disabled:cursor-not-allowed disabled:opacity-45",
+            voiceListening &&
+              "border-[var(--chat-accent)] bg-[var(--chat-accent-soft)] text-[var(--chat-text)]",
+          )}
+          title={voiceSupported ? "Voice to text" : "Voice input unavailable"}
+        >
+          {voiceListening ? (
+            <MicOff className="h-3 w-3" />
+          ) : (
+            <Mic className="h-3 w-3" />
+          )}
+          Voice
+        </button>
+      </div>
+
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span
+          className={cn(
+            "h-1.5 w-1.5 shrink-0 rounded-full",
+            state === "open" ? "bg-[var(--chat-success)]" : "bg-[var(--chat-muted)]",
+          )}
+        />
+        <span className="truncate">{statusText}</span>
+      </div>
     </div>
   );
 }
@@ -1112,11 +1384,11 @@ function MessageRow({ message }: { message: ChatMessage }) {
       className={cn(
         "group flex w-full gap-3",
         isUser ? "flex-row-reverse text-right" : "text-left",
-        isAssistant && "border-t border-[oklch(0.22_0.006_255)] pt-5 first:border-t-0 first:pt-0",
+        isAssistant && "border-t border-[var(--chat-border)] pt-5 first:border-t-0 first:pt-0",
       )}
     >
       {!isUser && (
-        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[oklch(0.21_0.006_255)] text-[oklch(0.74_0.006_255)]">
+        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]">
           <Bot className="h-3.5 w-3.5" />
         </div>
       )}
@@ -1131,20 +1403,20 @@ function MessageRow({ message }: { message: ChatMessage }) {
           className={cn(
             "max-w-full text-sm leading-7",
             isUser
-              ? "inline-block rounded-2xl bg-[oklch(0.22_0.006_255)] px-3.5 py-2 text-[oklch(0.94_0.004_255)] shadow-sm"
+              ? "inline-block rounded-2xl bg-[var(--chat-user)] px-3.5 py-2 text-[var(--chat-text)] shadow-sm"
               : message.role === "system"
-                ? "rounded-lg border border-[oklch(0.29_0.015_80)] bg-[oklch(0.20_0.012_80)] px-3 py-2 text-[oklch(0.82_0.03_80)]"
-                : "text-[oklch(0.92_0.004_255)]",
+                ? "rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_32%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] px-3 py-2 text-[var(--chat-text)]"
+                : "text-[var(--chat-text)]",
           )}
         >
           <div
             className={cn(
-              "mb-1 flex items-center gap-2 text-[0.68rem] text-[oklch(0.58_0.006_255)]",
+              "mb-1 flex items-center gap-2 text-[0.68rem] text-[var(--chat-muted)]",
               isAssistant && "mb-3",
               isUser && "justify-end",
             )}
           >
-            <span className="font-medium text-[oklch(0.68_0.006_255)]">
+            <span className="font-medium text-[var(--chat-muted-strong)]">
               {isUser
                 ? "You"
                 : isAssistant
@@ -1163,11 +1435,11 @@ function MessageRow({ message }: { message: ChatMessage }) {
           </div>
           {message.role === "assistant" ? (
             message.content ? (
-              <div className="chat-message-prose [&>div]:text-[oklch(0.92_0.004_255)] [&_a]:text-[oklch(0.78_0.05_255)] [&_code]:bg-[oklch(0.22_0.006_255)] [&_code]:text-[oklch(0.86_0.04_255)] [&_pre]:border-[oklch(0.28_0.006_255)] [&_pre]:bg-[oklch(0.16_0.006_255)]">
+              <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[var(--chat-surface-strong)] [&_code]:text-[var(--chat-text)] [&_pre]:border-[var(--chat-border-strong)] [&_pre]:bg-[var(--chat-surface-soft)]">
                 <Markdown content={message.content} />
               </div>
             ) : (
-              <div className="flex items-center gap-2 text-[oklch(0.62_0.006_255)]">
+              <div className="flex items-center gap-2 text-[var(--chat-muted)]">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 Thinking...
               </div>
@@ -1178,7 +1450,7 @@ function MessageRow({ message }: { message: ChatMessage }) {
             </div>
           )}
           {message.warning && (
-            <div className="mt-3 rounded-lg border border-[oklch(0.45_0.08_80)] bg-[oklch(0.23_0.025_80)] px-3 py-2 text-xs text-[oklch(0.82_0.07_80)]">
+            <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_12%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-text)]">
               {message.warning}
             </div>
           )}
@@ -1201,16 +1473,16 @@ function PendingPromptCard({
 }) {
   if (pendingPrompt.type === "approval") {
     return (
-      <Card className="border-[oklch(0.38_0.07_80)] bg-[oklch(0.20_0.018_80)] p-3 text-[oklch(0.90_0.018_80)]">
+      <Card className="border-[color-mix(in_srgb,var(--chat-warning)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] p-3 text-[var(--chat-text)]">
         <div className="flex items-start gap-3">
-          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[oklch(0.82_0.08_80)]" />
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--chat-warning)]" />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold">Approval needed</div>
-            <p className="mt-1 text-sm text-[oklch(0.68_0.02_80)]">
+            <p className="mt-1 text-sm text-[var(--chat-muted-strong)]">
               {pendingPrompt.description}
             </p>
             {pendingPrompt.command && (
-              <pre className="mt-2 max-h-28 overflow-auto rounded-lg bg-[oklch(0.15_0.006_255)] px-2 py-1.5 text-xs text-[oklch(0.80_0.006_255)]">
+              <pre className="mt-2 max-h-28 overflow-auto rounded-lg bg-[var(--chat-surface-soft)] px-2 py-1.5 text-xs text-[var(--chat-muted-strong)]">
                 {pendingPrompt.command}
               </pre>
             )}
@@ -1255,7 +1527,7 @@ function PendingPromptCard({
         : pendingPrompt.prompt || `Secret${pendingPrompt.envVar ? `: ${pendingPrompt.envVar}` : ""}`;
 
   return (
-    <Card className="border-[oklch(0.32_0.035_255)] bg-[oklch(0.18_0.012_255)] p-3 text-[oklch(0.92_0.004_255)]">
+    <Card className="border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-3 text-[var(--chat-text)]">
       <div className="mb-2 text-sm font-semibold">{title}</div>
       {choices?.length ? (
         <div className="flex flex-wrap gap-2">
@@ -1275,7 +1547,7 @@ function PendingPromptCard({
         >
           <input
             autoFocus
-            className="min-w-0 flex-1 rounded-lg border border-[oklch(0.30_0.006_255)] bg-[oklch(0.14_0.006_255)] px-3 py-2 text-sm text-[oklch(0.92_0.004_255)] outline-none focus:ring-1 focus:ring-[oklch(0.58_0.06_255)]"
+            className="min-w-0 flex-1 rounded-lg border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-3 py-2 text-sm text-[var(--chat-text)] outline-none focus:ring-1 focus:ring-[var(--chat-accent)]"
             onChange={(event) => setPromptValue(event.target.value)}
             type={pendingPrompt.type === "sudo" ? "password" : "text"}
             value={promptValue}
@@ -1306,12 +1578,13 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
   return (
     <div
       className={cn(
-        "rounded-xl border border-[oklch(0.28_0.006_255)] bg-[oklch(0.185_0.006_255)] px-2.5 py-2.5 text-xs transition-colors hover:bg-[oklch(0.205_0.006_255)]",
-        artifact.status === "error" && "border-[oklch(0.46_0.14_25)] bg-[oklch(0.20_0.025_25)]",
+        "rounded-xl border border-[var(--chat-border)] bg-[var(--chat-surface)] px-2.5 py-2.5 text-xs transition-colors hover:bg-[var(--chat-surface-strong)]",
+        artifact.status === "error" &&
+          "border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))]",
       )}
     >
       <div className="flex items-start gap-2">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[oklch(0.14_0.006_255)] text-[oklch(0.78_0.05_255)]">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
           <Icon className="h-3.5 w-3.5" />
         </div>
 
@@ -1320,17 +1593,17 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
           onClick={() => artifact.content && setOpen((value) => !value)}
           type="button"
         >
-          <div className="truncate font-medium text-[oklch(0.92_0.004_255)]">
+          <div className="truncate font-medium text-[var(--chat-text)]">
             {artifact.title}
           </div>
-          <div className="mt-0.5 truncate text-[0.68rem] text-[oklch(0.62_0.006_255)]">
+          <div className="mt-0.5 truncate text-[0.68rem] text-[var(--chat-muted)]">
             {artifact.detail || artifact.source || artifact.kind}
           </div>
         </button>
 
         <button
           aria-label="Copy artifact"
-          className="rounded-md p-1 text-[oklch(0.58_0.006_255)] transition-colors hover:bg-[oklch(0.27_0.006_255)] hover:text-[oklch(0.92_0.004_255)]"
+          className="rounded-md p-1 text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           onClick={copy}
           type="button"
         >
@@ -1343,7 +1616,7 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
       </div>
 
       {open && artifact.content && (
-        <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-[oklch(0.14_0.006_255)] p-2 text-[0.68rem] leading-4 text-[oklch(0.78_0.006_255)] whitespace-pre-wrap">
+        <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-[var(--chat-surface-soft)] p-2 text-[0.68rem] leading-4 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
           {artifact.content}
         </pre>
       )}
@@ -1361,10 +1634,10 @@ function ProgressItem({ tool }: { tool: ToolEntry }) {
         className={cn(
           "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
           failed
-            ? "bg-[oklch(0.35_0.12_25)] text-[oklch(0.86_0.08_25)]"
+            ? "bg-[color-mix(in_srgb,var(--chat-danger)_18%,var(--chat-bg))] text-[var(--chat-danger)]"
             : complete
-              ? "bg-[oklch(0.72_0.01_255)] text-[oklch(0.18_0.006_255)]"
-              : "bg-[oklch(0.25_0.006_255)] text-[oklch(0.78_0.006_255)]",
+              ? "bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]"
+              : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
         )}
       >
         {tool.status === "running" ? (
@@ -1374,9 +1647,9 @@ function ProgressItem({ tool }: { tool: ToolEntry }) {
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[oklch(0.78_0.006_255)]">{tool.name}</div>
+        <div className="truncate text-[var(--chat-muted-strong)]">{tool.name}</div>
         {(tool.summary || tool.context || tool.preview || tool.error) && (
-          <div className="mt-0.5 line-clamp-2 text-xs text-[oklch(0.55_0.006_255)]">
+          <div className="mt-0.5 line-clamp-2 text-xs text-[var(--chat-muted)]">
             {tool.error || tool.summary || tool.preview || tool.context}
           </div>
         )}
@@ -1422,18 +1695,18 @@ function ActivityPanel({
   const [artifactsOpen, setArtifactsOpen] = useState(true);
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-[oklch(0.27_0.006_255)] bg-[oklch(0.17_0.006_255)] p-4 normal-case shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
+    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface)] p-4 normal-case shadow-[0_24px_80px_rgba(0,0,0,0.18)]">
       <section className="shrink-0">
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-medium text-[oklch(0.70_0.006_255)]">
+          <h2 className="text-sm font-medium text-[var(--chat-muted-strong)]">
             Progress
           </h2>
           <span
             className={cn(
               "rounded-full px-2 py-0.5 text-[0.68rem]",
               state === "open"
-                ? "bg-[oklch(0.24_0.055_150)] text-[oklch(0.85_0.08_150)]"
-                : "bg-[oklch(0.23_0.006_255)] text-[oklch(0.62_0.006_255)]",
+                ? "bg-[color-mix(in_srgb,var(--chat-success)_18%,var(--chat-bg))] text-[var(--chat-success)]"
+                : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
             )}
           >
             {STATE_LABEL[state]}
@@ -1442,7 +1715,7 @@ function ActivityPanel({
 
         <div className="space-y-3">
           <div className="flex gap-2 text-sm leading-5">
-            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[oklch(0.72_0.01_255)] text-[oklch(0.18_0.006_255)]">
+            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
               {busy ? (
                 <Loader2 className="h-2.5 w-2.5 animate-spin" />
               ) : (
@@ -1450,10 +1723,10 @@ function ActivityPanel({
               )}
             </span>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[oklch(0.78_0.006_255)]">
+              <div className="truncate text-[var(--chat-muted-strong)]">
                 {statusText}
               </div>
-              <div className="mt-0.5 truncate text-xs text-[oklch(0.55_0.006_255)]">
+              <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
                 {modelLabel(info)}
               </div>
             </div>
@@ -1469,13 +1742,13 @@ function ActivityPanel({
       </section>
 
       {banner && (
-        <section className="mt-4 rounded-xl border border-[oklch(0.42_0.13_25)] bg-[oklch(0.20_0.025_25)] p-3">
-          <div className="flex items-start gap-2 text-sm text-[oklch(0.82_0.08_25)]">
+        <section className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3">
+          <div className="flex items-start gap-2 text-sm text-[var(--chat-danger)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <div className="break-words">{banner}</div>
               <button
-                className="mt-2 rounded-full border border-[oklch(0.48_0.10_25)] px-2.5 py-1 text-xs transition-colors hover:bg-[oklch(0.25_0.035_25)]"
+                className="mt-2 rounded-full border border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] px-2.5 py-1 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
                 onClick={onReconnect}
                 type="button"
               >
@@ -1486,14 +1759,14 @@ function ActivityPanel({
         </section>
       )}
 
-      <section className="mt-4 flex min-h-0 flex-1 flex-col border-t border-[oklch(0.24_0.006_255)] pt-4">
+      <section className="mt-4 flex min-h-0 flex-1 flex-col border-t border-[var(--chat-border)] pt-4">
         <button
-          className="mb-3 flex items-center justify-between gap-2 text-left text-sm font-medium text-[oklch(0.70_0.006_255)]"
+          className="mb-3 flex items-center justify-between gap-2 text-left text-sm font-medium text-[var(--chat-muted-strong)]"
           onClick={() => setArtifactsOpen((open) => !open)}
           type="button"
         >
           <span>Artifacts</span>
-          <span className="text-xs text-[oklch(0.50_0.006_255)]">
+          <span className="text-xs text-[var(--chat-muted)]">
             {artifacts.length}
           </span>
         </button>
@@ -1501,7 +1774,7 @@ function ActivityPanel({
         {artifactsOpen && (
           <div className="flex min-h-0 flex-col gap-2 overflow-y-auto pr-1">
             {artifacts.length === 0 ? (
-              <div className="px-2 py-5 text-center text-xs text-[oklch(0.55_0.006_255)]">
+              <div className="px-2 py-5 text-center text-xs text-[var(--chat-muted)]">
                 No artifacts yet
               </div>
             ) : (
@@ -1516,14 +1789,14 @@ function ActivityPanel({
         )}
       </section>
 
-      <section className="mt-4 shrink-0 border-t border-[oklch(0.24_0.006_255)] pt-4">
+      <section className="mt-4 shrink-0 border-t border-[var(--chat-border)] pt-4">
         <button
-          className="flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-[oklch(0.70_0.006_255)]"
+          className="flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-[var(--chat-muted-strong)]"
           onClick={() => setToolsOpen((open) => !open)}
           type="button"
         >
           <span>Tools</span>
-          <span className="text-xs text-[oklch(0.50_0.006_255)]">
+          <span className="text-xs text-[var(--chat-muted)]">
             {tools.length}
           </span>
         </button>
@@ -1531,7 +1804,7 @@ function ActivityPanel({
         {toolsOpen && (
           <div className="mt-3 max-h-44 space-y-2 overflow-y-auto pr-1">
             {tools.length === 0 ? (
-              <div className="px-2 py-3 text-center text-xs text-[oklch(0.55_0.006_255)]">
+              <div className="px-2 py-3 text-center text-xs text-[var(--chat-muted)]">
                 No tool calls yet
               </div>
             ) : (
@@ -1544,9 +1817,9 @@ function ActivityPanel({
         )}
       </section>
 
-      <section className="mt-4 shrink-0 border-t border-[oklch(0.24_0.006_255)] pt-4">
+      <section className="mt-4 shrink-0 border-t border-[var(--chat-border)] pt-4">
         <button
-          className="flex w-full items-center justify-between gap-2 rounded-xl px-1 py-1 text-left text-sm text-[oklch(0.78_0.006_255)] transition-colors hover:bg-[oklch(0.20_0.006_255)] disabled:opacity-50"
+          className="flex w-full items-center justify-between gap-2 rounded-xl px-1 py-1 text-left text-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] disabled:opacity-50"
           disabled={!canPickModel}
           onClick={onOpenModel}
           type="button"

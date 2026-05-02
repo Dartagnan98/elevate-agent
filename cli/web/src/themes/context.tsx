@@ -25,6 +25,16 @@ import { api } from "@/lib/api";
 /** LocalStorage key — pre-applied before the React tree mounts to avoid
  *  a visible flash of the default palette on theme-overridden installs. */
 const STORAGE_KEY = "elevate-dashboard-theme";
+const DEFAULT_THEME_NAME = "dark";
+const BUILTIN_THEME_NAMES = new Set(Object.keys(BUILTIN_THEMES));
+const LEGACY_THEME_ALIASES: Record<string, string> = {
+  cyberpunk: DEFAULT_THEME_NAME,
+  default: DEFAULT_THEME_NAME,
+  ember: DEFAULT_THEME_NAME,
+  midnight: DEFAULT_THEME_NAME,
+  mono: DEFAULT_THEME_NAME,
+  rose: DEFAULT_THEME_NAME,
+};
 
 /** Tracks fontUrls we've already injected so multiple theme switches don't
  *  pile up <link> tags. Keyed by URL. */
@@ -232,6 +242,12 @@ function applyLayoutVariant(variant: ThemeLayoutVariant | undefined) {
   root.style.setProperty("--theme-layout-variant", final);
 }
 
+function normalizeThemeName(name: string | null | undefined): string {
+  if (!name) return DEFAULT_THEME_NAME;
+  if (BUILTIN_THEME_NAMES.has(name)) return name;
+  return LEGACY_THEME_ALIASES[name] ?? DEFAULT_THEME_NAME;
+}
+
 // ---------------------------------------------------------------------------
 // Font stylesheet injection
 // ---------------------------------------------------------------------------
@@ -303,15 +319,16 @@ function applyTheme(theme: DashboardTheme) {
 // ---------------------------------------------------------------------------
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  /** Name of the currently active theme (built-in id or user YAML name). */
+  /** Name of the currently active theme. Elevate intentionally supports only
+   *  the two product modes here: dark and light. */
   const [themeName, setThemeName] = useState<string>(() => {
-    if (typeof window === "undefined") return "default";
-    return window.localStorage.getItem(STORAGE_KEY) ?? "default";
+    if (typeof window === "undefined") return DEFAULT_THEME_NAME;
+    return normalizeThemeName(window.localStorage.getItem(STORAGE_KEY));
   });
 
-  /** All selectable themes (shown in the picker). Starts with just the
-   *  built-ins; the API call below merges in user themes. */
-  const [availableThemes, setAvailableThemes] = useState<
+  /** All selectable themes shown in the picker. Server/user themes are ignored
+   *  on purpose so old custom theme files cannot re-texture the app shell. */
+  const [availableThemes] = useState<
     Array<{ description: string; label: string; name: string }>
   >(() =>
     Object.values(BUILTIN_THEMES).map((t) => ({
@@ -321,59 +338,32 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     })),
   );
 
-  /** Full definitions for user themes keyed by name — the API provides
-   *  these so custom YAMLs apply without a client-side stub. */
-  const [userThemeDefs, setUserThemeDefs] = useState<
-    Record<string, DashboardTheme>
-  >({});
-
   // Resolve a theme name to a full DashboardTheme, falling back to default
-  // only when neither a built-in nor a user theme is found.
+  // only when an old config/localStorage value points at a removed theme.
   const resolveTheme = useCallback(
     (name: string): DashboardTheme => {
-      return (
-        BUILTIN_THEMES[name] ??
-        userThemeDefs[name] ??
-        defaultTheme
-      );
+      return BUILTIN_THEMES[normalizeThemeName(name)] ?? defaultTheme;
     },
-    [userThemeDefs],
+    [],
   );
 
-  // Re-apply on every themeName change, or when user themes arrive from
-  // the API (since the active theme might be a user theme whose definition
-  // hadn't loaded yet on first render).
+  // Re-apply on every themeName change.
   useEffect(() => {
     applyTheme(resolveTheme(themeName));
   }, [themeName, resolveTheme]);
 
-  // Load server-side themes (built-ins + user YAMLs) once on mount.
+  // Load server active preference once on mount, but normalize it to the
+  // supported dark/light pair before it can affect the UI.
   useEffect(() => {
     let cancelled = false;
     api
       .getThemes()
       .then((resp) => {
         if (cancelled) return;
-        if (resp.themes?.length) {
-          setAvailableThemes(
-            resp.themes.map((t) => ({
-              name: t.name,
-              label: t.label,
-              description: t.description,
-            })),
-          );
-          // Index any definitions the server shipped (user themes).
-          const defs: Record<string, DashboardTheme> = {};
-          for (const entry of resp.themes) {
-            if (entry.definition) {
-              defs[entry.name] = entry.definition;
-            }
-          }
-          if (Object.keys(defs).length > 0) setUserThemeDefs(defs);
-        }
-        if (resp.active && resp.active !== themeName) {
-          setThemeName(resp.active);
-          window.localStorage.setItem(STORAGE_KEY, resp.active);
+        const next = normalizeThemeName(resp.active);
+        if (next !== themeName) {
+          setThemeName(next);
+          window.localStorage.setItem(STORAGE_KEY, next);
         }
       })
       .catch(() => {});
@@ -385,20 +375,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setTheme = useCallback(
     (name: string) => {
-      // Accept any name the server told us exists OR any built-in.
-      const knownNames = new Set<string>([
-        ...Object.keys(BUILTIN_THEMES),
-        ...availableThemes.map((t) => t.name),
-        ...Object.keys(userThemeDefs),
-      ]);
-      const next = knownNames.has(name) ? name : "default";
+      const next = normalizeThemeName(name);
       setThemeName(next);
       if (typeof window !== "undefined") {
         window.localStorage.setItem(STORAGE_KEY, next);
       }
       api.setTheme(next).catch(() => {});
     },
-    [availableThemes, userThemeDefs],
+    [],
   );
 
   const value = useMemo<ThemeContextValue>(
@@ -420,7 +404,7 @@ export function useTheme(): ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: defaultTheme,
-  themeName: "default",
+  themeName: DEFAULT_THEME_NAME,
   availableThemes: Object.values(BUILTIN_THEMES).map((t) => ({
     name: t.name,
     label: t.label,

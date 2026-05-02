@@ -168,16 +168,15 @@ export interface DashboardTheme {
  * Wire response shape for `GET /api/dashboard/themes`.
  *
  * The `themes` list is intentionally partial — built-in themes are fully
- * defined in `presets.ts`; user themes carry their full definition so the
- * client can apply them without a second round-trip.
+ * defined in `presets.ts`. Elevate currently exposes only light/dark product
+ * themes, so `definition` is kept for wire compatibility with older clients.
  */
 export interface ThemeListEntry {
   description: string;
   label: string;
   name: string;
-  /** Full theme definition. Present for user-defined themes loaded from
-   *  `~/.elevate/dashboard-themes/*.yaml`; undefined for built-ins (the
-   *  client already has those in `BUILTIN_THEMES`). */
+  /** Full theme definition. Retained for wire compatibility; undefined for
+   *  built-ins because the client already has those in `BUILTIN_THEMES`. */
   definition?: DashboardTheme;
 }
 

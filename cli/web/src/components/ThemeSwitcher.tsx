@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Palette, Check } from "lucide-react";
+import { Check, Moon, Sun } from "lucide-react";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { BUILTIN_THEMES, useTheme } from "@/themes";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 
 /**
- * Compact theme picker mounted next to the language switcher in the header.
- * Each dropdown row shows a 3-stop swatch (background / midground / warm
- * glow) so users can preview the palette before committing. User-defined
- * themes from `~/.elevate/dashboard-themes/*.yaml` that aren't in
- * `BUILTIN_THEMES` render without swatches and apply the default palette.
+ * Compact light/dark picker mounted next to the language switcher in the
+ * header.
  *
  * When placed at the bottom of a container (e.g. the sidebar rail), pass
  * `dropUp` so the menu opens above the trigger instead of clipping below
@@ -47,6 +44,7 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
 
   const current = availableThemes.find((th) => th.name === themeName);
   const label = current?.label ?? themeName;
+  const ActiveIcon = themeName === "light" ? Sun : Moon;
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -54,19 +52,18 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         className={cn(
-          "group relative inline-flex items-center gap-1.5 px-2 py-1 text-xs",
-          "text-muted-foreground hover:text-foreground transition-colors cursor-pointer",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+          "inline-flex h-8 items-center gap-2 rounded-lg border border-border px-2.5 text-xs",
+          "bg-card text-muted-foreground transition-colors hover:text-foreground",
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
         title={t.theme?.switchTheme ?? "Switch theme"}
         aria-label={t.theme?.switchTheme ?? "Switch theme"}
         aria-expanded={open}
         aria-haspopup="listbox"
       >
-        <Palette className="h-3.5 w-3.5" />
+        <ActiveIcon className="h-3.5 w-3.5" />
         <Typography
-          mondwest
-          className="hidden sm:inline tracking-wide uppercase text-[0.65rem]"
+          className="hidden text-xs font-medium normal-case tracking-normal sm:inline"
         >
           {label}
         </Typography>
@@ -79,15 +76,12 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
           className={cn(
             "absolute z-50 min-w-[240px]",
             dropUp ? "left-0 bottom-full mb-1" : "right-0 top-full mt-1",
-            "border border-current/20 bg-background-base/95 backdrop-blur-sm",
-            "shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]",
+            "overflow-hidden rounded-xl border border-border bg-card/98 backdrop-blur-sm",
+            "shadow-[0_18px_44px_-22px_rgba(0,0,0,0.65)]",
           )}
         >
-          <div className="border-b border-current/20 px-3 py-2">
-            <Typography
-              mondwest
-              className="text-[0.65rem] tracking-[0.15em] uppercase text-midground/70"
-            >
+          <div className="border-b border-border px-3 py-2">
+            <Typography className="text-xs font-semibold normal-case text-muted-foreground">
               {t.theme?.title ?? "Theme"}
             </Typography>
           </div>
@@ -108,8 +102,8 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
                 }}
                 className={cn(
                   "flex w-full items-center gap-3 px-3 py-2 text-left transition-colors cursor-pointer",
-                  "hover:bg-midground/10",
-                  isActive ? "text-midground" : "text-midground/60",
+                  "hover:bg-accent",
+                  isActive ? "text-foreground" : "text-muted-foreground",
                 )}
               >
                 {preset ? (
@@ -120,13 +114,12 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
 
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <Typography
-                    mondwest
-                    className="truncate text-[0.75rem] tracking-wide uppercase"
+                    className="truncate text-sm font-medium normal-case tracking-normal"
                   >
                     {th.label}
                   </Typography>
                   {th.description && (
-                    <Typography className="truncate text-[0.65rem] normal-case tracking-normal text-midground/50">
+                    <Typography className="truncate text-xs normal-case tracking-normal text-muted-foreground">
                       {th.description}
                     </Typography>
                   )}
@@ -134,7 +127,7 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
 
                 <Check
                   className={cn(
-                    "h-3 w-3 shrink-0 text-midground",
+                    "h-3.5 w-3.5 shrink-0 text-primary",
                     isActive ? "opacity-100" : "opacity-0",
                   )}
                 />
@@ -154,7 +147,7 @@ function ThemeSwatch({ theme }: { theme: string }) {
   return (
     <div
       aria-hidden
-      className="flex h-4 w-9 shrink-0 overflow-hidden border border-current/20"
+      className="flex h-5 w-10 shrink-0 overflow-hidden rounded-md border border-border"
     >
       <span className="flex-1" style={{ background: background.hex }} />
       <span className="flex-1" style={{ background: midground.hex }} />
@@ -167,7 +160,7 @@ function PlaceholderSwatch() {
   return (
     <div
       aria-hidden
-      className="h-4 w-9 shrink-0 border border-dashed border-current/20"
+      className="h-5 w-10 shrink-0 rounded-md border border-dashed border-border"
     />
   );
 }

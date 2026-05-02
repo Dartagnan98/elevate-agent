@@ -2840,13 +2840,28 @@ def mount_spa(application: FastAPI):
 # Built-in dashboard themes — label + description only.  The actual color
 # definitions live in the frontend (web/src/themes/presets.ts).
 _BUILTIN_DASHBOARD_THEMES = [
-    {"name": "default",   "label": "Elevate Blue",  "description": "Deep command blue with warm real-estate accents"},
-    {"name": "midnight",  "label": "Midnight",      "description": "Deep blue-violet with cool accents"},
-    {"name": "ember",     "label": "Ember",          "description": "Warm crimson and bronze — forge vibes"},
-    {"name": "mono",      "label": "Mono",           "description": "Clean grayscale — minimal and focused"},
-    {"name": "cyberpunk", "label": "Cyberpunk",      "description": "Neon green on black — matrix terminal"},
-    {"name": "rose",      "label": "Rosé",           "description": "Soft pink and warm ivory — easy on the eyes"},
+    {"name": "dark",  "label": "Dark",  "description": "Deep blue-black workspace for focused agent work"},
+    {"name": "light", "label": "Light", "description": "Bright workspace with crisp blue agent controls"},
 ]
+
+_DASHBOARD_THEME_NAMES = {t["name"] for t in _BUILTIN_DASHBOARD_THEMES}
+_DASHBOARD_THEME_ALIASES = {
+    "cyberpunk": "dark",
+    "default": "dark",
+    "ember": "dark",
+    "midnight": "dark",
+    "mono": "dark",
+    "rose": "dark",
+}
+
+
+def _normalise_dashboard_theme_name(name: Any) -> str:
+    if isinstance(name, str):
+        if name in _DASHBOARD_THEME_NAMES:
+            return name
+        if name in _DASHBOARD_THEME_ALIASES:
+            return _DASHBOARD_THEME_ALIASES[name]
+    return "dark"
 
 
 def _parse_theme_layer(value: Any, default_hex: str, default_alpha: float = 1.0) -> Optional[Dict[str, Any]]:
@@ -3089,30 +3104,15 @@ def _discover_user_themes() -> list:
 async def get_dashboard_themes():
     """Return available themes and the currently active one.
 
-    Built-in entries ship name/label/description only (the frontend owns
-    their full definitions in `web/src/themes/presets.ts`).  User themes
-    from `~/.elevate/dashboard-themes/*.yaml` ship with their full
-    normalised definition under `definition`, so the client can apply
-    them without a stub.
+    Elevate intentionally exposes only the product light/dark pair here. Older
+    theme config names are normalized to dark so stale local config cannot
+    bring back removed textured skins.
     """
     config = load_config()
-    active = config.get("dashboard", {}).get("theme", "default")
-    user_themes = _discover_user_themes()
-    seen = set()
+    active = _normalise_dashboard_theme_name(config.get("dashboard", {}).get("theme", "dark"))
     themes = []
     for t in _BUILTIN_DASHBOARD_THEMES:
-        seen.add(t["name"])
         themes.append(t)
-    for t in user_themes:
-        if t["name"] in seen:
-            continue
-        themes.append({
-            "name": t["name"],
-            "label": t["label"],
-            "description": t["description"],
-            "definition": t,
-        })
-        seen.add(t["name"])
     return {"themes": themes, "active": active}
 
 
@@ -3126,9 +3126,9 @@ async def set_dashboard_theme(body: ThemeSetBody):
     config = load_config()
     if "dashboard" not in config:
         config["dashboard"] = {}
-    config["dashboard"]["theme"] = body.name
+    config["dashboard"]["theme"] = _normalise_dashboard_theme_name(body.name)
     save_config(config)
-    return {"ok": True, "theme": body.name}
+    return {"ok": True, "theme": config["dashboard"]["theme"]}
 
 
 # ---------------------------------------------------------------------------

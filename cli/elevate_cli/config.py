@@ -655,7 +655,7 @@ DEFAULT_CONFIG = {
 
     # Web dashboard settings
     "dashboard": {
-        "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+        "theme": "dark",  # Dashboard visual theme: "dark" or "light"
     },
 
     # Agent Hub definitions shown in the local dashboard.  The runtime uses

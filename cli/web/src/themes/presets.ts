@@ -3,12 +3,9 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
 /**
  * Built-in dashboard themes.
  *
- * Each theme defines its own palette and layout so switching themes produces
- * visible changes beyond color while keeping Elevate's app typography clean,
- * sans-serif, and offline-friendly.
- *
- * Theme names must stay in sync with the backend's
- * `_BUILTIN_DASHBOARD_THEMES` list in `elevate_cli/web_server.py`.
+ * Elevate keeps the dashboard chrome deliberately simple: one refined dark
+ * mode and one clean light mode. Theme names must stay in sync with the
+ * backend's `_BUILTIN_DASHBOARD_THEMES` list in `elevate_cli/web_server.py`.
  */
 
 // ---------------------------------------------------------------------------
@@ -38,154 +35,81 @@ const DEFAULT_LAYOUT: ThemeLayout = {
 // Themes
 // ---------------------------------------------------------------------------
 
-export const defaultTheme: DashboardTheme = {
-  name: "default",
-  label: "Elevate Blue",
-  description: "Deep command blue with warm real-estate accents",
+export const darkTheme: DashboardTheme = {
+  name: "dark",
+  label: "Dark",
+  description: "Deep blue-black workspace for focused agent work",
   palette: {
-    background: { hex: "#07182f", alpha: 1 },
-    midground: { hex: "#e7f0ff", alpha: 1 },
+    background: { hex: "#181a1d", alpha: 1 },
+    midground: { hex: "#f0f3f7", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(76, 141, 255, 0.34)",
-    noiseOpacity: 0.42,
+    warmGlow: "rgba(69, 126, 210, 0.16)",
+    noiseOpacity: 0,
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,
   colorOverrides: {
-    primary: "#9cc7ff",
-    primaryForeground: "#07182f",
-    destructive: "#f07070",
-    destructiveForeground: "#07182f",
+    card: "color-mix(in srgb, #f0f3f7 5%, #181a1d)",
+    cardForeground: "#f0f3f7",
+    popover: "color-mix(in srgb, #f0f3f7 6%, #181a1d)",
+    popoverForeground: "#f0f3f7",
+    primary: "#7fb2ff",
+    primaryForeground: "#101215",
+    secondary: "color-mix(in srgb, #f0f3f7 9%, #181a1d)",
+    secondaryForeground: "#f0f3f7",
+    muted: "color-mix(in srgb, #f0f3f7 8%, #181a1d)",
+    mutedForeground: "color-mix(in srgb, #f0f3f7 58%, transparent)",
+    accent: "color-mix(in srgb, #7fb2ff 14%, #181a1d)",
+    accentForeground: "#f0f3f7",
+    destructive: "#ff827d",
+    destructiveForeground: "#101215",
     success: "#35d58b",
     warning: "#f3bf67",
-    ring: "#9cc7ff",
+    border: "color-mix(in srgb, #f0f3f7 14%, transparent)",
+    input: "color-mix(in srgb, #f0f3f7 16%, transparent)",
+    ring: "#7fb2ff",
   },
 };
 
-export const midnightTheme: DashboardTheme = {
-  name: "midnight",
-  label: "Midnight",
-  description: "Deep blue-violet with cool accents",
+export const lightTheme: DashboardTheme = {
+  name: "light",
+  label: "Light",
+  description: "Bright workspace with crisp blue agent controls",
   palette: {
-    background: { hex: "#0a0a1f", alpha: 1 },
-    midground: { hex: "#d4c8ff", alpha: 1 },
+    background: { hex: "#f6f8fb", alpha: 1 },
+    midground: { hex: "#17233a", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(167, 139, 250, 0.32)",
-    noiseOpacity: 0.8,
+    warmGlow: "rgba(66, 116, 205, 0.10)",
+    noiseOpacity: 0,
   },
-  typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    baseSize: "14px",
-    lineHeight: "1.6",
-  },
-  layout: {
-    radius: "0.75rem",
-    density: "comfortable",
-  },
-};
-
-export const emberTheme: DashboardTheme = {
-  name: "ember",
-  label: "Ember",
-  description: "Warm crimson and bronze — forge vibes",
-  palette: {
-    background: { hex: "#1a0a06", alpha: 1 },
-    midground: { hex: "#ffd8b0", alpha: 1 },
-    foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(249, 115, 22, 0.38)",
-    noiseOpacity: 1,
-  },
-  typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    baseSize: "15px",
-    lineHeight: "1.6",
-  },
-  layout: {
-    radius: "0.25rem",
-    density: "comfortable",
-  },
+  typography: DEFAULT_TYPOGRAPHY,
+  layout: DEFAULT_LAYOUT,
   colorOverrides: {
-    destructive: "#c92d0f",
-    warning: "#f97316",
+    card: "#ffffff",
+    cardForeground: "#17233a",
+    popover: "#ffffff",
+    popoverForeground: "#17233a",
+    primary: "#1f5ca8",
+    primaryForeground: "#f8fbff",
+    secondary: "#e7edf6",
+    secondaryForeground: "#17233a",
+    muted: "#e9eef6",
+    mutedForeground: "#66728a",
+    accent: "#dce8f8",
+    accentForeground: "#17233a",
+    destructive: "#c94b45",
+    destructiveForeground: "#fff7f6",
+    success: "#168a59",
+    warning: "#a96917",
+    border: "#d9e1ec",
+    input: "#cbd5e2",
+    ring: "#1f5ca8",
   },
 };
 
-export const monoTheme: DashboardTheme = {
-  name: "mono",
-  label: "Mono",
-  description: "Clean grayscale — minimal and focused",
-  palette: {
-    background: { hex: "#0e0e0e", alpha: 1 },
-    midground: { hex: "#eaeaea", alpha: 1 },
-    foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(255, 255, 255, 0.1)",
-    noiseOpacity: 0.6,
-  },
-  typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    baseSize: "13px",
-    lineHeight: "1.5",
-  },
-  layout: {
-    radius: "0",
-    density: "compact",
-  },
-};
-
-export const cyberpunkTheme: DashboardTheme = {
-  name: "cyberpunk",
-  label: "Cyberpunk",
-  description: "Neon green on black — matrix terminal",
-  palette: {
-    background: { hex: "#040608", alpha: 1 },
-    midground: { hex: "#9bffcf", alpha: 1 },
-    foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(0, 255, 136, 0.22)",
-    noiseOpacity: 1.2,
-  },
-  typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    baseSize: "14px",
-    lineHeight: "1.5",
-  },
-  layout: {
-    radius: "0",
-    density: "compact",
-  },
-  colorOverrides: {
-    success: "#00ff88",
-    warning: "#ffd700",
-    destructive: "#ff0055",
-  },
-};
-
-export const roseTheme: DashboardTheme = {
-  name: "rose",
-  label: "Rosé",
-  description: "Soft pink and warm ivory — easy on the eyes",
-  palette: {
-    background: { hex: "#1a0f15", alpha: 1 },
-    midground: { hex: "#ffd4e1", alpha: 1 },
-    foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(249, 168, 212, 0.3)",
-    noiseOpacity: 0.9,
-  },
-  typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    baseSize: "16px",
-    lineHeight: "1.7",
-  },
-  layout: {
-    radius: "1rem",
-    density: "spacious",
-  },
-};
+export const defaultTheme = darkTheme;
 
 export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
-  default: defaultTheme,
-  midnight: midnightTheme,
-  ember: emberTheme,
-  mono: monoTheme,
-  cyberpunk: cyberpunkTheme,
-  rose: roseTheme,
+  dark: darkTheme,
+  light: lightTheme,
 };
