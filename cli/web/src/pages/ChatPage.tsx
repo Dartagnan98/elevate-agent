@@ -1,10 +1,10 @@
 import { Markdown } from "@/components/Markdown";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import type { ToolEntry } from "@/components/ToolCall";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import { api, type AgentHubAgent } from "@/lib/api";
 import {
   GatewayClient,
   type ConnectionState,
@@ -17,6 +17,7 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronUp,
   Clipboard,
   FileCode2,
   FileText,
@@ -28,7 +29,9 @@ import {
   Send,
   Shield,
   ShieldAlert,
+  Sparkles,
   Square,
+  Users,
   X,
 } from "lucide-react";
 import {
@@ -146,6 +149,22 @@ interface QueuedInput {
   text: string;
 }
 
+interface ComposerAgent {
+  description?: string;
+  enabled: boolean;
+  id: string;
+  name: string;
+  role?: string;
+  status?: string;
+}
+
+interface RichMessageTemplate {
+  description: string;
+  id: string;
+  label: string;
+  prompt: string;
+}
+
 type PendingPrompt =
   | {
       choices?: string[] | null;
@@ -171,6 +190,79 @@ type PendingPrompt =
 
 const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
+
+const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
+  {
+    description: "Main chat, routing, synthesis, and final response owner.",
+    enabled: true,
+    id: "executive-assistant",
+    name: "Executive Assistant",
+    role: "Primary operator",
+    status: "ready",
+  },
+  {
+    description: "Paperwork, scheduling, checklists, and transaction ops.",
+    enabled: true,
+    id: "admin",
+    name: "Admin",
+    role: "Operations support",
+    status: "ready",
+  },
+  {
+    description: "Lead follow-up, client touchpoints, and nurture messaging.",
+    enabled: true,
+    id: "outreach",
+    name: "Outreach",
+    role: "Relationship lane",
+    status: "ready",
+  },
+  {
+    description: "Campaigns, listing positioning, emails, and creative direction.",
+    enabled: true,
+    id: "marketing",
+    name: "Marketing",
+    role: "Campaign lane",
+    status: "ready",
+  },
+];
+
+const RICH_MESSAGE_TEMPLATES: RichMessageTemplate[] = [
+  {
+    description: "Seller-safe weekly listing update with next steps.",
+    id: "seller-update",
+    label: "Seller Update",
+    prompt:
+      "Create a seller update. Include ShowingTime activity, buyer feedback themes, market context, recommended next steps, and a polished email draft. Do not auto-send.",
+  },
+  {
+    description: "Clean follow-up with timing and next action.",
+    id: "outreach-follow-up",
+    label: "Outreach Follow-up",
+    prompt:
+      "Draft an outreach follow-up. Identify the lead type, relationship context, message goal, recommended timing, the message draft, and the next follow-up action.",
+  },
+  {
+    description: "Quick CMA direction before deeper analysis.",
+    id: "cma-brief",
+    label: "CMA Brief",
+    prompt:
+      "Prepare a CMA brief. Summarize the subject property, missing inputs, comparable search plan, pricing signals, risk flags, and what needs approval before producing a PDF.",
+  },
+  {
+    description: "Ops checklist with owner, date, and blocker fields.",
+    id: "admin-checklist",
+    label: "Admin Checklist",
+    prompt:
+      "Turn this into an admin checklist. Use sections for paperwork, scheduling, listing status, blockers, owner, due date, and next action.",
+  },
+  {
+    description: "Campaign plan with copy direction and deliverables.",
+    id: "marketing-campaign",
+    label: "Marketing Campaign",
+    prompt:
+      "Build a marketing campaign brief. Include audience, offer angle, channels, email/social copy direction, creative assets needed, approvals, and production steps.",
+  },
+];
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   closed: "closed",
@@ -236,6 +328,27 @@ function displayStatusText(text: string): string {
 
 function syntheticToolId(name: string): string {
   return `progress:${name || "tool"}`;
+}
+
+function composerAgentFromHub(agent: AgentHubAgent): ComposerAgent {
+  return {
+    description: agent.description,
+    enabled: agent.enabled,
+    id: agent.id,
+    name: agent.name,
+    role: agent.role,
+    status: agent.status,
+  };
+}
+
+function routePromptForAgent(text: string, agent: ComposerAgent): string {
+  if (agent.id === "executive-assistant") return text;
+
+  return [
+    `[Elevate agent route: ${agent.name} (${agent.id})]`,
+    "Use this specialist lane for the turn when useful, then return the answer in this chat.",
+    `User request: ${text}`,
+  ].join("\n");
 }
 
 function nowLabel(ts: number): string {
@@ -464,6 +577,12 @@ export default function ChatPage() {
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
   const [promptValue, setPromptValue] = useState("");
   const [modelOpen, setModelOpen] = useState(false);
+  const [composerAgents, setComposerAgents] = useState<ComposerAgent[]>(
+    DEFAULT_COMPOSER_AGENTS,
+  );
+  const [selectedAgentId, setSelectedAgentId] = useState("executive-assistant");
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [richMenuOpen, setRichMenuOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [resumeFallback, setResumeFallback] = useState(false);
   const [portalRoot] = useState<HTMLElement | null>(() =>
@@ -475,6 +594,19 @@ export default function ChatPage() {
       : false,
   );
   const { setEnd } = usePageHeader();
+
+  const activeComposerAgents = useMemo(() => {
+    const enabled = composerAgents.filter((agent) => agent.enabled);
+    return enabled.length ? enabled : DEFAULT_COMPOSER_AGENTS;
+  }, [composerAgents]);
+
+  const selectedAgent = useMemo(
+    () =>
+      activeComposerAgents.find((agent) => agent.id === selectedAgentId) ??
+      activeComposerAgents[0] ??
+      DEFAULT_COMPOSER_AGENTS[0],
+    [activeComposerAgents, selectedAgentId],
+  );
 
   const appendMessage = useCallback(
     (role: ChatRole, content: string, extras: Partial<ChatMessage> = {}) => {
@@ -541,6 +673,29 @@ export default function ChatPage() {
     sync();
     mql.addEventListener("change", sync);
     return () => mql.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    api
+      .getAgentHub()
+      .then((snapshot) => {
+        if (cancelled) return;
+        const agents = snapshot.agents
+          .map(composerAgentFromHub)
+          .filter((agent) => agent.enabled);
+        if (agents.length) {
+          setComposerAgents(agents);
+        }
+      })
+      .catch(() => {
+        // Agent Hub metadata should never block the chat composer.
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1041,6 +1196,33 @@ export default function ChatPage() {
     updateAssistant,
   ]);
 
+  const selectComposerAgent = useCallback(
+    (agent: ComposerAgent) => {
+      setSelectedAgentId(agent.id);
+      setAgentMenuOpen(false);
+      setStatusText(
+        agent.id === "executive-assistant"
+          ? "Executive Assistant selected"
+          : `Routing through ${agent.name}`,
+      );
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [],
+  );
+
+  const insertRichMessageTemplate = useCallback(
+    (template: RichMessageTemplate) => {
+      setInput((prev) => {
+        const clean = prev.trim();
+        return clean ? `${clean}\n\n${template.prompt}` : template.prompt;
+      });
+      setRichMenuOpen(false);
+      setStatusText(`${template.label} inserted`);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [],
+  );
+
   const submitPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
@@ -1049,6 +1231,8 @@ export default function ChatPage() {
       appendMessage("user", trimmed);
       setInput("");
       setBanner(null);
+      setAgentMenuOpen(false);
+      setRichMenuOpen(false);
 
       if (trimmed.startsWith("/")) {
         await executeSlash({
@@ -1063,6 +1247,8 @@ export default function ChatPage() {
         return;
       }
 
+      const routedText = routePromptForAgent(trimmed, selectedAgent);
+
       if (busy) {
         const queued: QueuedInput = {
           createdAt: Date.now(),
@@ -1075,7 +1261,7 @@ export default function ChatPage() {
         try {
           await gw.request("session.steer", {
             session_id: sessionId,
-            text: trimmed,
+            text: routedText,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1094,7 +1280,7 @@ export default function ChatPage() {
       try {
         await gw.request("prompt.submit", {
           session_id: sessionId,
-          text: trimmed,
+          text: routedText,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1103,7 +1289,7 @@ export default function ChatPage() {
         setStatusText("Error");
       }
     },
-    [appendMessage, busy, gw, sessionId],
+    [appendMessage, busy, gw, selectedAgent, sessionId],
   );
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -1385,23 +1571,11 @@ export default function ChatPage() {
             <div className="mx-auto max-w-[48rem]">
               <QueuedInputStrip queuedInputs={queuedInputs} />
 
-              <div className="flex items-end gap-2 rounded-[1.4rem] bg-[var(--chat-surface)] p-2 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
-                <div className="min-w-0 flex-1 px-2 pb-1 pt-1">
-                  <ComposerStatusBar
-                    canPickModel={canPickModel}
-                    info={info}
-                    onOpenModel={() => setModelOpen(true)}
-                    onToggleVoice={toggleVoiceInput}
-                    state={state}
-                    statusText={statusText}
-                    voiceListening={voiceListening}
-                    voiceSupported={voiceSupported}
-                  />
-
+              <div className="rounded-[1.45rem] bg-[var(--chat-surface)] p-2.5 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
                 <textarea
                   ref={inputRef}
                   aria-label="Message Elevate Agent"
-                  className="mt-2 max-h-40 min-h-12 w-full resize-none bg-transparent text-sm leading-6 text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)]"
+                  className="max-h-40 min-h-14 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)]"
                   disabled={state !== "open" || !sessionId}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={onComposerKeyDown}
@@ -1413,24 +1587,34 @@ export default function ChatPage() {
                   rows={2}
                   value={input}
                 />
-              </div>
-              <button
-                aria-label="Send message"
-                className={cn(
-                  "mb-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors",
-                  canSend
-                    ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
-                    : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
-                )}
-                disabled={!canSend}
-                type="submit"
-              >
-                {busy ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-              </button>
+
+                <ComposerActionBar
+                  agentMenuOpen={agentMenuOpen}
+                  agents={activeComposerAgents}
+                  busy={busy}
+                  canPickModel={canPickModel}
+                  canSend={canSend}
+                  info={info}
+                  onOpenModel={() => setModelOpen(true)}
+                  onRichMenuToggle={() => {
+                    setRichMenuOpen((open) => !open);
+                    setAgentMenuOpen(false);
+                  }}
+                  onSelectAgent={selectComposerAgent}
+                  onSelectRichMessage={insertRichMessageTemplate}
+                  onToggleAgentMenu={() => {
+                    setAgentMenuOpen((open) => !open);
+                    setRichMenuOpen(false);
+                  }}
+                  onToggleVoice={toggleVoiceInput}
+                  richMenuOpen={richMenuOpen}
+                  richTemplates={RICH_MESSAGE_TEMPLATES}
+                  selectedAgent={selectedAgent}
+                  state={state}
+                  statusText={statusText}
+                  voiceListening={voiceListening}
+                  voiceSupported={voiceSupported}
+                />
               </div>
             </div>
           </form>
@@ -1506,31 +1690,137 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
   );
 }
 
-function ComposerStatusBar({
+function ComposerActionBar({
+  agentMenuOpen,
+  agents,
+  busy,
   canPickModel,
+  canSend,
   info,
   onOpenModel,
+  onRichMenuToggle,
+  onSelectAgent,
+  onSelectRichMessage,
+  onToggleAgentMenu,
   onToggleVoice,
+  richMenuOpen,
+  richTemplates,
+  selectedAgent,
   state,
   statusText,
   voiceListening,
   voiceSupported,
 }: {
+  agentMenuOpen: boolean;
+  agents: ComposerAgent[];
+  busy: boolean;
   canPickModel: boolean;
+  canSend: boolean;
   info: SessionInfo;
   onOpenModel(): void;
+  onRichMenuToggle(): void;
+  onSelectAgent(agent: ComposerAgent): void;
+  onSelectRichMessage(template: RichMessageTemplate): void;
+  onToggleAgentMenu(): void;
   onToggleVoice(): void;
+  richMenuOpen: boolean;
+  richTemplates: RichMessageTemplate[];
+  selectedAgent: ComposerAgent;
   state: ConnectionState;
   statusText: string;
   voiceListening: boolean;
   voiceSupported: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
+    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <div className="relative">
+          <button
+            type="button"
+            onClick={onToggleAgentMenu}
+            className={cn(
+              "inline-flex h-7 max-w-[12rem] items-center gap-1.5 rounded-full px-2.5",
+              "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
+              "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
+              agentMenuOpen &&
+                "bg-[var(--chat-accent-soft)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-accent)]",
+            )}
+            title="Choose agent lane"
+          >
+            <Users className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{selectedAgent.name}</span>
+            <ChevronUp className="h-3 w-3 shrink-0 opacity-70" />
+          </button>
+
+          {agentMenuOpen && (
+            <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[18rem] overflow-hidden rounded-2xl bg-[var(--chat-surface)] p-1.5 text-left shadow-[0_18px_54px_rgba(0,0,0,0.22),inset_0_0_0_1px_var(--chat-border-strong)]">
+              {agents.map((agent) => (
+                <button
+                  key={agent.id}
+                  type="button"
+                  onClick={() => onSelectAgent(agent)}
+                  className={cn(
+                    "flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
+                    selectedAgent.id === agent.id
+                      ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+                      : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+                  )}
+                >
+                  <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-semibold">
+                      {agent.name}
+                    </span>
+                    <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
+                      {agent.role || agent.description || agent.status || "Agent lane"}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <button
+            type="button"
+            onClick={onRichMenuToggle}
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
+              "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
+              "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
+              richMenuOpen &&
+                "bg-[var(--chat-accent-soft)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-accent)]",
+            )}
+            title="Insert rich message"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Rich message
+            <ChevronUp className="h-3 w-3 opacity-70" />
+          </button>
+
+          {richMenuOpen && (
+            <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[19rem] overflow-hidden rounded-2xl bg-[var(--chat-surface)] p-1.5 text-left shadow-[0_18px_54px_rgba(0,0,0,0.22),inset_0_0_0_1px_var(--chat-border-strong)]">
+              {richTemplates.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  onClick={() => onSelectRichMessage(template)}
+                  className="flex w-full flex-col rounded-xl px-2.5 py-2 text-left text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+                >
+                  <span className="text-xs font-semibold">{template.label}</span>
+                  <span className="mt-0.5 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
+                    {template.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <span
           className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-full px-2",
+            "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
             "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
           )}
           title="Tool access"
@@ -1544,7 +1834,7 @@ function ComposerStatusBar({
           onClick={onOpenModel}
           disabled={!canPickModel}
           className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-full px-2",
+            "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
             "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
             "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
             "disabled:cursor-not-allowed disabled:opacity-50",
@@ -1560,7 +1850,7 @@ function ComposerStatusBar({
           onClick={onToggleVoice}
           disabled={!voiceSupported}
           className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-full px-2",
+            "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
             "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
             "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
             "disabled:cursor-not-allowed disabled:opacity-45",
@@ -1578,14 +1868,31 @@ function ComposerStatusBar({
         </button>
       </div>
 
-      <div className="flex min-w-0 items-center gap-1.5">
+      <div className="ml-auto flex min-w-0 items-center gap-2">
         <span
           className={cn(
             "h-1.5 w-1.5 shrink-0 rounded-full",
             state === "open" ? "bg-[var(--chat-success)]" : "bg-[var(--chat-muted)]",
           )}
         />
-        <span className="truncate">{statusText}</span>
+        <span className="max-w-[10rem] truncate">{statusText}</span>
+        <button
+          aria-label="Send message"
+          className={cn(
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors",
+            canSend
+              ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
+              : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
+          )}
+          disabled={!canSend}
+          type="submit"
+        >
+          {busy ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Send className="h-4 w-4" />
+          )}
+        </button>
       </div>
     </div>
   );
@@ -1604,16 +1911,11 @@ function MessageRow({
   return (
     <article
       className={cn(
-        "group flex w-full gap-3",
+        "group flex w-full",
         isUser ? "flex-row-reverse text-right" : "text-left",
         isAssistant && "pt-3 first:pt-0",
       )}
     >
-      {!isUser && (
-        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]">
-          <Bot className="h-3.5 w-3.5" />
-        </div>
-      )}
       <div
         className={cn(
           "min-w-0 flex-1",
@@ -1631,30 +1933,6 @@ function MessageRow({
                 : "text-[var(--chat-text)]",
           )}
         >
-          <div
-            className={cn(
-              "mb-1 flex items-center gap-2 text-[0.68rem] text-[var(--chat-muted)]",
-              isAssistant && "mb-3",
-              isUser && "justify-end",
-            )}
-          >
-            <span className="font-medium text-[var(--chat-muted-strong)]">
-              {isUser
-                ? "You"
-                : isAssistant
-                  ? "Executive Assistant"
-                  : message.title || message.role}
-            </span>
-            <span>{nowLabel(message.createdAt)}</span>
-            {message.status === "streaming" && (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            )}
-            {message.status === "interrupted" && (
-              <Badge variant="secondary" className="text-[0.6rem]">
-                interrupted
-              </Badge>
-            )}
-          </div>
           {message.role === "assistant" ? (
             message.content ? (
               <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[var(--chat-surface-strong)] [&_code]:text-[var(--chat-text)] [&_pre]:border-[var(--chat-border-strong)] [&_pre]:bg-[var(--chat-surface-soft)]">
