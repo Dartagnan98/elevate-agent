@@ -742,20 +742,26 @@ async def get_agent_hub():
     """Return the local Agent Hub snapshot for the dashboard."""
     try:
         from elevate_cli.agent_hub import build_agent_hub_snapshot
+        import inspect
 
-        return build_agent_hub_snapshot()
+        kwargs = (
+            {"include_profiles": False}
+            if "include_profiles" in inspect.signature(build_agent_hub_snapshot).parameters
+            else {}
+        )
+        return build_agent_hub_snapshot(**kwargs)
     except Exception as exc:
         _log.exception("GET /api/agent-hub failed")
         raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")
 
 
 @app.get("/api/harness")
-async def get_harness():
+async def get_harness(include_profiles: bool = False):
     """Return the compact local harness health snapshot."""
     try:
         from elevate_cli.harness import build_harness_snapshot
 
-        return build_harness_snapshot()
+        return build_harness_snapshot(include_profiles=include_profiles)
     except Exception as exc:
         _log.exception("GET /api/harness failed")
         raise HTTPException(status_code=500, detail=f"Harness snapshot failed: {exc}")

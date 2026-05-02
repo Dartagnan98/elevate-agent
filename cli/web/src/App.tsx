@@ -655,6 +655,15 @@ function DesktopSidebar({
     onNavigate();
   };
 
+  const startNewChat = () => {
+    if (!embeddedChat) {
+      go("/hub");
+      return;
+    }
+    navigate(`/chat?new=${Date.now()}`);
+    onNavigate();
+  };
+
   const focusSearch = () => {
     searchRef.current?.focus();
   };
@@ -902,13 +911,14 @@ function DesktopSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
         <div className="space-y-0.5">
-          <SidebarAction
-            icon={Plus}
-            label="New chat"
-            path={embeddedChat ? "/chat" : "/hub"}
-            onNavigate={go}
-            primary
-          />
+          <button
+            type="button"
+            onClick={startNewChat}
+            className={sidebarActionClass(false, true)}
+          >
+            <Plus className="h-[15px] w-[15px] shrink-0" />
+            <span className="truncate">New chat</span>
+          </button>
           <button
             type="button"
             onClick={focusSearch}

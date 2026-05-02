@@ -417,6 +417,7 @@ function buildSourceEntries({
 export default function ChatPage() {
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
+  const newChatId = searchParams.get("new");
   const [version, setVersion] = useState(0);
   const gw = useMemo(() => new GatewayClient(), [version]);
 
@@ -916,6 +917,7 @@ export default function ChatPage() {
     appendMessage,
     ensureAssistant,
     gw,
+    newChatId,
     resumeId,
     updateAssistant,
   ]);

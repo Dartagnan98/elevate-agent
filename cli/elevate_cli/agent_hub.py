@@ -615,7 +615,7 @@ def _orchestration_summary() -> dict[str, Any]:
         }
 
 
-def build_agent_hub_snapshot() -> dict[str, Any]:
+def build_agent_hub_snapshot(*, include_profiles: bool = True) -> dict[str, Any]:
     """Return a redacted local snapshot for the dashboard Agent Hub."""
     config = load_config()
     runtime = read_runtime_status()
@@ -638,7 +638,7 @@ def build_agent_hub_snapshot() -> dict[str, Any]:
             skills=skills,
             toolsets=toolsets,
             orchestration=orchestration,
-            include_profiles=True,
+            include_profiles=include_profiles,
         )
     except Exception as exc:
         harness = {"error": str(exc), "available": False}

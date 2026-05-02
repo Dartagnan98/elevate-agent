@@ -588,12 +588,12 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
-def _evaluate_skill_access(frontmatter: Dict[str, Any]):
+def _evaluate_skill_access(frontmatter: Dict[str, Any], config: Optional[dict] = None):
     """Return the local access decision for a skill frontmatter block."""
     try:
         from elevate_cli.access import evaluate_skill_access
 
-        return evaluate_skill_access(frontmatter)
+        return evaluate_skill_access(frontmatter, config=config)
     except Exception:
         logger.debug("Could not evaluate skill access", exc_info=True)
         return None
@@ -627,6 +627,13 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     skills = []
     seen_names: set = set()
+    config = None
+    try:
+        from elevate_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = None
 
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
@@ -656,7 +663,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     continue
                 if name in disabled:
                     continue
-                access_decision = _evaluate_skill_access(frontmatter)
+                access_decision = _evaluate_skill_access(frontmatter, config=config)
                 if access_decision is not None and not access_decision.allowed:
                     continue
 
