@@ -474,6 +474,14 @@ function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
   return `/chat?resume=${encodeURIComponent(session.id)}`;
 }
 
+function compactSessionAge(ts: number): string {
+  const delta = Date.now() / 1000 - ts;
+  if (delta < 60) return "now";
+  if (delta < 3600) return `${Math.max(1, Math.floor(delta / 60))}m`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h`;
+  return `${Math.floor(delta / 86400)}d`;
+}
+
 function DesktopSidebar({
   embeddedChat,
   navItems,
@@ -853,7 +861,7 @@ function SessionListItem({
       to={route}
       onClick={onNavigate}
       className={cn(
-        "group relative flex min-h-10 items-center gap-2.5 rounded-lg px-2.5 py-1.5",
+        "group relative flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5",
         "text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
         active
           ? "bg-accent/85 text-midground"
@@ -866,15 +874,14 @@ function SessionListItem({
           session.is_active ? "bg-success" : "bg-current/30",
         )}
       />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[0.82rem] font-medium leading-[1.15rem]">
-          {sessionTitle(session)}
-        </span>
-        <span className="mt-0.5 flex items-center gap-1.5 text-[0.66rem] leading-3 text-muted-foreground">
-          <span className="truncate">{session.source ?? "local"}</span>
-          <span aria-hidden>·</span>
-          <span className="shrink-0">{timeAgo(session.last_active)}</span>
-        </span>
+      <span className="min-w-0 flex-1 truncate text-[0.82rem] font-medium leading-4">
+        {sessionTitle(session)}
+      </span>
+      <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.66rem] leading-none text-muted-foreground">
+        {session.source && session.source !== "local" && (
+          <span className="max-w-[3.25rem] truncate">{session.source}</span>
+        )}
+        <span className="tabular-nums">{compactSessionAge(session.last_active)}</span>
       </span>
       <button
         type="button"
@@ -885,14 +892,22 @@ function SessionListItem({
           onTogglePinned(session.id);
         }}
         className={cn(
-          "shrink-0 rounded-md p-1 transition-opacity",
+          "flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
           pinned
-            ? "text-primary opacity-100"
-            : "text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+            ? "text-primary"
+            : "text-muted-foreground/45 hover:bg-accent hover:text-midground",
         )}
       >
-        <Pin className="h-[13px] w-[13px]" />
+        <Pin
+          className={cn(
+            "h-[13px] w-[13px] transition-opacity",
+            pinned ? "opacity-100" : "opacity-45 group-hover:opacity-100",
+          )}
+        />
       </button>
+      <span className="sr-only">
+        {session.source ?? "local"} {timeAgo(session.last_active)}
+      </span>
     </NavLink>
   );
 }
