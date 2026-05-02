@@ -1634,7 +1634,7 @@ export default function ChatPage() {
         )}
         <aside
           className={cn(
-            "fixed bottom-4 right-4 top-4 z-[60] flex w-[min(24rem,calc(100vw-2rem))] flex-col",
+            "fixed right-4 top-4 z-[60] flex h-[52dvh] max-h-[32rem] min-h-[22rem] w-[min(24rem,calc(100vw-2rem))] flex-col",
             "normal-case",
             mobilePanelOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]",
             "transition-transform duration-200 ease-out",
@@ -1822,7 +1822,7 @@ export default function ChatPage() {
           </form>
         </section>
 
-        <aside className="pointer-events-none absolute bottom-5 right-5 top-5 hidden w-[21.5rem] xl:block">
+        <aside className="pointer-events-none absolute right-5 top-5 hidden h-[52vh] max-h-[34rem] min-h-[22rem] w-[21.5rem] xl:block">
           <div className="pointer-events-auto h-full">{activity}</div>
         </aside>
       </div>
