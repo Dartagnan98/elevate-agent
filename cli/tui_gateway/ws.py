@@ -111,11 +111,15 @@ class WSTransport:
 
 async def handle_ws(ws: Any) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
-    await ws.accept()
+    try:
+        await ws.accept()
+    except RuntimeError as exc:
+        _log.debug("ws accept failed before connection opened: %s", exc)
+        return
 
     transport = WSTransport(ws, asyncio.get_running_loop())
 
-    await transport.write_async(
+    ready_sent = await transport.write_async(
         {
             "jsonrpc": "2.0",
             "method": "event",
@@ -125,12 +129,21 @@ async def handle_ws(ws: Any) -> None:
             },
         }
     )
+    if not ready_sent:
+        return
 
     try:
         while True:
             try:
                 raw = await ws.receive_text()
             except _WebSocketDisconnect:
+                break
+            except RuntimeError as exc:
+                # Starlette can surface a fast browser-side close during the
+                # connect/StrictMode remount window as RuntimeError instead of
+                # WebSocketDisconnect. Treat it as a clean drop so the dashboard
+                # chat sidecar never crashes the ASGI app.
+                _log.debug("ws receive failed after disconnect: %s", exc)
                 break
 
             line = raw.strip()

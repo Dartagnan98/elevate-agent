@@ -646,6 +646,7 @@ function DesktopSidebar({
           </button>
           <SidebarAction icon={Puzzle} label="Plugins" path="/skills" onNavigate={go} />
           <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
+          <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
           <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
         </div>
 

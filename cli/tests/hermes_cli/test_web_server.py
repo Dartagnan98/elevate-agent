@@ -142,6 +142,16 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["agents"] == []
 
+    def test_gateway_ws_ready_and_clean_disconnect(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+        with self.client.websocket_connect(f"/api/ws?token={web_server._SESSION_TOKEN}") as ws:
+            first = ws.receive_json()
+
+        assert first["method"] == "event"
+        assert first["params"]["type"] == "gateway.ready"
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import elevate_cli.web_server as web_server

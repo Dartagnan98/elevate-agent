@@ -2690,7 +2690,10 @@ async def gateway_ws(ws: WebSocket) -> None:
 
     from tui_gateway.ws import handle_ws
 
-    await handle_ws(ws)
+    try:
+        await handle_ws(ws)
+    except RuntimeError as exc:
+        _log.debug("Chat sidecar websocket closed before handshake completed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
