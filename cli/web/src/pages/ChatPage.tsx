@@ -55,7 +55,13 @@ import {
   useRef,
   useState,
 } from "react";
-import type { FormEvent, KeyboardEvent, ReactNode } from "react";
+import type {
+  CSSProperties,
+  FormEvent,
+  KeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
@@ -230,6 +236,23 @@ type PendingPrompt =
 
 const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
+const PREVIEW_PANEL_MIN_WIDTH = 480;
+const PREVIEW_PANEL_CHAT_MIN_WIDTH = 420;
+
+function clampPreviewPanelWidth(width: number): number {
+  if (typeof window === "undefined") return Math.round(width);
+  const max = Math.max(
+    PREVIEW_PANEL_MIN_WIDTH,
+    window.innerWidth - PREVIEW_PANEL_CHAT_MIN_WIDTH,
+  );
+  const min = Math.min(PREVIEW_PANEL_MIN_WIDTH, max);
+  return Math.round(Math.min(max, Math.max(min, width)));
+}
+
+function defaultPreviewPanelWidth(): number {
+  if (typeof window === "undefined") return 720;
+  return clampPreviewPanelWidth(window.innerWidth * 0.5);
+}
 
 const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
   {
@@ -1216,6 +1239,7 @@ export default function ChatPage() {
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
+  const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [subagents, setSubagents] = useState<SubagentEntry[]>([]);
@@ -1339,6 +1363,39 @@ export default function ChatPage() {
     setPreviewArtifact(artifact);
   }, []);
 
+  const startPreviewResize = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (!previewArtifact) return;
+      event.preventDefault();
+
+      const target = event.currentTarget;
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startWidth = previewPanelWidth;
+
+      target.setPointerCapture(pointerId);
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const delta = startX - moveEvent.clientX;
+        setPreviewPanelWidth(clampPreviewPanelWidth(startWidth + delta));
+      };
+
+      const stopResize = () => {
+        if (target.hasPointerCapture(pointerId)) {
+          target.releasePointerCapture(pointerId);
+        }
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", stopResize);
+        window.removeEventListener("pointercancel", stopResize);
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", stopResize);
+      window.addEventListener("pointercancel", stopResize);
+    },
+    [previewArtifact, previewPanelWidth],
+  );
+
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string) => {
       const clean = displayStatusText(text).trim();
@@ -1370,6 +1427,14 @@ export default function ChatPage() {
     sync();
     mql.addEventListener("change", sync);
     return () => mql.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    const sync = () => {
+      setPreviewPanelWidth((width) => clampPreviewPanelWidth(width));
+    };
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
   }, []);
 
   useEffect(() => {
@@ -2342,6 +2407,12 @@ export default function ChatPage() {
     () => deriveChatTitle(visibleMessages, resumeId, resumeFallback),
     [resumeFallback, resumeId, visibleMessages],
   );
+  const previewPanelWidthPx = `${previewPanelWidth}px`;
+  const previewPanelLayoutStyle = previewArtifact
+    ? ({
+        "--preview-panel-width": previewPanelWidthPx,
+      } as CSSProperties)
+    : undefined;
   const activity = (
     <ActivityPanel
       artifacts={artifacts}
@@ -2421,8 +2492,11 @@ export default function ChatPage() {
         <section
           className={cn(
             "flex min-h-0 flex-1 flex-col",
-            previewArtifact ? "xl:pr-[34rem] 2xl:pr-[42rem]" : "xl:pr-[23rem]",
+            previewArtifact
+              ? "xl:pr-[calc(var(--preview-panel-width)+1.5rem)]"
+              : "xl:pr-[23rem]",
           )}
+          style={previewPanelLayoutStyle}
         >
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-5 sm:px-6">
             {visibleMessages.length === 0 ? (
@@ -2566,11 +2640,22 @@ export default function ChatPage() {
           className={cn(
             "pointer-events-none absolute right-5 top-5 hidden xl:block",
             previewArtifact
-              ? "h-[calc(100%-2.5rem)] min-h-[30rem] w-[40rem] max-w-[calc(100vw-2.5rem)]"
+              ? "h-[calc(100%-2.5rem)] min-h-[30rem] max-w-[calc(100vw-2.5rem)]"
               : "h-[52vh] max-h-[34rem] min-h-[22rem] w-[21.5rem]",
           )}
+          style={previewArtifact ? { width: previewPanelWidthPx } : undefined}
         >
-          <div className="pointer-events-auto h-full">
+          <div className="pointer-events-auto relative h-full">
+            {previewArtifact && (
+              <button
+                aria-label="Resize artifact preview"
+                className="absolute -left-3 top-6 z-20 flex h-[calc(100%-3rem)] w-6 touch-none cursor-col-resize items-center justify-center rounded-full text-[var(--chat-muted)] transition hover:text-[var(--chat-text)]"
+                onPointerDown={startPreviewResize}
+                type="button"
+              >
+                <span className="h-12 w-1 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)]" />
+              </button>
+            )}
             {previewArtifact ? (
               <ArtifactPreviewPane
                 artifact={previewArtifact}
