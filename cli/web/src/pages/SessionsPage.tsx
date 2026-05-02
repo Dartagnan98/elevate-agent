@@ -12,7 +12,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Database,
   Loader2,
   MessageSquare,
   Search,
@@ -23,7 +22,6 @@ import {
   MessageCircle,
   Hash,
   X,
-  Play,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
@@ -257,7 +255,8 @@ function SessionRow({
   snippet,
   searchQuery,
   isExpanded,
-  onToggle,
+  onOpenChat,
+  onToggleDetails,
   onDelete,
   resumeInChatEnabled,
 }: {
@@ -265,7 +264,8 @@ function SessionRow({
   snippet?: string;
   searchQuery?: string;
   isExpanded: boolean;
-  onToggle: () => void;
+  onOpenChat: () => void;
+  onToggleDetails: () => void;
   onDelete: () => void;
   resumeInChatEnabled: boolean;
 }) {
@@ -273,7 +273,6 @@ function SessionRow({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { t } = useI18n();
-  const navigate = useNavigate();
 
   useEffect(() => {
     if (isExpanded && messages === null && !loading) {
@@ -302,7 +301,20 @@ function SessionRow({
     >
       <div
         className="flex items-center justify-between p-3 cursor-pointer hover:bg-secondary/30 transition-colors"
-        onClick={onToggle}
+        onClick={onOpenChat}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onOpenChat();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        title={
+          resumeInChatEnabled
+            ? t.sessions.resumeInChat
+            : "Start Agent Hub with chat enabled"
+        }
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className={`shrink-0 ${sourceInfo.color}`}>
@@ -353,21 +365,36 @@ function SessionRow({
           <Badge variant="outline" className="text-[10px]">
             {session.source ?? "local"}
           </Badge>
-          {resumeInChatEnabled && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 text-muted-foreground hover:text-success"
-              aria-label={t.sessions.resumeInChat}
-              title={t.sessions.resumeInChat}
-              onClick={(e) => {
-                e.stopPropagation();
-                navigate(`/chat?resume=${encodeURIComponent(session.id)}`);
-              }}
-            >
-              <Play className="h-3.5 w-3.5" />
-            </Button>
-          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground hover:text-success"
+            aria-label={t.sessions.resumeInChat}
+            title={t.sessions.resumeInChat}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenChat();
+            }}
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            aria-label="Show session details"
+            title="Show session details"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleDetails();
+            }}
+          >
+            <ChevronDown
+              className={`h-3.5 w-3.5 transition-transform ${
+                isExpanded ? "rotate-180" : ""
+              }`}
+            />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -425,6 +452,7 @@ export default function SessionsPage() {
   const [overviewSessions, setOverviewSessions] = useState<SessionInfo[]>([]);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
+  const navigate = useNavigate();
   const { setAfterTitle, setEnd } = usePageHeader();
   const { activeAction, actionStatus, dismissLog } = useSystemActions();
   const resumeInChatEnabled = isDashboardEmbeddedChatEnabled();
@@ -557,6 +585,20 @@ export default function SessionsPage() {
   const pendingSession = sessionDelete.pendingId
     ? sessions.find((s) => s.id === sessionDelete.pendingId)
     : null;
+
+  const openSessionInChat = useCallback(
+    (id: string) => {
+      if (!resumeInChatEnabled) {
+        showToast(
+          "Chat is not enabled for this dashboard. Restart with `elevate hub`.",
+          "error",
+        );
+        return;
+      }
+      navigate(`/chat?resume=${encodeURIComponent(id)}`);
+    },
+    [navigate, resumeInChatEnabled, showToast],
+  );
 
   // Build snippet map from search results (session_id → snippet)
   const snippetMap = new Map<string, string>();
@@ -731,7 +773,16 @@ export default function SessionsPage() {
             {recentSessions.map((s) => (
               <div
                 key={s.id}
-                className="flex w-full flex-col gap-2 rounded-2xl border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
+                className="flex w-full cursor-pointer flex-col gap-2 rounded-2xl border border-border p-3 transition-colors hover:bg-secondary/30 sm:flex-row sm:items-center sm:justify-between"
+                onClick={() => openSessionInChat(s.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openSessionInChat(s.id);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
               >
                 <div className="flex flex-col gap-1 min-w-0 w-full">
                   <span className="font-medium text-sm truncate">
@@ -757,7 +808,7 @@ export default function SessionsPage() {
                   variant="outline"
                   className="text-[10px] shrink-0 self-start sm:self-center"
                 >
-                  <Database className="mr-1 h-3 w-3" />
+                  <MessageSquare className="mr-1 h-3 w-3" />
                   {s.source ?? "local"}
                 </Badge>
               </div>
@@ -788,7 +839,8 @@ export default function SessionsPage() {
                 snippet={snippetMap.get(s.id)}
                 searchQuery={search || undefined}
                 isExpanded={expandedId === s.id}
-                onToggle={() =>
+                onOpenChat={() => openSessionInChat(s.id)}
+                onToggleDetails={() =>
                   setExpandedId((prev) => (prev === s.id ? null : s.id))
                 }
                 onDelete={() => sessionDelete.requestDelete(s.id)}
