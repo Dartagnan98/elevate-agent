@@ -1653,6 +1653,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
+    resolved = getattr(db, "resolve_session_id", lambda value: value)(target)
+    if resolved:
+        target = resolved
     found = db.get_session(target)
     if not found:
         found = db.get_session_by_title(target)

@@ -44,6 +44,7 @@ import {
   Sparkles,
   Star,
   Terminal,
+  Trash2,
   Wrench,
   X,
   Zap,
@@ -53,8 +54,10 @@ import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { api, type SessionInfo } from "@/lib/api";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
+import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
+import { Toast } from "@/components/Toast";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
@@ -76,6 +79,8 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { useConfirmDelete } from "@/hooks/useConfirmDelete";
+import { useToast } from "@/hooks/useToast";
 
 function RootRedirect() {
   return <Navigate to="/hub" replace />;
@@ -492,6 +497,7 @@ function DesktopSidebar({
   onNavigate: () => void;
 }) {
   const { t } = useI18n();
+  const location = useLocation();
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -500,6 +506,7 @@ function DesktopSidebar({
   const [query, setQuery] = useState("");
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => readPinnedSessionIds());
   const { isBusy, pendingAction, runAction } = useSystemActions();
+  const { toast, showToast } = useToast();
 
   const loadSessions = useCallback(() => {
     api
@@ -569,6 +576,39 @@ function DesktopSidebar({
     );
   };
 
+  const sessionDelete = useConfirmDelete<string>({
+    onDelete: useCallback(
+      async (sessionId: string) => {
+        try {
+          await api.deleteSession(sessionId);
+          setSessions((prev) =>
+            prev.filter((session) => session.id !== sessionId),
+          );
+          setPinnedIds((prev) => prev.filter((id) => id !== sessionId));
+
+          const activeResumeId = new URLSearchParams(location.search).get("resume");
+          if (
+            embeddedChat &&
+            location.pathname === "/chat" &&
+            activeResumeId === sessionId
+          ) {
+            navigate("/chat");
+          }
+
+          showToast("Session deleted", "success");
+        } catch (error) {
+          showToast("Failed to delete session", "error");
+          throw error;
+        }
+      },
+      [embeddedChat, location.pathname, location.search, navigate, showToast],
+    ),
+  });
+
+  const pendingDeleteSession = sessionDelete.pendingId
+    ? sessions.find((session) => session.id === sessionDelete.pendingId)
+    : null;
+
   const navLabel = (item: NavItem) =>
     item.labelKey
       ? ((t.app.nav as Record<string, string>)[item.labelKey] ?? item.label)
@@ -576,6 +616,19 @@ function DesktopSidebar({
 
   return (
     <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-[13px] tracking-normal text-midground">
+      <Toast toast={toast} />
+      <DeleteConfirmDialog
+        open={sessionDelete.isOpen}
+        onCancel={sessionDelete.cancel}
+        onConfirm={sessionDelete.confirm}
+        title="Delete session?"
+        description={
+          pendingDeleteSession
+            ? `"${sessionTitle(pendingDeleteSession)}" will be removed from this machine. This cannot be undone.`
+            : "This session will be removed from this machine. This cannot be undone."
+        }
+        loading={sessionDelete.isDeleting}
+      />
       <div className="flex h-[60px] shrink-0 items-center justify-between gap-3 px-4">
         <div className="flex items-center gap-2.5" aria-hidden>
           <span className="h-[11px] w-[11px] rounded-full bg-[#ff5f57]" />
@@ -676,6 +729,7 @@ function DesktopSidebar({
             onNavigate={onNavigate}
             onTogglePinned={togglePinned}
             pinnedIds={pinnedIds}
+            onRequestDelete={sessionDelete.requestDelete}
             sessions={spotlightSessions}
           />
         )}
@@ -687,6 +741,7 @@ function DesktopSidebar({
           onNavigate={onNavigate}
           onTogglePinned={togglePinned}
           pinnedIds={pinnedIds}
+          onRequestDelete={sessionDelete.requestDelete}
           sessions={recentSessions}
           statusText={
             sessionError
@@ -798,6 +853,7 @@ function SessionSection({
   label,
   loading = false,
   onNavigate,
+  onRequestDelete,
   onTogglePinned,
   pinnedIds,
   sessions,
@@ -807,6 +863,7 @@ function SessionSection({
   label: string;
   loading?: boolean;
   onNavigate: () => void;
+  onRequestDelete: (sessionId: string) => void;
   onTogglePinned: (sessionId: string) => void;
   pinnedIds: string[];
   sessions: SessionInfo[];
@@ -821,6 +878,7 @@ function SessionSection({
             key={session.id}
             embeddedChat={embeddedChat}
             onNavigate={onNavigate}
+            onRequestDelete={onRequestDelete}
             onTogglePinned={onTogglePinned}
             pinned={pinnedIds.includes(session.id)}
             session={session}
@@ -840,12 +898,14 @@ function SessionSection({
 function SessionListItem({
   embeddedChat,
   onNavigate,
+  onRequestDelete,
   onTogglePinned,
   pinned,
   session,
 }: {
   embeddedChat: boolean;
   onNavigate: () => void;
+  onRequestDelete: (sessionId: string) => void;
   onTogglePinned: (sessionId: string) => void;
   pinned: boolean;
   session: SessionInfo;
@@ -904,6 +964,25 @@ function SessionListItem({
             pinned ? "opacity-100" : "opacity-45 group-hover:opacity-100",
           )}
         />
+      </button>
+      <button
+        type="button"
+        aria-label="Delete session"
+        title="Delete session"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onRequestDelete(session.id);
+        }}
+        className={cn(
+          "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+          "text-muted-foreground/45 opacity-55 transition-all",
+          "hover:bg-destructive/10 hover:text-destructive",
+          "group-hover:opacity-100 focus-visible:opacity-100",
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-destructive/50",
+        )}
+      >
+        <Trash2 className="h-[13px] w-[13px]" />
       </button>
       <span className="sr-only">
         {session.source ?? "local"} {timeAgo(session.last_active)}

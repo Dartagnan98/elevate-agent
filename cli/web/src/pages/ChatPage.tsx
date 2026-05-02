@@ -446,6 +446,7 @@ export default function ChatPage() {
   const [promptValue, setPromptValue] = useState("");
   const [modelOpen, setModelOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  const [resumeFallback, setResumeFallback] = useState(false);
   const [portalRoot] = useState<HTMLElement | null>(() =>
     typeof document !== "undefined" ? document.body : null,
   );
@@ -588,6 +589,7 @@ export default function ChatPage() {
     setPromptValue("");
     setBusy(false);
     setBanner(null);
+    setResumeFallback(false);
     setStatusText("Connecting...");
 
     const accepts = (ev: GatewayEvent) => {
@@ -841,25 +843,52 @@ export default function ChatPage() {
     gw.connect()
       .then(async () => {
         if (cancelled) return;
-        const created = resumeId
-          ? await gw.request<SessionResumeResponse>("session.resume", {
+        let resumeWarning: string | null = null;
+        let created: SessionCreateResponse | SessionResumeResponse;
+
+        if (resumeId) {
+          try {
+            created = await gw.request<SessionResumeResponse>("session.resume", {
               cols: 100,
               session_id: resumeId,
-            })
-          : await gw.request<SessionCreateResponse>("session.create", {
+            }, 30_000);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            resumeWarning = `Could not resume that session, so I started a fresh chat you can use now. ${message}`;
+            setResumeFallback(true);
+            created = await gw.request<SessionCreateResponse>("session.create", {
               cols: 100,
             });
+          }
+        } else {
+          created = await gw.request<SessionCreateResponse>("session.create", {
+            cols: 100,
+          });
+        }
 
         if (cancelled) return;
         activeSessionRef.current = created.session_id;
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
-        if (created.info?.credential_warning || created.info?.config_warning) {
+        if (resumeWarning) {
+          setBanner(resumeWarning);
+        } else if (created.info?.credential_warning || created.info?.config_warning) {
           setBanner(
             created.info.credential_warning ?? created.info.config_warning ?? null,
           );
         }
-        if ("messages" in created) {
+
+        if (resumeWarning) {
+          setMessages([
+            {
+              content: resumeWarning,
+              createdAt: Date.now(),
+              id: id("resume-fallback"),
+              role: "system",
+              status: "error",
+            },
+          ]);
+        } else if ("messages" in created) {
           const resumed = created as Partial<SessionResumeResponse>;
           setMessages(
             normalizeTranscript(
@@ -1156,7 +1185,7 @@ export default function ChatPage() {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h1 className="truncate text-sm font-semibold text-[var(--chat-text)]">
-                  {resumeId ? "Resumed session" : "Elevate Agent"}
+                  {resumeId && !resumeFallback ? "Resumed session" : "Elevate Agent"}
                 </h1>
                 <span className="h-1 w-1 rounded-full bg-[var(--chat-border-strong)]" />
                 <span className="truncate text-xs text-[var(--chat-muted)]">
