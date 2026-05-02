@@ -125,6 +125,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert "version" in data
+        assert "project_root" in data
         assert "elevate_home" in data
         assert "active_sessions" in data
 

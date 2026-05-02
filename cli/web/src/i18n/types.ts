@@ -74,6 +74,7 @@ export interface Translations {
       documentation: string;
       keys: string;
       logs: string;
+      project: string;
       sessions: string;
       skills: string;
     };

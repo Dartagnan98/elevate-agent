@@ -74,6 +74,7 @@ export const en: Translations = {
       documentation: "Documentation",
       keys: "Keys",
       logs: "Logs",
+      project: "Project",
       sessions: "Sessions",
       skills: "Skills",
     },

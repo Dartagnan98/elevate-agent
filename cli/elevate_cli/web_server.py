@@ -720,6 +720,7 @@ async def get_status():
     return {
         "version": __version__,
         "release_date": __release_date__,
+        "project_root": str(PROJECT_ROOT),
         "elevate_home": str(get_elevate_home()),
         "config_path": str(get_config_path()),
         "env_path": str(get_env_path()),

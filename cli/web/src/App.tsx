@@ -68,6 +68,7 @@ import CronPage from "@/pages/CronPage";
 import SkillsPage from "@/pages/SkillsPage";
 import ChatPage from "@/pages/ChatPage";
 import AgentHubPage from "@/pages/AgentHubPage";
+import ProjectPage from "@/pages/ProjectPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -91,6 +92,7 @@ const CHAT_NAV_ITEM: NavItem = {
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/hub": AgentHubPage,
+  "/project": ProjectPage,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
   "/logs": LogsPage,
@@ -112,6 +114,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
     labelKey: "sessions",
     label: "Sessions",
     icon: MessageSquare,
+  },
+  {
+    path: "/project",
+    labelKey: "project",
+    label: "Project",
+    icon: Folder,
   },
   {
     path: "/analytics",
@@ -638,7 +646,7 @@ function DesktopSidebar({
           </button>
           <SidebarAction icon={Puzzle} label="Plugins" path="/skills" onNavigate={go} />
           <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
-          <SidebarAction icon={Folder} label="Project" path="/hub" onNavigate={go} />
+          <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
         </div>
 
         <div className="relative mt-3">
