@@ -42,6 +42,7 @@ import {
   Wrench,
   Users,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -167,13 +168,6 @@ interface ComposerAgent {
   status?: string;
 }
 
-interface RichMessageTemplate {
-  description: string;
-  id: string;
-  label: string;
-  prompt: string;
-}
-
 type PendingPrompt =
   | {
       choices?: string[] | null;
@@ -232,44 +226,6 @@ const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
     name: "Marketing",
     role: "Campaign lane",
     status: "ready",
-  },
-];
-
-const RICH_MESSAGE_TEMPLATES: RichMessageTemplate[] = [
-  {
-    description: "Seller-safe weekly listing update with next steps.",
-    id: "seller-update",
-    label: "Seller Update",
-    prompt:
-      "Create a seller update. Include ShowingTime activity, buyer feedback themes, market context, recommended next steps, and a polished email draft. Do not auto-send.",
-  },
-  {
-    description: "Clean follow-up with timing and next action.",
-    id: "outreach-follow-up",
-    label: "Outreach Follow-up",
-    prompt:
-      "Draft an outreach follow-up. Identify the lead type, relationship context, message goal, recommended timing, the message draft, and the next follow-up action.",
-  },
-  {
-    description: "Quick CMA direction before deeper analysis.",
-    id: "cma-brief",
-    label: "CMA Brief",
-    prompt:
-      "Prepare a CMA brief. Summarize the subject property, missing inputs, comparable search plan, pricing signals, risk flags, and what needs approval before producing a PDF.",
-  },
-  {
-    description: "Ops checklist with owner, date, and blocker fields.",
-    id: "admin-checklist",
-    label: "Admin Checklist",
-    prompt:
-      "Turn this into an admin checklist. Use sections for paperwork, scheduling, listing status, blockers, owner, due date, and next action.",
-  },
-  {
-    description: "Campaign plan with copy direction and deliverables.",
-    id: "marketing-campaign",
-    label: "Marketing Campaign",
-    prompt:
-      "Build a marketing campaign brief. Include audience, offer angle, channels, email/social copy direction, creative assets needed, approvals, and production steps.",
   },
 ];
 
@@ -576,6 +532,7 @@ export default function ChatPage() {
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
+  const [composerScrollTop, setComposerScrollTop] = useState(0);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
@@ -593,7 +550,6 @@ export default function ChatPage() {
   );
   const [selectedAgentId, setSelectedAgentId] = useState("executive-assistant");
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const [richMenuOpen, setRichMenuOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [resumeFallback, setResumeFallback] = useState(false);
   const [portalRoot] = useState<HTMLElement | null>(() =>
@@ -1221,25 +1177,11 @@ export default function ChatPage() {
     [],
   );
 
-  const insertRichMessageTemplate = useCallback(
-    (template: RichMessageTemplate) => {
-      setInput((prev) => {
-        const clean = prev.trim();
-        return clean ? `${clean}\n\n${template.prompt}` : template.prompt;
-      });
-      setRichMenuOpen(false);
-      setStatusText(`${template.label} inserted`);
-      window.requestAnimationFrame(() => inputRef.current?.focus());
-    },
-    [],
-  );
-
   const applyComposerCompletion = useCallback(
     (nextInput: string, nextCaret: number) => {
       setInput(nextInput);
       setCaretIndex(nextCaret);
       setAgentMenuOpen(false);
-      setRichMenuOpen(false);
       window.requestAnimationFrame(() => {
         const target = inputRef.current;
         if (!target) return;
@@ -1257,9 +1199,9 @@ export default function ChatPage() {
 
       appendMessage("user", trimmed);
       setInput("");
+      setComposerScrollTop(0);
       setBanner(null);
       setAgentMenuOpen(false);
-      setRichMenuOpen(false);
 
       if (trimmed.startsWith("/")) {
         await executeSlash({
@@ -1612,34 +1554,50 @@ export default function ChatPage() {
                   onApply={applyComposerCompletion}
                 />
 
-                <textarea
-                  ref={inputRef}
-                  aria-label="Message Elevate Agent"
-                  className="max-h-40 min-h-14 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)]"
-                  disabled={state !== "open" || !sessionId}
-                  onChange={(event) => {
-                    setInput(event.target.value);
-                    setCaretIndex(event.currentTarget.selectionStart ?? event.target.value.length);
-                    setAgentMenuOpen(false);
-                    setRichMenuOpen(false);
-                  }}
-                  onClick={(event) =>
-                    setCaretIndex(event.currentTarget.selectionStart ?? input.length)
-                  }
-                  onKeyDown={onComposerKeyDown}
-                  onKeyUp={(event) =>
-                    setCaretIndex(event.currentTarget.selectionStart ?? input.length)
-                  }
-                  placeholder={
-                    state === "open" && sessionId
-                      ? "Message Elevate Agent..."
-                      : "Connecting..."
-                  }
-                  rows={2}
-                  value={input}
-                />
-
-                <ComposerTokenPreview input={input} />
+                <div className="relative min-h-14">
+                  <ComposerRichInputLayer
+                    input={input}
+                    scrollTop={composerScrollTop}
+                  />
+                  <textarea
+                    ref={inputRef}
+                    aria-label="Message Elevate Agent"
+                    className={cn(
+                      "relative z-10 max-h-40 min-h-14 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
+                      "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
+                      input
+                        ? "text-transparent"
+                        : "text-[var(--chat-text)]",
+                    )}
+                    disabled={state !== "open" || !sessionId}
+                    onChange={(event) => {
+                      setInput(event.target.value);
+                      setCaretIndex(event.currentTarget.selectionStart ?? event.target.value.length);
+                      setAgentMenuOpen(false);
+                    }}
+                    onClick={(event) =>
+                      setCaretIndex(event.currentTarget.selectionStart ?? input.length)
+                    }
+                    onKeyDown={onComposerKeyDown}
+                    onKeyUp={(event) =>
+                      setCaretIndex(event.currentTarget.selectionStart ?? input.length)
+                    }
+                    onScroll={(event) =>
+                      setComposerScrollTop(event.currentTarget.scrollTop)
+                    }
+                    onSelect={(event) =>
+                      setCaretIndex(event.currentTarget.selectionStart ?? input.length)
+                    }
+                    placeholder={
+                      state === "open" && sessionId
+                        ? "Message Elevate Agent..."
+                        : "Connecting..."
+                    }
+                    rows={2}
+                    spellCheck
+                    value={input}
+                  />
+                </div>
 
                 <ComposerActionBar
                   agentMenuOpen={agentMenuOpen}
@@ -1649,19 +1607,11 @@ export default function ChatPage() {
                   canSend={canSend}
                   info={info}
                   onOpenModel={() => setModelOpen(true)}
-                  onRichMenuToggle={() => {
-                    setRichMenuOpen((open) => !open);
-                    setAgentMenuOpen(false);
-                  }}
                   onSelectAgent={selectComposerAgent}
-                  onSelectRichMessage={insertRichMessageTemplate}
                   onToggleAgentMenu={() => {
                     setAgentMenuOpen((open) => !open);
-                    setRichMenuOpen(false);
                   }}
                   onToggleVoice={toggleVoiceInput}
-                  richMenuOpen={richMenuOpen}
-                  richTemplates={RICH_MESSAGE_TEMPLATES}
                   selectedAgent={selectedAgent}
                   state={state}
                   statusText={statusText}
@@ -1743,66 +1693,100 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
   );
 }
 
-function ComposerTokenPreview({ input }: { input: string }) {
-  const tokens = useMemo(() => {
-    const matches = input.matchAll(
-      /(^|\s)(\/[a-z][\w-]*|@(agent|skill|toolset|plugin|file|folder|url|git):[^\s]+|@(diff|staged)\b)/gi,
-    );
-    return Array.from(matches)
-      .map((match) => match[2])
-      .filter(Boolean)
-      .slice(0, 8);
-  }, [input]);
+type ComposerSegment =
+  | { text: string; type: "text" }
+  | { icon: LucideIcon; label: string; text: string; type: "token" };
 
-  if (!tokens.length) return null;
+function composerTokenIcon(token: string) {
+  const normalized = token.toLowerCase();
+  if (token.startsWith("/")) return Command;
+  if (normalized.startsWith("@agent:")) return Bot;
+  if (normalized.startsWith("@skill:")) return Sparkles;
+  if (normalized.startsWith("@toolset:")) return Wrench;
+  if (normalized.startsWith("@plugin:")) return Plug;
+  if (normalized.startsWith("@folder:")) return Folder;
+  if (normalized.startsWith("@file:")) return FileText;
+  if (normalized.startsWith("@git:") || normalized === "@diff" || normalized === "@staged") {
+    return GitBranch;
+  }
+  return FileText;
+}
+
+function composerTokenLabel(token: string): string {
+  if (token.startsWith("/")) return token;
+  const raw = token.replace(/^@[a-z]+:/i, "").replace(/^@/, "");
+  const parts = raw.split(/[/-]/).filter(Boolean);
+  return parts.slice(-2).join(" / ") || raw;
+}
+
+function parseComposerSegments(input: string): ComposerSegment[] {
+  const tokenPattern =
+    /(^|\s)(\/[a-z][\w-]*|@(agent|skill|toolset|plugin|file|folder|url|git):[^\s]+|@(diff|staged)\b)/gi;
+  const segments: ComposerSegment[] = [];
+  let cursor = 0;
+
+  for (const match of input.matchAll(tokenPattern)) {
+    const prefix = match[1] ?? "";
+    const token = match[2];
+    if (!token) continue;
+    const index = (match.index ?? 0) + prefix.length;
+    if (index > cursor) {
+      segments.push({ text: input.slice(cursor, index), type: "text" });
+    }
+    segments.push({
+      icon: composerTokenIcon(token),
+      label: composerTokenLabel(token),
+      text: token,
+      type: "token",
+    });
+    cursor = index + token.length;
+  }
+
+  if (cursor < input.length) {
+    segments.push({ text: input.slice(cursor), type: "text" });
+  }
+
+  return segments.length ? segments : [{ text: input, type: "text" }];
+}
+
+function ComposerRichInputLayer({
+  input,
+  scrollTop,
+}: {
+  input: string;
+  scrollTop: number;
+}) {
+  const segments = useMemo(() => parseComposerSegments(input), [input]);
+
+  if (!input) return null;
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5 px-1.5 pb-1.5">
-      {tokens.map((token) => {
-        const normalized = token.toLowerCase();
-        const isSlash = token.startsWith("/");
-        const isFile = normalized.startsWith("@file:") || normalized.startsWith("@folder:");
-        const isAgent = normalized.startsWith("@agent:");
-        const isSkill = normalized.startsWith("@skill:");
-        const isToolset = normalized.startsWith("@toolset:");
-        const isPlugin = normalized.startsWith("@plugin:");
-        const isGit = normalized.startsWith("@git:") || normalized === "@diff" || normalized === "@staged";
-        const Icon = isSlash
-          ? Command
-          : isAgent
-            ? Bot
-            : isSkill
-              ? Sparkles
-              : isToolset
-                ? Wrench
-                : isPlugin
-                  ? Plug
-                  : isFile
-                    ? normalized.startsWith("@folder:")
-                      ? Folder
-                      : FileText
-                    : isGit
-                      ? GitBranch
-                      : FileText;
-        const rawLabel = isSlash
-          ? token
-          : token.replace(/^@[a-z]+:/i, "").replace(/^@/, "");
-        const label = rawLabel
-          .split(/[/-]/)
-          .filter(Boolean)
-          .slice(-2)
-          .join(" / ");
+    <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)]">
+      <div
+        className="whitespace-pre-wrap break-words"
+        style={{ transform: `translateY(-${scrollTop}px)` }}
+      >
+        {segments.map((segment, index) => {
+          if (segment.type === "text") {
+            return <span key={`${index}-text`}>{segment.text}</span>;
+          }
 
-        return (
-          <span
-            key={token}
-            className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full bg-[var(--chat-surface-soft)] px-2.5 py-1 text-xs text-[var(--chat-muted-strong)] shadow-[inset_0_0_0_1px_var(--chat-border)]"
-          >
-            <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-accent)]" />
-            <span className="truncate">{label}</span>
-          </span>
-        );
-      })}
+          const Icon = segment.icon;
+          return (
+            <span
+              aria-label={segment.text}
+              className="relative inline-block align-baseline text-transparent"
+              key={`${index}-${segment.text}`}
+            >
+              {segment.text}
+              <span className="absolute left-0 top-[0.12rem] inline-flex max-w-full items-center gap-1 rounded-full bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.82rem] font-medium leading-5 text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{segment.label}</span>
+              </span>
+            </span>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1815,13 +1799,9 @@ function ComposerActionBar({
   canSend,
   info,
   onOpenModel,
-  onRichMenuToggle,
   onSelectAgent,
-  onSelectRichMessage,
   onToggleAgentMenu,
   onToggleVoice,
-  richMenuOpen,
-  richTemplates,
   selectedAgent,
   state,
   statusText,
@@ -1835,13 +1815,9 @@ function ComposerActionBar({
   canSend: boolean;
   info: SessionInfo;
   onOpenModel(): void;
-  onRichMenuToggle(): void;
   onSelectAgent(agent: ComposerAgent): void;
-  onSelectRichMessage(template: RichMessageTemplate): void;
   onToggleAgentMenu(): void;
   onToggleVoice(): void;
-  richMenuOpen: boolean;
-  richTemplates: RichMessageTemplate[];
   selectedAgent: ComposerAgent;
   state: ConnectionState;
   statusText: string;
@@ -1891,43 +1867,6 @@ function ComposerActionBar({
                     <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
                       {agent.role || agent.description || agent.status || "Agent lane"}
                     </span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="relative">
-          <button
-            type="button"
-            onClick={onRichMenuToggle}
-            className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
-              "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
-              "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
-              richMenuOpen &&
-                "bg-[var(--chat-accent-soft)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-accent)]",
-            )}
-            title="Insert rich message"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Rich message
-            <ChevronUp className="h-3 w-3 opacity-70" />
-          </button>
-
-          {richMenuOpen && (
-            <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[19rem] overflow-hidden rounded-2xl bg-[var(--chat-surface)] p-1.5 text-left shadow-[0_18px_54px_rgba(0,0,0,0.22),inset_0_0_0_1px_var(--chat-border-strong)]">
-              {richTemplates.map((template) => (
-                <button
-                  key={template.id}
-                  type="button"
-                  onClick={() => onSelectRichMessage(template)}
-                  className="flex w-full flex-col rounded-xl px-2.5 py-2 text-left text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
-                >
-                  <span className="text-xs font-semibold">{template.label}</span>
-                  <span className="mt-0.5 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
-                    {template.description}
                   </span>
                 </button>
               ))}
