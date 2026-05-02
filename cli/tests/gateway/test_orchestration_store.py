@@ -115,6 +115,8 @@ def test_orchestration_snapshot_summarizes_run_plan_graph(tmp_path):
     assert graph["completed_run_ids"] == [setup["run_id"]]
     assert graph["unresolved_dependency_ids"] == ["does-not-exist"]
     assert graph["next_ready_run_ids"] == [ready["run_id"]]
+    ready_item = next(item for item in graph["items"] if item["run_id"] == ready["run_id"])
+    assert ready_item["priority"] == "urgent"
 
 
 def test_orchestration_snapshot_reports_dependency_cycles(tmp_path):
@@ -199,6 +201,50 @@ def test_orchestration_agent_update_merges_metadata(tmp_path):
     assert agent["metadata"]["job_profile"] == {"owns": ["follow-up"]}
     assert agent["metadata"]["identity"] == {"emoji": "spark"}
     assert agent["metadata"]["config"] == {"timezone": "America/Vancouver"}
+
+
+def test_orchestration_run_metadata_fields_are_normalized(tmp_path):
+    store = OrchestrationStore(tmp_path / "orchestration.db")
+    setup = store.create_run(
+        run_id="setup",
+        agent_id="admin",
+        task="Collect paperwork.",
+        status="completed",
+    )
+
+    run = store.create_run(
+        run_id="campaign",
+        agent_id="marketing",
+        task="Draft campaign.",
+        status="queued",
+        metadata={
+            "depends_on": setup["run_id"],
+            "assigned_to": "marketing",
+            "file_scope": "knowledge/listings/123.md",
+            "subsystem": "listing-launch",
+            "priority": "high",
+        },
+    )
+
+    assert run["blocked_by"] == [setup["run_id"]]
+    assert run["assigned_to"] == "marketing"
+    assert run["file_scope"] == ["knowledge/listings/123.md"]
+    graph_item = next(item for item in store.snapshot()["plan_graph"]["items"] if item["run_id"] == "campaign")
+    assert graph_item["assigned_to"] == "marketing"
+    assert graph_item["subsystem"] == "listing-launch"
+
+    updated = store.update_run(
+        "campaign",
+        {
+            "blocked_by": ["setup"],
+            "file_scope": ["knowledge/listings/123.md", "scripts/render.js"],
+            "priority": "urgent",
+        },
+    )
+
+    assert updated["metadata"]["blocked_by"] == ["setup"]
+    assert updated["metadata"]["file_scope"] == ["knowledge/listings/123.md", "scripts/render.js"]
+    assert updated["priority"] == "urgent"
 
 
 def test_orchestration_store_rejects_orphan_events(tmp_path):

@@ -65,3 +65,44 @@ def test_format_harness_snapshot_contains_key_sections(tmp_path, monkeypatch):
     assert "Orchestration:" in output
     assert "Memory:" in output
     assert "Safety:" in output
+
+
+def test_harness_prefers_live_memory_activity(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+
+    snapshot = build_harness_snapshot(
+        config={},
+        sessions={},
+        memory={
+            "provider": "holographic",
+            "facts": 4,
+            "indexed_facts": 3,
+            "journal": {"pending": 1, "failed": 0},
+            "embedding": {"enabled": True},
+            "activity": {
+                "state": "searching",
+                "updated_at": "2026-05-01T00:00:00Z",
+                "pipeline": {
+                    "derived_from_journal": False,
+                    "search": "running",
+                    "verify": "pending",
+                    "inject": "pending",
+                    "maintain": "pending",
+                    "active": True,
+                    "last_step": "search",
+                },
+                "recent_events": [{"kind": "memory.prefetch", "message": "started"}],
+            },
+            "graph": {"nodes": [], "edges": []},
+        },
+        skills={},
+        toolsets={},
+        orchestration={},
+        include_profiles=False,
+    )
+
+    pipeline = snapshot["memory"]["pipeline"]
+    assert pipeline["derived_from_journal"] is False
+    assert pipeline["state"] == "searching"
+    assert pipeline["search"] == "running"
+    assert pipeline["recent_events"][0]["kind"] == "memory.prefetch"

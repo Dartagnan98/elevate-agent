@@ -507,6 +507,17 @@ export interface HarnessSnapshot {
       failure_count: number;
       indexed_facts: number;
       facts: number;
+      last_step?: string;
+      updated_at?: string;
+      recent_events?: Array<{
+        kind?: string;
+        message?: string;
+        timestamp?: string;
+        state?: string;
+        step?: string;
+        status?: string;
+        data?: Record<string, unknown>;
+      }>;
     };
   };
   safety: {

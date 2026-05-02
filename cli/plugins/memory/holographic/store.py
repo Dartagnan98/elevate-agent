@@ -915,6 +915,20 @@ class MemoryStore:
         if not self.embedding_client or not query.strip():
             return []
 
+        try:
+            from . import activity as memory_activity
+
+            memory_activity.record_event(
+                "memory.embedding_search.started",
+                message="semantic search started",
+                state="embedding",
+                step="search",
+                status="running",
+                data={"provider": self.embedding_client.provider, "model": self.embedding_client.model},
+            )
+        except Exception:
+            memory_activity = None  # type: ignore[assignment]
+
         query_result = self.embedding_client.embed(query.strip())
         query_vec = query_result.vector
         params: list = [
@@ -959,7 +973,21 @@ class MemoryStore:
                 scored.append(fact)
 
             scored.sort(key=lambda x: x["score"], reverse=True)
-            return scored[:limit]
+            results = scored[:limit]
+
+        try:
+            if memory_activity is not None:  # type: ignore[name-defined]
+                memory_activity.record_event(
+                    "memory.embedding_search.complete",
+                    message=f"semantic search returned {len(results)} result(s)",
+                    state="idle",
+                    step="search",
+                    status="done",
+                    data={"hits": len(results), "limit": limit},
+                )
+        except Exception:
+            pass
+        return results
 
     # ------------------------------------------------------------------
     # Entity helpers

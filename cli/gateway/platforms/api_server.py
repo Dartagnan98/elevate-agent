@@ -49,6 +49,7 @@ from gateway.platforms.base import (
 from gateway.orchestration import (
     OrchestrationValidationError,
     get_orchestration_store,
+    normalize_run_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -2195,7 +2196,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 parent_run_id=body.get("parent_run_id"),
                 parent_session_key=body.get("parent_session_key"),
                 session_key=body.get("session_key"),
-                metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+                metadata=normalize_run_metadata(
+                    body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+                    body,
+                ),
             )
             return web.json_response({"run": run}, status=201)
         except OrchestrationValidationError as exc:

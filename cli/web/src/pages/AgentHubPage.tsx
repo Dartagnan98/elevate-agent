@@ -358,6 +358,17 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
             </Badge>
           ))}
         </div>
+        {harness.memory.pipeline.recent_events?.length ? (
+          <div className="border border-border bg-muted/20 p-2 text-xs">
+            <div className="mb-1 text-muted-foreground">Memory activity</div>
+            {harness.memory.pipeline.recent_events.slice(0, 3).map((event, index) => (
+              <div key={`${event.timestamp ?? "event"}-${index}`} className="truncate">
+                {event.kind ?? "memory"}{event.status ? ` / ${event.status}` : ""}
+                {event.message ? `: ${event.message}` : ""}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {harness.recommendations.length > 0 && (
           <div className="space-y-1 text-xs text-muted-foreground">
             {harness.recommendations.slice(0, 2).map((item) => (

@@ -59,11 +59,12 @@ Config in `config.yaml` under `plugins.elevate-memory-store`:
 | `default_trust` | `0.5` | Default trust score for new facts |
 | `hrr_dim` | `1024` | HRR vector dimensions |
 | `embedding_enabled` | `false` | Enable semantic embeddings |
-| `embedding_provider` | `openai` | `openai`, `ollama`, or `openai_compatible` |
+| `embedding_provider` | `openai` | `openai`, `ollama`, `openai_compatible`, or optional `local_minilm` |
 | `embedding_model` | `text-embedding-3-small` | Provider model name |
 | `embedding_dimensions` | empty | Optional dimensions override |
 | `embedding_base_url` | empty | Provider base URL for Ollama/custom endpoints |
 | `embedding_api_key_env` | `OPENAI_API_KEY` | Environment variable for cloud provider key |
+| `embedding_cache_dir` | empty | Optional model cache folder for `local_minilm` |
 
 Example:
 
@@ -87,6 +88,11 @@ plugins:
     durable_recall_limit: 4
     graph_recall_limit: 2
 ```
+
+`local_minilm` uses `sentence-transformers/all-MiniLM-L6-v2` locally with
+384-dimensional vectors. It is opt-in and requires the optional
+`sentence-transformers` package; Elevate will not download this model during a
+normal install unless the user explicitly selects that provider.
 
 ## Tools
 

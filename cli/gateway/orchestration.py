@@ -26,6 +26,7 @@ _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted", "timeou
 _ACTIVE_RUN_STATUSES = {"queued", "running", "blocked", "waiting_for_approval"}
 _RUN_STATUSES = {*_ACTIVE_RUN_STATUSES, *_TERMINAL_STATUSES}
 _AGENT_STATUSES = {"ready", "online", "offline", "disabled", "running", "error"}
+_RUN_METADATA_FIELDS = {"blocked_by", "depends_on", "assigned_to", "file_scope", "priority", "subsystem", "handoff"}
 _UNSET = object()
 
 
@@ -198,6 +199,70 @@ def _clean_status(value: Any, allowed: set[str], *, default: str, field: str) ->
     return text
 
 
+def _clean_string_list(value: Any, *, field: str, max_items: int = 50, max_length: int = 500) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, dict):
+        raise OrchestrationValidationError(f"{field} must be a string or list")
+    elif isinstance(value, Iterable):
+        raw_items = list(value)
+    else:
+        raise OrchestrationValidationError(f"{field} must be a string or list")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items[:max_items]:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if len(text) > max_length:
+            raise OrchestrationValidationError(f"{field} entries must be <= {max_length} characters")
+        if text not in seen:
+            cleaned.append(text)
+            seen.add(text)
+    return cleaned
+
+
+def normalize_run_metadata(metadata: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Normalize visible run planning metadata.
+
+    API callers may send dependency/owner fields either inside ``metadata`` or
+    as top-level request fields. The store persists them in metadata so older
+    DB schemas remain compatible.
+    """
+
+    merged: Dict[str, Any] = {}
+    if isinstance(metadata, dict):
+        merged.update(metadata)
+    if isinstance(payload, dict):
+        for field in _RUN_METADATA_FIELDS:
+            if field in payload:
+                merged[field] = payload[field]
+
+    for dep_field in ("blocked_by", "depends_on"):
+        if dep_field in merged:
+            cleaned = []
+            for value in _clean_string_list(merged.get(dep_field), field=dep_field, max_length=128):
+                try:
+                    cleaned.append(_clean_run_id(value))
+                except OrchestrationValidationError:
+                    raise OrchestrationValidationError(f"{dep_field} contains an invalid run id: {value}") from None
+            merged[dep_field] = cleaned
+
+    if "file_scope" in merged:
+        merged["file_scope"] = _clean_string_list(merged.get("file_scope"), field="file_scope", max_length=1000)
+    if "assigned_to" in merged and merged.get("assigned_to") not in (None, ""):
+        merged["assigned_to"] = _clean_id(merged.get("assigned_to"), field="assigned_to")
+    if "priority" in merged and merged.get("priority") not in (None, ""):
+        merged["priority"] = _clean_string(merged.get("priority"), field="priority", max_length=40) or "normal"
+    if "subsystem" in merged and merged.get("subsystem") not in (None, ""):
+        merged["subsystem"] = _clean_string(merged.get("subsystem"), field="subsystem", max_length=120)
+    if "handoff" in merged and merged.get("handoff") is not None and not isinstance(merged.get("handoff"), dict):
+        raise OrchestrationValidationError("handoff must be an object")
+    return merged
+
+
 def _row_to_agent(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "agent_id": row["agent_id"],
@@ -257,6 +322,12 @@ def _row_to_run(row: sqlite3.Row) -> Dict[str, Any]:
         "summary": row["summary"],
         "error": row["error"],
         "metadata": metadata,
+        "blocked_by": _run_blockers({"metadata": metadata}),
+        "depends_on": _run_blockers({"metadata": metadata}),
+        "assigned_to": metadata.get("assigned_to"),
+        "file_scope": metadata.get("file_scope") if isinstance(metadata.get("file_scope"), list) else [],
+        "priority": metadata.get("priority") or "normal",
+        "subsystem": metadata.get("subsystem"),
     }
 
 
@@ -341,9 +412,14 @@ def summarize_run_plan_graph(runs: list[Dict[str, Any]], *, next_limit: int = 8)
     items = [
         {
             "run_id": run["run_id"],
+            "agent_id": run.get("agent_id"),
             "status": str(run.get("status") or "queued").lower(),
             "blocked_by": _run_blockers(run),
             "priority_rank": _priority_rank(run),
+            "priority": (run.get("metadata") or {}).get("priority", "normal") if isinstance(run.get("metadata"), dict) else "normal",
+            "assigned_to": (run.get("metadata") or {}).get("assigned_to") if isinstance(run.get("metadata"), dict) else None,
+            "file_scope": (run.get("metadata") or {}).get("file_scope", []) if isinstance(run.get("metadata"), dict) else [],
+            "subsystem": (run.get("metadata") or {}).get("subsystem") if isinstance(run.get("metadata"), dict) else None,
         }
         for run in runs
         if run.get("run_id")
@@ -408,6 +484,19 @@ def summarize_run_plan_graph(runs: list[Dict[str, Any]], *, next_limit: int = 8)
 
     return {
         "item_count": len(items),
+        "items": [
+            {
+                "run_id": item["run_id"],
+                "agent_id": item.get("agent_id"),
+                "status": item["status"],
+                "blocked_by": item["blocked_by"],
+                "assigned_to": item.get("assigned_to"),
+                "file_scope": item.get("file_scope") if isinstance(item.get("file_scope"), list) else [],
+                "subsystem": item.get("subsystem"),
+                "priority": item.get("priority") or "normal",
+            }
+            for item in items
+        ],
         "ready_run_ids": ready_ids,
         "blocked_run_ids": blocked_ids,
         "active_run_ids": active_ids,
@@ -694,7 +783,8 @@ class OrchestrationStore:
         parent_run_id = _clean_string(parent_run_id, field="parent_run_id", max_length=128)
         parent_session_key = _clean_string(parent_session_key, field="parent_session_key", max_length=256)
         session_key = _clean_string(session_key, field="session_key", max_length=256)
-        metadata_json = _json_dumps(metadata or {})
+        normalized_metadata = normalize_run_metadata(metadata or {})
+        metadata_json = _json_dumps(normalized_metadata)
         now = _utc_now()
         started_at = now if status == "running" else None
         completed_at = now if status in _TERMINAL_STATUSES else None
@@ -777,8 +867,10 @@ class OrchestrationStore:
         if not current:
             return None
 
-        allowed = {"status", "summary", "error", "session_key", "metadata"}
+        allowed = {"status", "summary", "error", "session_key", "metadata", *_RUN_METADATA_FIELDS}
         cleaned: dict[str, Any] = {}
+        current_metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+        metadata_patch: dict[str, Any] = {}
         for key, value in updates.items():
             if key not in allowed:
                 continue
@@ -791,7 +883,16 @@ class OrchestrationStore:
             elif key == "session_key":
                 cleaned[key] = _clean_string(value, field="session_key", max_length=256)
             elif key == "metadata":
-                cleaned[key] = _json_dumps(value if isinstance(value, dict) else {})
+                if not isinstance(value, dict):
+                    raise OrchestrationValidationError("metadata must be an object")
+                metadata_patch.update(value)
+            elif key in _RUN_METADATA_FIELDS:
+                metadata_patch[key] = value
+
+        if metadata_patch:
+            cleaned["metadata"] = _json_dumps(
+                normalize_run_metadata({**current_metadata, **metadata_patch})
+            )
 
         if not cleaned:
             return current

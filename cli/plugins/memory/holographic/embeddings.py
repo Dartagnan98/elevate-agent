@@ -200,6 +200,58 @@ class HashEmbeddingClient(BaseEmbeddingClient):
         )
 
 
+class LocalMiniLMEmbeddingClient(BaseEmbeddingClient):
+    """Optional local semantic backend using sentence-transformers MiniLM.
+
+    This keeps the installer light: no model is downloaded unless the user
+    explicitly selects ``embedding_provider: local_minilm`` and has the optional
+    sentence-transformers dependency available.
+    """
+
+    provider = "local_minilm"
+
+    def __init__(
+        self,
+        model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        cache_dir: str | None = None,
+    ) -> None:
+        super().__init__(model=model, dimensions=384)
+        try:
+            from sentence_transformers import SentenceTransformer
+        except Exception as exc:
+            raise EmbeddingError(
+                "local_minilm requires the optional sentence-transformers package; "
+                "install it or use embedding_provider: openai, ollama, or openai_compatible"
+            ) from exc
+
+        kwargs = {}
+        if cache_dir:
+            kwargs["cache_folder"] = os.path.expanduser(cache_dir)
+        try:
+            self._model = SentenceTransformer(model, **kwargs)
+        except Exception as exc:
+            raise EmbeddingError(f"local MiniLM model load failed: {exc}") from exc
+
+    def embed(self, text: str) -> EmbeddingResult:
+        try:
+            vector_obj = self._model.encode(
+                text,
+                normalize_embeddings=True,
+                convert_to_numpy=False,
+            )
+        except Exception as exc:
+            raise EmbeddingError(f"local MiniLM embedding failed: {exc}") from exc
+        if hasattr(vector_obj, "tolist"):
+            vector_obj = vector_obj.tolist()
+        vector = [float(v) for v in vector_obj]
+        return EmbeddingResult(
+            provider=self.provider,
+            model=self.model,
+            dimensions=len(vector),
+            vector=vector,
+        )
+
+
 def _parse_dimensions(raw: object) -> int | None:
     text = str(raw or "").strip()
     if not text:
@@ -242,6 +294,13 @@ def build_embedding_client(config: dict) -> BaseEmbeddingClient | None:
         return OllamaEmbeddingClient(
             model=model or "mxbai-embed-large",
             base_url=str(config.get("embedding_base_url") or "http://localhost:11434"),
+        )
+    if provider in {"local_minilm", "local-minilm", "minilm", "local"}:
+        if dimensions not in (None, 384):
+            raise EmbeddingError("local_minilm uses fixed 384-dimensional vectors")
+        return LocalMiniLMEmbeddingClient(
+            model=model or "sentence-transformers/all-MiniLM-L6-v2",
+            cache_dir=str(config.get("embedding_cache_dir") or "").strip() or None,
         )
     if provider == "hash":
         return HashEmbeddingClient(

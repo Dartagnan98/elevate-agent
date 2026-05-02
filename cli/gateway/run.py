@@ -1551,7 +1551,11 @@ class GatewayRunner:
                     mode = str(cfg.get("display", {}).get("busy_input_mode", "") or "").strip().lower()
             except Exception:
                 pass
-        return "queue" if mode == "queue" else "interrupt"
+        if mode in {"queue", "queued"}:
+            return "queue"
+        if mode in {"interrupt", "hard", "cancel"}:
+            return "interrupt"
+        return "soft"
 
     @staticmethod
     def _load_restart_drain_timeout() -> float:
@@ -2086,17 +2090,40 @@ class GatewayRunner:
                 logger.debug("Failed to send busy status reply: %s", e)
             return True
 
-        # Store the message so it's processed as the next turn after the
-        # current run finishes (or is interrupted).
-        from gateway.platforms.base import merge_pending_message_event
-        merge_pending_message_event(adapter._pending_messages, session_key, event)
-
         is_queue_mode = self._busy_input_mode == "queue"
+        is_interrupt_mode = self._busy_input_mode == "interrupt"
+        had_pending_before = session_key in adapter._pending_messages
 
-        # If not in queue mode, interrupt the running agent immediately.
-        # This aborts in-flight tool calls and causes the agent loop to exit
-        # at the next check point.
-        if not is_queue_mode and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+        # Queue normal follow-ups into the active turn by default. This keeps
+        # long tool workflows intact while still letting the model see the new
+        # user guidance at the next safe boundary. Operators can opt back into
+        # hard interrupts with display.busy_input_mode=interrupt.
+        soft_accepted = False
+        if (
+            not is_queue_mode
+            and not is_interrupt_mode
+            and running_agent
+            and running_agent is not _AGENT_PENDING_SENTINEL
+            and event.message_type == MessageType.TEXT
+            and not getattr(event, "media_urls", None)
+            and not had_pending_before
+            and hasattr(running_agent, "queue_soft_interrupt")
+        ):
+            try:
+                soft_accepted = bool(running_agent.queue_soft_interrupt(event.text))
+            except Exception:
+                soft_accepted = False
+
+        # Store messages that are not folded into the live turn so they are
+        # processed after the current run finishes (or after a hard interrupt).
+        if not soft_accepted:
+            from gateway.platforms.base import merge_pending_message_event
+            merge_pending_message_event(adapter._pending_messages, session_key, event)
+
+        # Hard interrupt mode aborts in-flight tool calls and exits the loop at
+        # the next checkpoint. Keep it available for deployments that prefer the
+        # older behavior.
+        if is_interrupt_mode and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 running_agent.interrupt(event.text)
             except Exception:
@@ -2138,10 +2165,20 @@ class GatewayRunner:
                 f"⏳ Queued for the next turn{status_detail}. "
                 f"I'll respond once the current task finishes."
             )
-        else:
+        elif is_interrupt_mode:
             message = (
                 f"⚡ Interrupting current task{status_detail}. "
                 f"I'll respond to your message shortly."
+            )
+        elif soft_accepted:
+            message = (
+                f"⏩ Added to the current task{status_detail}. "
+                f"I'll fold it in without restarting the work."
+            )
+        else:
+            message = (
+                f"⏳ Queued for the next turn{status_detail}. "
+                f"I'll respond once the current task reaches a safe point."
             )
 
         thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
@@ -4102,6 +4139,17 @@ class GatewayRunner:
                     if self._queue_during_drain_enabled()
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
+            if (
+                event.message_type == MessageType.TEXT
+                and not getattr(event, "media_urls", None)
+                and hasattr(running_agent, "queue_soft_interrupt")
+            ):
+                logger.debug("Soft follow-up for session %s", _quick_key[:20])
+                try:
+                    if running_agent.queue_soft_interrupt(event.text):
+                        return "⏩ Added to the current task. I'll fold it in without restarting the work."
+                except Exception as exc:
+                    logger.debug("Soft follow-up failed for %s: %s", _quick_key[:20], exc)
             logger.debug("PRIORITY interrupt for session %s", _quick_key[:20])
             running_agent.interrupt(event.text)
             if _quick_key in self._pending_messages:
@@ -11233,6 +11281,11 @@ class GatewayRunner:
                 if _leftover_steer:
                     pending = _leftover_steer
                     logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
+            if result and not pending and not pending_event:
+                _leftover_soft = result.get("pending_soft_interrupt")
+                if _leftover_soft:
+                    pending = _leftover_soft
+                    logger.debug("Delivering leftover soft follow-up as next turn: '%s...'", pending[:40])
 
             # Safety net: if the pending text is a slash command (e.g. "/stop",
             # "/new"), discard it — commands should never be passed to the agent

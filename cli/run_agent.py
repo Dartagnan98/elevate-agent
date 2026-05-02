@@ -1027,6 +1027,8 @@ class AIAgent:
         # existing tool message rather than inserting a new user turn).
         self._pending_steer: Optional[str] = None
         self._pending_steer_lock = threading.Lock()
+        self._pending_soft_interrupts: list[dict[str, Any]] = []
+        self._pending_soft_interrupts_lock = threading.Lock()
 
         # Concurrent-tool worker thread tracking.  `_execute_tool_calls_concurrent`
         # runs each tool on its own ThreadPoolExecutor worker — those worker
@@ -3832,6 +3834,10 @@ class AIAgent:
         if _steer_lock is not None:
             with _steer_lock:
                 self._pending_steer = None
+        _soft_lock = getattr(self, "_pending_soft_interrupts_lock", None)
+        if _soft_lock is not None:
+            with _soft_lock:
+                self._pending_soft_interrupts = []
 
     def steer(self, text: str) -> bool:
         """
@@ -3867,6 +3873,129 @@ class AIAgent:
                 self._pending_steer = self._pending_steer + "\n" + cleaned
             else:
                 self._pending_steer = cleaned
+        return True
+
+    def queue_soft_interrupt(
+        self,
+        text: str,
+        *,
+        urgent: bool = False,
+        source: str = "user",
+    ) -> bool:
+        """Queue a mid-run message for injection at the next safe boundary.
+
+        Unlike ``interrupt()``, this does not cancel the current API call or
+        running tool. The text is delivered either through the next tool result
+        or as a fresh user message after the current assistant text response.
+        """
+        if not text or not str(text).strip():
+            return False
+        item = {
+            "content": str(text).strip(),
+            "urgent": bool(urgent),
+            "source": str(source or "user")[:40],
+            "queued_at": time.time(),
+        }
+        _lock = getattr(self, "_pending_soft_interrupts_lock", None)
+        if _lock is None:
+            existing = getattr(self, "_pending_soft_interrupts", [])
+            self._pending_soft_interrupts = [*existing, item]
+            return True
+        with _lock:
+            self._pending_soft_interrupts.append(item)
+        if not self.quiet_mode:
+            preview = item["content"][:60] + ("..." if len(item["content"]) > 60 else "")
+            self._vprint(f"{self.log_prefix}⏩ Soft follow-up queued: {preview}")
+        return True
+
+    def _drain_pending_soft_interrupts(self, *, urgent_only: bool = False) -> list[dict[str, Any]]:
+        """Return and clear pending soft interrupts."""
+        _lock = getattr(self, "_pending_soft_interrupts_lock", None)
+        if _lock is None:
+            items = list(getattr(self, "_pending_soft_interrupts", []) or [])
+            if urgent_only:
+                selected = [item for item in items if item.get("urgent")]
+                self._pending_soft_interrupts = [item for item in items if not item.get("urgent")]
+                return selected
+            self._pending_soft_interrupts = []
+            return items
+        with _lock:
+            items = list(self._pending_soft_interrupts)
+            if urgent_only:
+                selected = [item for item in items if item.get("urgent")]
+                self._pending_soft_interrupts = [item for item in items if not item.get("urgent")]
+                return selected
+            self._pending_soft_interrupts = []
+            return items
+
+    def _requeue_soft_interrupts(self, items: list[dict[str, Any]]) -> None:
+        if not items:
+            return
+        _lock = getattr(self, "_pending_soft_interrupts_lock", None)
+        if _lock is None:
+            existing = list(getattr(self, "_pending_soft_interrupts", []) or [])
+            self._pending_soft_interrupts = items + existing
+            return
+        with _lock:
+            self._pending_soft_interrupts = items + self._pending_soft_interrupts
+
+    @staticmethod
+    def _soft_interrupt_text(items: list[dict[str, Any]]) -> str:
+        if not items:
+            return ""
+        lines = ["User follow-up received while you were already working:"]
+        for item in items:
+            content = str(item.get("content") or "").strip()
+            if content:
+                lines.append(f"- {content}")
+        lines.append("Fold this into the current task before continuing. Do not restart work that is already complete.")
+        return "\n".join(lines)
+
+    def _apply_pending_soft_interrupts_to_tool_results(self, messages: list, num_tool_msgs: int | None = None) -> bool:
+        """Append queued follow-ups to the latest tool result when possible."""
+        if not messages:
+            return False
+        items = self._drain_pending_soft_interrupts()
+        if not items:
+            return False
+
+        start_idx = 0
+        if num_tool_msgs is not None and num_tool_msgs > 0:
+            start_idx = max(len(messages) - num_tool_msgs, 0)
+        elif num_tool_msgs is None:
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    start_idx = idx + 1
+                    break
+        target_idx = None
+        for idx in range(len(messages) - 1, start_idx - 1, -1):
+            msg = messages[idx]
+            if isinstance(msg, dict) and msg.get("role") == "tool":
+                target_idx = idx
+                break
+
+        if target_idx is None:
+            self._requeue_soft_interrupts(items)
+            return False
+
+        marker = "\n\n" + self._soft_interrupt_text(items)
+        existing_content = messages[target_idx].get("content", "")
+        if isinstance(existing_content, str):
+            messages[target_idx]["content"] = existing_content + marker
+        else:
+            try:
+                blocks = list(existing_content) if existing_content else []
+                blocks.append({"type": "text", "text": marker.lstrip()})
+                messages[target_idx]["content"] = blocks
+            except Exception:
+                self._requeue_soft_interrupts(items)
+                return False
+        logger.debug(
+            "Delivered %d soft interrupt(s) through tool result at index %d",
+            len(items),
+            target_idx,
+        )
         return True
 
     def _drain_pending_steer(self) -> Optional[str]:
@@ -8322,6 +8451,7 @@ class AIAgent:
             # Same as the sequential path: drain between each collected
             # result so the steer lands as early as possible.
             self._apply_pending_steer_to_tool_results(messages, 1)
+            self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
 
         # ── Per-turn aggregate budget enforcement ─────────────────────────
         num_tools = len(parsed_calls)
@@ -8335,6 +8465,7 @@ class AIAgent:
         # so the steer marker is never truncated. See steer() for details.
         if num_tools > 0:
             self._apply_pending_steer_to_tool_results(messages, num_tools)
+            self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools)
 
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
@@ -8683,6 +8814,7 @@ class AIAgent:
             # injection lands as soon as a tool finishes — not after the
             # entire batch.  The model sees it on the next API iteration.
             self._apply_pending_steer_to_tool_results(messages, 1)
+            self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
 
             if not self.quiet_mode:
                 if self.verbose_logging:
@@ -8718,6 +8850,7 @@ class AIAgent:
         # applied to sequential execution as well.
         if num_tools_seq > 0:
             self._apply_pending_steer_to_tool_results(messages, num_tools_seq)
+            self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools_seq)
 
 
 
@@ -9363,6 +9496,12 @@ class AIAgent:
                     else:
                         existing = getattr(self, "_pending_steer", None)
                         self._pending_steer = (existing + "\n" + _pre_api_steer) if existing else _pre_api_steer
+
+            # Soft follow-ups use the same safe boundary as /steer when a
+            # completed tool result exists. If there is no tool result yet,
+            # the final-response branch below injects them as a fresh user
+            # message after the assistant text response.
+            self._apply_pending_soft_interrupts_to_tool_results(messages, None)
 
             # Prepare messages for API call
             # If we have an ephemeral system prompt, prepend it to the messages
@@ -11986,6 +12125,19 @@ class AIAgent:
                     ):
                         messages.pop()
 
+                    _soft_items = self._drain_pending_soft_interrupts()
+                    if _soft_items:
+                        messages.append(final_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": self._soft_interrupt_text(_soft_items),
+                        })
+                        final_response = None
+                        _turn_exit_reason = "soft_interrupt_after_text_response"
+                        self._session_messages = messages
+                        self._save_session_log(messages)
+                        continue
+
                     messages.append(final_msg)
                     
                     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
@@ -12177,6 +12329,9 @@ class AIAgent:
         _leftover_steer = self._drain_pending_steer()
         if _leftover_steer:
             result["pending_steer"] = _leftover_steer
+        _leftover_soft = self._drain_pending_soft_interrupts()
+        if _leftover_soft:
+            result["pending_soft_interrupt"] = self._soft_interrupt_text(_leftover_soft)
         self._response_was_previewed = False
         
         # Include interrupt message if one triggered the interrupt

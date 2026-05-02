@@ -144,6 +144,19 @@ def organize_holographic_journal(
 
     provider = HolographicMemoryProvider(config=plugin_config)
     provider.initialize(MAINTENANCE_SESSION_ID)
+    try:
+        from plugins.memory.holographic import activity as memory_activity
+
+        memory_activity.record_event(
+            "memory.daily_organize.started",
+            message="daily journal organization",
+            state="maintaining",
+            step="maintain",
+            status="running",
+            data={"session_id": session_id, "session_day": session_day, "drain": drain},
+        )
+    except Exception:
+        memory_activity = None  # type: ignore[assignment]
     processed = 0
     promoted = 0
     pending = 0
@@ -172,6 +185,19 @@ def organize_holographic_journal(
                 break
     finally:
         provider.shutdown()
+
+    try:
+        if memory_activity is not None:  # type: ignore[name-defined]
+            memory_activity.record_event(
+                "memory.daily_organize.complete",
+                message=f"processed {processed}, promoted {promoted}",
+                state="idle",
+                step="maintain",
+                status="done" if pending == 0 else "pending",
+                data={"processed": processed, "promoted": promoted, "pending": pending, "batches": batches},
+            )
+    except Exception:
+        pass
 
     return {
         "ran": True,

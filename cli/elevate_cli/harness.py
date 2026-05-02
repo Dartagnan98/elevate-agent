@@ -53,10 +53,38 @@ def _safe_list_count(value: Any, key: str) -> int:
 def _memory_pipeline_summary(memory: dict[str, Any], embedding: dict[str, Any]) -> dict[str, Any]:
     """Summarize the observable memory pipeline from local journal state.
 
-    Elevate does not yet expose a live per-turn memory sidecar event stream, so
-    this is intentionally marked as derived. It still gives the CLI and Agent
-    Hub the jcode-style shape we want: search, verify, inject, maintain.
+    Prefer the live holographic activity stream when present. Fall back to a
+    journal-derived summary so fresh installs still show useful posture.
     """
+    activity = memory.get("activity") if isinstance(memory.get("activity"), dict) else {}
+    activity_pipeline = (
+        activity.get("pipeline")
+        if isinstance(activity.get("pipeline"), dict)
+        else {}
+    )
+    if activity_pipeline and activity_pipeline.get("derived_from_journal") is False:
+        journal_for_activity = memory.get("journal") if isinstance(memory.get("journal"), dict) else {}
+        return {
+            "derived_from_journal": False,
+            "state": str(activity.get("state") or "idle"),
+            "search": str(activity_pipeline.get("search") or "skipped"),
+            "verify": str(activity_pipeline.get("verify") or "skipped"),
+            "inject": str(activity_pipeline.get("inject") or "skipped"),
+            "maintain": str(activity_pipeline.get("maintain") or "skipped"),
+            "active": bool(activity_pipeline.get("active")),
+            "backlog": _safe_count(journal_for_activity, "pending"),
+            "failure_count": _safe_count(journal_for_activity, "failed"),
+            "indexed_facts": _safe_count(memory, "indexed_facts"),
+            "facts": _safe_count(memory, "facts"),
+            "last_step": str(activity_pipeline.get("last_step") or ""),
+            "updated_at": str(activity.get("updated_at") or ""),
+            "recent_events": (
+                activity.get("recent_events")
+                if isinstance(activity.get("recent_events"), list)
+                else []
+            )[:10],
+        }
+
     journal = memory.get("journal") if isinstance(memory.get("journal"), dict) else {}
     pending = _safe_count(journal, "pending")
     processed = _safe_count(journal, "processed")
@@ -86,6 +114,9 @@ def _memory_pipeline_summary(memory: dict[str, Any], embedding: dict[str, Any]) 
         "failure_count": failed,
         "indexed_facts": indexed_facts,
         "facts": facts,
+        "last_step": "",
+        "updated_at": "",
+        "recent_events": [],
     }
 
 

@@ -30,6 +30,7 @@ from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+from . import activity as memory_activity
 from .embeddings import EmbeddingError, build_embedding_client, parse_bool
 from .store import MemoryStore
 from .retrieval import FactRetriever
@@ -291,11 +292,12 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
             {"key": "embedding_enabled", "description": "Enable semantic embeddings", "default": "false", "choices": ["true", "false"]},
-            {"key": "embedding_provider", "description": "Embedding backend", "default": "openai", "choices": ["openai", "ollama", "openai_compatible"]},
+            {"key": "embedding_provider", "description": "Embedding backend", "default": "openai", "choices": ["openai", "ollama", "openai_compatible", "local_minilm"]},
             {"key": "embedding_model", "description": "Embedding model name", "default": "text-embedding-3-small"},
             {"key": "embedding_dimensions", "description": "Optional vector dimensions override", "default": ""},
             {"key": "embedding_base_url", "description": "Optional provider base URL", "default": ""},
             {"key": "embedding_api_key_env", "description": "API key environment variable", "default": "OPENAI_API_KEY"},
+            {"key": "embedding_cache_dir", "description": "Optional local model cache directory for local_minilm", "default": ""},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -376,9 +378,19 @@ class HolographicMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._retriever or not query:
             return ""
+        memory_activity.pipeline_start(reason="prefetch")
         try:
             if self._layered_prefetch_enabled:
-                return self._build_layered_context(query, session_id=session_id)
+                context = self._build_layered_context(query, session_id=session_id)
+                memory_activity.record_event(
+                    "memory.prefetch.complete",
+                    message="layered recall ready" if context else "no relevant memory",
+                    state="idle",
+                    step="inject",
+                    status="done" if context else "skipped",
+                    data={"prompt_chars": len(context), "session_id": session_id},
+                )
+                return context
 
             results = self._retriever.search(
                 query,
@@ -386,13 +398,37 @@ class HolographicMemoryProvider(MemoryProvider):
                 limit=self._durable_recall_limit,
             )
             if not results:
+                memory_activity.record_event(
+                    "memory.prefetch.empty",
+                    message="no durable facts matched",
+                    state="idle",
+                    step="inject",
+                    status="skipped",
+                    data={"hits": 0},
+                )
                 return ""
             lines = []
             for r in results:
                 trust = r.get("trust_score", r.get("trust", 0))
                 lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
-            return "## Elevate Memory Core\n" + "\n".join(lines)
+            context = "## Elevate Memory Core\n" + "\n".join(lines)
+            memory_activity.record_event(
+                "memory.prefetch.complete",
+                message=f"injected {len(results)} durable fact(s)",
+                state="idle",
+                step="inject",
+                status="done",
+                data={"hits": len(results), "prompt_chars": len(context)},
+            )
+            return context
         except Exception as e:
+            memory_activity.record_event(
+                "memory.prefetch.error",
+                message=str(e),
+                state="error",
+                step="search",
+                status="error",
+            )
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
 
@@ -401,13 +437,29 @@ class HolographicMemoryProvider(MemoryProvider):
             return
         turn_session_id = session_id or self._session_id or ""
         try:
-            self._store.record_turn(
+            turn_id = self._store.record_turn(
                 turn_session_id,
                 user_content,
                 assistant_content,
                 max_chars=self._turn_journal_max_chars,
             )
+            memory_activity.record_event(
+                "memory.turn_recorded",
+                message="turn journaled for later organization",
+                state="idle",
+                step="maintain",
+                status="pending",
+                data={"turn_id": turn_id, "session_id": turn_session_id},
+            )
         except Exception as exc:
+            memory_activity.record_event(
+                "memory.turn_record_failed",
+                message=str(exc),
+                state="error",
+                step="maintain",
+                status="error",
+                data={"session_id": turn_session_id},
+            )
             logger.debug("Holographic turn journal write failed: %s", exc)
             return
 
@@ -419,11 +471,26 @@ class HolographicMemoryProvider(MemoryProvider):
 
         self._turns_since_organize = 0
         try:
+            memory_activity.record_event(
+                "memory.organize.started",
+                message="periodic journal organization",
+                state="maintaining",
+                step="maintain",
+                status="running",
+                data={"session_id": turn_session_id},
+            )
             self._organize_journal(
                 session_id=turn_session_id,
                 limit=self._organize_batch_limit,
             )
         except Exception as exc:
+            memory_activity.record_event(
+                "memory.organize.error",
+                message=str(exc),
+                state="error",
+                step="maintain",
+                status="error",
+            )
             logger.debug("Holographic turn journal organization failed: %s", exc)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -479,6 +546,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
                 )
+                memory_activity.record_event(
+                    "memory.tool.remembered",
+                    message="fact stored",
+                    state="idle",
+                    step="maintain",
+                    status="done",
+                    data={"fact_id": fact_id, "category": args.get("category", "general")},
+                )
                 return json.dumps({"fact_id": fact_id, "status": "added"})
 
             elif action == "search":
@@ -487,6 +562,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     min_trust=float(args.get("min_trust", self._min_trust)),
                     limit=int(args.get("limit", 10)),
+                )
+                memory_activity.record_event(
+                    "memory.tool.recalled",
+                    message=f"fact search returned {len(results)} result(s)",
+                    state="idle",
+                    step="search",
+                    status="done",
+                    data={"query": args.get("query"), "count": len(results)},
                 )
                 return json.dumps({"results": results, "count": len(results)})
 
@@ -529,8 +612,24 @@ class HolographicMemoryProvider(MemoryProvider):
 
             elif action == "embedding_backfill":
                 limit = args.get("limit")
+                memory_activity.record_event(
+                    "memory.embedding_backfill.started",
+                    message="embedding backfill started",
+                    state="embedding",
+                    step="search",
+                    status="running",
+                    data={"limit": limit},
+                )
                 result = store.backfill_embeddings(
                     limit=int(limit) if limit is not None else None,
+                )
+                memory_activity.record_event(
+                    "memory.embedding_backfill.complete",
+                    message=f"indexed {result.get('indexed', 0)} fact(s)",
+                    state="idle",
+                    step="search",
+                    status="done" if result.get("enabled") else "skipped",
+                    data=result,
                 )
                 return json.dumps(result)
 
@@ -698,6 +797,14 @@ class HolographicMemoryProvider(MemoryProvider):
             session_day=scoped_day,
             limit=batch_limit,
         )
+        memory_activity.record_event(
+            "memory.organize.started",
+            message=f"organizing {len(rows)} pending turn(s)",
+            state="maintaining",
+            step="maintain",
+            status="running",
+            data={"session_id": scoped_session, "session_day": scoped_day, "limit": batch_limit},
+        )
         processed = 0
         promoted = 0
 
@@ -723,6 +830,14 @@ class HolographicMemoryProvider(MemoryProvider):
         status = self._store.journal_status(
             session_id=scoped_session,
             session_day=scoped_day,
+        )
+        memory_activity.record_event(
+            "memory.organize.complete",
+            message=f"processed {processed}, promoted {promoted}",
+            state="idle",
+            step="maintain",
+            status="done",
+            data={"processed": processed, "promoted": promoted, "pending": status.get("pending", 0)},
         )
         return {
             "processed": processed,

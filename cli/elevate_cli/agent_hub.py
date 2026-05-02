@@ -406,8 +406,15 @@ def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
             "api_key_env": str(plugin_cfg.get("embedding_api_key_env") or "OPENAI_API_KEY"),
         },
         "graph": {"nodes": [], "edges": []},
+        "activity": {},
         "error": "",
     }
+    try:
+        from plugins.memory.holographic.activity import snapshot as activity_snapshot
+
+        summary["activity"] = activity_snapshot()
+    except Exception:
+        summary["activity"] = {}
     if not db_path.exists():
         return summary
 
