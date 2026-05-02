@@ -149,6 +149,7 @@ interface ArtifactEntry {
   id: string;
   kind: ArtifactKind;
   key: string;
+  messageId?: string;
   path?: string;
   source?: string;
   status?: "error" | "ok";
@@ -1006,6 +1007,7 @@ function previewKind(path: string, contentType: string): "html" | "image" | "off
 function artifactKey(entry: Omit<ArtifactEntry, "createdAt" | "id" | "key">) {
   return [
     entry.kind,
+    entry.messageId ?? "",
     entry.path ?? "",
     entry.source ?? "",
     entry.title,
@@ -1033,11 +1035,16 @@ function extractPathsFromText(text: string): string[] {
   return Array.from(new Set(matches ?? [])).slice(0, 12);
 }
 
-function artifactsFromText(text: string, source: string): ArtifactEntry[] {
+function artifactsFromText(
+  text: string,
+  source: string,
+  messageId?: string,
+): ArtifactEntry[] {
   return extractPathsFromText(text).map((path) =>
     makeArtifact({
       detail: path,
       kind: "file",
+      messageId,
       path,
       source,
       title: fileName(path),
@@ -1048,7 +1055,7 @@ function artifactsFromText(text: string, source: string): ArtifactEntry[] {
 function artifactsFromMessages(messages: ChatMessage[]): ArtifactEntry[] {
   return messages.flatMap((message) => {
     if (!message.content.trim()) return [];
-    return artifactsFromText(message.content, `${message.role} history`);
+    return artifactsFromText(message.content, `${message.role} history`, message.id);
   });
 }
 
@@ -1096,6 +1103,7 @@ function isOpenPreviewIntent(text: string): boolean {
 
 function artifactsFromToolComplete(
   payload: Record<string, unknown>,
+  messageId?: string,
 ): ArtifactEntry[] {
   const toolName = String(payload.name ?? "tool");
   const artifacts: ArtifactEntry[] = [];
@@ -1109,15 +1117,16 @@ function artifactsFromToolComplete(
         content: inlineDiff,
         detail: toolName,
         kind: "diff",
+        messageId,
         source: toolName,
         title: `${toolName} changes`,
       }),
     );
-    artifacts.push(...artifactsFromText(inlineDiff, toolName));
+    artifacts.push(...artifactsFromText(inlineDiff, toolName, messageId));
   }
 
   if (summary) {
-    artifacts.push(...artifactsFromText(summary, toolName));
+    artifacts.push(...artifactsFromText(summary, toolName, messageId));
   }
 
   return artifacts;
@@ -1125,6 +1134,7 @@ function artifactsFromToolComplete(
 
 function artifactsFromSubagentEvent(
   payload: Record<string, unknown>,
+  messageId?: string,
 ): ArtifactEntry[] {
   const artifacts: ArtifactEntry[] = [];
   const source = String(payload.goal || payload.subagent_id || "agent");
@@ -1141,6 +1151,7 @@ function artifactsFromSubagentEvent(
       makeArtifact({
         detail: path,
         kind: "file",
+        messageId,
         path,
         source,
         title: fileName(path),
@@ -1158,16 +1169,17 @@ function artifactsFromSubagentEvent(
         content: preview,
         detail: source,
         kind: "output",
+        messageId,
         source: tool,
         status: item.is_error ? "error" : "ok",
         title: `${tool} output ${index + 1}`,
       }),
     );
-    artifacts.push(...artifactsFromText(preview, tool));
+    artifacts.push(...artifactsFromText(preview, tool, messageId));
   });
 
   if (summary) {
-    artifacts.push(...artifactsFromText(summary, source));
+    artifacts.push(...artifactsFromText(summary, source, messageId));
   }
 
   return artifacts;
@@ -1685,7 +1697,9 @@ export default function ChatPage() {
         if (name) {
           setStatusText(payload.error ? `${name} failed` : `${name} complete`);
         }
-        addArtifacts(artifactsFromToolComplete(payload));
+        addArtifacts(
+          artifactsFromToolComplete(payload, currentAssistantRef.current ?? undefined),
+        );
       }
     };
 
@@ -1749,7 +1763,9 @@ export default function ChatPage() {
       });
 
       if (ev.type === "subagent.complete") {
-        addArtifacts(artifactsFromSubagentEvent(payload));
+        addArtifacts(
+          artifactsFromSubagentEvent(payload, currentAssistantRef.current ?? undefined),
+        );
       }
     };
 
@@ -1805,6 +1821,7 @@ export default function ChatPage() {
         const text = eventText(ev);
         const status = eventString(ev, "status") || "complete";
         const warning = eventString(ev, "warning");
+        const messageId = currentAssistantRef.current ?? ensureAssistant();
 
         updateAssistant((message) => ({
           ...message,
@@ -1813,7 +1830,7 @@ export default function ChatPage() {
           warning: warning || undefined,
         }));
         if (text) {
-          addArtifacts(artifactsFromText(text, "assistant"));
+          addArtifacts(artifactsFromText(text, "assistant", messageId));
         }
         setTools((prev) =>
           prev.map((tool) =>
@@ -2403,6 +2420,20 @@ export default function ChatPage() {
       ),
     [messages],
   );
+  const artifactsByMessage = useMemo(() => {
+    const grouped = new Map<string, ArtifactEntry[]>();
+    for (const artifact of artifacts) {
+      if (!artifact.messageId) continue;
+      const next = grouped.get(artifact.messageId) ?? [];
+      next.push(artifact);
+      grouped.set(artifact.messageId, next);
+    }
+    return grouped;
+  }, [artifacts]);
+  const unanchoredArtifacts = useMemo(
+    () => artifacts.filter((artifact) => !artifact.messageId),
+    [artifacts],
+  );
   const chatTitle = useMemo(
     () => deriveChatTitle(visibleMessages, resumeId, resumeFallback),
     [resumeFallback, resumeId, visibleMessages],
@@ -2516,7 +2547,9 @@ export default function ChatPage() {
                         ? statusText
                         : undefined
                     }
+                    artifacts={artifactsByMessage.get(message.id) ?? []}
                     message={message}
+                    onOpenArtifact={openArtifactPreview}
                   />
                 ))}
                 <ChatActivityDigest
@@ -2527,7 +2560,7 @@ export default function ChatPage() {
                   tools={tools}
                 />
                 <ChatArtifactShelf
-                  artifacts={artifacts}
+                  artifacts={unanchoredArtifacts}
                   onOpenArtifact={openArtifactPreview}
                 />
                 {pendingPrompt && (
@@ -3194,10 +3227,14 @@ function ComposerActionBar({
 
 function MessageRow({
   activityText,
+  artifacts,
   message,
+  onOpenArtifact,
 }: {
   activityText?: string;
+  artifacts: ArtifactEntry[];
   message: ChatMessage;
+  onOpenArtifact(artifact: ArtifactEntry): void;
 }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
@@ -3255,6 +3292,17 @@ function MessageRow({
           {message.warning && (
             <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_12%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-text)]">
               {message.warning}
+            </div>
+          )}
+          {artifacts.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {artifacts.slice(-4).map((artifact) => (
+                <InlineArtifactCard
+                  key={`message-artifact-${artifact.id}`}
+                  artifact={artifact}
+                  onOpenArtifact={onOpenArtifact}
+                />
+              ))}
             </div>
           )}
         </div>
