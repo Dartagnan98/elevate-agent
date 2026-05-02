@@ -51,7 +51,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
@@ -130,7 +130,6 @@ interface ChatMessage {
 }
 
 type ArtifactKind = "diff" | "file" | "output";
-type ActivityTab = "artifacts" | "progress" | "sources";
 
 interface ArtifactEntry {
   content?: string;
@@ -157,6 +156,19 @@ interface QueuedInput {
   id: string;
   status: "queued" | "error";
   text: string;
+}
+
+interface UsageInfo {
+  calls?: number;
+  cache_read?: number;
+  cache_write?: number;
+  context_max?: number;
+  context_percent?: number;
+  context_used?: number;
+  input?: number;
+  model?: string;
+  output?: number;
+  total?: number;
 }
 
 interface ComposerAgent {
@@ -275,6 +287,28 @@ function eventString(ev: GatewayEvent, key: string): string {
 function modelLabel(info: SessionInfo): string {
   const model = info.model || "model";
   return model.split("/").slice(-1)[0] || model;
+}
+
+function normalizeUsage(raw: unknown): UsageInfo | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const toNumber = (key: string) =>
+    typeof item[key] === "number" && Number.isFinite(item[key])
+      ? (item[key] as number)
+      : undefined;
+
+  return {
+    calls: toNumber("calls"),
+    cache_read: toNumber("cache_read"),
+    cache_write: toNumber("cache_write"),
+    context_max: toNumber("context_max"),
+    context_percent: toNumber("context_percent"),
+    context_used: toNumber("context_used"),
+    input: toNumber("input"),
+    model: typeof item.model === "string" ? item.model : undefined,
+    output: toNumber("output"),
+    total: toNumber("total"),
+  };
 }
 
 function displayStatusText(text: string): string {
@@ -525,8 +559,10 @@ export default function ChatPage() {
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const voiceBaseInputRef = useRef("");
 
   const [info, setInfo] = useState<SessionInfo>({});
+  const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
@@ -723,6 +759,7 @@ export default function ChatPage() {
     currentAssistantRef.current = null;
     setSessionId(null);
     setInfo({});
+    setUsage(null);
     setArtifacts([]);
     setTools([]);
     setQueuedInputs([]);
@@ -882,6 +919,12 @@ export default function ChatPage() {
       addArtifacts(artifactsFromSubagentEvent(compactToolPayload(ev.payload)));
     };
 
+    const updateUsageFromPayload = (ev: GatewayEvent) => {
+      const payload = compactToolPayload(ev.payload);
+      const nextUsage = normalizeUsage(payload.usage);
+      if (nextUsage) setUsage(nextUsage);
+    };
+
     unsubs.push(gw.onState(setState));
     unsubs.push(
       gw.on<SessionInfo>("session.info", (ev) => {
@@ -921,6 +964,7 @@ export default function ChatPage() {
     unsubs.push(
       gw.on("message.complete", (ev) => {
         if (!accepts(ev)) return;
+        updateUsageFromPayload(ev);
         const text = eventText(ev);
         const status = eventString(ev, "status") || "complete";
         const warning = eventString(ev, "warning");
@@ -1163,6 +1207,31 @@ export default function ChatPage() {
     updateAssistant,
   ]);
 
+  useEffect(() => {
+    if (!sessionId || state !== "open") return;
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const next = await gw.request<UsageInfo>(
+          "session.usage",
+          { session_id: sessionId },
+          8_000,
+        );
+        if (!cancelled) setUsage(normalizeUsage(next));
+      } catch {
+        // Context usage is helpful, not critical to chat.
+      }
+    };
+
+    void refresh();
+    const timer = window.setInterval(refresh, busy ? 3_000 : 12_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [busy, gw, sessionId, state]);
+
   const selectComposerAgent = useCallback(
     (agent: ComposerAgent) => {
       setSelectedAgentId(agent.id);
@@ -1348,25 +1417,39 @@ export default function ChatPage() {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "en-US";
+    voiceBaseInputRef.current = input.trimEnd();
     recognition.onresult = (event) => {
-      let finalText = "";
-      let interimText = "";
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const finalSegments: string[] = [];
+      const interimSegments: string[] = [];
+      for (let index = 0; index < event.results.length; index += 1) {
         const result = event.results[index];
         const transcript = result?.[0]?.transcript?.trim() ?? "";
         if (!transcript) continue;
-        if (result.isFinal) finalText = `${finalText} ${transcript}`.trim();
-        else interimText = `${interimText} ${transcript}`.trim();
+        if (result.isFinal) finalSegments.push(transcript);
+        else interimSegments.push(transcript);
       }
 
-      if (finalText) {
-        setInput((prev) => [prev.trim(), finalText].filter(Boolean).join(" "));
+      const dictated = [...finalSegments, ...interimSegments].join(" ").trim();
+      if (dictated) {
+        const nextInput = [voiceBaseInputRef.current, dictated]
+          .filter(Boolean)
+          .join(" ");
+        setInput(nextInput);
+        setCaretIndex(nextInput.length);
+        window.requestAnimationFrame(() => {
+          const target = inputRef.current;
+          if (!target) return;
+          target.setSelectionRange(nextInput.length, nextInput.length);
+        });
+      }
+
+      if (finalSegments.length) {
         setStatusText("Voice captured");
-      } else if (interimText) {
-        setStatusText(`Listening: ${interimText}`);
+      } else if (interimSegments.length) {
+        setStatusText(`Listening: ${interimSegments.join(" ")}`);
       }
     };
     recognition.onerror = (event) => {
@@ -1385,7 +1468,7 @@ export default function ChatPage() {
     setVoiceListening(true);
     setStatusText("Listening...");
     recognition.start();
-  }, [voiceListening]);
+  }, [input, voiceListening]);
 
   const canSend = !!input.trim() && state === "open" && !!sessionId;
   const canPickModel = state === "open" && !!sessionId;
@@ -1394,25 +1477,7 @@ export default function ChatPage() {
       artifacts={artifacts}
       banner={banner}
       busy={busy}
-      canPickModel={canPickModel}
-      gw={gw}
       info={info}
-      modelOpen={modelOpen}
-      onCloseModel={() => setModelOpen(false)}
-      onModelSubmit={(slashCommand) => {
-        if (!sessionId) return;
-        void executeSlash({
-          callbacks: {
-            send: submitPrompt,
-            sys: (body) => appendMessage("system", body),
-          },
-          command: slashCommand,
-          gw,
-          sessionId,
-        });
-        setModelOpen(false);
-      }}
-      onOpenModel={() => setModelOpen(true)}
       onReconnect={reconnect}
       sessionId={sessionId}
       state={state}
@@ -1615,6 +1680,7 @@ export default function ChatPage() {
                   selectedAgent={selectedAgent}
                   state={state}
                   statusText={statusText}
+                  usage={usage}
                   voiceListening={voiceListening}
                   voiceSupported={voiceSupported}
                 />
@@ -1628,6 +1694,25 @@ export default function ChatPage() {
         </aside>
       </div>
       {mobileActivityPortal}
+      {modelOpen && canPickModel && sessionId && (
+        <ModelPickerDialog
+          gw={gw}
+          onClose={() => setModelOpen(false)}
+          onSubmit={(slashCommand) => {
+            void executeSlash({
+              callbacks: {
+                send: submitPrompt,
+                sys: (body) => appendMessage("system", body),
+              },
+              command: slashCommand,
+              gw,
+              sessionId,
+            });
+            setModelOpen(false);
+          }}
+          sessionId={sessionId}
+        />
+      )}
     </div>
   );
 }
@@ -1791,6 +1876,51 @@ function ComposerRichInputLayer({
   );
 }
 
+function ContextRing({ usage }: { usage: UsageInfo | null }) {
+  const used = Math.max(0, Math.min(100, usage?.context_percent ?? 0));
+  const left = usage?.context_percent === undefined ? null : Math.max(0, 100 - used);
+  const circumference = 2 * Math.PI * 9;
+  const stroke = left === null ? 0 : (left / 100) * circumference;
+  const label = left === null ? "--" : `${Math.round(left)}%`;
+  const detail =
+    usage?.context_used && usage?.context_max
+      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(usage.context_max).toLocaleString()} tokens used`
+      : "Context usage pending";
+
+  return (
+    <span
+      className="inline-flex h-7 items-center gap-1.5 rounded-full bg-[var(--chat-surface-soft)] px-2.5 text-[var(--chat-muted-strong)]"
+      title={`Context left: ${label}. ${detail}`}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-5 w-5 -rotate-90"
+        viewBox="0 0 24 24"
+      >
+        <circle
+          cx="12"
+          cy="12"
+          fill="none"
+          r="9"
+          stroke="var(--chat-border-strong)"
+          strokeWidth="2.5"
+        />
+        <circle
+          cx="12"
+          cy="12"
+          fill="none"
+          r="9"
+          stroke="var(--chat-accent)"
+          strokeDasharray={`${stroke} ${circumference}`}
+          strokeLinecap="round"
+          strokeWidth="2.5"
+        />
+      </svg>
+      <span className="text-[0.68rem]">{label}</span>
+    </span>
+  );
+}
+
 function ComposerActionBar({
   agentMenuOpen,
   agents,
@@ -1805,6 +1935,7 @@ function ComposerActionBar({
   selectedAgent,
   state,
   statusText,
+  usage,
   voiceListening,
   voiceSupported,
 }: {
@@ -1821,6 +1952,7 @@ function ComposerActionBar({
   selectedAgent: ComposerAgent;
   state: ConnectionState;
   statusText: string;
+  usage: UsageInfo | null;
   voiceListening: boolean;
   voiceSupported: boolean;
 }) {
@@ -1899,7 +2031,10 @@ function ComposerActionBar({
         >
           <Bot className="h-3 w-3" />
           {modelLabel(info)}
+          <ChevronDown className="h-3 w-3 opacity-70" />
         </button>
+
+        <ContextRing usage={usage} />
 
         <button
           type="button"
@@ -2218,13 +2353,7 @@ function ActivityPanel({
   artifacts,
   banner,
   busy,
-  canPickModel,
-  gw,
   info,
-  modelOpen,
-  onCloseModel,
-  onModelSubmit,
-  onOpenModel,
   onReconnect,
   sessionId,
   state,
@@ -2234,34 +2363,18 @@ function ActivityPanel({
   artifacts: ArtifactEntry[];
   banner: string | null;
   busy: boolean;
-  canPickModel: boolean;
-  gw: GatewayClient;
   info: SessionInfo;
-  modelOpen: boolean;
-  onCloseModel(): void;
-  onModelSubmit(slashCommand: string): void;
-  onOpenModel(): void;
   onReconnect(): void;
   sessionId: string | null;
   state: ConnectionState;
   statusText: string;
   tools: ToolEntry[];
 }) {
-  const [activeTab, setActiveTab] = useState<ActivityTab>("progress");
   const sources = useMemo(
     () => buildSourceEntries({ artifacts, info, sessionId, tools }),
     [artifacts, info, sessionId, tools],
   );
   const runningTools = tools.filter((tool) => tool.status === "running").length;
-  const tabItems: Array<{
-    count: number;
-    id: ActivityTab;
-    label: string;
-  }> = [
-    { count: tools.length, id: "progress", label: "Progress" },
-    { count: artifacts.length, id: "artifacts", label: "Artifacts" },
-    { count: sources.length, id: "sources", label: "Sources" },
-  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] bg-[var(--chat-surface)] normal-case shadow-[0_32px_90px_rgba(0,0,0,0.24),inset_0_0_0_1px_var(--chat-border)] ring-1 ring-white/[0.025] backdrop-blur-xl">
@@ -2317,133 +2430,110 @@ function ActivityPanel({
         </section>
       )}
 
-      <div className="shrink-0 px-2.5 pb-2">
-        <div className="grid grid-cols-3 gap-0.5 rounded-xl bg-[var(--chat-surface-soft)] p-0.5">
-          {tabItems.map((item) => (
-            <button
-              key={item.id}
-              className={cn(
-                "flex h-7 min-w-0 items-center justify-center gap-1 rounded-lg px-1.5 text-[0.68rem] font-medium transition-colors",
-                activeTab === item.id
-                  ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)] shadow-sm"
-                  : "text-[var(--chat-muted)] hover:text-[var(--chat-muted-strong)]",
-              )}
-              onClick={() => setActiveTab(item.id)}
-              type="button"
-            >
-              <span className="truncate">{item.label}</span>
-              <span className="text-[0.6rem] text-[var(--chat-muted)]">
-                {item.count}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2.5">
-        {activeTab === "progress" && (
-          <section className="space-y-2">
-            <div className="grid grid-cols-2 gap-2">
-              <PortalMetric label="Running" value={busy ? runningTools || 1 : 0} />
-              <PortalMetric label="Tool calls" value={tools.length} />
-            </div>
-
-            <div className="rounded-2xl bg-[var(--chat-surface-soft)] p-3">
-              <div className="flex gap-2 text-sm leading-5">
-                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
-                  {busy ? (
-                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="h-2.5 w-2.5" />
-                  )}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[var(--chat-muted-strong)]">
-                    {statusText}
-                  </div>
-                  <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
-                    {modelLabel(info)}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              {tools.length === 0 ? (
-                <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
-                  {busy
-                    ? "Waiting for the first tool event..."
-                    : "Tool activity will appear here"}
-                </div>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-2.5 py-2.5">
+        <section className="rounded-2xl bg-[var(--chat-surface-soft)] p-3">
+          <div className="flex gap-2 text-sm leading-5">
+            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
+              {busy ? (
+                <Loader2 className="h-2.5 w-2.5 animate-spin" />
               ) : (
-                tools
-                  .slice()
-                  .reverse()
-                  .map((tool) => <ProgressItem key={tool.id} tool={tool} />)
+                <CheckCircle2 className="h-2.5 w-2.5" />
               )}
-            </div>
-          </section>
-        )}
-
-        {activeTab === "artifacts" && (
-          <section className="space-y-2">
-            {artifacts.length === 0 ? (
-              <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-8 text-center text-xs text-[var(--chat-muted)]">
-                Files, diffs, and outputs will land here
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[var(--chat-muted-strong)]">
+                {statusText}
               </div>
-            ) : (
-              artifacts
-                .slice()
-                .reverse()
-                .map((artifact) => (
-                  <ArtifactCard key={artifact.id} artifact={artifact} />
-                ))
-            )}
-          </section>
-        )}
+              <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
+                {modelLabel(info)}
+              </div>
+            </div>
+          </div>
+        </section>
 
-        {activeTab === "sources" && (
-          <section className="space-y-2">
-            {sources.map((source) => (
-              <SourceCard key={source.id} source={source} />
-            ))}
-          </section>
-        )}
+        <section className="space-y-2">
+          <PortalSectionHeader
+            count={tools.length}
+            label="Tasks"
+            meta={busy ? `${runningTools || 1} running` : "idle"}
+          />
+          {tools.length === 0 ? (
+            <PortalEmpty>
+              {busy
+                ? "Waiting for the first tool event..."
+                : "Tool activity will appear here"}
+            </PortalEmpty>
+          ) : (
+            tools
+              .slice()
+              .reverse()
+              .map((tool) => <ProgressItem key={tool.id} tool={tool} />)
+          )}
+        </section>
+
+        <section className="space-y-2">
+          <PortalSectionHeader
+            count={artifacts.length}
+            label="Artifacts"
+            meta="files and outputs"
+          />
+          {artifacts.length === 0 ? (
+            <PortalEmpty>Files, diffs, and outputs will land here</PortalEmpty>
+          ) : (
+            artifacts
+              .slice()
+              .reverse()
+              .map((artifact) => (
+                <ArtifactCard key={artifact.id} artifact={artifact} />
+              ))
+          )}
+        </section>
+
+        <section className="space-y-2">
+          <PortalSectionHeader
+            count={sources.length}
+            label="Sources"
+            meta="model and session"
+          />
+          {sources.map((source) => (
+            <SourceCard key={source.id} source={source} />
+          ))}
+        </section>
       </div>
-
-      <section className="shrink-0 px-2.5 pb-2.5 pt-1">
-        <button
-          className="flex w-full items-center justify-between gap-2 rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2.5 text-left text-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] disabled:opacity-50"
-          disabled={!canPickModel}
-          onClick={onOpenModel}
-          type="button"
-        >
-          <span className="min-w-0 truncate">{modelLabel(info)}</span>
-          {canPickModel && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-        </button>
-      </section>
-
-      {modelOpen && canPickModel && sessionId && (
-        <ModelPickerDialog
-          gw={gw}
-          onClose={onCloseModel}
-          onSubmit={onModelSubmit}
-          sessionId={sessionId}
-        />
-      )}
     </div>
   );
 }
 
-function PortalMetric({ label, value }: { label: string; value: number }) {
+function PortalSectionHeader({
+  count,
+  label,
+  meta,
+}: {
+  count: number;
+  label: string;
+  meta: string;
+}) {
   return (
-    <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2.5">
-      <div className="text-[1.05rem] font-semibold leading-none text-[var(--chat-text)]">
-        {value}
+    <div className="flex items-center justify-between gap-2 px-1">
+      <div className="flex items-center gap-2">
+        <span className="text-[0.72rem] font-semibold text-[var(--chat-muted-strong)]">
+          {label}
+        </span>
+        <span className="rounded-full bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.6rem] text-[var(--chat-muted)]">
+          {count}
+        </span>
       </div>
-      <div className="mt-1 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
-        {label}
-      </div>
+      <span className="truncate text-[0.65rem] text-[var(--chat-muted)]">
+        {meta}
+      </span>
+    </div>
+  );
+}
+
+function PortalEmpty({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
+      {children}
     </div>
   );
 }
