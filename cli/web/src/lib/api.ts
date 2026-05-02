@@ -33,6 +33,25 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
   return res.json();
 }
 
+async function fetchBlob(url: string, init?: RequestInit): Promise<BlobResponse> {
+  const headers = new Headers(init?.headers);
+  const token = window.__ELEVATE_SESSION_TOKEN__;
+  if (token) {
+    setSessionHeader(headers, token);
+  }
+  const res = await fetch(`${BASE}${url}`, { ...init, headers });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`${res.status}: ${text}`);
+  }
+  return {
+    blob: await res.blob(),
+    contentType: res.headers.get("content-type") ?? "",
+    fileName: res.headers.get("x-elevate-file-name") ?? "",
+    size: Number(res.headers.get("x-elevate-file-size") ?? "0") || undefined,
+  };
+}
+
 async function getSessionToken(): Promise<string> {
   if (_sessionToken) return _sessionToken;
   const injected = window.__ELEVATE_SESSION_TOKEN__;
@@ -69,6 +88,8 @@ export const api = {
     fetchJSON<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  previewFile: (path: string) =>
+    fetchBlob(`/api/files/preview?path=${encodeURIComponent(path)}`),
   getLogs: (params: { file?: string; lines?: number; level?: string; component?: string }) => {
     const qs = new URLSearchParams();
     if (params.file) qs.set("file", params.file);
@@ -693,6 +714,13 @@ export interface SkillInfo {
   description: string;
   category: string;
   enabled: boolean;
+}
+
+export interface BlobResponse {
+  blob: Blob;
+  contentType: string;
+  fileName: string;
+  size?: number;
 }
 
 export interface ToolsetInfo {

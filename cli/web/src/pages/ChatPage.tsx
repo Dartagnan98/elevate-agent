@@ -27,10 +27,12 @@ import {
   ChevronUp,
   Clipboard,
   Command,
+  ExternalLink,
   FileCode2,
   FileText,
   Folder,
   GitBranch,
+  PanelRightOpen,
   Loader2,
   Mic,
   MicOff,
@@ -742,6 +744,30 @@ function fileName(path: string): string {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() || path;
 }
 
+function fileExtension(path: string): string {
+  const name = fileName(path).toLowerCase();
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot) : "";
+}
+
+function previewKind(path: string, contentType: string): "html" | "image" | "office" | "pdf" | "text" | "unknown" {
+  const ext = fileExtension(path);
+  const type = contentType.toLowerCase();
+  if (type.includes("pdf") || ext === ".pdf") return "pdf";
+  if (type.startsWith("image/") || [".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"].includes(ext)) {
+    return "image";
+  }
+  if (type.includes("html") || ext === ".html" || ext === ".htm") return "html";
+  if (
+    type.startsWith("text/") ||
+    [".csv", ".json", ".log", ".md", ".txt", ".yaml", ".yml"].includes(ext)
+  ) {
+    return "text";
+  }
+  if ([".docx", ".pptx", ".xlsx"].includes(ext)) return "office";
+  return "unknown";
+}
+
 function artifactKey(entry: Omit<ArtifactEntry, "createdAt" | "id" | "key">) {
   return [
     entry.kind,
@@ -928,6 +954,7 @@ export default function ChatPage() {
   const [info, setInfo] = useState<SessionInfo>({});
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
+  const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
@@ -1034,6 +1061,10 @@ export default function ChatPage() {
     });
   }, []);
 
+  const openArtifactPreview = useCallback((artifact: ArtifactEntry) => {
+    setPreviewArtifact(artifact);
+  }, []);
+
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string) => {
       const clean = displayStatusText(text).trim();
@@ -1131,6 +1162,7 @@ export default function ChatPage() {
     setInfo({});
     setUsage(null);
     setArtifacts([]);
+    setPreviewArtifact(null);
     setTools([]);
     setActivityTrace([]);
     setQueuedInputs([]);
@@ -1919,6 +1951,7 @@ export default function ChatPage() {
       banner={banner}
       busy={busy}
       info={info}
+      onOpenArtifact={openArtifactPreview}
       onReconnect={reconnect}
       sessionId={sessionId}
       state={state}
@@ -1963,10 +1996,37 @@ export default function ChatPage() {
       portalRoot,
     );
 
+  const mobilePreviewPortal =
+    narrow &&
+    previewArtifact &&
+    portalRoot &&
+    createPortal(
+      <>
+        <button
+          aria-label="Close artifact preview"
+          className="fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm"
+          onClick={() => setPreviewArtifact(null)}
+          type="button"
+        />
+        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70]">
+          <ArtifactPreviewPane
+            artifact={previewArtifact}
+            onClose={() => setPreviewArtifact(null)}
+          />
+        </aside>
+      </>,
+      portalRoot,
+    );
+
   return (
     <div className="elevate-chat-shell relative -m-4 flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6">
       <div className="relative flex min-h-0 flex-1">
-        <section className="flex min-h-0 flex-1 flex-col xl:pr-[23rem]">
+        <section
+          className={cn(
+            "flex min-h-0 flex-1 flex-col",
+            previewArtifact ? "xl:pr-[34rem] 2xl:pr-[42rem]" : "xl:pr-[23rem]",
+          )}
+        >
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-5 sm:px-6">
             {visibleMessages.length === 0 ? (
               <EmptyState state={state} />
@@ -1995,7 +2055,10 @@ export default function ChatPage() {
                   statusText={statusText}
                   tools={tools}
                 />
-                <ChatArtifactShelf artifacts={artifacts} />
+                <ChatArtifactShelf
+                  artifacts={artifacts}
+                  onOpenArtifact={openArtifactPreview}
+                />
                 {pendingPrompt && (
                   <PendingPromptCard
                     pendingPrompt={pendingPrompt}
@@ -2096,12 +2159,29 @@ export default function ChatPage() {
           </form>
         </section>
 
-        <aside className="pointer-events-none absolute right-5 top-5 hidden h-[52vh] max-h-[34rem] min-h-[22rem] w-[21.5rem] xl:block">
-          <div className="pointer-events-auto h-full">{activity}</div>
+        <aside
+          className={cn(
+            "pointer-events-none absolute right-5 top-5 hidden xl:block",
+            previewArtifact
+              ? "h-[calc(100%-2.5rem)] min-h-[30rem] w-[40rem] max-w-[calc(100vw-2.5rem)]"
+              : "h-[52vh] max-h-[34rem] min-h-[22rem] w-[21.5rem]",
+          )}
+        >
+          <div className="pointer-events-auto h-full">
+            {previewArtifact ? (
+              <ArtifactPreviewPane
+                artifact={previewArtifact}
+                onClose={() => setPreviewArtifact(null)}
+              />
+            ) : (
+              activity
+            )}
+          </div>
         </aside>
       </div>
       {mobileActivityPortal}
-      {narrow && !mobilePanelOpen && (
+      {mobilePreviewPortal}
+      {narrow && !mobilePanelOpen && !previewArtifact && (
         <button
           className="fixed right-4 top-4 z-40 rounded-full bg-[var(--chat-surface)] px-3 py-1.5 text-xs font-medium text-[var(--chat-muted-strong)] shadow-[0_12px_38px_rgba(0,0,0,0.18),inset_0_0_0_1px_var(--chat-border)]"
           onClick={() => setMobilePanelOpen(true)}
@@ -2663,20 +2743,36 @@ function ChatActivityDigest({
   );
 }
 
-function ChatArtifactShelf({ artifacts }: { artifacts: ArtifactEntry[] }) {
+function ChatArtifactShelf({
+  artifacts,
+  onOpenArtifact,
+}: {
+  artifacts: ArtifactEntry[];
+  onOpenArtifact(artifact: ArtifactEntry): void;
+}) {
   const visible = artifacts.slice(-3).reverse();
   if (!visible.length) return null;
 
   return (
     <section className="space-y-2">
       {visible.map((artifact) => (
-        <InlineArtifactCard key={`inline-${artifact.id}`} artifact={artifact} />
+        <InlineArtifactCard
+          key={`inline-${artifact.id}`}
+          artifact={artifact}
+          onOpenArtifact={onOpenArtifact}
+        />
       ))}
     </section>
   );
 }
 
-function InlineArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
+function InlineArtifactCard({
+  artifact,
+  onOpenArtifact,
+}: {
+  artifact: ArtifactEntry;
+  onOpenArtifact(artifact: ArtifactEntry): void;
+}) {
   const [copied, setCopied] = useState(false);
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
 
@@ -2696,14 +2792,25 @@ function InlineArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
           <FileText className="h-4 w-4" />
         </div>
-        <div className="min-w-0 flex-1">
+        <button
+          className="min-w-0 flex-1 text-left"
+          onClick={() => onOpenArtifact(artifact)}
+          type="button"
+        >
           <div className="truncate text-sm font-semibold text-[var(--chat-text)]">
             {artifact.title}
           </div>
           <div className="truncate text-xs text-[var(--chat-muted)]">
             {artifact.path || artifact.detail || artifact.source || "Artifact"}
           </div>
-        </div>
+        </button>
+        <button
+          className="rounded-full border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          onClick={() => onOpenArtifact(artifact)}
+          type="button"
+        >
+          Open
+        </button>
         <button
           className="rounded-full border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           onClick={copy}
@@ -2815,7 +2922,215 @@ function PendingPromptCard({
   );
 }
 
-function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
+function ArtifactPreviewPane({
+  artifact,
+  onClose,
+}: {
+  artifact: ArtifactEntry;
+  onClose(): void;
+}) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [contentType, setContentType] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [textPreview, setTextPreview] = useState<string | null>(
+    artifact.content ?? null,
+  );
+  const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
+  const pathForKind = artifact.path ?? artifact.title;
+  const kind = artifact.path ? previewKind(pathForKind, contentType) : "text";
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+
+    setBlobUrl(null);
+    setContentType("");
+    setError(null);
+    setTextPreview(artifact.content ?? null);
+
+    if (!artifact.path) {
+      setLoading(false);
+      return () => {};
+    }
+
+    setLoading(true);
+    void api
+      .previewFile(artifact.path)
+      .then(async (response) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(response.blob);
+        const nextKind = previewKind(artifact.path ?? artifact.title, response.contentType);
+        setBlobUrl(objectUrl);
+        setContentType(response.contentType);
+        if (nextKind === "text") {
+          const text = await response.blob.text();
+          if (!cancelled) setTextPreview(text.slice(0, 250_000));
+        }
+      })
+      .catch((previewError: Error) => {
+        if (!cancelled) setError(previewError.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifact]);
+
+  const copy = () => {
+    navigator.clipboard
+      .writeText(copyText)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
+  };
+
+  const openExternal = () => {
+    if (!blobUrl) return;
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[0_32px_90px_rgba(0,0,0,0.26),inset_0_0_0_1px_var(--chat-border)] ring-1 ring-white/[0.025]">
+      <header className="flex shrink-0 items-start gap-3 px-4 pb-3 pt-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[var(--chat-surface-soft)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+          <FileText className="h-4.5 w-4.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h2 className="truncate text-[0.95rem] font-semibold leading-5">
+              {artifact.title}
+            </h2>
+            <span className="shrink-0 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[0.65rem] text-[var(--chat-muted)]">
+              {fileExtension(pathForKind).replace(".", "").toUpperCase() || artifact.kind}
+            </span>
+          </div>
+          <p className="mt-1 truncate text-[0.72rem] leading-4 text-[var(--chat-muted)]">
+            {artifact.path || artifact.detail || artifact.source || "Artifact preview"}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            className="h-8 rounded-full px-2.5 text-xs"
+            disabled={!blobUrl}
+            onClick={openExternal}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+            Open
+          </Button>
+          <Button
+            className="h-8 rounded-full px-2.5 text-xs"
+            onClick={copy}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {copied ? "Copied" : "Copy"}
+          </Button>
+          <Button
+            aria-label="Close preview"
+            className="h-8 w-8 rounded-full p-0"
+            onClick={onClose}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 border-t border-[var(--chat-border)] bg-[var(--chat-surface-soft)]">
+        {loading ? (
+          <div className="flex h-full items-center justify-center text-sm text-[var(--chat-muted)]">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            Opening local preview...
+          </div>
+        ) : error ? (
+          <div className="flex h-full items-center justify-center p-6">
+            <div className="max-w-sm rounded-2xl bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_34%,transparent)]">
+              <div className="font-semibold">Could not preview this file</div>
+              <div className="mt-1 break-words text-xs opacity-90">{error}</div>
+            </div>
+          </div>
+        ) : kind === "pdf" && blobUrl ? (
+          <iframe
+            className="h-full w-full bg-[var(--chat-bg)]"
+            src={blobUrl}
+            title={artifact.title}
+          />
+        ) : kind === "html" && blobUrl ? (
+          <iframe
+            className="h-full w-full bg-white"
+            sandbox=""
+            src={blobUrl}
+            title={artifact.title}
+          />
+        ) : kind === "image" && blobUrl ? (
+          <div className="flex h-full items-center justify-center overflow-auto p-4">
+            <img
+              alt={artifact.title}
+              className="max-h-full max-w-full object-contain"
+              src={blobUrl}
+            />
+          </div>
+        ) : kind === "text" && textPreview !== null ? (
+          <pre className="h-full overflow-auto p-4 text-[0.76rem] leading-5 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
+            {textPreview}
+          </pre>
+        ) : (
+          <div className="flex h-full items-center justify-center p-6">
+            <div className="max-w-sm text-center">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--chat-surface)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+                <FileText className="h-5 w-5" />
+              </div>
+              <div className="mt-3 text-sm font-semibold">
+                Preview prepared
+              </div>
+              <p className="mt-1 text-xs leading-5 text-[var(--chat-muted)]">
+                This file type may need a native app. Use Open to launch the
+                browser download/viewer, or copy the local path.
+              </p>
+              <div className="mt-4 flex justify-center gap-2">
+                <Button
+                  disabled={!blobUrl}
+                  onClick={openExternal}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                  Open
+                </Button>
+                <Button onClick={copy} size="sm" type="button" variant="outline">
+                  {copied ? "Copied" : "Copy path"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArtifactCard({
+  artifact,
+  onOpenArtifact,
+}: {
+  artifact: ArtifactEntry;
+  onOpenArtifact(artifact: ArtifactEntry): void;
+}) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const Icon = artifact.kind === "diff" ? FileCode2 : FileText;
@@ -2846,7 +3161,13 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
 
         <button
           className="min-w-0 flex-1 text-left"
-          onClick={() => artifact.content && setOpen((value) => !value)}
+          onClick={() => {
+            if (artifact.path) {
+              onOpenArtifact(artifact);
+            } else if (artifact.content) {
+              setOpen((value) => !value);
+            }
+          }}
           type="button"
         >
           <div className="truncate font-medium text-[var(--chat-text)]">
@@ -2855,6 +3176,15 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
           <div className="mt-0.5 truncate text-[0.68rem] text-[var(--chat-muted)]">
             {artifact.detail || artifact.source || artifact.kind}
           </div>
+        </button>
+
+        <button
+          aria-label="Open artifact preview"
+          className="rounded-md p-1 text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          onClick={() => onOpenArtifact(artifact)}
+          type="button"
+        >
+          <PanelRightOpen className="h-3.5 w-3.5" />
         </button>
 
         <button
@@ -2956,6 +3286,7 @@ function ActivityPanel({
   banner,
   busy,
   info,
+  onOpenArtifact,
   onReconnect,
   sessionId,
   state,
@@ -2966,6 +3297,7 @@ function ActivityPanel({
   banner: string | null;
   busy: boolean;
   info: SessionInfo;
+  onOpenArtifact(artifact: ArtifactEntry): void;
   onReconnect(): void;
   sessionId: string | null;
   state: ConnectionState;
@@ -3058,7 +3390,11 @@ function ActivityPanel({
               .slice()
               .reverse()
               .map((artifact) => (
-                <ArtifactCard key={artifact.id} artifact={artifact} />
+                <ArtifactCard
+                  key={artifact.id}
+                  artifact={artifact}
+                  onOpenArtifact={onOpenArtifact}
+                />
               ))
           )}
         </section>

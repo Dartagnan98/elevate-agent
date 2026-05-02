@@ -14,10 +14,12 @@ import hmac
 import importlib.util
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -942,6 +944,102 @@ def _open_in_file_manager(path: Path) -> None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+    )
+
+
+_PREVIEWABLE_SUFFIXES = {
+    ".csv",
+    ".docx",
+    ".gif",
+    ".htm",
+    ".html",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".log",
+    ".md",
+    ".pdf",
+    ".png",
+    ".pptx",
+    ".svg",
+    ".txt",
+    ".webp",
+    ".xlsx",
+    ".yaml",
+    ".yml",
+}
+_MAX_PREVIEW_BYTES = 100 * 1024 * 1024
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _preview_roots() -> list[Path]:
+    roots = [
+        Path.home(),
+        PROJECT_ROOT,
+        get_elevate_home(),
+        Path(tempfile.gettempdir()),
+    ]
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            resolved.append(root.expanduser().resolve())
+        except OSError:
+            continue
+    return resolved
+
+
+def _resolve_preview_file(raw_path: str) -> Path:
+    if not raw_path or not raw_path.strip():
+        raise HTTPException(status_code=400, detail="Missing file path")
+
+    candidate = Path(os.path.expandvars(raw_path.strip())).expanduser()
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate)
+
+    try:
+        path = candidate.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid file path: {exc}")
+
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if path.suffix.lower() not in _PREVIEWABLE_SUFFIXES:
+        raise HTTPException(status_code=415, detail="File type is not previewable")
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not inspect file: {exc}")
+    if size > _MAX_PREVIEW_BYTES:
+        raise HTTPException(status_code=413, detail="File is too large to preview")
+
+    if not any(_is_relative_to(path, root) for root in _preview_roots()):
+        raise HTTPException(status_code=403, detail="File path is outside preview roots")
+
+    return path
+
+
+@app.get("/api/files/preview")
+async def preview_file(path: str):
+    target = _resolve_preview_file(path)
+    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "X-Elevate-File-Name": target.name,
+            "X-Elevate-File-Size": str(target.stat().st_size),
+        },
     )
 
 
