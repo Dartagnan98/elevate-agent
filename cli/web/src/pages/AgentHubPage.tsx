@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Activity,
   Bot,
@@ -17,11 +18,11 @@ import {
   Terminal,
   Users,
   Wrench,
+  Settings,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
   AgentHubAgent,
-  AgentHubMemoryNode,
   AgentHubPlatform,
   AgentHubSnapshot,
   HarnessSnapshot,
@@ -30,6 +31,7 @@ import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { MemoryConstellation } from "@/components/MemoryConstellation";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -47,108 +49,6 @@ function statusVariant(status: string): "success" | "warning" | "outline" | "sec
   if (status === "needs_model") return "warning";
   if (status === "disabled") return "secondary";
   return "outline";
-}
-
-function nodePosition(node: AgentHubMemoryNode, index: number, total: number) {
-  const isEntity = node.type === "entity";
-  const radius = isEntity ? 88 : 48;
-  const offset = isEntity ? 0 : Math.PI / Math.max(total, 1);
-  const angle = (index / Math.max(total, 1)) * Math.PI * 2 + offset;
-  return {
-    x: 128 + Math.cos(angle) * radius,
-    y: 112 + Math.sin(angle) * radius,
-  };
-}
-
-function MemoryGraph({
-  nodes,
-  edges,
-}: {
-  nodes: AgentHubMemoryNode[];
-  edges: { source: string; target: string; type: string }[];
-}) {
-  const positions = useMemo(() => {
-    const byType = new Map<string, AgentHubMemoryNode[]>();
-    for (const node of nodes) {
-      const key = node.type === "entity" ? "entity" : "fact";
-      byType.set(key, [...(byType.get(key) ?? []), node]);
-    }
-    const map = new Map<string, { x: number; y: number }>();
-    for (const [type, grouped] of byType.entries()) {
-      grouped.forEach((node, index) => {
-        map.set(node.id, nodePosition({ ...node, type }, index, grouped.length));
-      });
-    }
-    return map;
-  }, [nodes]);
-
-  if (!nodes.length) {
-    return (
-      <div className="flex h-56 items-center justify-center rounded-2xl border border-border bg-muted/20 text-sm text-muted-foreground">
-        No graph nodes yet
-      </div>
-    );
-  }
-
-  return (
-    <div className="relative h-56 overflow-hidden rounded-2xl border border-border bg-muted/20">
-      <svg viewBox="0 0 256 224" className="h-full w-full">
-        <g opacity="0.7">
-          {edges.map((edge, index) => {
-            const source = positions.get(edge.source);
-            const target = positions.get(edge.target);
-            if (!source || !target) return null;
-            return (
-              <line
-                key={`${edge.source}-${edge.target}-${index}`}
-                x1={source.x}
-                y1={source.y}
-                x2={target.x}
-                y2={target.y}
-                stroke="currentColor"
-                strokeWidth="0.8"
-                className="text-border"
-              />
-            );
-          })}
-        </g>
-        <circle
-          cx="128"
-          cy="112"
-          r="28"
-          className="fill-primary/10 stroke-primary/40"
-          strokeWidth="1.2"
-        />
-        {nodes.map((node) => {
-          const pos = positions.get(node.id);
-          if (!pos) return null;
-          const entity = node.type === "entity";
-          const r = entity ? 7 : 5;
-          return (
-            <g key={node.id}>
-              <circle
-                cx={pos.x}
-                cy={pos.y}
-                r={r}
-                className={cn(
-                  entity ? "fill-warning/80 stroke-warning" : "fill-primary/70 stroke-primary",
-                )}
-                strokeWidth="1"
-              />
-              <title>{node.label}</title>
-            </g>
-          );
-        })}
-      </svg>
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 flex flex-wrap gap-1">
-        {nodes.slice(0, 5).map((node) => (
-          <Badge key={node.id} variant="outline" className="max-w-[10rem] truncate">
-            {node.label}
-          </Badge>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 function Stat({
@@ -381,6 +281,125 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
   );
 }
 
+function SetupRunway({
+  busyAction,
+  onRestart,
+  onStart,
+  snapshot,
+}: {
+  busyAction: string | null;
+  onRestart: () => void;
+  onStart: () => void;
+  snapshot: AgentHubSnapshot;
+}) {
+  const pendingPairings = snapshot.platforms.reduce(
+    (total, platform) => total + platform.pending_pairings.length,
+    0,
+  );
+  const configuredPlatforms = snapshot.platforms.filter((platform) => platform.configured).length;
+
+  const items = [
+    {
+      icon: KeyRound,
+      label: "Model auth",
+      detail: snapshot.model.configured ? `${snapshot.model.provider} / ${snapshot.model.model}` : "Connect OpenAI Codex",
+      state: snapshot.model.configured ? "ready" : "needs setup",
+      to: "/env",
+    },
+    {
+      icon: Terminal,
+      label: "Gateway",
+      detail: snapshot.gateway.running ? `Running${snapshot.gateway.pid ? ` as ${snapshot.gateway.pid}` : ""}` : "Start the local service",
+      state: snapshot.gateway.running ? "online" : "offline",
+      action: snapshot.gateway.running ? onRestart : onStart,
+    },
+    {
+      icon: Users,
+      label: "Messaging",
+      detail: pendingPairings ? `${pendingPairings} pairing code${pendingPairings === 1 ? "" : "s"} waiting` : `${configuredPlatforms} connector${configuredPlatforms === 1 ? "" : "s"} configured`,
+      state: pendingPairings ? "review" : configuredPlatforms ? "ready" : "blank",
+      to: "/approvals",
+    },
+    {
+      icon: Brain,
+      label: "Memory",
+      detail: snapshot.memory.embedding.enabled
+        ? `${snapshot.memory.embedding.provider}:${snapshot.memory.embedding.model}`
+        : "Turn on embeddings",
+      state: snapshot.memory.embedding.enabled ? "ready" : "optional",
+      to: "/memory",
+    },
+  ];
+
+  return (
+    <Card className="bg-card/72">
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle>Setup runway</CardTitle>
+          <Link
+            to="/config"
+            className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+          >
+            <Settings className="h-3.5 w-3.5" />
+            Full settings
+          </Link>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        {items.map((item) => {
+          const Icon = item.icon;
+          const content = (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Icon className="h-4 w-4 shrink-0 text-primary" />
+                  <span className="truncate text-sm font-semibold text-foreground">{item.label}</span>
+                </div>
+                <Badge
+                  variant={
+                    item.state === "ready" || item.state === "online"
+                      ? "success"
+                      : item.state === "review" || item.state === "needs setup"
+                        ? "warning"
+                        : "outline"
+                  }
+                >
+                  {item.state}
+                </Badge>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">{item.detail}</p>
+            </>
+          );
+
+          if (item.action) {
+            return (
+              <button
+                key={item.label}
+                type="button"
+                onClick={item.action}
+                disabled={busyAction !== null}
+                className="rounded-2xl border border-border/70 bg-background/35 p-3 text-left transition-colors hover:bg-foreground/5 disabled:opacity-60"
+              >
+                {content}
+              </button>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              to={item.to ?? "/config"}
+              className="rounded-2xl border border-border/70 bg-background/35 p-3 transition-colors hover:bg-foreground/5"
+            >
+              {content}
+            </Link>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AgentHubPage() {
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -574,6 +593,13 @@ export default function AgentHubPage() {
         <Stat icon={CalendarClock} label="Cron" value={snapshot.cron.enabled} />
       </div>
 
+      <SetupRunway
+        busyAction={busyAction}
+        onRestart={() => void runAction("restart")}
+        onStart={() => void runAction("start")}
+        snapshot={snapshot}
+      />
+
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <div className="flex flex-col gap-4">
           <Card>
@@ -614,16 +640,18 @@ export default function AgentHubPage() {
             <CardHeader>
               <CardTitle>Memory Graph</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <MemoryGraph
+            <CardContent className="space-y-3 p-0">
+              <MemoryConstellation
+                compact
+                className="min-h-[21rem] rounded-none"
                 nodes={snapshot.memory.graph.nodes}
                 edges={snapshot.memory.graph.edges}
               />
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2 px-4">
                 <MiniMetric label="Pending" value={snapshot.memory.journal.pending} />
                 <MiniMetric label="Segments" value={snapshot.memory.journal.session_segment_count} />
               </div>
-              <div className="text-xs text-muted-foreground">
+              <div className="px-4 pb-4 text-xs text-muted-foreground">
                 {snapshot.memory.provider} memory / {memoryEmbeddingLabel}
               </div>
             </CardContent>

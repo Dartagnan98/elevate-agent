@@ -45,6 +45,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { MemoryConstellation } from "@/components/MemoryConstellation";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 
@@ -498,77 +499,12 @@ function MemoryGraphView({
   nodes: AgentHubMemoryNode[];
   edges: { source: string; target: string; type: string }[];
 }) {
-  const positions = nodes.map((node, index) => {
-    const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
-    const radius = node.type === "entity" ? 128 : 78;
-    return {
-      node,
-      x: 190 + Math.cos(angle) * radius,
-      y: 148 + Math.sin(angle) * radius,
-    };
-  });
-  const byId = new Map(positions.map((item) => [item.node.id, item]));
-
-  if (!nodes.length) {
-    return (
-      <div className="flex min-h-[24rem] items-center justify-center rounded-[1.4rem] border border-dashed border-border bg-background/30 text-sm text-muted-foreground">
-        No memory graph nodes yet. Session facts and entities will appear here after memory processing.
-      </div>
-    );
-  }
-
   return (
-    <div className="relative min-h-[24rem] overflow-hidden rounded-[1.4rem] border border-border bg-background/35">
-      <svg viewBox="0 0 380 296" className="h-full min-h-[24rem] w-full">
-        <g opacity="0.65">
-          {edges.map((edge, index) => {
-            const source = byId.get(edge.source);
-            const target = byId.get(edge.target);
-            if (!source || !target) return null;
-            return (
-              <line
-                key={`${edge.source}-${edge.target}-${index}`}
-                x1={source.x}
-                y1={source.y}
-                x2={target.x}
-                y2={target.y}
-                className="stroke-border"
-                strokeWidth="1"
-              />
-            );
-          })}
-        </g>
-        <circle
-          cx="190"
-          cy="148"
-          r="34"
-          className="fill-primary/10 stroke-primary/35"
-          strokeWidth="1.3"
-        />
-        {positions.map(({ node, x, y }) => {
-          const entity = node.type === "entity";
-          return (
-            <g key={node.id}>
-              <circle
-                cx={x}
-                cy={y}
-                r={entity ? 8 : 5.5}
-                className={entity ? "fill-warning/80 stroke-warning" : "fill-primary/75 stroke-primary"}
-                strokeWidth="1"
-              />
-              <title>{node.label}</title>
-            </g>
-          );
-        })}
-      </svg>
-      <div className="absolute inset-x-4 bottom-4 flex flex-wrap gap-1.5">
-        {nodes.slice(0, 9).map((node) => (
-          <Badge key={node.id} variant="outline" className="max-w-[12rem] truncate bg-card/75">
-            {node.label}
-          </Badge>
-        ))}
-      </div>
-    </div>
+    <MemoryConstellation
+      className="min-h-[38rem]"
+      edges={edges}
+      nodes={nodes}
+    />
   );
 }
 
@@ -1099,8 +1035,8 @@ export function RealEstateMemoryPage() {
           { icon: CalendarClock, label: "Session segments", value: memory?.journal.session_segment_count ?? 0 },
         ]}
       />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <Card>
+      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <Card className="bg-[#1e1e1d] p-0">
           <CardHeader>
             <div className="flex items-center justify-between gap-3">
               <CardTitle>Knowledge graph</CardTitle>
@@ -1109,7 +1045,7 @@ export function RealEstateMemoryPage() {
               </Badge>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-0">
             <MemoryGraphView
               nodes={memory?.graph.nodes ?? []}
               edges={memory?.graph.edges ?? []}

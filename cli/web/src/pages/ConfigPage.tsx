@@ -29,7 +29,10 @@ import {
   Filter,
   Network,
   ShieldCheck,
+  Copy,
+  KeyRound,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
 import { useToast } from "@/hooks/useToast";
@@ -117,6 +120,33 @@ const SETTINGS_LANES = [
   },
 ] as const;
 
+const SETUP_STEPS = [
+  {
+    label: "1. Connect the model",
+    description: "Give Elevate its own OpenAI Codex session so the Hub can start chats without fighting the Codex app.",
+    command: "elevate auth add openai-codex",
+  },
+  {
+    label: "2. Pair Telegram",
+    description: "Approve a pairing code from the bot so messages route into the local gateway.",
+    command: "elevate pairing approve telegram <CODE>",
+  },
+  {
+    label: "3. Restart local gateway",
+    description: "Reload config, connectors, agents, skills, and memory settings after setup changes.",
+    command: "elevate gateway restart",
+  },
+] as const;
+
+function modelProvider(config: Record<string, unknown> | null): string {
+  const model = config?.model;
+  if (model && typeof model === "object" && !Array.isArray(model)) {
+    const provider = (model as Record<string, unknown>).provider;
+    if (typeof provider === "string" && provider.trim()) return provider;
+  }
+  return "not selected";
+}
+
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -133,7 +163,8 @@ export default function ConfigPage() {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(true);
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useI18n();
@@ -319,14 +350,36 @@ export default function ConfigPage() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const imported = JSON.parse(reader.result as string);
-        setConfig(imported);
-        showToast(t.config.configImported, "success");
+        const text = String(reader.result ?? "");
+        const fileName = file.name.toLowerCase();
+        if (fileName.endsWith(".yaml") || fileName.endsWith(".yml")) {
+          setYamlText(text);
+          setYamlMode(true);
+          showToast("YAML imported — review and save", "success");
+        } else {
+          const imported = JSON.parse(text);
+          setConfig(imported);
+          setYamlMode(false);
+          showToast(`${t.config.configImported}. Click Save to write it.`, "success");
+        }
       } catch {
         showToast(t.config.invalidJson, "error");
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = "";
       }
     };
     reader.readAsText(file);
+  };
+
+  const copyCommand = async (command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopiedCommand(command);
+      showToast("Command copied", "success");
+      window.setTimeout(() => setCopiedCommand(null), 1600);
+    } catch {
+      showToast("Could not copy command", "error");
+    }
   };
 
   /* ---- Loading ---- */
@@ -401,6 +454,7 @@ export default function ConfigPage() {
               <code className="truncate rounded-md bg-muted/50 px-2 py-1">
                 {t.config.configPath}
               </code>
+              <Badge variant="outline">Provider {modelProvider(config)}</Badge>
               <Badge variant={showAdvanced ? "warning" : "outline"}>
                 {showAdvanced ? "Advanced visible" : "Core view"}
               </Badge>
@@ -420,10 +474,18 @@ export default function ConfigPage() {
             <Button variant="ghost" size="sm" onClick={handleExport} title={t.config.exportConfig} aria-label={t.config.exportConfig}>
               <Download className="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} title={t.config.importConfig} aria-label={t.config.importConfig}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              title={t.config.importConfig}
+              aria-label={t.config.importConfig}
+              className="gap-1.5"
+            >
               <Upload className="h-3.5 w-3.5" />
+              Import
             </Button>
-            <input ref={fileInputRef} type="file" accept=".json" className="hidden" onChange={handleImport} />
+            <input ref={fileInputRef} type="file" accept=".json,.yaml,.yml" className="hidden" onChange={handleImport} />
             <Button variant="ghost" size="sm" onClick={handleReset} title={t.config.resetDefaults} aria-label={t.config.resetDefaults}>
               <RotateCcw className="h-3.5 w-3.5" />
             </Button>
@@ -460,6 +522,57 @@ export default function ConfigPage() {
                 {saving ? t.common.saving : t.common.save}
               </Button>
             )}
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="grid gap-2 md:grid-cols-3">
+            {SETUP_STEPS.map((step) => (
+              <div
+                key={step.label}
+                className="rounded-2xl border border-border/70 bg-background/35 p-3"
+              >
+                <div className="text-sm font-semibold text-foreground">{step.label}</div>
+                <p className="mt-1 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">
+                  {step.description}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void copyCommand(step.command)}
+                  className="mt-3 flex w-full items-center justify-between gap-2 rounded-xl bg-foreground/[0.055] px-2.5 py-2 text-left text-[0.72rem] text-muted-foreground transition-colors hover:bg-foreground/[0.09] hover:text-foreground"
+                >
+                  <code className="truncate bg-transparent p-0">{step.command}</code>
+                  <Copy className="h-3.5 w-3.5 shrink-0" />
+                </button>
+                {copiedCommand === step.command && (
+                  <div className="mt-1 text-[0.68rem] text-success">Copied</div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-2xl border border-border/70 bg-background/35 p-3">
+            <div className="text-sm font-semibold text-foreground">Import / onboarding</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Bring in an exported Elevate config, edit raw YAML, or jump to keys and OAuth. Imported files are staged until you click Save.
+            </p>
+            <div className="mt-3 grid gap-2">
+              <Button size="sm" onClick={() => fileInputRef.current?.click()} className="justify-start">
+                <Upload className="h-3.5 w-3.5" />
+                Import JSON/YAML
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setYamlMode(true)} className="justify-start">
+                <Code className="h-3.5 w-3.5" />
+                Edit raw YAML
+              </Button>
+              <Link
+                to="/env"
+                className="inline-flex h-8 items-center justify-start gap-2 rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                Keys and OAuth
+              </Link>
+            </div>
           </div>
         </div>
 
