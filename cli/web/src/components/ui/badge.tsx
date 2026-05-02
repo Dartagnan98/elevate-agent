@@ -2,15 +2,15 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center border px-2 py-0.5 font-compressed text-[0.65rem] tracking-[0.15em] uppercase transition-colors",
+  "inline-flex items-center rounded-full border px-2 py-0.5 font-sans text-[0.68rem] font-medium tracking-normal normal-case transition-colors",
   {
     variants: {
       variant: {
-        default: "border-foreground/20 bg-foreground/10 text-foreground",
-        secondary: "border-border bg-secondary text-secondary-foreground",
-        destructive: "border-destructive/30 bg-destructive/15 text-destructive",
-        outline: "border-border text-muted-foreground",
-        success: "grain border-emerald-600/30 bg-emerald-950/70 text-emerald-400",
+        default: "border-foreground/15 bg-foreground/8 text-foreground",
+        secondary: "border-border/70 bg-secondary/80 text-secondary-foreground",
+        destructive: "border-destructive/25 bg-destructive/12 text-destructive",
+        outline: "border-border/70 bg-card/35 text-muted-foreground",
+        success: "border-success/25 bg-success/12 text-success",
         warning: "border-warning/30 bg-warning/15 text-warning",
       },
     },

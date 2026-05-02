@@ -146,7 +146,7 @@ function EnvVarRow({
   // Non-compact unset row
   if (!info.is_set && !isEditing) {
     return (
-      <div className="flex items-center justify-between gap-3 border border-border/50 px-4 py-2.5 opacity-60 hover:opacity-100 transition-opacity">
+      <div className="flex items-center justify-between gap-3 rounded-2xl border border-border/50 px-4 py-2.5 opacity-60 transition-opacity hover:opacity-100">
         <div className="flex items-center gap-3 min-w-0">
           <Label className="font-mono-ui text-[0.7rem] text-muted-foreground">{varKey}</Label>
           <span className="text-[0.65rem] text-muted-foreground/60 truncate hidden sm:block">{info.description}</span>
@@ -170,7 +170,7 @@ function EnvVarRow({
 
   // Full expanded row for set keys or keys being edited
   return (
-    <div className="grid gap-2 border border-border p-4">
+    <div className="grid gap-2 rounded-2xl border border-border p-4">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
           <Label className="font-mono-ui text-[0.7rem]">{varKey}</Label>
@@ -198,7 +198,7 @@ function EnvVarRow({
 
       {!isEditing && (
         <div className="flex items-center gap-2">
-          <div className={`flex-1 border border-border px-3 py-2 font-mono-ui text-xs ${
+          <div className={`flex-1 rounded-xl border border-border px-3 py-2 font-mono-ui text-xs ${
             isRevealed ? "bg-background text-foreground select-all" : "bg-muted/30 text-muted-foreground"
           }`}>
             {info.is_set ? displayValue : "---"}
@@ -292,12 +292,12 @@ function ProviderGroupCard({
   const keyUrl = apiKeys.find(([, info]) => info.url)?.[1]?.url ?? null;
 
   return (
-    <div className="border border-border">
+    <div className="overflow-hidden rounded-2xl border border-border bg-card/45">
       {/* Header — always visible */}
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-primary/5 transition-colors"
+        className="flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-primary/5"
       >
         <div className="flex items-center gap-3 min-w-0">
           {expanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}

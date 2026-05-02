@@ -144,7 +144,7 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
       aria-modal="true"
       aria-labelledby="model-picker-title"
     >
-      <div className="relative w-full max-w-3xl max-h-[80vh] border border-border bg-card shadow-2xl flex flex-col">
+      <div className="relative flex max-h-[80vh] w-full max-w-3xl flex-col overflow-hidden rounded-[1.35rem] border border-border bg-card shadow-2xl">
         <button
           type="button"
           onClick={onClose}
@@ -154,20 +154,20 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
           <X className="h-5 w-5" />
         </button>
 
-        <header className="p-5 pb-3 border-b border-border">
+        <header className="border-b border-border p-5 pb-3">
           <h2
             id="model-picker-title"
-            className="font-display text-base tracking-wider uppercase"
+            className="font-display text-base font-semibold tracking-normal normal-case"
           >
             Switch Model
           </h2>
-          <p className="text-xs text-muted-foreground mt-1 font-mono">
+          <p className="mt-1 text-xs text-muted-foreground">
             current: {currentModel || "(unknown)"}
             {currentProviderSlug && ` · ${currentProviderSlug}`}
           </p>
         </header>
 
-        <div className="px-5 pt-3 pb-2 border-b border-border">
+        <div className="border-b border-border px-5 pb-2 pt-3">
           <div className="relative">
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
             <Input
@@ -385,7 +385,7 @@ function ModelColumn({
 
 function CurrentTag() {
   return (
-    <span className="text-[0.6rem] uppercase tracking-wider text-primary/80 shrink-0">
+    <span className="shrink-0 text-[0.68rem] font-medium tracking-normal text-primary/80">
       current
     </span>
   );

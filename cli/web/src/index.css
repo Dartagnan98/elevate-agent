@@ -133,6 +133,66 @@ html .font-courier {
   font-family: var(--theme-font-sans);
 }
 
+/* Shared dashboard page skin. The chat view defines the strongest visual
+   language, so non-chat pages borrow the same soft panels, muted separators,
+   and native-feeling controls. */
+.elevate-page-shell {
+  --page-panel: var(--chat-surface);
+  --page-panel-soft: var(--chat-surface-soft);
+  --page-panel-strong: var(--chat-surface-strong);
+  --page-border: var(--chat-border);
+  --page-border-strong: var(--chat-border-strong);
+  color: var(--chat-text);
+}
+
+.elevate-page-shell .uppercase {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.elevate-page-shell [class*="tracking-["] {
+  letter-spacing: 0;
+}
+
+.elevate-page-shell [class*="border-border"] {
+  border-color: var(--page-border);
+}
+
+.elevate-page-shell table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.elevate-page-shell thead tr,
+.elevate-page-shell tbody tr {
+  border-color: var(--page-border);
+}
+
+.elevate-page-shell textarea {
+  border-radius: 1rem;
+  border-color: var(--page-border-strong);
+  background: color-mix(in srgb, var(--midground-base) 3%, var(--background-base));
+}
+
+.elevate-page-shell pre {
+  border-radius: 1rem;
+  border-color: var(--page-border);
+  background: color-mix(in srgb, var(--midground-base) 3%, var(--background-base));
+}
+
+.elevate-page-shell code {
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
+  padding-inline: 0.35em;
+  padding-block: 0.12em;
+}
+
+.elevate-docs-shell iframe {
+  border-radius: 1.35rem;
+  border-color: var(--page-border-strong);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.22);
+}
+
 /* Density: scale the shadcn spacing utilities via a multiplier. The DS
    components use `p-N` / `gap-N` / `space-*` classes which resolve against
    Tailwind's spacing scale; multiplying `--spacing` at :root scales them

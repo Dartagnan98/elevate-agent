@@ -294,7 +294,7 @@ function SessionRow({
 
   return (
     <div
-      className={`border overflow-hidden transition-colors ${
+      className={`overflow-hidden rounded-2xl border bg-card/70 transition-colors ${
         session.is_active
           ? "border-success/30 bg-success/[0.03]"
           : "border-border"
@@ -650,7 +650,7 @@ export default function SessionsPage() {
       )}
 
       {activeAction && (
-        <div className="border border-border bg-background-base/50">
+        <div className="overflow-hidden rounded-2xl border border-border bg-background-base/50">
           <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
             <div className="flex items-center gap-2 min-w-0">
               {actionStatus?.running ? (
@@ -663,7 +663,7 @@ export default function SessionsPage() {
                 <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
               )}
 
-              <span className="text-xs font-mondwest tracking-[0.12em] truncate">
+              <span className="truncate text-xs font-medium tracking-normal">
                 {activeAction === "restart"
                   ? t.status.restartGateway
                   : t.status.updateElevate}
@@ -731,7 +731,7 @@ export default function SessionsPage() {
             {recentSessions.map((s) => (
               <div
                 key={s.id}
-                className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border border-border p-3 w-full"
+                className="flex w-full flex-col gap-2 rounded-2xl border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="flex flex-col gap-1 min-w-0 w-full">
                   <span className="font-medium text-sm truncate">

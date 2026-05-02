@@ -431,6 +431,8 @@ export default function App() {
               <div
                 className={cn(
                   "w-full min-w-0",
+                  !isChatRoute && "elevate-page-shell",
+                  isDocsRoute && "elevate-docs-shell",
                   (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
                 )}
               >

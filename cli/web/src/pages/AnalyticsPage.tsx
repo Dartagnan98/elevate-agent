@@ -102,7 +102,7 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
               >
                 {/* Tooltip */}
                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 pointer-events-none">
-                  <div className="bg-card border border-border px-2.5 py-1.5 text-[10px] text-foreground shadow-lg whitespace-nowrap">
+                  <div className="whitespace-nowrap rounded-xl border border-border bg-card px-2.5 py-1.5 text-[10px] text-foreground shadow-lg">
                     <div className="font-medium">{formatDate(d.day)}</div>
                     <div>{t.analytics.input}: {formatTokens(d.input_tokens)}</div>
                     <div>{t.analytics.output}: {formatTokens(d.output_tokens)}</div>

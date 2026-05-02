@@ -84,14 +84,14 @@ function MemoryGraph({
 
   if (!nodes.length) {
     return (
-      <div className="flex h-56 items-center justify-center border border-border bg-muted/20 text-sm text-muted-foreground">
+      <div className="flex h-56 items-center justify-center rounded-2xl border border-border bg-muted/20 text-sm text-muted-foreground">
         No graph nodes yet
       </div>
     );
   }
 
   return (
-    <div className="relative h-56 overflow-hidden border border-border bg-muted/20">
+    <div className="relative h-56 overflow-hidden rounded-2xl border border-border bg-muted/20">
       <svg viewBox="0 0 256 224" className="h-full w-full">
         <g opacity="0.7">
           {edges.map((edge, index) => {
@@ -161,10 +161,10 @@ function Stat({
   value: string | number;
 }) {
   return (
-    <div className="border border-border bg-muted/20 px-3 py-2">
+    <div className="rounded-2xl border border-border bg-muted/20 px-3 py-2">
       <div className="flex items-center gap-2 text-muted-foreground">
         <Icon className="h-3.5 w-3.5" />
-        <span className="font-mondwest text-[0.65rem] uppercase tracking-[0.14em]">
+        <span className="text-[0.68rem] font-medium">
           {label}
         </span>
       </div>
@@ -205,8 +205,8 @@ function AgentCard({ agent }: { agent: AgentHubAgent }) {
 
 function MiniMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="border border-border bg-background/30 px-2 py-2">
-      <div className="text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground">
+    <div className="rounded-2xl border border-border bg-background/30 px-2 py-2">
+      <div className="text-[0.68rem] font-medium text-muted-foreground">
         {label}
       </div>
       <div className="text-base font-semibold">{value}</div>
@@ -240,7 +240,7 @@ function ChipRow({
 function PlatformRow({ platform }: { platform: AgentHubPlatform }) {
   const runtimeState = platform.runtime?.state ?? (platform.configured ? "configured" : "blank");
   return (
-    <div className="border-b border-border px-3 py-3 last:border-b-0">
+    <div className="px-3 py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           {platform.configured ? (
@@ -328,7 +328,7 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
           <MiniMetric label="Memory Flow" value={harness.memory.pipeline.state} />
         </div>
         {harness.performance.available ? (
-          <div className="border border-border bg-muted/20 p-2 text-xs">
+          <div className="rounded-2xl border border-border bg-muted/20 p-2 text-xs">
             <div className="flex justify-between gap-2">
               <span className="text-muted-foreground">Baseline</span>
               <span>{harness.performance.baseline_request_tokens ?? 0} tokens</span>
@@ -347,7 +347,7 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
             </div>
           </div>
         ) : (
-          <div className="border border-border bg-muted/20 p-2 text-xs text-muted-foreground">
+          <div className="rounded-2xl border border-border bg-muted/20 p-2 text-xs text-muted-foreground">
             {harness.performance.error || "Performance profiles skipped"}
           </div>
         )}
@@ -359,7 +359,7 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
           ))}
         </div>
         {harness.memory.pipeline.recent_events?.length ? (
-          <div className="border border-border bg-muted/20 p-2 text-xs">
+          <div className="rounded-2xl border border-border bg-muted/20 p-2 text-xs">
             <div className="mb-1 text-muted-foreground">Memory activity</div>
             {harness.memory.pipeline.recent_events.slice(0, 3).map((event, index) => (
               <div key={`${event.timestamp ?? "event"}-${index}`} className="truncate">
@@ -475,7 +475,7 @@ export default function AgentHubPage() {
     <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
       <Toast toast={toast} />
 
-      <section className="overflow-hidden rounded-lg border border-border bg-card/70">
+      <section className="overflow-hidden rounded-[1.6rem] border border-border bg-card/70 shadow-[0_24px_90px_rgba(0,0,0,0.16)]">
         <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="min-w-0 space-y-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -635,7 +635,7 @@ export default function AgentHubPage() {
             </CardHeader>
             <CardContent className="space-y-2">
               {snapshot.sessions.recent.slice(0, 8).map((session) => (
-                <div key={session.id} className="rounded-md border border-border bg-muted/20 p-2">
+                <div key={session.id} className="rounded-2xl border border-border bg-muted/20 p-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate text-sm">{session.title || "Untitled session"}</span>
                     {session.is_active && <Badge variant="success">Live</Badge>}

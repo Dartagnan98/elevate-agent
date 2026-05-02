@@ -154,7 +154,7 @@ export function AutoField({
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
     return (
-      <div className="grid gap-3 border border-border p-3">
+      <div className="grid gap-3 rounded-2xl border border-border p-3">
         <Label className="text-xs font-medium">{label}</Label>
         <FieldHint schema={schema} schemaKey={schemaKey} />
         {Object.entries(obj).map(([subKey, subVal]) => (

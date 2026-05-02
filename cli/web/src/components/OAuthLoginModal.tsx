@@ -183,7 +183,7 @@ export function OAuthLoginModal({
       aria-modal="true"
       aria-labelledby="oauth-modal-title"
     >
-      <div className="relative w-full max-w-md border border-border bg-card shadow-2xl">
+      <div className="relative w-full max-w-md overflow-hidden rounded-[1.35rem] border border-border bg-card shadow-2xl">
         <button
           type="button"
           onClick={handleClose}
@@ -198,7 +198,7 @@ export function OAuthLoginModal({
               id="oauth-modal-title"
               variant="sm"
               mondwest
-              className="tracking-wider uppercase"
+              className="tracking-normal normal-case"
             >
               {t.oauth.connect} {provider.name}
             </H2>

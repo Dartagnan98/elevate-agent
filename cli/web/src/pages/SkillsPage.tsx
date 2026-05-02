@@ -264,13 +264,13 @@ export default function SkillsPage() {
             <div
               className={`
                 flex flex-col
-                border border-border bg-muted/20
+                rounded-2xl border border-border bg-muted/20
               `}
             >
               {/* Filter heading */}
               <div className="hidden sm:flex items-center gap-2 px-3 py-2 border-b border-border">
                 <Filter className="h-3 w-3 text-muted-foreground" />
-                <span className="font-mondwest text-[0.65rem] tracking-[0.12em] uppercase text-muted-foreground">
+                <span className="text-[0.68rem] font-medium tracking-normal text-muted-foreground">
                   {t.skills.filters}
                 </span>
               </div>
@@ -301,7 +301,7 @@ export default function SkillsPage() {
               {/* Category sub-filters (only for Skills view) */}
               {view === "skills" && !isSearching && allCategories.length > 0 && (
                 <div className="hidden sm:flex flex-col border-t border-border">
-                  <div className="px-3 pt-2 pb-1 font-mondwest text-[0.6rem] tracking-[0.12em] uppercase text-muted-foreground/70">
+                  <div className="px-3 pt-2 pb-1 text-[0.68rem] font-medium tracking-normal text-muted-foreground/70">
                     {t.skills.categories}
                   </div>
                   <div className="flex flex-col p-2 pt-1 gap-px max-h-[calc(100vh-340px)] overflow-y-auto">
@@ -317,7 +317,7 @@ export default function SkillsPage() {
                           }
                           className={`
                             group flex items-center gap-2 px-2 py-1
-                            rounded-sm text-left text-[11px] cursor-pointer
+                            rounded-xl text-left text-[11px] cursor-pointer
                             transition-colors
                             ${
                               isActive
@@ -553,8 +553,8 @@ function PanelItem({ active, icon: Icon, label, onClick }: PanelItemProps) {
       onClick={onClick}
       className={`
         group flex items-center gap-2 px-2.5 py-1.5
-        font-mondwest text-[0.7rem] tracking-[0.08em] uppercase
-        rounded-sm text-left cursor-pointer whitespace-nowrap
+        text-[0.7rem] font-medium tracking-normal normal-case
+        rounded-xl text-left cursor-pointer whitespace-nowrap
         transition-colors
         ${
           active

@@ -11,7 +11,7 @@ export function Segmented<T extends string>({
     <div
       role="radiogroup"
       className={cn(
-        "inline-flex border border-border bg-background/30",
+        "inline-flex gap-0.5 rounded-full bg-card/70 p-0.5 shadow-[inset_0_0_0_1px_var(--chat-border)]",
         className,
       )}
     >
@@ -26,14 +26,13 @@ export function Segmented<T extends string>({
             aria-checked={active}
             onClick={() => onChange(opt.value)}
             className={cn(
-              "font-mondwest tracking-[0.1em] uppercase",
+              "rounded-full font-sans font-medium tracking-normal normal-case",
               "transition-colors cursor-pointer whitespace-nowrap",
-              "border-r border-border last:border-r-0",
-              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground/30",
-              size === "sm" && "h-7 px-2.5 text-[0.65rem]",
+              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70",
+              size === "sm" && "h-7 px-2.5 text-xs",
               size === "md" && "h-8 px-3 text-xs",
               active
-                ? "bg-foreground/90 text-background"
+                ? "bg-secondary text-foreground shadow-sm"
                 : "text-muted-foreground hover:bg-foreground/10 hover:text-foreground",
             )}
           >
@@ -52,7 +51,7 @@ export function FilterGroup({
 }: FilterGroupProps) {
   return (
     <div className={cn("flex items-center gap-2", className)}>
-      <span className="font-mondwest text-[0.65rem] tracking-[0.12em] uppercase text-muted-foreground/70">
+      <span className="text-xs font-medium tracking-normal normal-case text-muted-foreground/80">
         {label}
       </span>
       {children}

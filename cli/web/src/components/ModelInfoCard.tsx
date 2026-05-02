@@ -52,7 +52,7 @@ export function ModelInfoCard({ currentModel, refreshKey = 0 }: ModelInfoCardPro
   const hasCaps = caps && Object.keys(caps).length > 0;
 
   return (
-    <div className="border border-border/60 bg-muted/30 px-3 py-2.5 space-y-2">
+    <div className="space-y-2 rounded-2xl border border-border/60 bg-muted/30 px-3 py-2.5">
       {/* Context window */}
       <div className="flex items-center gap-4 text-xs">
         <div className="flex items-center gap-1.5 text-muted-foreground">

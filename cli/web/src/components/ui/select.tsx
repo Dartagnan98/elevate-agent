@@ -91,8 +91,8 @@ export function Select({
         onClick={() => !disabled && setOpen((o) => !o)}
         onKeyDown={handleKeyDown}
         className={cn(
-          "flex h-9 w-full items-center justify-between border border-border bg-background/40 px-3 py-1 font-courier text-sm text-left transition-colors",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground/30 focus-visible:border-foreground/25",
+          "flex h-9 w-full items-center justify-between rounded-xl border border-border/80 bg-card/55 px-3 py-1 font-sans text-sm text-left transition-colors",
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70 focus-visible:border-ring/40",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "cursor-pointer",
         )}
@@ -113,7 +113,7 @@ export function Select({
           ref={listRef}
           role="listbox"
           className={cn(
-            "absolute z-50 mt-1 w-full border border-border bg-popover text-popover-foreground shadow-lg",
+            "absolute z-50 mt-1 w-full overflow-hidden rounded-2xl border border-border/80 bg-popover text-popover-foreground shadow-[0_18px_54px_rgba(0,0,0,0.22)]",
             "max-h-60 overflow-auto",
             "animate-[fade-in_100ms_ease-out]",
           )}
@@ -132,7 +132,7 @@ export function Select({
                   close();
                 }}
                 className={cn(
-                  "flex items-center gap-2 px-3 py-2 text-sm font-courier cursor-pointer transition-colors",
+                  "flex items-center gap-2 px-3 py-2 text-sm font-sans cursor-pointer transition-colors",
                   isHighlighted && "bg-foreground/10",
                   isSelected && "text-foreground",
                   !isSelected && "text-muted-foreground",

@@ -188,7 +188,7 @@ export default function CronPage() {
               <Label htmlFor="cron-prompt">{t.cron.prompt}</Label>
               <textarea
                 id="cron-prompt"
-                className="flex min-h-[80px] w-full border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex min-h-[80px] w-full rounded-xl border border-input bg-card/55 px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 placeholder={t.cron.promptPlaceholder}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
