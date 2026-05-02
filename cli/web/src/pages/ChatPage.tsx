@@ -2308,7 +2308,7 @@ function composerTokenIcon(token: string) {
 }
 
 function composerTokenLabel(token: string): string {
-  if (token.startsWith("/")) return token;
+  if (token.startsWith("/")) return token.slice(1) || "/";
   const raw = token.replace(/^@[a-z]+:/i, "").replace(/^@/, "");
   const parts = raw.split(/[/-]/).filter(Boolean);
   return parts.slice(-2).join(" / ") || raw;
@@ -2316,7 +2316,7 @@ function composerTokenLabel(token: string): string {
 
 function parseComposerSegments(input: string): ComposerSegment[] {
   const tokenPattern =
-    /(^|\s)(\/[a-z][\w-]*|@(agent|skill|toolset|plugin|file|folder|url|git):[^\s]+|@(diff|staged)\b)/gi;
+    /(^|\s)(\/[\w-]*|@(agent|skill|toolset|plugin|file|folder|url|git):[^\s]+|@(diff|staged)\b)/gi;
   const segments: ComposerSegment[] = [];
   let cursor = 0;
 
@@ -2374,9 +2374,9 @@ function ComposerRichInputLayer({
               key={`${index}-${segment.text}`}
             >
               {segment.text}
-              <span className="absolute left-0 top-[0.12rem] inline-flex max-w-full items-center gap-1 rounded-full bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.82rem] font-medium leading-5 text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
-                <Icon className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">{segment.label}</span>
+              <span className="absolute left-0 top-[0.12rem] inline-flex max-w-[min(24rem,calc(100vw-4rem))] items-center gap-1.5 rounded-full bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.82rem] font-medium leading-5 text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+                <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-accent)]" />
+                <span className="min-w-0 truncate">{segment.label}</span>
               </span>
             </span>
           );
