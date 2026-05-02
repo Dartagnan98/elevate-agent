@@ -887,14 +887,37 @@ function composerAgentFromHub(agent: AgentHubAgent): ComposerAgent {
   };
 }
 
+const HUB_INTERFACE_CONTEXT = [
+  "[Elevate Hub interface context]",
+  "The user is typing inside Elevate Agent Hub web chat.",
+  [
+    "When the user asks to open, view, show, preview, or pull up a generated PDF,",
+    "document, image, report, local artifact, 'it', 'this', or something on the",
+    "side/right side, prefer the Hub's built-in artifact preview/side pane.",
+  ].join(" "),
+  [
+    "Do not launch Chrome, Safari, desktop apps, localhost, or 127.0.0.1 just to",
+    "display a local artifact from Hub chat.",
+  ].join(" "),
+  [
+    "If the Hub UI already opened or can open the artifact, answer briefly with the",
+    "artifact name or where it is available in the Hub preview.",
+  ].join(" "),
+].join("\n");
+
 function routePromptForAgent(text: string, agent: ComposerAgent): string {
-  if (agent.id === "executive-assistant") return text;
+  const userRequest = `User request: ${text}`;
+
+  if (agent.id === "executive-assistant") {
+    return [HUB_INTERFACE_CONTEXT, userRequest].join("\n\n");
+  }
 
   return [
+    HUB_INTERFACE_CONTEXT,
     `[Elevate agent route: ${agent.name} (${agent.id})]`,
     "Use this specialist lane for the turn when useful, then return the answer in this chat.",
-    `User request: ${text}`,
-  ].join("\n");
+    userRequest,
+  ].join("\n\n");
 }
 
 function nowLabel(ts: number): string {
@@ -2042,10 +2065,15 @@ export default function ChatPage() {
       setStatusText(status);
 
       try {
-        await gw.request("prompt.submit", {
+        const payload: Record<string, unknown> = {
           session_id: sessionId,
           text: routedText,
-        });
+        };
+        if (routedText !== text) {
+          payload.persist_user_message = text;
+        }
+
+        await gw.request("prompt.submit", payload);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         appendMessage("system", message, { status: "error" });

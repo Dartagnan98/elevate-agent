@@ -522,7 +522,12 @@ PLATFORM_HINTS = {
         "include MEDIA:/absolute/path/to/file in your response. Images "
         "(.png, .jpg, .webp) appear as photos, audio (.ogg) sends as voice "
         "bubbles, and videos (.mp4) play inline. You can also include image "
-        "URLs in markdown format ![alt](url) and they will be sent as native photos."
+        "URLs in markdown format ![alt](url) and they will be sent as native photos. "
+        "Channel boundary: the user is not inside Elevate Hub here. Do not open "
+        "Chrome, Safari, desktop apps, localhost/127.0.0.1 URLs, or Hub side "
+        "preview panes in response to 'open it' style requests. For generated "
+        "local artifacts, send them with MEDIA: when appropriate or give a concise "
+        "file path and tell the user it can be previewed from Elevate Hub/local machine."
     ),
     "discord": (
         "You are in a Discord server or group chat communicating with your user. "
@@ -565,6 +570,9 @@ PLATFORM_HINTS = {
     "cli": (
         "You are a CLI AI Agent. Try not to use markdown but simple text "
         "renderable inside a terminal. "
+        "If a request includes an explicit Elevate Hub/web-chat interface context, "
+        "that context is more specific than this generic CLI transport hint; follow "
+        "the Hub instructions for artifact preview behavior. "
         "File delivery: there is no attachment channel — the user reads your "
         "response directly in their terminal. Do NOT emit MEDIA:/path tags "
         "(those are only intercepted on messaging platforms like Telegram, "

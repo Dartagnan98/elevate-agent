@@ -2172,6 +2172,7 @@ def _(rid, params: dict) -> dict:
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
+    persist_user_message = params.get("persist_user_message")
     session, err = _sess(params, rid)
     if err:
         return err
@@ -2236,11 +2237,14 @@ def _(rid, params: dict) -> dict:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
 
-            result = agent.run_conversation(
-                prompt,
-                conversation_history=list(history),
-                stream_callback=_stream,
-            )
+            run_kwargs = {
+                "conversation_history": list(history),
+                "stream_callback": _stream,
+            }
+            if isinstance(persist_user_message, str):
+                run_kwargs["persist_user_message"] = persist_user_message
+
+            result = agent.run_conversation(prompt, **run_kwargs)
 
             last_reasoning = None
             status_note = None
