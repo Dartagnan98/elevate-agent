@@ -998,6 +998,48 @@ function artifactsFromText(text: string, source: string): ArtifactEntry[] {
   );
 }
 
+function previewPriority(artifact: ArtifactEntry): number {
+  if (!artifact.path) return -1;
+  const ext = fileExtension(artifact.path);
+  if (ext === ".pdf") return 100;
+  if (ext === ".html" || ext === ".htm") return 90;
+  if ([".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"].includes(ext)) return 80;
+  if ([".md", ".txt"].includes(ext)) return 50;
+  return -1;
+}
+
+function bestSidePreviewArtifact(artifacts: ArtifactEntry[]): ArtifactEntry | null {
+  let best: ArtifactEntry | null = null;
+  let bestScore = -1;
+
+  for (const artifact of artifacts) {
+    const score = previewPriority(artifact);
+    if (score < 0) continue;
+    if (
+      !best ||
+      score > bestScore ||
+      (score === bestScore && artifact.createdAt > best.createdAt)
+    ) {
+      best = artifact;
+      bestScore = score;
+    }
+  }
+
+  return best;
+}
+
+function isOpenPreviewIntent(text: string): boolean {
+  const lower = text.toLowerCase();
+  const asksToOpen =
+    /\b(open|show|preview|view|display)\b/.test(lower) ||
+    /\b(pull|bring|pop)\s+(it|this|that|up)\b/.test(lower);
+  if (!asksToOpen) return false;
+
+  return /\b(it|this|that|pdf|document|doc|file|artifact|report|output|result|local|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub)\b/.test(
+    lower,
+  );
+}
+
 function artifactsFromToolComplete(
   payload: Record<string, unknown>,
 ): ArtifactEntry[] {
@@ -1235,6 +1277,7 @@ export default function ChatPage() {
 
   const addArtifacts = useCallback((entries: ArtifactEntry[]) => {
     if (!entries.length) return;
+    const previewCandidate = bestSidePreviewArtifact(entries);
 
     setArtifacts((prev) => {
       const seen = new Set(prev.map((entry) => entry.key));
@@ -1248,6 +1291,10 @@ export default function ChatPage() {
 
       return next.slice(-ARTIFACT_LIMIT);
     });
+
+    if (previewCandidate) {
+      setPreviewArtifact(previewCandidate);
+    }
   }, []);
 
   const openArtifactPreview = useCallback((artifact: ArtifactEntry) => {
@@ -2057,6 +2104,19 @@ export default function ChatPage() {
       setBanner(null);
       setAgentMenuOpen(false);
 
+      const previewTarget = bestSidePreviewArtifact(artifacts);
+      if (previewTarget && isOpenPreviewIntent(trimmed)) {
+        setPreviewArtifact(previewTarget);
+        appendMessage("user", trimmed);
+        appendMessage(
+          "assistant",
+          `Opened in the side preview: ${previewTarget.title}`,
+          { status: "complete" },
+        );
+        setStatusText("Opened artifact preview");
+        return;
+      }
+
       if (trimmed.startsWith("/")) {
         appendMessage("user", trimmed);
         await executeSlash({
@@ -2088,7 +2148,7 @@ export default function ChatPage() {
 
       await submitGatewayPrompt(trimmed, routedText);
     },
-    [appendMessage, busy, gw, selectedAgent, sessionId, submitGatewayPrompt],
+    [appendMessage, artifacts, busy, gw, selectedAgent, sessionId, submitGatewayPrompt],
   );
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
