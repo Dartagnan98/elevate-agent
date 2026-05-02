@@ -4851,6 +4851,41 @@ def _update_via_zip(args):
     print("✓ Update complete!")
 
 
+def _find_git_worktree_root(start: Path) -> Optional[Path]:
+    """Return the git worktree root for an Elevate install.
+
+    Editable installs keep the Python package under ``<repo>/cli`` while the
+    actual checkout lives at ``<repo>``. Older updater code only checked
+    ``PROJECT_ROOT/.git`` and therefore rejected perfectly valid installs.
+    """
+    start = start.resolve()
+
+    # Fast path that avoids shelling out and covers normal checkouts plus
+    # linked worktrees where `.git` is a file.
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+
+    git = shutil.which("git")
+    if not git:
+        return None
+
+    try:
+        result = subprocess.run(
+            [git, "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return Path(value).resolve() if value else None
+
+
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     status = subprocess.run(
         git_cmd + ["status", "--porcelain"],
@@ -5639,9 +5674,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
     use_zip_update = False
-    git_dir = PROJECT_ROOT / ".git"
+    git_root = _find_git_worktree_root(PROJECT_ROOT)
 
-    if not git_dir.exists():
+    if git_root is None:
         if sys.platform == "win32":
             use_zip_update = True
         else:
@@ -5653,7 +5688,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     # On Windows, git can fail with "unable to write loose object file: Invalid argument"
     # due to filesystem atomicity issues. Set the recommended workaround.
-    if sys.platform == "win32" and git_dir.exists():
+    if sys.platform == "win32" and git_root is not None:
         subprocess.run(
             [
                 "git",
@@ -5663,7 +5698,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 "windows.appendAtomically",
                 "false",
             ],
-            cwd=PROJECT_ROOT,
+            cwd=git_root,
             check=False,
             capture_output=True,
         )
@@ -5674,7 +5709,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
         git_cmd = ["git", "-c", "windows.appendAtomically=false"]
 
     # Detect if we're updating from a fork (before any branch logic)
-    origin_url = _get_origin_url(git_cmd, PROJECT_ROOT)
+    git_cwd = git_root or PROJECT_ROOT
+
+    origin_url = _get_origin_url(git_cmd, git_cwd)
     is_fork = _is_fork(origin_url)
 
     if is_fork:
@@ -5693,7 +5730,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print("→ Fetching updates...")
         fetch_result = subprocess.run(
             git_cmd + ["fetch", "origin"],
-            cwd=PROJECT_ROOT,
+            cwd=git_cwd,
             capture_output=True,
             text=True,
         )
@@ -5717,7 +5754,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Get current branch (returns literal "HEAD" when detached)
         result = subprocess.run(
             git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=PROJECT_ROOT,
+            cwd=git_cwd,
             capture_output=True,
             text=True,
             check=True,
@@ -5736,16 +5773,16 @@ def _cmd_update_impl(args, gateway_mode: bool):
             )
             print(f"  ⚠ Currently on {label} — switching to main for update...")
             # Stash before checkout so uncommitted work isn't lost
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, git_cwd)
             subprocess.run(
                 git_cmd + ["checkout", "main"],
-                cwd=PROJECT_ROOT,
+                cwd=git_cwd,
                 capture_output=True,
                 text=True,
                 check=True,
             )
         else:
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, git_cwd)
 
         prompt_for_restore = auto_stash_ref is not None and (
             gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty())
@@ -5754,7 +5791,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Check if there are updates
         result = subprocess.run(
             git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
-            cwd=PROJECT_ROOT,
+            cwd=git_cwd,
             capture_output=True,
             text=True,
             check=True,
@@ -5767,7 +5804,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             if auto_stash_ref is not None:
                 _restore_stashed_changes(
                     git_cmd,
-                    PROJECT_ROOT,
+                    git_cwd,
                     auto_stash_ref,
                     prompt_user=prompt_for_restore,
                     input_fn=gw_input_fn,
@@ -5775,7 +5812,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             if current_branch not in ("main", "HEAD"):
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
-                    cwd=PROJECT_ROOT,
+                    cwd=git_cwd,
                     capture_output=True,
                     text=True,
                     check=False,
@@ -5790,7 +5827,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         try:
             pull_result = subprocess.run(
                 git_cmd + ["pull", "--ff-only", "origin", branch],
-                cwd=PROJECT_ROOT,
+                cwd=git_cwd,
                 capture_output=True,
                 text=True,
             )
@@ -5803,7 +5840,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 )
                 reset_result = subprocess.run(
                     git_cmd + ["reset", "--hard", f"origin/{branch}"],
-                    cwd=PROJECT_ROOT,
+                    cwd=git_cwd,
                     capture_output=True,
                     text=True,
                 )
@@ -5828,7 +5865,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 else:
                     _restore_stashed_changes(
                         git_cmd,
-                        PROJECT_ROOT,
+                        git_cwd,
                         auto_stash_ref,
                         prompt_user=prompt_for_restore,
                         input_fn=gw_input_fn,
@@ -5847,7 +5884,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         # Fork upstream sync logic (only for main branch on forks)
         if is_fork and branch == "main":
-            _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+            _sync_with_upstream_if_needed(git_cmd, git_cwd)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
         # breaks on this machine, keep base deps and reinstall the remaining extras

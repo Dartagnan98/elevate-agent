@@ -9,6 +9,65 @@ import pytest
 from elevate_cli.main import cmd_update, PROJECT_ROOT
 
 
+def test_find_git_worktree_root_from_nested_cli(tmp_path):
+    """Updater should accept the real install layout: <repo>/cli with .git at <repo>."""
+    from elevate_cli.main import _find_git_worktree_root
+
+    repo_root = tmp_path / "elevate"
+    cli_root = repo_root / "cli"
+    cli_root.mkdir(parents=True)
+    (repo_root / ".git").mkdir()
+
+    assert _find_git_worktree_root(cli_root) == repo_root.resolve()
+
+
+def test_update_runs_git_from_parent_worktree_for_nested_cli(tmp_path, monkeypatch):
+    """Git operations should run at <repo>, not <repo>/cli, for normal installs."""
+    import elevate_cli.main as main_mod
+
+    repo_root = tmp_path / "elevate"
+    cli_root = repo_root / "cli"
+    cli_root.mkdir(parents=True)
+    (repo_root / ".git").mkdir()
+
+    monkeypatch.setattr(main_mod, "PROJECT_ROOT", cli_root)
+    monkeypatch.setattr(main_mod, "_invalidate_update_cache", lambda: None)
+
+    def side_effect(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "remote get-url origin" in joined:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="https://github.com/ctrlstrategies/elevate.git\n",
+                stderr="",
+            )
+        if "fetch origin" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref HEAD" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout="main\n", stderr="")
+        if "status --porcelain" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "ls-files --unmerged" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "rev-list HEAD..origin/main --count" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("shutil.which", return_value=None), patch(
+        "subprocess.run", side_effect=side_effect
+    ) as mock_run:
+        main_mod._cmd_update_impl(SimpleNamespace(), gateway_mode=False)
+
+    git_call_cwds = [
+        call.kwargs.get("cwd")
+        for call in mock_run.call_args_list
+        if call.args and call.args[0] and call.args[0][0] == "git"
+    ]
+    assert repo_root in git_call_cwds
+    assert cli_root not in git_call_cwds
+
+
 def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
     """Build a side_effect function for subprocess.run that simulates git commands."""
 

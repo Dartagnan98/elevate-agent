@@ -138,13 +138,10 @@ def check_for_updates() -> Optional[int]:
     or ``None`` if the check fails or isn't applicable.
     """
     elevate_home = get_elevate_home()
-    repo_dir = elevate_home / "elevate"
     cache_file = elevate_home / ".update_check"
 
-    # Must be a git repo — fall back to project root for dev installs
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    if not (repo_dir / ".git").exists():
+    repo_dir = _resolve_repo_dir()
+    if repo_dir is None:
         return None
 
     # Read cache
@@ -193,10 +190,11 @@ def check_for_updates() -> Optional[int]:
 def _resolve_repo_dir() -> Optional[Path]:
     """Return the active Elevate git checkout, or None if this isn't a git install."""
     elevate_home = get_elevate_home()
-    repo_dir = elevate_home / "elevate"
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    return repo_dir if (repo_dir / ".git").exists() else None
+    for start in (elevate_home / "elevate", Path(__file__).parent.parent.resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / ".git").exists():
+                return candidate
+    return None
 
 
 def _git_short_hash(repo_dir: Path, rev: str) -> Optional[str]:
