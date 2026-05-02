@@ -41,7 +41,7 @@ import {
   Shield,
   ShieldAlert,
   Sparkles,
-  Square,
+  SquareTerminal,
   Wrench,
   Users,
   X,
@@ -168,6 +168,18 @@ interface ActivityTrace {
   id: string;
   kind: "reasoning" | "status" | "thinking";
   text: string;
+}
+
+interface SubagentEntry {
+  completedAt?: number;
+  goal: string;
+  id: string;
+  model?: string;
+  preview?: string;
+  startedAt: number;
+  status: "running" | "done" | "error";
+  subagent_id: string;
+  toolCount?: number;
 }
 
 interface UsageInfo {
@@ -495,6 +507,44 @@ function summaryStatus(tools: ToolEntry[]): ProgressState {
 
 function detailsFor(tools: ToolEntry[]): string[] {
   return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-4);
+}
+
+function isTerminalTool(tool: ToolEntry): boolean {
+  const haystack = `${tool.name} ${tool.context ?? ""} ${tool.preview ?? ""}`.toLowerCase();
+  return toolKind(tool) === "run" || /\b(terminal|bash|shell|exec|command)\b/.test(haystack);
+}
+
+function isSubagentTool(tool: ToolEntry): boolean {
+  const haystack = `${tool.name} ${tool.context ?? ""} ${tool.preview ?? ""}`.toLowerCase();
+  return /\b(subagent|sub-agent|delegate|delegation|agent)\b/.test(haystack);
+}
+
+function runningWorkTitle(tools: ToolEntry[], subagents: SubagentEntry[], busy: boolean): string {
+  const runningTools = tools.filter((tool) => tool.status === "running");
+  const terminals = runningTools.filter(isTerminalTool);
+  const activeSubagents = subagents.filter((subagent) => subagent.status === "running");
+  const otherTools = runningTools.filter(
+    (tool) => !isTerminalTool(tool) && !isSubagentTool(tool),
+  );
+
+  const parts = [
+    terminals.length ? plural(terminals.length, "terminal") : "",
+    activeSubagents.length ? plural(activeSubagents.length, "subagent") : "",
+    otherTools.length ? plural(otherTools.length, "tool") : "",
+  ].filter(Boolean);
+
+  return parts.length ? `Running ${parts.join(" · ")}` : busy ? "Agent working" : "Ready";
+}
+
+function runningToolLine(tool: ToolEntry): string {
+  return compactLine(tool.preview || tool.context || tool.name, tool.name).slice(0, 130);
+}
+
+function runningSubagentLine(subagent: SubagentEntry): string {
+  return compactLine(
+    subagent.preview || subagent.goal || subagent.subagent_id,
+    subagent.model || "subagent",
+  ).slice(0, 130);
 }
 
 function buildProgressSummaries({
@@ -962,6 +1012,7 @@ export default function ChatPage() {
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
+  const [subagents, setSubagents] = useState<SubagentEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
@@ -1169,6 +1220,7 @@ export default function ChatPage() {
     setArtifacts([]);
     setPreviewArtifact(null);
     setTools([]);
+    setSubagents([]);
     setActivityTrace([]);
     setQueuedInputs([]);
     setPendingPrompt(null);
@@ -1349,9 +1401,68 @@ export default function ChatPage() {
       }
     };
 
-    const trackSubagentArtifacts = (ev: GatewayEvent) => {
+    const trackSubagent = (ev: GatewayEvent) => {
       if (!accepts(ev)) return;
-      addArtifacts(artifactsFromSubagentEvent(compactToolPayload(ev.payload)));
+      const payload = compactToolPayload(ev.payload);
+      const goal = compactLine(
+        String(payload.goal || payload.text || payload.summary || "Subagent"),
+      );
+      const subagentId = String(payload.subagent_id || goal || `subagent-${Date.now()}`);
+      const preview = compactLine(
+        String(payload.tool_preview || payload.text || payload.summary || ""),
+      );
+      const statusText = String(payload.status || "").toLowerCase();
+      const nextStatus: SubagentEntry["status"] =
+        ev.type === "subagent.complete"
+          ? statusText.includes("error") || statusText.includes("fail")
+            ? "error"
+            : "done"
+          : "running";
+      const now = Date.now();
+
+      setSubagents((prev) => {
+        const existing = prev.find((subagent) => subagent.subagent_id === subagentId);
+        if (existing) {
+          return prev
+            .map((subagent) =>
+              subagent.subagent_id === subagentId
+                ? {
+                    ...subagent,
+                    completedAt: nextStatus === "running" ? subagent.completedAt : now,
+                    goal: goal || subagent.goal,
+                    model: typeof payload.model === "string" ? payload.model : subagent.model,
+                    preview: preview || subagent.preview,
+                    status: nextStatus,
+                    toolCount:
+                      typeof payload.tool_count === "number"
+                        ? payload.tool_count
+                        : subagent.toolCount,
+                  }
+                : subagent,
+            )
+            .slice(-12);
+        }
+
+        return [
+          ...prev,
+          {
+            completedAt: nextStatus === "running" ? undefined : now,
+            goal: goal || "Subagent",
+            id: id("subagent"),
+            model: typeof payload.model === "string" ? payload.model : undefined,
+            preview: preview || undefined,
+            startedAt: now,
+            status: nextStatus,
+            subagent_id: subagentId,
+            toolCount:
+              typeof payload.tool_count === "number" ? payload.tool_count : undefined,
+          },
+        ].slice(-12);
+      });
+
+      if (ev.type === "subagent.complete") {
+        addArtifacts(artifactsFromSubagentEvent(payload));
+      }
     };
 
     const updateUsageFromPayload = (ev: GatewayEvent) => {
@@ -1380,6 +1491,7 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         currentAssistantRef.current = null;
         setActivityTrace([]);
+        setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant();
         setBusy(true);
         setStatusText("Working...");
@@ -1429,6 +1541,17 @@ export default function ChatPage() {
         );
         currentAssistantRef.current = null;
         setBusy(false);
+        setSubagents((prev) =>
+          prev.map((subagent) =>
+            subagent.status === "running"
+              ? {
+                  ...subagent,
+                  completedAt: Date.now(),
+                  status: status === "interrupted" ? "error" : "done",
+                }
+              : subagent,
+          ),
+        );
         if (status === "interrupted") {
           setQueuedInputs([]);
         }
@@ -1468,7 +1591,10 @@ export default function ChatPage() {
     unsubs.push(gw.on("tool.start", trackTool));
     unsubs.push(gw.on("tool.progress", trackTool));
     unsubs.push(gw.on("tool.complete", trackTool));
-    unsubs.push(gw.on("subagent.complete", trackSubagentArtifacts));
+    unsubs.push(gw.on("subagent.start", trackSubagent));
+    unsubs.push(gw.on("subagent.progress", trackSubagent));
+    unsubs.push(gw.on("subagent.tool", trackSubagent));
+    unsubs.push(gw.on("subagent.complete", trackSubagent));
     unsubs.push(
       gw.on("tool.generating", (ev) => {
         if (!accepts(ev)) return;
@@ -1570,6 +1696,13 @@ export default function ChatPage() {
         appendMessage("system", message, { status: "error" });
         setBusy(false);
         setQueuedInputs([]);
+        setSubagents((prev) =>
+          prev.map((subagent) =>
+            subagent.status === "running"
+              ? { ...subagent, completedAt: Date.now(), status: "error" }
+              : subagent,
+          ),
+        );
         setStatusText("Error");
       }),
     );
@@ -2095,6 +2228,12 @@ export default function ChatPage() {
             onSubmit={onSubmit}
           >
             <div className="mx-auto max-w-[48rem]">
+              <RunningWorkStrip
+                busy={busy}
+                onInterrupt={interruptCurrentTurn}
+                subagents={subagents}
+                tools={tools}
+              />
               <QueuedInputStrip queuedInputs={queuedInputs} />
 
               <div className="relative rounded-[1.45rem] bg-[var(--chat-surface)] p-2.5 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
@@ -2302,6 +2441,114 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function RunningWorkStrip({
+  busy,
+  onInterrupt,
+  subagents,
+  tools,
+}: {
+  busy: boolean;
+  onInterrupt(): void;
+  subagents: SubagentEntry[];
+  tools: ToolEntry[];
+}) {
+  const [open, setOpen] = useState(false);
+  const runningTools = tools.filter((tool) => tool.status === "running");
+  const runningSubagents = subagents.filter((subagent) => subagent.status === "running");
+  const visible = runningTools.length > 0 || runningSubagents.length > 0;
+  if (!visible) return null;
+
+  const terminalTools = runningTools.filter(isTerminalTool);
+  const otherTools = runningTools.filter((tool) => !isTerminalTool(tool));
+  const title = runningWorkTitle(runningTools, runningSubagents, busy);
+  const rows = [
+    ...terminalTools.map((tool) => ({
+      detail: runningToolLine(tool),
+      icon: SquareTerminal,
+      id: tool.id,
+      label: tool.name,
+      tone: "terminal" as const,
+    })),
+    ...runningSubagents.map((subagent) => ({
+      detail: runningSubagentLine(subagent),
+      icon: Bot,
+      id: subagent.id,
+      label: subagent.goal || "Subagent",
+      tone: "agent" as const,
+    })),
+    ...otherTools.map((tool) => ({
+      detail: runningToolLine(tool),
+      icon: Wrench,
+      id: tool.id,
+      label: tool.name,
+      tone: "tool" as const,
+    })),
+  ].slice(0, 6);
+
+  return (
+    <div className="mb-2 overflow-hidden rounded-[1.35rem] bg-[var(--chat-surface)] shadow-[0_18px_58px_rgba(0,0,0,0.18),inset_0_0_0_1px_var(--chat-border-strong)]">
+      <div className="flex min-h-11 items-center gap-2 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left text-[0.86rem] text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
+        >
+          <SquareTerminal className="h-4 w-4 shrink-0 opacity-75" />
+          <span className="min-w-0 truncate font-medium">{title}</span>
+          {runningSubagents.length > 0 && (
+            <span className="hidden shrink-0 rounded-full bg-[var(--chat-surface-soft)] px-2 py-0.5 text-[0.66rem] text-[var(--chat-muted)] sm:inline-flex">
+              {plural(runningSubagents.length, "subagent")}
+            </span>
+          )}
+        </button>
+
+        <button
+          aria-label="Stop running work"
+          type="button"
+          onClick={onInterrupt}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+          title="Stop the current response"
+        >
+          <span className="h-2.5 w-2.5 rounded-[0.18rem] bg-current" />
+        </button>
+
+        <button
+          aria-label={open ? "Hide running work details" : "Show running work details"}
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+        >
+          <ChevronDown
+            className={cn("h-4 w-4 transition-transform", open && "rotate-180")}
+          />
+        </button>
+      </div>
+
+      {open && rows.length > 0 && (
+        <div className="border-t border-[var(--chat-border)] px-3 pb-2 pt-1.5">
+          <div className="space-y-1">
+            {rows.map((row) => {
+              const Icon = row.icon;
+              return (
+                <div
+                  key={row.id}
+                  className="flex min-h-7 items-center gap-2 rounded-xl px-2 py-1 text-[0.76rem] text-[var(--chat-muted-strong)]"
+                >
+                  <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                  <span className="shrink-0 font-medium">{row.label}</span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--chat-muted)]">
+                    {row.detail}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2591,9 +2838,9 @@ function ComposerActionBar({
         <button
           aria-label={busy ? "Interrupt response" : "Send message"}
           className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors",
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all",
             busy
-              ? "bg-[var(--chat-warning)] text-[var(--chat-bg)] hover:opacity-90"
+              ? "bg-[var(--chat-text)] text-[var(--chat-bg)] shadow-[0_8px_22px_rgba(0,0,0,0.22)] hover:scale-[1.02]"
               : canSend
                 ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
                 : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
@@ -2604,7 +2851,7 @@ function ComposerActionBar({
           type={busy ? "button" : "submit"}
         >
           {busy ? (
-            <Square className="h-3.5 w-3.5 fill-current" />
+            <span className="h-3 w-3 rounded-[0.22rem] bg-current" />
           ) : (
             <Send className="h-4 w-4" />
           )}
