@@ -100,6 +100,11 @@
   --chat-success: var(--color-success, #35d58b);
   --chat-warning: var(--color-warning, #f3bf67);
   --chat-danger: var(--color-destructive, #ff827d);
+  --sidebar-bg: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
+  --sidebar-row: color-mix(in srgb, var(--midground-base) 4%, transparent);
+  --sidebar-row-hover: color-mix(in srgb, var(--midground-base) 8%, transparent);
+  --sidebar-row-active: color-mix(in srgb, var(--color-primary, #7fb2ff) 15%, var(--midground-base) 7%);
+  --sidebar-border: color-mix(in srgb, var(--midground-base) 10%, transparent);
 }
 
 /* Theme tokens cascade into the document root so every descendant inherits

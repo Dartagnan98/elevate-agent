@@ -487,9 +487,9 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     return (
       <div
         className={cn(
-          "absolute bottom-full left-0 right-0 z-40 mb-3 max-h-[24rem] overflow-y-auto rounded-[1.35rem] p-2",
-          "bg-[color-mix(in_srgb,var(--chat-surface)_92%,black)] text-sm text-[var(--chat-text)]",
-          "shadow-[0_28px_90px_rgba(0,0,0,0.42),inset_0_0_0_1px_var(--chat-border-strong)] backdrop-blur-xl",
+          "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[20rem] overflow-y-auto rounded-2xl p-1.5",
+          "bg-[var(--chat-surface-soft)] text-[var(--chat-text)]",
+          "shadow-[0_18px_54px_rgba(0,0,0,0.32),inset_0_0_0_1px_var(--chat-border)] backdrop-blur-xl",
         )}
         role="listbox"
       >
@@ -502,34 +502,34 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           return (
             <div key={`${item.group}-${item.text}-${index}`}>
               {showGroup && (
-                <div className="px-3 pb-1 pt-2 text-xs font-medium text-[var(--chat-muted)]">
+                <div className="px-2.5 pb-0.5 pt-1.5 text-[0.68rem] font-medium text-[var(--chat-muted)]">
                   {item.group}
                 </div>
               )}
               <button
                 aria-selected={active}
                 className={cn(
-                  "grid min-h-10 w-full grid-cols-[1.75rem_minmax(0,auto)_minmax(0,1fr)_auto] items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition-colors",
+                  "grid min-h-8 w-full grid-cols-[1.35rem_minmax(0,auto)_minmax(0,1fr)_auto] items-center gap-1.5 rounded-xl px-2.5 py-1 text-left transition-colors",
                   active
                     ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)]"
-                    : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+                    : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
                 )}
                 onClick={() => apply(item)}
                 onMouseEnter={() => setSelected(index)}
                 role="option"
                 type="button"
               >
-                <Icon className="h-4 w-4 justify-self-center text-current opacity-90" />
-                <span className="min-w-0 truncate text-[0.95rem] font-medium">
+                <Icon className="h-3.5 w-3.5 justify-self-center text-current opacity-85" />
+                <span className="min-w-0 truncate text-[0.82rem] font-medium leading-5">
                   {item.display}
                 </span>
                 {item.meta && (
-                  <span className="min-w-0 truncate text-[0.85rem] text-[var(--chat-muted)]">
+                  <span className="min-w-0 truncate text-[0.72rem] leading-5 text-[var(--chat-muted)]">
                     {item.meta}
                   </span>
                 )}
                 {item.kind === "skill" && (
-                  <span className="rounded-full px-2 py-0.5 text-[0.68rem] text-[var(--chat-muted)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+                  <span className="rounded-full px-1.5 py-0.5 text-[0.62rem] leading-none text-[var(--chat-muted)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
                     Personal
                   </span>
                 )}
@@ -538,7 +538,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           );
         })}
         {trigger?.mode === "mention" && trigger.query.length === 0 && (
-          <div className="px-3 pb-2 pt-1 text-[0.82rem] text-[var(--chat-muted)]">
+          <div className="px-2.5 pb-1.5 pt-1 text-[0.72rem] text-[var(--chat-muted)]">
             Type to search for files, skills, agents, toolsets, or plugins.
           </div>
         )}

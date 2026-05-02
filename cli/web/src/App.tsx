@@ -403,7 +403,7 @@ export default function App() {
             aria-label={t.app.navigation}
             className={cn(
               "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[19rem] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
-              "bg-background-base/96 shadow-[inset_-1px_0_0_color-mix(in_srgb,var(--midground-base)_7%,transparent)] backdrop-blur-sm",
+              "bg-[var(--sidebar-bg)] shadow-[inset_-1px_0_0_var(--sidebar-border)] backdrop-blur-sm",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
@@ -869,15 +869,15 @@ function DesktopSidebar({
           onOpenMiniWindow={openMiniWindow}
         />
       )}
-      <div className="flex h-[60px] shrink-0 items-center justify-between gap-3 px-4">
+      <div className="flex h-[54px] shrink-0 items-center justify-between gap-3 px-3.5">
         <div className="flex items-center gap-2.5" aria-hidden>
-          <span className="h-[11px] w-[11px] rounded-full bg-[#ff5f57]" />
-          <span className="h-[11px] w-[11px] rounded-full bg-[#ffbd2e]" />
-          <span className="h-[11px] w-[11px] rounded-full bg-[#28c840]" />
+          <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
+          <span className="h-2.5 w-2.5 rounded-full bg-[#ffbd2e]" />
+          <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
         </div>
 
         <Typography
-          className="min-w-0 flex-1 truncate text-center text-[0.92rem] font-semibold leading-none text-midground"
+          className="min-w-0 flex-1 truncate text-center text-[0.88rem] font-semibold leading-none text-midground"
         >
           Elevate Agent
         </Typography>
@@ -911,7 +911,7 @@ function DesktopSidebar({
 
       <PluginSlot name="header-left" />
 
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-2.5">
         <div className="space-y-0.5">
           <button
             type="button"
@@ -938,7 +938,7 @@ function DesktopSidebar({
           <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
         </div>
 
-        <div className="relative mt-3">
+        <div className="relative mt-2.5">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             ref={searchRef}
@@ -946,9 +946,9 @@ function DesktopSidebar({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search chats"
             className={cn(
-              "h-9 w-full rounded-xl bg-card/70 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--midground-base)_8%,transparent)]",
-              "pl-9 pr-8 text-[0.84rem] text-midground placeholder:text-muted-foreground",
-              "outline-none transition-colors focus:bg-card focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_36%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
+              "h-8 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)]",
+              "pl-8 pr-8 text-[0.8rem] text-midground placeholder:text-muted-foreground",
+              "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
             )}
           />
           {query && (
@@ -1045,7 +1045,7 @@ function DesktopSidebar({
 
 function SidebarSectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1 px-2 text-[0.66rem] font-semibold normal-case text-muted-foreground">
+    <div className="mb-1 px-2 text-[0.64rem] font-semibold normal-case text-muted-foreground">
       {children}
     </div>
   );
@@ -1053,12 +1053,12 @@ function SidebarSectionLabel({ children }: { children: ReactNode }) {
 
 function sidebarActionClass(active: boolean, primary = false) {
   return cn(
-    "group flex min-h-8 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.84rem]",
+    "group flex min-h-7 w-full items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[0.8rem]",
     "cursor-pointer transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
     primary && "font-semibold",
     active
-      ? "bg-accent/85 text-midground"
-      : "text-muted-foreground hover:bg-accent/55 hover:text-midground",
+      ? "bg-[var(--sidebar-row-active)] text-midground"
+      : "text-muted-foreground hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
   );
 }
 
@@ -1115,7 +1115,7 @@ function SessionSection({
   unreadIds: string[];
 }) {
   return (
-    <div className="mt-4">
+    <div className="mt-3">
       <SidebarSectionLabel>{label}</SidebarSectionLabel>
       <div className="space-y-0.5">
         {sessions.map((session) => (
@@ -1133,7 +1133,7 @@ function SessionSection({
       </div>
 
       {(loading || statusText) && sessions.length === 0 && (
-        <div className="px-2.5 py-1.5 text-[0.74rem] text-muted-foreground">
+        <div className="px-2.5 py-1 text-[0.72rem] text-muted-foreground">
           {loading ? "Loading chats" : statusText}
         </div>
       )}
@@ -1173,11 +1173,11 @@ function SessionListItem({
       }}
       onContextMenu={(event) => onOpenContextMenu(session, event)}
       className={cn(
-        "group relative flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5",
+        "group relative flex min-h-7 items-center gap-2 rounded-lg px-2.5 py-1",
         "text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
         active
-          ? "bg-accent/85 text-midground"
-          : "text-muted-foreground hover:bg-accent/55 hover:text-midground",
+          ? "bg-[var(--sidebar-row-active)] text-midground"
+          : "text-muted-foreground hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
       )}
     >
       <span
@@ -1190,7 +1190,7 @@ function SessionListItem({
               : "bg-current/30",
         )}
       />
-      <span className="min-w-0 flex-1 truncate text-[0.82rem] font-medium leading-4">
+      <span className="min-w-0 flex-1 truncate text-[0.8rem] font-medium leading-4">
         {sessionTitle(session)}
       </span>
       <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.66rem] leading-none text-muted-foreground">
@@ -1208,15 +1208,15 @@ function SessionListItem({
           onTogglePinned(session.id);
         }}
         className={cn(
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
+          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-colors",
           pinned
             ? "text-primary"
-            : "text-muted-foreground/45 hover:bg-accent hover:text-midground",
+            : "text-muted-foreground/45 hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
         )}
       >
         <Pin
           className={cn(
-            "h-[13px] w-[13px] transition-opacity",
+            "h-3 w-3 transition-opacity",
             pinned ? "opacity-100" : "opacity-45 group-hover:opacity-100",
           )}
         />
@@ -1227,14 +1227,14 @@ function SessionListItem({
         title="Open chat menu"
         onClick={(event) => onOpenContextMenu(session, event)}
         className={cn(
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md",
           "text-muted-foreground/45 opacity-55 transition-all",
-          "hover:bg-accent hover:text-midground",
+          "hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
           "group-hover:opacity-100 focus-visible:opacity-100",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
         )}
       >
-        <MoreHorizontal className="h-[13px] w-[13px]" />
+        <MoreHorizontal className="h-3 w-3" />
       </button>
       <span className="sr-only">
         {session.source ?? "local"} {timeAgo(session.last_active)}
