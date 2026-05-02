@@ -156,13 +156,6 @@ interface ArtifactEntry {
   title: string;
 }
 
-interface SourceEntry {
-  detail: string;
-  id: string;
-  kind: "artifact" | "model" | "session" | "tool";
-  title: string;
-}
-
 interface QueuedInput {
   createdAt: number;
   id: string;
@@ -428,7 +421,7 @@ function replaceUrlWithResume(sessionId: string): void {
   );
 }
 
-type ProgressState = "done" | "error" | "running";
+type ProgressState = "done" | "error" | "pending" | "running";
 
 interface ProgressSummary {
   detail?: string;
@@ -713,12 +706,49 @@ function runningSubagentLine(subagent: SubagentEntry): string {
   ).slice(0, 130);
 }
 
+function progressIntentLabel(text: string): string {
+  const clean = displayStatusText(text).trim();
+  if (!clean || isGenericActivityText(clean)) return "";
+
+  const lower = clean.toLowerCase();
+  if (
+    /^running\b/.test(lower) ||
+    /^preparing\b/.test(lower) ||
+    /\bcomplete$/.test(lower) ||
+    /\bfailed$/.test(lower)
+  ) {
+    return "";
+  }
+
+  const firstSentence = clean.match(/^[^.!?]+[.!?]?/)?.[0] ?? clean;
+  const label = firstSentence
+    .replace(/^(?:i['’]m going to|i am going to|i['’]ll|i will)\s+/i, "")
+    .replace(/^(?:now|next|then),?\s+/i, "")
+    .replace(/^going to\s+/i, "")
+    .replace(/\s+now\.?$/i, "")
+    .trim();
+
+  if (!label) return "";
+  return `${label[0].toUpperCase()}${label.slice(1)}`.slice(0, 92);
+}
+
+function addProgressSummary(
+  summaries: ProgressSummary[],
+  summary: ProgressSummary,
+): void {
+  const normalized = summary.label.toLowerCase();
+  if (summaries.some((item) => item.label.toLowerCase() === normalized)) return;
+  summaries.push(summary);
+}
+
 function buildProgressSummaries({
+  activityTrace,
   artifacts,
   busy,
   statusText,
   tools,
 }: {
+  activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
   statusText: string;
@@ -737,81 +767,120 @@ function buildProgressSummaries({
   }
 
   const summaries: ProgressSummary[] = [];
-  const current = displayStatusText(statusText || "Working...");
-  if (busy && tools.length === 0) {
-    summaries.push({
-      detail: "One active turn",
-      details: current ? [current] : [],
+
+  const intentItems = activityTrace
+    .map((trace) => ({ id: trace.id, label: progressIntentLabel(trace.text) }))
+    .filter((item) => item.label);
+
+  intentItems.slice(0, 3).forEach((item, index, visible) => {
+    addProgressSummary(summaries, {
+      details: [],
+      id: item.id,
+      label: item.label,
+      status: busy && index === visible.length - 1 ? "running" : "done",
+    });
+  });
+
+  const current = progressIntentLabel(statusText || "Working...");
+  if (busy && current) {
+    addProgressSummary(summaries, {
+      details: [],
       id: "current",
-      label: current || "Working on the request",
+      label: current,
       status: "running",
     });
   }
 
   if (groups.read.length || groups.search.length) {
-    const parts = [
-      groups.read.length ? plural(groups.read.length, "file") : "",
-      groups.search.length ? plural(groups.search.length, "search", "searches") : "",
-    ].filter(Boolean);
-    summaries.push({
-      detail: "Code and context inspection",
+    addProgressSummary(summaries, {
       details: detailsFor([...groups.read, ...groups.search]),
       id: "explore",
-      label: `Checked ${parts.join(", ") || plural(groups.read.length + groups.search.length, "item")}`,
+      label: "Review relevant context",
       status: summaryStatus([...groups.read, ...groups.search]),
     });
   }
 
   if (groups.edit.length) {
-    summaries.push({
-      detail: "Changed files",
+    addProgressSummary(summaries, {
       details: detailsFor(groups.edit),
       id: "edit",
-      label: `Edited ${plural(groups.edit.length, "file")}`,
+      label: "Apply focused changes",
       status: summaryStatus(groups.edit),
     });
   }
 
   if (groups.run.length) {
-    summaries.push({
-      detail: "Commands and checks",
+    addProgressSummary(summaries, {
       details: detailsFor(groups.run),
       id: "run",
-      label: `Ran ${plural(groups.run.length, "command")}`,
+      label: "Verify the result",
       status: summaryStatus(groups.run),
     });
   }
 
   if (groups.other.length) {
-    summaries.push({
-      detail: "Other tool work",
+    addProgressSummary(summaries, {
       details: detailsFor(groups.other),
       id: "other",
-      label: `Used ${plural(groups.other.length, "tool action")}`,
+      label: "Use supporting tools",
       status: summaryStatus(groups.other),
     });
   }
 
   if (artifacts.length) {
-    summaries.push({
-      detail: "Files, diffs, previews, and outputs",
+    addProgressSummary(summaries, {
       details: artifacts.slice(-8).map((artifact) =>
         compactLine(artifact.detail || artifact.path || artifact.source, artifact.title),
       ),
       id: "artifacts",
-      label: `Prepared ${plural(artifacts.length, "artifact")}`,
+      label: "Prepare outputs",
       status: "done",
+    });
+  }
+
+  if (busy) {
+    if (!groups.edit.length && tools.length > 0) {
+      addProgressSummary(summaries, {
+        details: [],
+        id: "pending-change",
+        label: "Make the needed update",
+        status: "pending",
+      });
+    }
+    if (!groups.run.length) {
+      addProgressSummary(summaries, {
+        details: [],
+        id: "pending-verify",
+        label: "Check that it works",
+        status: "pending",
+      });
+    }
+    addProgressSummary(summaries, {
+      details: [],
+      id: "pending-wrap",
+      label: "Report the result",
+      status: "pending",
     });
   }
 
   if (!summaries.length) {
     summaries.push({
-      detail: "Waiting for the next request",
       details: [],
       id: "ready",
       label: "Ready",
       status: "done",
     });
+  }
+
+  const runningIndex = summaries.findIndex((summary) => summary.status === "running");
+  if (runningIndex >= 0) {
+    return summaries
+      .map((summary, index) =>
+        index < runningIndex && summary.status === "pending"
+          ? { ...summary, status: "done" as const }
+          : summary,
+      )
+      .slice(0, 5);
   }
 
   return summaries.slice(0, 5);
@@ -1191,45 +1260,6 @@ function artifactsFromSubagentEvent(
   }
 
   return artifacts;
-}
-
-function buildSourceEntries({
-  artifacts,
-  info,
-  sessionId,
-}: {
-  artifacts: ArtifactEntry[];
-  info: SessionInfo;
-  sessionId: string | null;
-}): SourceEntry[] {
-  const entries: SourceEntry[] = [];
-
-  entries.push({
-    detail: [info.provider, info.model].filter(Boolean).join(" / ") || "model pending",
-    id: "model",
-    kind: "model",
-    title: "Model",
-  });
-
-  if (sessionId) {
-    entries.push({
-      detail: sessionId,
-      id: "session",
-      kind: "session",
-      title: "Session",
-    });
-  }
-
-  for (const artifact of artifacts.slice(-8).reverse()) {
-    entries.push({
-      detail: artifact.detail || artifact.path || artifact.source || artifact.kind,
-      id: `artifact:${artifact.id}`,
-      kind: "artifact",
-      title: artifact.title,
-    });
-  }
-
-  return entries.slice(0, 14);
 }
 
 export default function ChatPage() {
@@ -2454,13 +2484,12 @@ export default function ChatPage() {
     : undefined;
   const activity = (
     <ActivityPanel
+      activityTrace={activityTrace}
       artifacts={artifacts}
       banner={banner}
       busy={busy}
-      info={info}
       onOpenArtifact={openArtifactPreview}
       onReconnect={reconnect}
-      sessionId={sessionId}
       state={state}
       statusText={statusText}
       tools={tools}
@@ -3926,6 +3955,7 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
   const hasDetails = summary.details.length > 0;
   const complete = summary.status === "done";
   const failed = summary.status === "error";
+  const running = summary.status === "running";
 
   return (
     <div className="text-sm leading-6">
@@ -3939,40 +3969,53 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
         onClick={() => hasDetails && setOpen((value) => !value)}
         type="button"
       >
-      <span
-        className={cn(
-          "mt-1 flex h-[1.05rem] w-[1.05rem] shrink-0 items-center justify-center rounded-full border",
-          failed
-            ? "border-[color-mix(in_srgb,var(--chat-danger)_70%,transparent)] text-[var(--chat-danger)]"
-            : complete
-              ? "border-[color-mix(in_srgb,var(--chat-muted-strong)_70%,transparent)] text-[var(--chat-muted-strong)]"
-              : "border-[color-mix(in_srgb,var(--chat-muted-strong)_65%,transparent)] text-[var(--chat-muted-strong)]",
-        )}
-      >
-        {summary.status === "running" ? (
-          <Loader2 className="h-2.5 w-2.5 animate-spin" />
-        ) : (
-          <CheckCircle2 className="h-2.5 w-2.5" />
-        )}
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="text-[0.92rem] font-medium text-[var(--chat-muted-strong)]">
-          {summary.label}
-        </div>
-        {summary.detail && (
-          <div className="mt-0.5 truncate text-[0.76rem] text-[var(--chat-muted)]">
-            {summary.detail}
-          </div>
-        )}
-      </div>
-      {hasDetails && (
-        <ChevronDown
+        <span
           className={cn(
-            "mt-1.5 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] opacity-70 transition group-hover:opacity-100",
-            open && "rotate-180",
+            "mt-1 flex h-[1.05rem] w-[1.05rem] shrink-0 items-center justify-center rounded-full border",
+            failed
+              ? "border-[color-mix(in_srgb,var(--chat-danger)_70%,transparent)] text-[var(--chat-danger)]"
+              : complete
+                ? "border-[color-mix(in_srgb,var(--chat-muted-strong)_70%,transparent)] text-[var(--chat-muted-strong)]"
+                : running
+                  ? "border-[color-mix(in_srgb,var(--chat-muted-strong)_65%,transparent)] text-[var(--chat-muted-strong)]"
+                  : "border-[color-mix(in_srgb,var(--chat-muted)_72%,transparent)] text-transparent",
           )}
-        />
-      )}
+        >
+          {running ? (
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          ) : failed ? (
+            <AlertCircle className="h-2.5 w-2.5" />
+          ) : complete ? (
+            <CheckCircle2 className="h-2.5 w-2.5" />
+          ) : (
+            <span className="sr-only">Pending</span>
+          )}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              "text-[0.92rem] font-medium",
+              summary.status === "pending"
+                ? "text-[var(--chat-muted)]"
+                : "text-[var(--chat-muted-strong)]",
+            )}
+          >
+            {summary.label}
+          </div>
+          {summary.detail && (
+            <div className="mt-0.5 truncate text-[0.76rem] text-[var(--chat-muted)]">
+              {summary.detail}
+            </div>
+          )}
+        </div>
+        {hasDetails && (
+          <ChevronDown
+            className={cn(
+              "mt-1.5 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] opacity-70 transition group-hover:opacity-100",
+              open && "rotate-180",
+            )}
+          />
+        )}
       </button>
       {open && hasDetails && (
         <div className="ml-8 mt-1 space-y-1 pb-1 text-[0.74rem] leading-5 text-[var(--chat-muted)]">
@@ -3988,35 +4031,29 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
 }
 
 function ActivityPanel({
+  activityTrace,
   artifacts,
   banner,
   busy,
-  info,
   onOpenArtifact,
   onReconnect,
-  sessionId,
   state,
   statusText,
   tools,
 }: {
+  activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   banner: string | null;
   busy: boolean;
-  info: SessionInfo;
   onOpenArtifact(artifact: ArtifactEntry): void;
   onReconnect(): void;
-  sessionId: string | null;
   state: ConnectionState;
   statusText: string;
   tools: ToolEntry[];
 }) {
-  const sources = useMemo(
-    () => buildSourceEntries({ artifacts, info, sessionId }),
-    [artifacts, info, sessionId],
-  );
   const progress = useMemo(
-    () => buildProgressSummaries({ artifacts, busy, statusText, tools }),
-    [artifacts, busy, statusText, tools],
+    () => buildProgressSummaries({ activityTrace, artifacts, busy, statusText, tools }),
+    [activityTrace, artifacts, busy, statusText, tools],
   );
 
   return (
@@ -4057,14 +4094,13 @@ function ActivityPanel({
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
         <section className="space-y-3 border-b border-[color-mix(in_srgb,var(--chat-border)_48%,transparent)] pb-5">
           <PortalSectionHeader
-            count={progress.length}
             label="Progress"
-            meta={busy ? "working" : ""}
+            meta=""
           />
           <ProgressSummaryList summaries={progress} />
         </section>
 
-        <section className="space-y-3 border-b border-[color-mix(in_srgb,var(--chat-border)_48%,transparent)] pb-5">
+        <section className="space-y-3 pb-1">
           <PortalSectionHeader
             count={artifacts.length}
             label="Artifacts"
@@ -4085,17 +4121,6 @@ function ActivityPanel({
               ))
           )}
         </section>
-
-        <section className="space-y-3 pb-1">
-          <PortalSectionHeader
-            count={sources.length}
-            label="Sources"
-            meta=""
-          />
-          {sources.map((source) => (
-            <SourceCard key={source.id} source={source} />
-          ))}
-        </section>
       </div>
     </div>
   );
@@ -4106,7 +4131,7 @@ function PortalSectionHeader({
   label,
   meta,
 }: {
-  count: number;
+  count?: number;
   label: string;
   meta: string;
 }) {
@@ -4116,9 +4141,11 @@ function PortalSectionHeader({
         <span className="text-[1rem] font-medium leading-6 text-[var(--chat-muted-strong)]">
           {label}
         </span>
-        <span className="rounded-full bg-[color-mix(in_srgb,var(--chat-surface-strong)_48%,transparent)] px-1.5 py-0.5 text-[0.64rem] leading-none text-[var(--chat-muted)]">
-          {count}
-        </span>
+        {typeof count === "number" && (
+          <span className="rounded-full bg-[color-mix(in_srgb,var(--chat-surface-strong)_48%,transparent)] px-1.5 py-0.5 text-[0.64rem] leading-none text-[var(--chat-muted)]">
+            {count}
+          </span>
+        )}
       </div>
       {meta && (
         <span className="truncate text-[0.68rem] text-[var(--chat-muted)]">
@@ -4133,35 +4160,6 @@ function PortalEmpty({ children }: { children: ReactNode }) {
   return (
     <div className="px-1 py-2 text-[0.82rem] leading-5 text-[var(--chat-muted)]">
       {children}
-    </div>
-  );
-}
-
-function SourceCard({ source }: { source: SourceEntry }) {
-  const Icon =
-    source.kind === "model"
-      ? Bot
-      : source.kind === "session"
-        ? Shield
-        : source.kind === "tool"
-          ? CheckCircle2
-          : FileText;
-
-  return (
-    <div className="rounded-xl px-1 py-1.5 transition-colors hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]">
-      <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center text-[var(--chat-muted-strong)]">
-          <Icon className="h-[1.05rem] w-[1.05rem]" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[0.93rem] font-medium leading-6 text-[var(--chat-text)]">
-            {source.title}
-          </div>
-          <div className="line-clamp-2 text-[0.73rem] leading-4 text-[var(--chat-muted)]">
-            {source.detail || source.kind}
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
