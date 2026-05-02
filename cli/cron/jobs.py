@@ -43,6 +43,27 @@ _jobs_file_lock = threading.Lock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
 
+WEEKDAY_ALIASES = {
+    "mon": 0,
+    "monday": 0,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "wed": 2,
+    "wednesday": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "fri": 4,
+    "friday": 4,
+    "sat": 5,
+    "saturday": 5,
+    "sun": 6,
+    "sunday": 6,
+}
+WEEKDAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
     """Normalize legacy/single-skill and multi-skill inputs into a unique ordered list."""
@@ -107,17 +128,50 @@ def parse_duration(s: str) -> int:
         "30m" → 30
         "2h" → 120
         "1d" → 1440
+        "2w" → 20160
     """
     s = s.strip().lower()
-    match = re.match(r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$', s)
+    match = re.match(
+        r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)$',
+        s,
+    )
     if not match:
-        raise ValueError(f"Invalid duration: '{s}'. Use format like '30m', '2h', or '1d'")
+        raise ValueError(f"Invalid duration: '{s}'. Use format like '30m', '2h', '1d', or '2w'")
     
     value = int(match.group(1))
-    unit = match.group(2)[0]  # First char: m, h, or d
+    unit = match.group(2)[0]  # First char: m, h, d, or w
     
-    multipliers = {'m': 1, 'h': 60, 'd': 1440}
+    multipliers = {'m': 1, 'h': 60, 'd': 1440, 'w': 10080}
     return value * multipliers[unit]
+
+
+def _format_interval_display(minutes: int) -> str:
+    for unit_minutes, suffix in ((10080, "w"), (1440, "d"), (60, "h")):
+        if minutes % unit_minutes == 0:
+            return f"{minutes // unit_minutes}{suffix}"
+    return f"{minutes}m"
+
+
+def _normalize_anchor_time(value: str) -> str:
+    match = re.match(r'^(\d{1,2}):(\d{2})$', value.strip())
+    if not match:
+        raise ValueError(f"Invalid interval time '{value}'. Use HH:MM, for example 09:00")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        raise ValueError(f"Invalid interval time '{value}'. Use HH:MM, for example 09:00")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _next_anchor_start(weekday: Optional[int], time_label: str) -> str:
+    now = _elevate_now()
+    hour, minute = [int(part) for part in time_label.split(":", 1)]
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if weekday is not None:
+        candidate += timedelta(days=(weekday - now.weekday()) % 7)
+    if candidate <= now:
+        candidate += timedelta(days=7 if weekday is not None else 1)
+    return candidate.isoformat()
 
 
 def parse_schedule(schedule: str) -> Dict[str, Any]:
@@ -135,6 +189,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         "2h"               → once in 2 hours
         "every 30m"        → recurring every 30 minutes
         "every 2h"         → recurring every 2 hours
+        "every 2w on Tuesday at 09:00" → every two weeks, anchored
         "0 9 * * *"        → cron expression
         "2026-02-03T14:00" → once at timestamp
     """
@@ -144,13 +199,39 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     
     # "every X" pattern → recurring interval
     if schedule_lower.startswith("every "):
-        duration_str = schedule[6:].strip()
+        interval_text = schedule[6:].strip()
+        match = re.match(
+            r'^(?P<duration>\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks))'
+            r'(?:\s+on\s+(?P<weekday>mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?|thu(?:r|rs|rsday|rday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))?'
+            r'(?:\s+at\s+(?P<time>\d{1,2}:\d{2}))?$',
+            interval_text,
+            re.IGNORECASE,
+        )
+        if not match:
+            raise ValueError(
+                f"Invalid interval schedule '{original}'. Use 'every 30m', "
+                f"'every 2h', or 'every 2w on Monday at 09:00'"
+            )
+        duration_str = match.group("duration")
         minutes = parse_duration(duration_str)
-        return {
+        parsed: Dict[str, Any] = {
             "kind": "interval",
             "minutes": minutes,
             "display": f"every {minutes}m"
         }
+        weekday_text = match.group("weekday")
+        time_text = match.group("time")
+        if weekday_text or time_text:
+            anchor_time = _normalize_anchor_time(time_text or "09:00")
+            anchor_weekday = WEEKDAY_ALIASES[weekday_text.lower()] if weekday_text else None
+            parsed["anchor_time"] = anchor_time
+            parsed["start_at"] = _next_anchor_start(anchor_weekday, anchor_time)
+            parsed["display"] = f"every {_format_interval_display(minutes)}"
+            if anchor_weekday is not None:
+                parsed["anchor_weekday"] = anchor_weekday
+                parsed["display"] += f" on {WEEKDAY_LABELS[anchor_weekday]}"
+            parsed["display"] += f" at {anchor_time}"
+        return parsed
     
     # Check for cron expression (5 or 6 space-separated fields)
     # Cron fields: minute hour day month weekday [year]
@@ -304,6 +385,10 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             # Next run is last_run + interval
             last = _ensure_aware(datetime.fromisoformat(last_run_at))
             next_run = last + timedelta(minutes=minutes)
+        elif schedule.get("start_at"):
+            next_run = _ensure_aware(datetime.fromisoformat(schedule["start_at"]))
+            while next_run <= now:
+                next_run += timedelta(minutes=minutes)
         else:
             # First run is now + interval
             next_run = now + timedelta(minutes=minutes)

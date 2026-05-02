@@ -50,6 +50,11 @@ class TestParseDuration:
         assert parse_duration("7day") == 7 * 1440
         assert parse_duration("2days") == 2 * 1440
 
+    def test_weeks(self):
+        assert parse_duration("1w") == 7 * 1440
+        assert parse_duration("2 weeks") == 14 * 1440
+        assert parse_duration("3wks") == 21 * 1440
+
     def test_whitespace_tolerance(self):
         assert parse_duration("  30m  ") == 30
         assert parse_duration("2 h") == 120
@@ -91,6 +96,19 @@ class TestParseSchedule:
         result = parse_schedule("Every 30m")
         assert result["kind"] == "interval"
         assert result["minutes"] == 30
+
+    def test_every_two_weeks_with_anchor(self, monkeypatch):
+        now = datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc)  # Saturday
+        monkeypatch.setattr("cron.jobs._elevate_now", lambda: now)
+
+        result = parse_schedule("every 2w on Tuesday at 09:30")
+
+        assert result["kind"] == "interval"
+        assert result["minutes"] == 14 * 1440
+        assert result["anchor_weekday"] == 1
+        assert result["anchor_time"] == "09:30"
+        assert result["display"] == "every 2w on Tuesday at 09:30"
+        assert result["start_at"] == "2026-05-05T09:30:00+00:00"
 
     def test_cron_expression(self):
         pytest.importorskip("croniter")
@@ -160,6 +178,28 @@ class TestComputeNextRun:
         next_dt = datetime.fromisoformat(result)
         # Should be ~30 minutes from last run
         assert next_dt > datetime.now().astimezone() + timedelta(minutes=29)
+
+    def test_interval_anchor_first_run(self, monkeypatch):
+        now = datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._elevate_now", lambda: now)
+        schedule = {
+            "kind": "interval",
+            "minutes": 14 * 1440,
+            "start_at": "2026-05-05T09:30:00+00:00",
+        }
+
+        assert compute_next_run(schedule) == "2026-05-05T09:30:00+00:00"
+
+    def test_interval_anchor_catches_up_to_future(self, monkeypatch):
+        now = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._elevate_now", lambda: now)
+        schedule = {
+            "kind": "interval",
+            "minutes": 14 * 1440,
+            "start_at": "2026-05-05T09:30:00+00:00",
+        }
+
+        assert compute_next_run(schedule) == "2026-06-02T09:30:00+00:00"
 
     def test_cron_returns_future(self):
         pytest.importorskip("croniter")
