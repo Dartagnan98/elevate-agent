@@ -164,6 +164,13 @@ interface QueuedInput {
   text: string;
 }
 
+interface ActivityTrace {
+  createdAt: number;
+  id: string;
+  kind: "reasoning" | "status" | "thinking";
+  text: string;
+}
+
 interface UsageInfo {
   calls?: number;
   cache_read?: number;
@@ -325,6 +332,182 @@ function replaceUrlWithResume(sessionId: string): void {
     "",
     `${url.pathname}?${url.searchParams.toString()}`,
   );
+}
+
+type ProgressState = "done" | "error" | "running";
+
+interface ProgressSummary {
+  detail?: string;
+  details: string[];
+  id: string;
+  label: string;
+  status: ProgressState;
+}
+
+function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralLabel}`;
+}
+
+function compactLine(value: string | undefined, fallback = ""): string {
+  return (value || fallback).replace(/\s+/g, " ").trim();
+}
+
+function toolDetail(tool: ToolEntry): string {
+  return compactLine(
+    tool.summary || tool.preview || tool.context || tool.error,
+    tool.name,
+  ).slice(0, 220);
+}
+
+function toolKind(tool: ToolEntry): "edit" | "other" | "read" | "run" | "search" {
+  const haystack = `${tool.name} ${tool.context ?? ""} ${tool.summary ?? ""} ${tool.preview ?? ""}`.toLowerCase();
+  if (/\b(apply_patch|patch|edit|write|rename|delete|changed|modified)\b/.test(haystack)) {
+    return "edit";
+  }
+  if (/\b(rg|grep|search|find|query)\b/.test(haystack)) return "search";
+  if (/\b(read|cat|sed|nl|open|view|ls|file)\b/.test(haystack)) return "read";
+  if (/\b(bash|shell|terminal|command|exec|npm|pnpm|yarn|git|python|node|curl|tmux|build|test)\b/.test(haystack)) {
+    return "run";
+  }
+  return "other";
+}
+
+function summaryStatus(tools: ToolEntry[]): ProgressState {
+  if (tools.some((tool) => tool.status === "error")) return "error";
+  if (tools.some((tool) => tool.status === "running")) return "running";
+  return "done";
+}
+
+function detailsFor(tools: ToolEntry[]): string[] {
+  return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-8);
+}
+
+function buildProgressSummaries({
+  artifacts,
+  busy,
+  statusText,
+  tools,
+}: {
+  artifacts: ArtifactEntry[];
+  busy: boolean;
+  statusText: string;
+  tools: ToolEntry[];
+}): ProgressSummary[] {
+  const groups = {
+    edit: [] as ToolEntry[],
+    other: [] as ToolEntry[],
+    read: [] as ToolEntry[],
+    run: [] as ToolEntry[],
+    search: [] as ToolEntry[],
+  };
+
+  for (const tool of tools) {
+    groups[toolKind(tool)].push(tool);
+  }
+
+  const summaries: ProgressSummary[] = [];
+  const current = displayStatusText(statusText || "Thinking...");
+  if (busy) {
+    summaries.push({
+      detail: "Current step",
+      details: current ? [current] : [],
+      id: "current",
+      label: current || "Thinking through the next step",
+      status: "running",
+    });
+  }
+
+  if (groups.read.length || groups.search.length) {
+    const parts = [
+      groups.read.length ? plural(groups.read.length, "file") : "",
+      groups.search.length ? plural(groups.search.length, "search", "searches") : "",
+    ].filter(Boolean);
+    summaries.push({
+      detail: "Code and context inspection",
+      details: detailsFor([...groups.read, ...groups.search]),
+      id: "explore",
+      label: `Explored ${parts.join(", ") || plural(groups.read.length + groups.search.length, "item")}`,
+      status: summaryStatus([...groups.read, ...groups.search]),
+    });
+  }
+
+  if (groups.edit.length) {
+    summaries.push({
+      detail: "Changed files",
+      details: detailsFor(groups.edit),
+      id: "edit",
+      label: `Edited ${plural(groups.edit.length, "file")}`,
+      status: summaryStatus(groups.edit),
+    });
+  }
+
+  if (groups.run.length) {
+    summaries.push({
+      detail: "Commands and checks",
+      details: detailsFor(groups.run),
+      id: "run",
+      label: `Ran ${plural(groups.run.length, "command")}`,
+      status: summaryStatus(groups.run),
+    });
+  }
+
+  if (groups.other.length) {
+    summaries.push({
+      detail: "Other tool work",
+      details: detailsFor(groups.other),
+      id: "other",
+      label: `Used ${plural(groups.other.length, "tool action")}`,
+      status: summaryStatus(groups.other),
+    });
+  }
+
+  if (artifacts.length) {
+    summaries.push({
+      detail: "Files, diffs, previews, and outputs",
+      details: artifacts.slice(-8).map((artifact) =>
+        compactLine(artifact.detail || artifact.path || artifact.source, artifact.title),
+      ),
+      id: "artifacts",
+      label: `Prepared ${plural(artifacts.length, "artifact")}`,
+      status: "done",
+    });
+  }
+
+  if (!summaries.length) {
+    summaries.push({
+      detail: "Waiting for the next request",
+      details: [],
+      id: "ready",
+      label: "Ready",
+      status: "done",
+    });
+  }
+
+  return summaries.slice(0, 5);
+}
+
+function activityStartedAt(
+  tools: ToolEntry[],
+  traces: ActivityTrace[],
+  fallback = Date.now(),
+): number {
+  const starts = [
+    ...tools.map((tool) => tool.startedAt).filter(Boolean),
+    ...traces.map((trace) => trace.createdAt).filter(Boolean),
+  ];
+  return starts.length ? Math.min(...starts) : fallback;
+}
+
+function activityFinishedAt(tools: ToolEntry[], fallback = Date.now()): number {
+  const ends = tools.map((tool) => tool.completedAt ?? tool.startedAt).filter(Boolean);
+  return ends.length ? Math.max(...ends) : fallback;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 function eventText(ev: GatewayEvent): string {
@@ -555,12 +738,10 @@ function buildSourceEntries({
   artifacts,
   info,
   sessionId,
-  tools,
 }: {
   artifacts: ArtifactEntry[];
   info: SessionInfo;
   sessionId: string | null;
-  tools: ToolEntry[];
 }): SourceEntry[] {
   const entries: SourceEntry[] = [];
 
@@ -577,15 +758,6 @@ function buildSourceEntries({
       id: "session",
       kind: "session",
       title: "Session",
-    });
-  }
-
-  for (const tool of tools.slice(-8).reverse()) {
-    entries.push({
-      detail: tool.summary || tool.context || tool.preview || tool.status,
-      id: `tool:${tool.id}`,
-      kind: "tool",
-      title: tool.name,
     });
   }
 
@@ -629,6 +801,7 @@ export default function ChatPage() {
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
+  const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
   const [composerScrollTop, setComposerScrollTop] = useState(0);
@@ -733,6 +906,28 @@ export default function ChatPage() {
     });
   }, []);
 
+  const addActivityTrace = useCallback(
+    (kind: ActivityTrace["kind"], text: string) => {
+      const clean = displayStatusText(text).trim();
+      if (!clean) return;
+
+      setActivityTrace((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.kind === kind && last.text === clean) return prev;
+        return [
+          ...prev,
+          {
+            createdAt: Date.now(),
+            id: id(`activity-${kind}`),
+            kind,
+            text: clean,
+          },
+        ].slice(-24);
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1279px)");
     const sync = () => setNarrow(mql.matches);
@@ -834,6 +1029,7 @@ export default function ChatPage() {
     setUsage(null);
     setArtifacts([]);
     setTools([]);
+    setActivityTrace([]);
     setQueuedInputs([]);
     setPendingPrompt(null);
     setPromptValue("");
@@ -1043,9 +1239,11 @@ export default function ChatPage() {
       gw.on("message.start", (ev) => {
         if (!accepts(ev)) return;
         currentAssistantRef.current = null;
+        setActivityTrace([]);
         ensureAssistant();
         setBusy(true);
         setStatusText("Working...");
+        addActivityTrace("status", "Working...");
       }),
     );
     unsubs.push(
@@ -1101,21 +1299,30 @@ export default function ChatPage() {
       gw.on("status.update", (ev) => {
         if (!accepts(ev)) return;
         const text = eventString(ev, "text");
-        if (text) setStatusText(displayStatusText(text));
+        if (text) {
+          setStatusText(displayStatusText(text));
+          addActivityTrace("status", text);
+        }
       }),
     );
     unsubs.push(
       gw.on("thinking.delta", (ev) => {
         if (!accepts(ev)) return;
         const text = eventText(ev);
-        if (text) setStatusText(displayStatusText(text));
+        if (text) {
+          setStatusText(displayStatusText(text));
+          addActivityTrace("thinking", text);
+        }
       }),
     );
     unsubs.push(
       gw.on("reasoning.delta", (ev) => {
         if (!accepts(ev)) return;
         const text = eventText(ev);
-        if (text) setStatusText(displayStatusText(text));
+        if (text) {
+          setStatusText(displayStatusText(text));
+          addActivityTrace("reasoning", text);
+        }
       }),
     );
     unsubs.push(gw.on("tool.start", trackTool));
@@ -1308,6 +1515,7 @@ export default function ChatPage() {
       gw.close();
     };
   }, [
+    addActivityTrace,
     addArtifacts,
     appendMessage,
     ensureAssistant,
@@ -1607,6 +1815,7 @@ export default function ChatPage() {
   const canPickModel = state === "open" && !!sessionId;
   const activity = (
     <ActivityPanel
+      activityTrace={activityTrace}
       artifacts={artifacts}
       banner={banner}
       busy={busy}
@@ -1722,6 +1931,14 @@ export default function ChatPage() {
                     message={message}
                   />
                 ))}
+                <ChatActivityDigest
+                  activityTrace={activityTrace}
+                  artifacts={artifacts}
+                  busy={busy}
+                  statusText={statusText}
+                  tools={tools}
+                />
+                <ChatArtifactShelf artifacts={artifacts} />
                 {pendingPrompt && (
                   <PendingPromptCard
                     pendingPrompt={pendingPrompt}
@@ -2284,6 +2501,143 @@ function MessageRow({
   );
 }
 
+function ThinkingShimmer({ text }: { text: string }) {
+  return (
+    <div className="elevate-thinking-shimmer inline-flex min-h-7 items-center rounded-full px-2 text-sm text-[var(--chat-muted)]">
+      {displayStatusText(text || "Thinking...")}
+    </div>
+  );
+}
+
+function ChatActivityDigest({
+  activityTrace,
+  artifacts,
+  busy,
+  statusText,
+  tools,
+}: {
+  activityTrace: ActivityTrace[];
+  artifacts: ArtifactEntry[];
+  busy: boolean;
+  statusText: string;
+  tools: ToolEntry[];
+}) {
+  const [open, setOpen] = useState(false);
+  const summaries = useMemo(
+    () => buildProgressSummaries({ artifacts, busy, statusText, tools }),
+    [artifacts, busy, statusText, tools],
+  );
+  const show = busy || tools.length > 0 || activityTrace.length > 0;
+  if (!show) return null;
+
+  const start = activityStartedAt(tools, activityTrace);
+  const end = busy ? Date.now() : activityFinishedAt(tools);
+  const duration = formatDuration(end - start);
+  const latestTrace = activityTrace.slice(-1)[0]?.text || statusText;
+  const compactSummaries = summaries.filter((summary) => summary.id !== "ready").slice(0, 3);
+
+  return (
+    <section className="border-t border-[var(--chat-border)] pt-3 text-[var(--chat-muted)]">
+      <button
+        className="flex items-center gap-2 text-sm text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <span>{busy ? "Working" : "Worked"} for {duration}</span>
+        <ChevronDown
+          className={cn(
+            "h-3.5 w-3.5 transition-transform",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+
+      <div className="mt-3 space-y-2">
+        {busy && <ThinkingShimmer text={latestTrace} />}
+        {compactSummaries.map((summary) => (
+          <ProgressSummaryRow key={`chat-${summary.id}`} summary={summary} />
+        ))}
+      </div>
+
+      {open && (
+        <div className="mt-3 space-y-2 pl-6 text-sm leading-6 text-[var(--chat-muted)]">
+          {activityTrace.slice(-8).map((trace) => (
+            <div key={trace.id}>
+              <span className="text-[var(--chat-muted-strong)]">
+                {trace.kind === "reasoning"
+                  ? "Reasoning"
+                  : trace.kind === "thinking"
+                    ? "Thinking"
+                    : "Status"}
+              </span>
+              <span className="mx-2 text-[var(--chat-border-strong)]">/</span>
+              <span>{trace.text}</span>
+            </div>
+          ))}
+          {tools.slice(-8).map((tool) => (
+            <div key={`detail-${tool.id}`} className="truncate">
+              {tool.name}: {toolDetail(tool)}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ChatArtifactShelf({ artifacts }: { artifacts: ArtifactEntry[] }) {
+  const visible = artifacts.slice(-3).reverse();
+  if (!visible.length) return null;
+
+  return (
+    <section className="space-y-2">
+      {visible.map((artifact) => (
+        <InlineArtifactCard key={`inline-${artifact.id}`} artifact={artifact} />
+      ))}
+    </section>
+  );
+}
+
+function InlineArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
+  const [copied, setCopied] = useState(false);
+  const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
+
+  const copy = () => {
+    navigator.clipboard
+      .writeText(copyText)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
+  };
+
+  return (
+    <div className="max-w-[38rem] rounded-2xl bg-[var(--chat-surface)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)]">
+      <div className="flex items-center gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
+          <FileText className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-semibold text-[var(--chat-text)]">
+            {artifact.title}
+          </div>
+          <div className="truncate text-xs text-[var(--chat-muted)]">
+            {artifact.path || artifact.detail || artifact.source || "Artifact"}
+          </div>
+        </div>
+        <button
+          className="rounded-full border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          onClick={copy}
+          type="button"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PendingPromptCard({
   onRespond,
   pendingPrompt,
@@ -2448,12 +2802,31 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
   );
 }
 
-function ProgressItem({ tool }: { tool: ToolEntry }) {
-  const complete = tool.status === "done";
-  const failed = tool.status === "error";
+function ProgressSummaryList({ summaries }: { summaries: ProgressSummary[] }) {
+  return (
+    <div className="space-y-1.5">
+      {summaries.map((summary) => (
+        <ProgressSummaryRow key={summary.id} summary={summary} />
+      ))}
+    </div>
+  );
+}
+
+function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
+  const [open, setOpen] = useState(false);
+  const hasDetails = summary.details.length > 0;
+  const complete = summary.status === "done";
+  const failed = summary.status === "error";
 
   return (
-    <div className="flex gap-2 text-sm leading-5">
+    <div className="rounded-xl px-1 py-1 text-sm leading-5">
+      <button
+        aria-expanded={open}
+        className="flex w-full items-start gap-2 text-left"
+        disabled={!hasDetails}
+        onClick={() => hasDetails && setOpen((value) => !value)}
+        type="button"
+      >
       <span
         className={cn(
           "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
@@ -2464,25 +2837,44 @@ function ProgressItem({ tool }: { tool: ToolEntry }) {
               : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
         )}
       >
-        {tool.status === "running" ? (
+        {summary.status === "running" ? (
           <Loader2 className="h-2.5 w-2.5 animate-spin" />
         ) : (
           <CheckCircle2 className="h-2.5 w-2.5" />
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[var(--chat-muted-strong)]">{tool.name}</div>
-        {(tool.summary || tool.context || tool.preview || tool.error) && (
-          <div className="mt-0.5 line-clamp-2 text-xs text-[var(--chat-muted)]">
-            {tool.error || tool.summary || tool.preview || tool.context}
+        <div className="text-[var(--chat-muted-strong)]">{summary.label}</div>
+        {summary.detail && (
+          <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
+            {summary.detail}
           </div>
         )}
       </div>
+      {hasDetails && (
+        <ChevronDown
+          className={cn(
+            "mt-1 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] transition-transform",
+            open && "rotate-180",
+          )}
+        />
+      )}
+      </button>
+      {open && hasDetails && (
+        <div className="ml-6 mt-1.5 space-y-1 text-xs leading-5 text-[var(--chat-muted)]">
+          {summary.details.map((detail, index) => (
+            <div key={`${summary.id}-${index}`} className="truncate">
+              {detail}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 function ActivityPanel({
+  activityTrace,
   artifacts,
   banner,
   busy,
@@ -2493,6 +2885,7 @@ function ActivityPanel({
   statusText,
   tools,
 }: {
+  activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   banner: string | null;
   busy: boolean;
@@ -2504,10 +2897,13 @@ function ActivityPanel({
   tools: ToolEntry[];
 }) {
   const sources = useMemo(
-    () => buildSourceEntries({ artifacts, info, sessionId, tools }),
-    [artifacts, info, sessionId, tools],
+    () => buildSourceEntries({ artifacts, info, sessionId }),
+    [artifacts, info, sessionId],
   );
-  const runningTools = tools.filter((tool) => tool.status === "running").length;
+  const progress = useMemo(
+    () => buildProgressSummaries({ artifacts, busy, statusText, tools }),
+    [artifacts, busy, statusText, tools],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] bg-[var(--chat-surface)] normal-case shadow-[0_32px_90px_rgba(0,0,0,0.24),inset_0_0_0_1px_var(--chat-border)] ring-1 ring-white/[0.025] backdrop-blur-xl">
@@ -2578,7 +2974,7 @@ function ActivityPanel({
                 {statusText}
               </div>
               <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
-                {modelLabel(info)}
+                {activityTrace.slice(-1)[0]?.text || modelLabel(info)}
               </div>
             </div>
           </div>
@@ -2586,22 +2982,11 @@ function ActivityPanel({
 
         <section className="space-y-2">
           <PortalSectionHeader
-            count={tools.length}
-            label="Tasks"
-            meta={busy ? `${runningTools || 1} running` : "idle"}
+            count={progress.length}
+            label="Progress"
+            meta={busy ? "working" : "summary"}
           />
-          {tools.length === 0 ? (
-            <PortalEmpty>
-              {busy
-                ? "Waiting for the first tool event..."
-                : "Tool activity will appear here"}
-            </PortalEmpty>
-          ) : (
-            tools
-              .slice()
-              .reverse()
-              .map((tool) => <ProgressItem key={tool.id} tool={tool} />)
-          )}
+          <ProgressSummaryList summaries={progress} />
         </section>
 
         <section className="space-y-2">

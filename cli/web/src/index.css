@@ -274,6 +274,40 @@ code { font-size: 0.875rem; }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes elevate-shimmer-sweep {
+  from { transform: translateX(-120%); }
+  to   { transform: translateX(240%); }
+}
+
+.elevate-thinking-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--chat-surface-strong) 74%, transparent);
+}
+
+.elevate-thinking-shimmer::after {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 42%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--chat-muted-strong) 18%, transparent),
+    transparent
+  );
+  animation: elevate-shimmer-sweep 1.35s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .elevate-thinking-shimmer::after {
+    animation: none;
+    display: none;
+  }
+}
+
 /* Hide scrollbar utility — used by the header's overflow-x nav row. */
 .scrollbar-none {
   -ms-overflow-style: none;
