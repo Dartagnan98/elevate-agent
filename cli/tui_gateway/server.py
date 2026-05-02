@@ -1581,6 +1581,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "session_id": sid,
+            "persisted_session_id": key,
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -1682,6 +1683,7 @@ def _(rid, params: dict) -> dict:
         {
             "session_id": sid,
             "resumed": target,
+            "persisted_session_id": target,
             "message_count": len(messages),
             "messages": messages,
             "info": _session_info(agent),

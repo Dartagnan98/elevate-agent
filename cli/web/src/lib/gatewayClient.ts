@@ -63,6 +63,7 @@ const ANY = "*";
 
 export class GatewayClient {
   private ws: WebSocket | null = null;
+  private connectPromise: Promise<void> | null = null;
   private reqId = 0;
   private pending = new Map<string, Pending>();
   private listeners = new Map<string, Set<(ev: GatewayEvent) => void>>();
@@ -105,7 +106,10 @@ export class GatewayClient {
   }
 
   async connect(token?: string): Promise<void> {
-    if (this._state === "open" || this._state === "connecting") return;
+    if (this._state === "open") return;
+    if (this._state === "connecting" && this.connectPromise) {
+      return this.connectPromise;
+    }
     this.setState("connecting");
 
     const resolved = token ?? window.__ELEVATE_SESSION_TOKEN__ ?? "";
@@ -139,25 +143,34 @@ export class GatewayClient {
       this.rejectAllPending(new Error("WebSocket closed"));
     });
 
-    await new Promise<void>((resolve, reject) => {
+    this.connectPromise = new Promise<void>((resolve, reject) => {
       const onOpen = () => {
         ws.removeEventListener("error", onError);
+        this.connectPromise = null;
         this.setState("open");
         resolve();
       };
       const onError = () => {
         ws.removeEventListener("open", onOpen);
+        this.connectPromise = null;
         this.setState("error");
         reject(new Error("WebSocket connection failed"));
       };
       ws.addEventListener("open", onOpen, { once: true });
       ws.addEventListener("error", onError, { once: true });
     });
+    return this.connectPromise;
   }
 
   close() {
-    this.ws?.close();
+    const ws = this.ws;
     this.ws = null;
+    this.connectPromise = null;
+    this.rejectAllPending(new Error("WebSocket closed"));
+    this.setState("closed");
+    if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      ws.close();
+    }
   }
 
   private dispatch(msg: Record<string, unknown>) {

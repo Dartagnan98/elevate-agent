@@ -8,7 +8,11 @@ import type { ToolEntry } from "@/components/ToolCall";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { usePageHeader } from "@/contexts/usePageHeader";
-import { api, type AgentHubAgent } from "@/lib/api";
+import {
+  api,
+  type AgentHubAgent,
+  type SessionMessage as StoredSessionMessage,
+} from "@/lib/api";
 import {
   GatewayClient,
   type ConnectionState,
@@ -109,12 +113,13 @@ interface GatewayTranscriptMessage {
 
 interface SessionCreateResponse {
   info?: SessionInfo;
+  persisted_session_id?: string;
+  resumed?: string;
   session_id: string;
 }
 
 interface SessionResumeResponse extends SessionCreateResponse {
   messages?: GatewayTranscriptMessage[];
-  resumed?: string;
 }
 
 type ChatRole = "assistant" | "system" | "tool" | "user";
@@ -250,6 +255,9 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   open: "live",
 };
 
+const SESSION_MESSAGE_CACHE = new Map<string, ChatMessage[]>();
+const MAX_CACHED_TRANSCRIPTS = 24;
+
 function id(prefix: string): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `${prefix}-${crypto.randomUUID()}`;
@@ -269,6 +277,54 @@ function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage
       status: "complete" as const,
       title: m.name,
     }));
+}
+
+function timestampMillis(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return value < 1_000_000_000_000 ? value * 1000 : value;
+}
+
+function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
+  return (messages ?? [])
+    .filter((m) => typeof m.content === "string" && m.content.trim())
+    .map((m, index) => ({
+      content: String(m.content ?? ""),
+      createdAt: timestampMillis(
+        m.timestamp,
+        Date.now() - Math.max(0, (messages?.length ?? 0) - index),
+      ),
+      id: id(`stored-${index}`),
+      role: m.role,
+      status: "complete" as const,
+      title: m.tool_name,
+    }));
+}
+
+function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
+  if (!sessionId) return;
+  SESSION_MESSAGE_CACHE.delete(sessionId);
+  SESSION_MESSAGE_CACHE.set(sessionId, messages);
+  while (SESSION_MESSAGE_CACHE.size > MAX_CACHED_TRANSCRIPTS) {
+    const oldest = SESSION_MESSAGE_CACHE.keys().next().value;
+    if (!oldest) break;
+    SESSION_MESSAGE_CACHE.delete(oldest);
+  }
+}
+
+function replaceUrlWithResume(sessionId: string): void {
+  if (typeof window === "undefined" || !sessionId) return;
+  const url = new URL(window.location.href);
+  if (!url.pathname.endsWith("/chat")) return;
+  if (url.searchParams.get("resume") === sessionId) return;
+  url.searchParams.delete("new");
+  url.searchParams.set("resume", sessionId);
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}?${url.searchParams.toString()}`,
+  );
 }
 
 function eventText(ev: GatewayEvent): string {
@@ -550,7 +606,10 @@ export default function ChatPage() {
   const resumeId = searchParams.get("resume");
   const newChatId = searchParams.get("new");
   const [version, setVersion] = useState(0);
-  const gw = useMemo(() => new GatewayClient(), [version]);
+  const gw = useMemo(
+    () => new GatewayClient(),
+    [newChatId, resumeId, version],
+  );
 
   const [state, setState] = useState<ConnectionState>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -562,6 +621,8 @@ export default function ChatPage() {
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const voiceBaseInputRef = useRef("");
   const queueDispatchRef = useRef(false);
+  const historyHydratedRef = useRef(false);
+  const persistedSessionIdRef = useRef<string | null>(null);
 
   const [info, setInfo] = useState<SessionInfo>({});
   const [usage, setUsage] = useState<UsageInfo | null>(null);
@@ -754,11 +815,20 @@ export default function ChatPage() {
   }, [messages, tools, pendingPrompt]);
 
   useEffect(() => {
+    const persisted = persistedSessionIdRef.current;
+    if (persisted && messages.length) {
+      rememberTranscript(persisted, messages);
+    }
+  }, [messages]);
+
+  useEffect(() => {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
 
     activeSessionRef.current = null;
     currentAssistantRef.current = null;
+    historyHydratedRef.current = false;
+    persistedSessionIdRef.current = resumeId;
     setSessionId(null);
     setInfo({});
     setUsage(null);
@@ -770,7 +840,34 @@ export default function ChatPage() {
     setBusy(false);
     setBanner(null);
     setResumeFallback(false);
-    setStatusText("Connecting...");
+    setStatusText(resumeId ? "Loading chat..." : "Connecting...");
+
+    if (resumeId) {
+      const cached = SESSION_MESSAGE_CACHE.get(resumeId);
+      if (cached) {
+        historyHydratedRef.current = true;
+        setMessages(cached);
+        setStatusText("Connecting live session...");
+      }
+
+      void api.getSessionMessages(resumeId)
+        .then((response) => {
+          if (cancelled) return;
+          const hydrated = normalizeStoredTranscript(response.messages);
+          historyHydratedRef.current = true;
+          rememberTranscript(response.session_id || resumeId, hydrated);
+          rememberTranscript(resumeId, hydrated);
+          setMessages(hydrated);
+          setStatusText("Connecting live session...");
+        })
+        .catch((error: Error) => {
+          if (cancelled || cached) return;
+          setBanner(`Could not load saved messages yet: ${error.message}`);
+        });
+    } else {
+      persistedSessionIdRef.current = null;
+      setMessages([]);
+    }
 
     const accepts = (ev: GatewayEvent) => {
       const active = activeSessionRef.current;
@@ -1158,6 +1255,11 @@ export default function ChatPage() {
 
         if (cancelled) return;
         activeSessionRef.current = created.session_id;
+        persistedSessionIdRef.current =
+          created.persisted_session_id ?? created.resumed ?? resumeId ?? null;
+        if (!resumeId && persistedSessionIdRef.current) {
+          replaceUrlWithResume(persistedSessionIdRef.current);
+        }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
         if (resumeWarning) {
@@ -1180,11 +1282,15 @@ export default function ChatPage() {
           ]);
         } else if ("messages" in created) {
           const resumed = created as Partial<SessionResumeResponse>;
-          setMessages(
-            normalizeTranscript(
+          if (!historyHydratedRef.current) {
+            const hydrated = normalizeTranscript(
               Array.isArray(resumed.messages) ? resumed.messages : undefined,
-            ),
-          );
+            );
+            setMessages(hydrated);
+            if (persistedSessionIdRef.current) {
+              rememberTranscript(persistedSessionIdRef.current, hydrated);
+            }
+          }
         } else {
           setMessages([]);
         }
