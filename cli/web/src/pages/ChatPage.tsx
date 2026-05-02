@@ -36,6 +36,7 @@ import {
   Loader2,
   Mic,
   MicOff,
+  Pin,
   Plug,
   Send,
   Shield,
@@ -3634,14 +3635,14 @@ function ArtifactCard({
   return (
     <div
       className={cn(
-        "rounded-xl bg-[var(--chat-surface-soft)] px-2.5 py-2.5 text-xs transition-colors hover:bg-[var(--chat-surface-strong)]",
+        "group rounded-xl px-1 py-1.5 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
         artifact.status === "error" &&
-          "bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_40%,transparent)]",
+          "bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]",
       )}
     >
-      <div className="flex items-start gap-2">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
-          <Icon className="h-3.5 w-3.5" />
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center text-[var(--chat-muted-strong)]">
+          <Icon className="h-[1.05rem] w-[1.05rem]" />
         </div>
 
         <button
@@ -3655,17 +3656,17 @@ function ArtifactCard({
           }}
           type="button"
         >
-          <div className="truncate font-medium text-[var(--chat-text)]">
+          <div className="truncate text-[0.93rem] font-medium leading-6 text-[var(--chat-text)]">
             {artifact.title}
           </div>
-          <div className="mt-0.5 truncate text-[0.68rem] text-[var(--chat-muted)]">
+          <div className="truncate text-[0.73rem] leading-4 text-[var(--chat-muted)]">
             {artifact.detail || artifact.source || artifact.kind}
           </div>
         </button>
 
         <button
           aria-label="Open artifact preview"
-          className="rounded-md p-1 text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          className="mt-0.5 rounded-md p-1 text-[var(--chat-muted)] opacity-55 transition hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_60%,transparent)] hover:text-[var(--chat-text)] hover:opacity-100 group-hover:opacity-85"
           onClick={() => onOpenArtifact(artifact)}
           type="button"
         >
@@ -3674,7 +3675,7 @@ function ArtifactCard({
 
         <button
           aria-label="Copy artifact"
-          className="rounded-md p-1 text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          className="mt-0.5 rounded-md p-1 text-[var(--chat-muted)] opacity-55 transition hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_60%,transparent)] hover:text-[var(--chat-text)] hover:opacity-100 group-hover:opacity-85"
           onClick={copy}
           type="button"
         >
@@ -3687,7 +3688,7 @@ function ArtifactCard({
       </div>
 
       {open && artifact.content && (
-        <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-[var(--chat-surface-soft)] p-2 text-[0.68rem] leading-4 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
+        <pre className="ml-8 mt-2 max-h-48 overflow-auto rounded-lg bg-[color-mix(in_srgb,var(--chat-surface-strong)_38%,transparent)] p-2 text-[0.68rem] leading-4 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
           {artifact.content}
         </pre>
       )}
@@ -3697,7 +3698,7 @@ function ArtifactCard({
 
 function ProgressSummaryList({ summaries }: { summaries: ProgressSummary[] }) {
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-1">
       {summaries.map((summary) => (
         <ProgressSummaryRow key={summary.id} summary={summary} />
       ))}
@@ -3786,22 +3787,25 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
   const failed = summary.status === "error";
 
   return (
-    <div className="rounded-xl px-1 py-1 text-sm leading-5">
+    <div className="text-sm leading-6">
       <button
         aria-expanded={open}
-        className="flex w-full items-start gap-2 text-left"
+        className={cn(
+          "group flex w-full items-start gap-3 rounded-xl px-1 py-1.5 text-left transition-colors",
+          hasDetails && "hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
+        )}
         disabled={!hasDetails}
         onClick={() => hasDetails && setOpen((value) => !value)}
         type="button"
       >
       <span
         className={cn(
-          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
+          "mt-1 flex h-[1.05rem] w-[1.05rem] shrink-0 items-center justify-center rounded-full border",
           failed
-            ? "bg-[color-mix(in_srgb,var(--chat-danger)_18%,var(--chat-bg))] text-[var(--chat-danger)]"
+            ? "border-[color-mix(in_srgb,var(--chat-danger)_70%,transparent)] text-[var(--chat-danger)]"
             : complete
-              ? "bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]"
-              : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
+              ? "border-[color-mix(in_srgb,var(--chat-muted-strong)_70%,transparent)] text-[var(--chat-muted-strong)]"
+              : "border-[color-mix(in_srgb,var(--chat-muted-strong)_65%,transparent)] text-[var(--chat-muted-strong)]",
         )}
       >
         {summary.status === "running" ? (
@@ -3811,9 +3815,11 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="text-[var(--chat-muted-strong)]">{summary.label}</div>
+        <div className="text-[0.92rem] font-medium text-[var(--chat-muted-strong)]">
+          {summary.label}
+        </div>
         {summary.detail && (
-          <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
+          <div className="mt-0.5 truncate text-[0.76rem] text-[var(--chat-muted)]">
             {summary.detail}
           </div>
         )}
@@ -3821,14 +3827,14 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
       {hasDetails && (
         <ChevronDown
           className={cn(
-            "mt-1 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] transition-transform",
+            "mt-1.5 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] opacity-70 transition group-hover:opacity-100",
             open && "rotate-180",
           )}
         />
       )}
       </button>
       {open && hasDetails && (
-        <div className="ml-6 mt-1.5 space-y-1 text-xs leading-5 text-[var(--chat-muted)]">
+        <div className="ml-8 mt-1 space-y-1 pb-1 text-[0.74rem] leading-5 text-[var(--chat-muted)]">
           {summary.details.map((detail, index) => (
             <div key={`${summary.id}-${index}`} className="truncate">
               {detail}
@@ -3873,43 +3879,24 @@ function ActivityPanel({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] bg-[var(--chat-surface)] normal-case shadow-[0_32px_90px_rgba(0,0,0,0.24),inset_0_0_0_1px_var(--chat-border)] ring-1 ring-white/[0.025] backdrop-blur-xl">
-      <header className="shrink-0 px-3.5 pb-2.5 pt-3.5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "h-2 w-2 rounded-full",
-                  state === "open"
-                    ? "bg-[var(--chat-success)] shadow-[0_0_18px_color-mix(in_srgb,var(--chat-success)_55%,transparent)]"
-                    : "bg-[var(--chat-muted)]",
-                )}
-              />
-              <h2 className="truncate text-[0.9rem] font-semibold leading-5 text-[var(--chat-text)]">
-                Activity Portal
-              </h2>
-            </div>
-            <p className="mt-1 truncate text-[0.72rem] leading-4 text-[var(--chat-muted)]">
-              Progress, artifacts, and sources
-            </p>
-          </div>
-
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.75rem] border border-[color-mix(in_srgb,var(--chat-border)_72%,transparent)] bg-[color-mix(in_srgb,var(--chat-surface)_92%,var(--chat-bg))] p-5 normal-case shadow-[0_28px_84px_rgba(0,0,0,0.22)] backdrop-blur-xl">
+      <div className="mb-4 flex shrink-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
           <span
             className={cn(
-              "rounded-full px-2.5 py-1 text-[0.68rem] font-medium",
-              state === "open"
-                ? "bg-[color-mix(in_srgb,var(--chat-success)_16%,var(--chat-bg))] text-[var(--chat-success)]"
-                : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
+              "h-2 w-2 rounded-full",
+              state === "open" ? "bg-[var(--chat-success)]" : "bg-[var(--chat-muted)]",
             )}
-          >
-            {STATE_LABEL[state]}
+          />
+          <span className="truncate text-[0.76rem] text-[var(--chat-muted)]">
+            {state === "open" ? "live" : STATE_LABEL[state]}
           </span>
         </div>
-      </header>
+        <Pin className="h-4 w-4 shrink-0 rotate-45 text-[var(--chat-muted)] opacity-80" />
+      </div>
 
       {banner && (
-        <section className="mx-3 mb-3 rounded-2xl bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_38%,transparent)]">
+        <section className="mb-4 rounded-2xl bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]">
           <div className="flex items-start gap-2 text-sm text-[var(--chat-danger)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
@@ -3926,21 +3913,21 @@ function ActivityPanel({
         </section>
       )}
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-2.5 py-2.5">
-        <section className="space-y-2">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+        <section className="space-y-3 border-b border-[color-mix(in_srgb,var(--chat-border)_48%,transparent)] pb-5">
           <PortalSectionHeader
             count={progress.length}
             label="Progress"
-            meta={busy ? "working" : "summary"}
+            meta={busy ? "working" : ""}
           />
           <ProgressSummaryList summaries={progress} />
         </section>
 
-        <section className="space-y-2">
+        <section className="space-y-3 border-b border-[color-mix(in_srgb,var(--chat-border)_48%,transparent)] pb-5">
           <PortalSectionHeader
             count={artifacts.length}
             label="Artifacts"
-            meta="files and outputs"
+            meta=""
           />
           {artifacts.length === 0 ? (
             <PortalEmpty>Files, diffs, and outputs will land here</PortalEmpty>
@@ -3958,11 +3945,11 @@ function ActivityPanel({
           )}
         </section>
 
-        <section className="space-y-2">
+        <section className="space-y-3 pb-1">
           <PortalSectionHeader
             count={sources.length}
             label="Sources"
-            meta="model and session"
+            meta=""
           />
           {sources.map((source) => (
             <SourceCard key={source.id} source={source} />
@@ -3983,25 +3970,27 @@ function PortalSectionHeader({
   meta: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 px-1">
+    <div className="flex items-center justify-between gap-3">
       <div className="flex items-center gap-2">
-        <span className="text-[0.72rem] font-semibold text-[var(--chat-muted-strong)]">
+        <span className="text-[1rem] font-medium leading-6 text-[var(--chat-muted-strong)]">
           {label}
         </span>
-        <span className="rounded-full bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.6rem] text-[var(--chat-muted)]">
+        <span className="rounded-full bg-[color-mix(in_srgb,var(--chat-surface-strong)_48%,transparent)] px-1.5 py-0.5 text-[0.64rem] leading-none text-[var(--chat-muted)]">
           {count}
         </span>
       </div>
-      <span className="truncate text-[0.65rem] text-[var(--chat-muted)]">
-        {meta}
-      </span>
+      {meta && (
+        <span className="truncate text-[0.68rem] text-[var(--chat-muted)]">
+          {meta}
+        </span>
+      )}
     </div>
   );
 }
 
 function PortalEmpty({ children }: { children: ReactNode }) {
   return (
-    <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
+    <div className="px-1 py-2 text-[0.82rem] leading-5 text-[var(--chat-muted)]">
       {children}
     </div>
   );
@@ -4018,16 +4007,16 @@ function SourceCard({ source }: { source: SourceEntry }) {
           : FileText;
 
   return (
-    <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2.5">
-      <div className="flex items-start gap-2.5">
-        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]">
-          <Icon className="h-3.5 w-3.5" />
+    <div className="rounded-xl px-1 py-1.5 transition-colors hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center text-[var(--chat-muted-strong)]">
+          <Icon className="h-[1.05rem] w-[1.05rem]" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-[var(--chat-text)]">
+          <div className="truncate text-[0.93rem] font-medium leading-6 text-[var(--chat-text)]">
             {source.title}
           </div>
-          <div className="mt-0.5 line-clamp-2 text-xs leading-4 text-[var(--chat-muted)]">
+          <div className="line-clamp-2 text-[0.73rem] leading-4 text-[var(--chat-muted)]">
             {source.detail || source.kind}
           </div>
         </div>
