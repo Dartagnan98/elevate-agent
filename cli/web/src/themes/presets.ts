@@ -47,7 +47,7 @@ export const defaultTheme: DashboardTheme = {
     midground: { hex: "#e7f0ff", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
     warmGlow: "rgba(76, 141, 255, 0.34)",
-    noiseOpacity: 0.95,
+    noiseOpacity: 0.42,
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,

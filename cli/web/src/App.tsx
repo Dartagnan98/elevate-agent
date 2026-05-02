@@ -48,7 +48,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { SelectionSwitcher, Typography } from "@nous-research/ui";
+import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
+import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { api, type SessionInfo } from "@/lib/api";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";

@@ -56,7 +56,7 @@
 
   /* Consumed by <Backdrop />; also theme-switchable. */
   --warm-glow: rgba(76, 141, 255, 0.34);
-  --noise-opacity-mul: 0.95;
+  --noise-opacity-mul: 0.42;
 
   /* Typography tokens — rewritten by ThemeProvider. Defaults match the
      system stack so themes that don't override look native. */
@@ -211,15 +211,4 @@ code { font-size: 0.875rem; }
   pointer-events: none;
   background: repeating-conic-gradient(currentColor 0% 25%, #0000 0% 50%) 0 0 /
     2px 2px;
-}
-
-/* When a theme provides `assets.bg`, the backdrop's <div> renders it as
-   a CSS background; the default filler <img> is hidden to prevent
-   double-compositing. Unset → initial → empty, so the :not() selector
-   matches and the default image stays visible. */
-:root:not([style*="--theme-asset-bg:"]) .theme-default-filler {
-  display: block;
-}
-:root[style*="--theme-asset-bg:"] .theme-default-filler {
-  display: none;
 }
