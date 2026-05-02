@@ -426,6 +426,21 @@ export default function AgentHubPage() {
     () => snapshot?.platforms.filter((platform) => platform.configured) ?? [],
     [snapshot],
   );
+  const executiveAgent = useMemo(
+    () =>
+      snapshot?.agents.find((agent) => agent.id === "executive-assistant") ??
+      snapshot?.agents[0] ??
+      null,
+    [snapshot],
+  );
+  const activeAgents = snapshot?.agents.filter((agent) => agent.enabled) ?? [];
+  const liveSessions = snapshot?.sessions.recent.filter((session) => session.is_active) ?? [];
+  const pendingPairings =
+    snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ??
+    0;
+  const memoryEmbeddingLabel = snapshot?.memory.embedding.enabled
+    ? `${snapshot.memory.embedding.provider}:${snapshot.memory.embedding.model}`
+    : "off";
 
   const runAction = async (name: "start" | "restart") => {
     setBusyAction(name);
@@ -457,100 +472,56 @@ export default function AgentHubPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
       <Toast toast={toast} />
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-        <Stat icon={Activity} label="Gateway" value={snapshot.gateway.running ? "Online" : "Offline"} />
-        <Stat icon={Users} label="Agents" value={snapshot.agents.length} />
-        <Stat icon={Terminal} label="Active" value={snapshot.sessions.active} />
-        <Stat icon={Brain} label="Facts" value={snapshot.memory.facts} />
-        <Stat icon={Database} label="Entities" value={snapshot.memory.entities} />
-        <Stat icon={CalendarClock} label="Cron" value={snapshot.cron.enabled} />
-      </div>
+      <section className="overflow-hidden rounded-lg border border-border bg-card/70">
+        <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
+          <div className="min-w-0 space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={snapshot.gateway.running ? "success" : "warning"}>
+                {snapshot.gateway.running ? "Gateway online" : "Gateway offline"}
+              </Badge>
+              <Badge variant="outline">
+                {snapshot.model.provider || "model"} / {snapshot.model.model || "not set"}
+              </Badge>
+              <Badge variant={snapshot.memory.embedding.enabled ? "success" : "outline"}>
+                Memory {memoryEmbeddingLabel}
+              </Badge>
+            </div>
 
-      <div className="grid gap-4 xl:grid-cols-[20rem_minmax(0,1fr)_22rem]">
-        <div className="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Memory Graph</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <MemoryGraph
-                nodes={snapshot.memory.graph.nodes}
-                edges={snapshot.memory.graph.edges}
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <MiniMetric label="Pending" value={snapshot.memory.journal.pending} />
-                <MiniMetric label="Segments" value={snapshot.memory.journal.session_segment_count} />
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {snapshot.memory.provider} memory
-                {snapshot.memory.embedding.enabled
-                  ? ` / ${snapshot.memory.embedding.provider}:${snapshot.memory.embedding.model}`
-                  : ""}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Sessions</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {snapshot.sessions.recent.slice(0, 6).map((session) => (
-                <div key={session.id} className="border border-border bg-muted/20 p-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm">{session.title}</span>
-                    {session.is_active && <Badge variant="success">Live</Badge>}
-                  </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{session.source}</span>
-                    <span>{timeAgo(session.last_active)}</span>
-                  </div>
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-muted-foreground">
+                  Main agent
                 </div>
-              ))}
-            </CardContent>
-          </Card>
-        </div>
+                <h1 className="mt-1 truncate text-2xl font-semibold leading-tight text-foreground sm:text-3xl">
+                  {executiveAgent?.name ?? "Executive Assistant"}
+                </h1>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+                  {executiveAgent?.description ||
+                    executiveAgent?.role ||
+                    "Primary operator and orchestration agent for the local Elevate workspace."}
+                </p>
+              </div>
 
-        <div className="flex flex-col gap-4">
-          <Card>
+              <div className="grid grid-cols-2 gap-2">
+                <MiniMetric label="Agent team" value={activeAgents.length} />
+                <MiniMetric label="Live chats" value={liveSessions.length} />
+                <MiniMetric label="Memory queue" value={snapshot.memory.journal.pending} />
+                <MiniMetric label="Cron live" value={snapshot.cron.enabled} />
+              </div>
+            </div>
+          </div>
+
+          <Card className="bg-background/35">
             <CardHeader>
               <div className="flex items-center justify-between gap-3">
-                <CardTitle>Agent Orchestration</CardTitle>
+                <CardTitle>Gateway</CardTitle>
                 <Badge variant={snapshot.gateway.running ? "success" : "warning"}>
-                  {snapshot.gateway.running ? `PID ${snapshot.gateway.pid}` : "Stopped"}
+                  {snapshot.gateway.pid ? `PID ${snapshot.gateway.pid}` : "Stopped"}
                 </Badge>
               </div>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-3 md:grid-cols-2">
-                {snapshot.agents.map((agent) => (
-                  <AgentCard key={agent.id} agent={agent} />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Runtime</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-3">
-              <MiniMetric label="Model" value={snapshot.model.model || "Not set"} />
-              <MiniMetric label="Toolsets" value={snapshot.toolsets.enabled.length} />
-              <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
-            </CardContent>
-          </Card>
-
-          <HarnessCard harness={snapshot.harness} />
-        </div>
-
-        <div className="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Gateway</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <div className="flex gap-2">
@@ -589,6 +560,96 @@ export default function AgentHubPage() {
                   value={snapshot.gateway.updated_at ? isoTimeAgo(snapshot.gateway.updated_at) : "unknown"}
                 />
               </div>
+            </CardContent>
+          </Card>
+        </div>
+      </section>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+        <Stat icon={Activity} label="Gateway" value={snapshot.gateway.running ? "Online" : "Offline"} />
+        <Stat icon={Users} label="Agents" value={snapshot.agents.length} />
+        <Stat icon={Terminal} label="Active" value={snapshot.sessions.active} />
+        <Stat icon={Brain} label="Facts" value={snapshot.memory.facts} />
+        <Stat icon={Database} label="Entities" value={snapshot.memory.entities} />
+        <Stat icon={CalendarClock} label="Cron" value={snapshot.cron.enabled} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <div className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle>Agent Orchestration</CardTitle>
+                <Badge variant={snapshot.gateway.running ? "success" : "warning"}>
+                  {activeAgents.length} enabled
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 md:grid-cols-2">
+                {snapshot.agents.map((agent) => (
+                  <AgentCard key={agent.id} agent={agent} />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Runtime</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-4">
+              <MiniMetric label="Model" value={snapshot.model.model || "Not set"} />
+              <MiniMetric label="Toolsets" value={snapshot.toolsets.enabled.length} />
+              <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
+              <MiniMetric label="Pairings" value={pendingPairings} />
+            </CardContent>
+          </Card>
+
+          <HarnessCard harness={snapshot.harness} />
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Memory Graph</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <MemoryGraph
+                nodes={snapshot.memory.graph.nodes}
+                edges={snapshot.memory.graph.edges}
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <MiniMetric label="Pending" value={snapshot.memory.journal.pending} />
+                <MiniMetric label="Segments" value={snapshot.memory.journal.session_segment_count} />
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {snapshot.memory.provider} memory / {memoryEmbeddingLabel}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Sessions</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {snapshot.sessions.recent.slice(0, 8).map((session) => (
+                <div key={session.id} className="rounded-md border border-border bg-muted/20 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-sm">{session.title || "Untitled session"}</span>
+                    {session.is_active && <Badge variant="success">Live</Badge>}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>{session.source}</span>
+                    <span>{session.message_count} msgs</span>
+                    <span>{timeAgo(session.last_active)}</span>
+                  </div>
+                </div>
+              ))}
+              {!snapshot.sessions.recent.length && (
+                <div className="py-4 text-sm text-muted-foreground">No sessions yet</div>
+              )}
             </CardContent>
           </Card>
 
