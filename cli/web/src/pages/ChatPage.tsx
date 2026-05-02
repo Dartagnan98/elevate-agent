@@ -17,6 +17,9 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  Clipboard,
+  FileCode2,
+  FileText,
   Loader2,
   MessageSquare,
   PanelRight,
@@ -76,6 +79,21 @@ interface ChatMessage {
   warning?: string;
 }
 
+type ArtifactKind = "diff" | "file" | "output";
+
+interface ArtifactEntry {
+  content?: string;
+  createdAt: number;
+  detail?: string;
+  id: string;
+  kind: ArtifactKind;
+  key: string;
+  path?: string;
+  source?: string;
+  status?: "error" | "ok";
+  title: string;
+}
+
 type PendingPrompt =
   | {
       choices?: string[] | null;
@@ -99,6 +117,7 @@ type PendingPrompt =
       type: "secret";
     };
 
+const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
 
 const STATE_LABEL: Record<ConnectionState, string> = {
@@ -170,6 +189,131 @@ function compactToolPayload(payload: unknown) {
     : {}) as Record<string, unknown>;
 }
 
+function fileName(path: string): string {
+  return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() || path;
+}
+
+function artifactKey(entry: Omit<ArtifactEntry, "createdAt" | "id" | "key">) {
+  return [
+    entry.kind,
+    entry.path ?? "",
+    entry.source ?? "",
+    entry.title,
+    (entry.content ?? "").slice(0, 120),
+  ].join(":");
+}
+
+function makeArtifact(
+  entry: Omit<ArtifactEntry, "createdAt" | "id" | "key">,
+): ArtifactEntry {
+  const key = artifactKey(entry);
+
+  return {
+    ...entry,
+    createdAt: Date.now(),
+    id: id(`artifact-${entry.kind}`),
+    key,
+  };
+}
+
+function extractPathsFromText(text: string): string[] {
+  const matches = text.match(
+    /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
+  );
+  return Array.from(new Set(matches ?? [])).slice(0, 12);
+}
+
+function artifactsFromText(text: string, source: string): ArtifactEntry[] {
+  return extractPathsFromText(text).map((path) =>
+    makeArtifact({
+      detail: path,
+      kind: "file",
+      path,
+      source,
+      title: fileName(path),
+    }),
+  );
+}
+
+function artifactsFromToolComplete(
+  payload: Record<string, unknown>,
+): ArtifactEntry[] {
+  const toolName = String(payload.name ?? "tool");
+  const artifacts: ArtifactEntry[] = [];
+  const inlineDiff =
+    typeof payload.inline_diff === "string" ? payload.inline_diff : "";
+  const summary = typeof payload.summary === "string" ? payload.summary : "";
+
+  if (inlineDiff) {
+    artifacts.push(
+      makeArtifact({
+        content: inlineDiff,
+        detail: toolName,
+        kind: "diff",
+        source: toolName,
+        title: `${toolName} changes`,
+      }),
+    );
+    artifacts.push(...artifactsFromText(inlineDiff, toolName));
+  }
+
+  if (summary) {
+    artifacts.push(...artifactsFromText(summary, toolName));
+  }
+
+  return artifacts;
+}
+
+function artifactsFromSubagentEvent(
+  payload: Record<string, unknown>,
+): ArtifactEntry[] {
+  const artifacts: ArtifactEntry[] = [];
+  const source = String(payload.goal || payload.subagent_id || "agent");
+  const filesWritten = Array.isArray(payload.files_written)
+    ? payload.files_written.map(String)
+    : [];
+  const outputTail = Array.isArray(payload.output_tail)
+    ? payload.output_tail
+    : [];
+  const summary = typeof payload.summary === "string" ? payload.summary : "";
+
+  for (const path of filesWritten) {
+    artifacts.push(
+      makeArtifact({
+        detail: path,
+        kind: "file",
+        path,
+        source,
+        title: fileName(path),
+      }),
+    );
+  }
+
+  outputTail.forEach((raw, index) => {
+    const item = compactToolPayload(raw);
+    const preview = typeof item.preview === "string" ? item.preview : "";
+    const tool = String(item.tool ?? "tool");
+    if (!preview) return;
+    artifacts.push(
+      makeArtifact({
+        content: preview,
+        detail: source,
+        kind: "output",
+        source: tool,
+        status: item.is_error ? "error" : "ok",
+        title: `${tool} output ${index + 1}`,
+      }),
+    );
+    artifacts.push(...artifactsFromText(preview, tool));
+  });
+
+  if (summary) {
+    artifacts.push(...artifactsFromText(summary, source));
+  }
+
+  return artifacts;
+}
+
 export default function ChatPage() {
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
@@ -184,6 +328,7 @@ export default function ChatPage() {
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const [info, setInfo] = useState<SessionInfo>({});
+  const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [input, setInput] = useState("");
@@ -250,6 +395,23 @@ export default function ChatPage() {
     [ensureAssistant],
   );
 
+  const addArtifacts = useCallback((entries: ArtifactEntry[]) => {
+    if (!entries.length) return;
+
+    setArtifacts((prev) => {
+      const seen = new Set(prev.map((entry) => entry.key));
+      const next = [...prev];
+
+      for (const entry of entries) {
+        if (seen.has(entry.key)) continue;
+        seen.add(entry.key);
+        next.push(entry);
+      }
+
+      return next.slice(-ARTIFACT_LIMIT);
+    });
+  }, []);
+
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
     const sync = () => setNarrow(mql.matches);
@@ -309,6 +471,7 @@ export default function ChatPage() {
     currentAssistantRef.current = null;
     setSessionId(null);
     setInfo({});
+    setArtifacts([]);
     setTools([]);
     setPendingPrompt(null);
     setPromptValue("");
@@ -389,7 +552,13 @@ export default function ChatPage() {
               : tool,
           ),
         );
+        addArtifacts(artifactsFromToolComplete(payload));
       }
+    };
+
+    const trackSubagentArtifacts = (ev: GatewayEvent) => {
+      if (!accepts(ev)) return;
+      addArtifacts(artifactsFromSubagentEvent(compactToolPayload(ev.payload)));
     };
 
     unsubs.push(gw.onState(setState));
@@ -441,6 +610,9 @@ export default function ChatPage() {
           status: status === "interrupted" ? "interrupted" : "complete",
           warning: warning || undefined,
         }));
+        if (text) {
+          addArtifacts(artifactsFromText(text, "assistant"));
+        }
         currentAssistantRef.current = null;
         setBusy(false);
         setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
@@ -470,6 +642,7 @@ export default function ChatPage() {
     unsubs.push(gw.on("tool.start", trackTool));
     unsubs.push(gw.on("tool.progress", trackTool));
     unsubs.push(gw.on("tool.complete", trackTool));
+    unsubs.push(gw.on("subagent.complete", trackSubagentArtifacts));
     unsubs.push(
       gw.on("tool.generating", (ev) => {
         if (!accepts(ev)) return;
@@ -596,7 +769,14 @@ export default function ChatPage() {
       unsubs.forEach((unsub) => unsub());
       gw.close();
     };
-  }, [appendMessage, ensureAssistant, gw, resumeId, updateAssistant]);
+  }, [
+    addArtifacts,
+    appendMessage,
+    ensureAssistant,
+    gw,
+    resumeId,
+    updateAssistant,
+  ]);
 
   const submitPrompt = useCallback(
     async (text: string) => {
@@ -720,6 +900,7 @@ export default function ChatPage() {
   const canPickModel = state === "open" && !!sessionId;
   const activity = (
     <ActivityPanel
+      artifacts={artifacts}
       banner={banner}
       busy={busy}
       canPickModel={canPickModel}
@@ -1103,7 +1284,70 @@ function PendingPromptCard({
   );
 }
 
+function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const Icon = artifact.kind === "diff" ? FileCode2 : FileText;
+  const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
+
+  const copy = () => {
+    navigator.clipboard
+      .writeText(copyText)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
+  };
+
+  return (
+    <div
+      className={cn(
+        "rounded-md border bg-background/60 px-2 py-2 text-xs",
+        artifact.status === "error" && "border-destructive/35 bg-destructive/[0.04]",
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+
+        <button
+          className="min-w-0 flex-1 text-left"
+          onClick={() => artifact.content && setOpen((value) => !value)}
+          type="button"
+        >
+          <div className="truncate font-medium text-foreground">
+            {artifact.title}
+          </div>
+          <div className="mt-0.5 truncate text-[0.68rem] text-muted-foreground">
+            {artifact.detail || artifact.source || artifact.kind}
+          </div>
+        </button>
+
+        <button
+          aria-label="Copy artifact"
+          className="rounded p-1 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+          onClick={copy}
+          type="button"
+        >
+          {copied ? (
+            <CheckCircle2 className="h-3.5 w-3.5" />
+          ) : (
+            <Clipboard className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+
+      {open && artifact.content && (
+        <pre className="mt-2 max-h-48 overflow-auto rounded bg-muted/40 p-2 text-[0.68rem] leading-4 whitespace-pre-wrap">
+          {artifact.content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 function ActivityPanel({
+  artifacts,
   banner,
   busy,
   canPickModel,
@@ -1119,6 +1363,7 @@ function ActivityPanel({
   statusText,
   tools,
 }: {
+  artifacts: ArtifactEntry[];
   banner: string | null;
   busy: boolean;
   canPickModel: boolean;
@@ -1135,6 +1380,7 @@ function ActivityPanel({
   tools: ToolEntry[];
 }) {
   const [toolsOpen, setToolsOpen] = useState(true);
+  const [artifactsOpen, setArtifactsOpen] = useState(true);
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 normal-case">
@@ -1185,6 +1431,39 @@ function ActivityPanel({
           </div>
         </Card>
       )}
+
+      <Card className="flex max-h-64 min-h-0 flex-col p-2">
+        <button
+          className="flex items-center justify-between gap-2 px-1 pb-2 text-left text-xs uppercase tracking-wide text-muted-foreground"
+          onClick={() => setArtifactsOpen((open) => !open)}
+          type="button"
+        >
+          <span className="flex items-center gap-1.5">
+            <FileText className="h-3.5 w-3.5" />
+            Artifacts
+          </span>
+          <Badge variant="secondary" className="text-[0.6rem]">
+            {artifacts.length}
+          </Badge>
+        </button>
+
+        {artifactsOpen && (
+          <div className="flex min-h-0 flex-col gap-1.5 overflow-y-auto pr-1">
+            {artifacts.length === 0 ? (
+              <div className="px-2 py-5 text-center text-xs text-muted-foreground">
+                No artifacts yet
+              </div>
+            ) : (
+              artifacts
+                .slice()
+                .reverse()
+                .map((artifact) => (
+                  <ArtifactCard key={artifact.id} artifact={artifact} />
+                ))
+            )}
+          </div>
+        )}
+      </Card>
 
       <Card className="flex min-h-0 flex-1 flex-col p-2">
         <button
