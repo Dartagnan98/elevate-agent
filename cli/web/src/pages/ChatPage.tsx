@@ -1709,8 +1709,7 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (text) {
-          setStatusText(displayStatusText(text));
-          addActivityTrace("thinking", text);
+          setStatusText("Working...");
         }
       }),
     );
@@ -1719,8 +1718,7 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (text) {
-          setStatusText(displayStatusText(text));
-          addActivityTrace("reasoning", text);
+          setStatusText("Working...");
         }
       }),
     );
