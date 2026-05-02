@@ -5,8 +5,10 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type MouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Routes,
   Route,
@@ -17,23 +19,31 @@ import {
 } from "react-router-dom";
 import {
   Activity,
+  Archive,
   BarChart3,
   BookOpen,
   Bot,
   Clock,
   Code,
+  Copy,
   Database,
   Download,
+  ExternalLink,
   Eye,
   FileText,
   Folder,
+  FolderOpen,
   Globe,
   Heart,
   KeyRound,
   Loader2,
+  MailOpen,
+  Maximize2,
   Menu,
   MessageSquare,
+  MoreHorizontal,
   Package,
+  Pencil,
   Pin,
   Plus,
   Puzzle,
@@ -44,7 +54,6 @@ import {
   Sparkles,
   Star,
   Terminal,
-  Trash2,
   Wrench,
   X,
   Zap,
@@ -444,12 +453,14 @@ export default function App() {
 }
 
 const PINNED_SESSIONS_KEY = "elevate.sidebar.pinnedSessions";
+const UNREAD_SESSIONS_KEY = "elevate.sidebar.unreadSessions";
+const ARCHIVED_SESSIONS_KEY = "elevate.sidebar.archivedSessions";
 const SIDEBAR_SESSION_LIMIT = 48;
 
-function readPinnedSessionIds(): string[] {
+function readStoredSessionIds(key: string): string[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PINNED_SESSIONS_KEY);
+    const raw = window.localStorage.getItem(key);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed)
       ? parsed.filter((value): value is string => typeof value === "string")
@@ -459,13 +470,37 @@ function readPinnedSessionIds(): string[] {
   }
 }
 
-function writePinnedSessionIds(ids: string[]): void {
+function writeStoredSessionIds(key: string, ids: string[]): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(ids));
+    window.localStorage.setItem(key, JSON.stringify(ids));
   } catch {
-    // Local pinning is a convenience only; failing closed keeps navigation usable.
+    // Local sidebar state is a convenience only; failing closed keeps navigation usable.
   }
+}
+
+function readPinnedSessionIds(): string[] {
+  return readStoredSessionIds(PINNED_SESSIONS_KEY);
+}
+
+function writePinnedSessionIds(ids: string[]): void {
+  writeStoredSessionIds(PINNED_SESSIONS_KEY, ids);
+}
+
+function readUnreadSessionIds(): string[] {
+  return readStoredSessionIds(UNREAD_SESSIONS_KEY);
+}
+
+function writeUnreadSessionIds(ids: string[]): void {
+  writeStoredSessionIds(UNREAD_SESSIONS_KEY, ids);
+}
+
+function readArchivedSessionIds(): string[] {
+  return readStoredSessionIds(ARCHIVED_SESSIONS_KEY);
+}
+
+function writeArchivedSessionIds(ids: string[]): void {
+  writeStoredSessionIds(ARCHIVED_SESSIONS_KEY, ids);
 }
 
 function sessionTitle(session: SessionInfo): string {
@@ -487,6 +522,28 @@ function compactSessionAge(ts: number): string {
   return `${Math.floor(delta / 86400)}d`;
 }
 
+type SessionMenuState = {
+  session: SessionInfo;
+  x: number;
+  y: number;
+};
+
+async function copyToClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
 function DesktopSidebar({
   embeddedChat,
   navItems,
@@ -505,6 +562,11 @@ function DesktopSidebar({
   const [sessionError, setSessionError] = useState(false);
   const [query, setQuery] = useState("");
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => readPinnedSessionIds());
+  const [unreadIds, setUnreadIds] = useState<string[]>(() => readUnreadSessionIds());
+  const [archivedIds, setArchivedIds] = useState<string[]>(() =>
+    readArchivedSessionIds(),
+  );
+  const [sessionMenu, setSessionMenu] = useState<SessionMenuState | null>(null);
   const { isBusy, pendingAction, runAction } = useSystemActions();
   const { toast, showToast } = useToast();
 
@@ -529,10 +591,39 @@ function DesktopSidebar({
     writePinnedSessionIds(pinnedIds);
   }, [pinnedIds]);
 
+  useEffect(() => {
+    writeUnreadSessionIds(unreadIds);
+  }, [unreadIds]);
+
+  useEffect(() => {
+    writeArchivedSessionIds(archivedIds);
+  }, [archivedIds]);
+
+  useEffect(() => {
+    if (!sessionMenu) return;
+    const close = () => setSessionMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [sessionMenu]);
+
   const filteredSessions = useMemo(() => {
+    const visibleSessions = sessions.filter(
+      (session) => !archivedIds.includes(session.id),
+    );
     const q = query.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter((session) => {
+    if (!q) return visibleSessions;
+    return visibleSessions.filter((session) => {
       const haystack = [
         sessionTitle(session),
         session.preview ?? "",
@@ -543,7 +634,7 @@ function DesktopSidebar({
         .toLowerCase();
       return haystack.includes(q);
     });
-  }, [query, sessions]);
+  }, [archivedIds, query, sessions]);
 
   const pinnedSessions = filteredSessions.filter((session) =>
     pinnedIds.includes(session.id),
@@ -576,15 +667,130 @@ function DesktopSidebar({
     );
   };
 
-  const sessionDelete = useConfirmDelete<string>({
+  const openSession = useCallback(
+    (session: SessionInfo) => {
+      setUnreadIds((prev) => prev.filter((id) => id !== session.id));
+      navigate(sessionRoute(session, embeddedChat));
+      onNavigate();
+    },
+    [embeddedChat, navigate, onNavigate],
+  );
+
+  const openSessionMenu = useCallback(
+    (session: SessionInfo, event: MouseEvent<HTMLElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setSessionMenu({ session, x: event.clientX, y: event.clientY });
+    },
+    [],
+  );
+
+  const renameSession = useCallback(
+    async (session: SessionInfo) => {
+      setSessionMenu(null);
+      const currentTitle = sessionTitle(session);
+      const title = window.prompt("Rename chat", currentTitle);
+      if (title === null) return;
+      try {
+        const response = await api.renameSession(session.id, title.trim() || null);
+        setSessions((prev) =>
+          prev.map((item) =>
+            item.id === session.id ? { ...item, title: response.title } : item,
+          ),
+        );
+        showToast("Session renamed", "success");
+      } catch (error) {
+        showToast("Failed to rename session", "error");
+      }
+    },
+    [showToast],
+  );
+
+  const toggleUnread = useCallback(
+    (session: SessionInfo) => {
+      setSessionMenu(null);
+      setUnreadIds((prev) => {
+        if (prev.includes(session.id)) {
+          showToast("Marked as read", "success");
+          return prev.filter((id) => id !== session.id);
+        }
+        showToast("Marked as unread", "success");
+        return [session.id, ...prev];
+      });
+    },
+    [showToast],
+  );
+
+  const copySessionId = useCallback(
+    async (session: SessionInfo) => {
+      setSessionMenu(null);
+      try {
+        await copyToClipboard(session.id);
+        showToast("Session ID copied", "success");
+      } catch {
+        showToast("Could not copy session ID", "error");
+      }
+    },
+    [showToast],
+  );
+
+  const copySessionDeepLink = useCallback(
+    async (session: SessionInfo) => {
+      setSessionMenu(null);
+      const url = new URL(sessionRoute(session, true), window.location.origin);
+      try {
+        await copyToClipboard(url.toString());
+        showToast("Deeplink copied", "success");
+      } catch {
+        showToast("Could not copy deeplink", "error");
+      }
+    },
+    [showToast],
+  );
+
+  const copyWorkingDirectory = useCallback(async () => {
+    setSessionMenu(null);
+    try {
+      const status = await api.getStatus();
+      await copyToClipboard(status.project_root || status.elevate_home);
+      showToast("Working directory copied", "success");
+    } catch {
+      showToast("Could not copy working directory", "error");
+    }
+  }, [showToast]);
+
+  const revealSession = useCallback(
+    async (session: SessionInfo) => {
+      setSessionMenu(null);
+      try {
+        await api.revealSession(session.id);
+        showToast("Opened in Finder", "success");
+      } catch {
+        showToast("Could not open session location", "error");
+      }
+    },
+    [showToast],
+  );
+
+  const openMiniWindow = useCallback((session: SessionInfo) => {
+    setSessionMenu(null);
+    const url = sessionRoute(session, true);
+    window.open(
+      url,
+      `elevate-session-${session.id}`,
+      "popup,width=920,height=760,menubar=no,toolbar=no,location=no,status=no",
+    );
+  }, []);
+
+  const sessionArchive = useConfirmDelete<string>({
     onDelete: useCallback(
       async (sessionId: string) => {
         try {
-          await api.deleteSession(sessionId);
-          setSessions((prev) =>
-            prev.filter((session) => session.id !== sessionId),
+          setArchivedIds((prev) =>
+            prev.includes(sessionId) ? prev : [sessionId, ...prev],
           );
           setPinnedIds((prev) => prev.filter((id) => id !== sessionId));
+          setUnreadIds((prev) => prev.filter((id) => id !== sessionId));
 
           const activeResumeId = new URLSearchParams(location.search).get("resume");
           if (
@@ -595,9 +801,9 @@ function DesktopSidebar({
             navigate("/chat");
           }
 
-          showToast("Session deleted", "success");
+          showToast("Chat archived", "success");
         } catch (error) {
-          showToast("Failed to delete session", "error");
+          showToast("Failed to archive chat", "error");
           throw error;
         }
       },
@@ -605,8 +811,8 @@ function DesktopSidebar({
     ),
   });
 
-  const pendingDeleteSession = sessionDelete.pendingId
-    ? sessions.find((session) => session.id === sessionDelete.pendingId)
+  const pendingArchiveSession = sessionArchive.pendingId
+    ? sessions.find((session) => session.id === sessionArchive.pendingId)
     : null;
 
   const navLabel = (item: NavItem) =>
@@ -618,17 +824,40 @@ function DesktopSidebar({
     <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-[13px] tracking-normal text-midground">
       <Toast toast={toast} />
       <DeleteConfirmDialog
-        open={sessionDelete.isOpen}
-        onCancel={sessionDelete.cancel}
-        onConfirm={sessionDelete.confirm}
-        title="Delete session?"
+        open={sessionArchive.isOpen}
+        onCancel={sessionArchive.cancel}
+        onConfirm={sessionArchive.confirm}
+        title="Archive chat?"
         description={
-          pendingDeleteSession
-            ? `"${sessionTitle(pendingDeleteSession)}" will be removed from this machine. This cannot be undone.`
-            : "This session will be removed from this machine. This cannot be undone."
+          pendingArchiveSession
+            ? `"${sessionTitle(pendingArchiveSession)}" will be hidden from this sidebar. Its saved session data stays on this machine.`
+            : "This chat will be hidden from this sidebar. Its saved session data stays on this machine."
         }
-        loading={sessionDelete.isDeleting}
+        loading={sessionArchive.isDeleting}
       />
+      {sessionMenu && (
+        <SessionContextMenu
+          menu={sessionMenu}
+          pinned={pinnedIds.includes(sessionMenu.session.id)}
+          unread={unreadIds.includes(sessionMenu.session.id)}
+          onClose={() => setSessionMenu(null)}
+          onTogglePinned={(session) => {
+            setSessionMenu(null);
+            togglePinned(session.id);
+          }}
+          onRename={renameSession}
+          onArchive={(session) => {
+            setSessionMenu(null);
+            sessionArchive.requestDelete(session.id);
+          }}
+          onToggleUnread={toggleUnread}
+          onOpenFinder={revealSession}
+          onCopyWorkingDirectory={copyWorkingDirectory}
+          onCopySessionId={copySessionId}
+          onCopyDeeplink={copySessionDeepLink}
+          onOpenMiniWindow={openMiniWindow}
+        />
+      )}
       <div className="flex h-[60px] shrink-0 items-center justify-between gap-3 px-4">
         <div className="flex items-center gap-2.5" aria-hidden>
           <span className="h-[11px] w-[11px] rounded-full bg-[#ff5f57]" />
@@ -726,11 +955,12 @@ function DesktopSidebar({
           <SessionSection
             embeddedChat={embeddedChat}
             label="Pinned"
-            onNavigate={onNavigate}
+            onOpenContextMenu={openSessionMenu}
+            onOpenSession={openSession}
             onTogglePinned={togglePinned}
             pinnedIds={pinnedIds}
-            onRequestDelete={sessionDelete.requestDelete}
             sessions={spotlightSessions}
+            unreadIds={unreadIds}
           />
         )}
 
@@ -738,11 +968,12 @@ function DesktopSidebar({
           embeddedChat={embeddedChat}
           label="Chats"
           loading={sessionsLoading}
-          onNavigate={onNavigate}
+          onOpenContextMenu={openSessionMenu}
+          onOpenSession={openSession}
           onTogglePinned={togglePinned}
           pinnedIds={pinnedIds}
-          onRequestDelete={sessionDelete.requestDelete}
           sessions={recentSessions}
+          unreadIds={unreadIds}
           statusText={
             sessionError
               ? "Sessions unavailable"
@@ -852,22 +1083,24 @@ function SessionSection({
   embeddedChat,
   label,
   loading = false,
-  onNavigate,
-  onRequestDelete,
+  onOpenContextMenu,
+  onOpenSession,
   onTogglePinned,
   pinnedIds,
   sessions,
   statusText,
+  unreadIds,
 }: {
   embeddedChat: boolean;
   label: string;
   loading?: boolean;
-  onNavigate: () => void;
-  onRequestDelete: (sessionId: string) => void;
+  onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
+  onOpenSession: (session: SessionInfo) => void;
   onTogglePinned: (sessionId: string) => void;
   pinnedIds: string[];
   sessions: SessionInfo[];
   statusText?: string;
+  unreadIds: string[];
 }) {
   return (
     <div className="mt-4">
@@ -877,11 +1110,12 @@ function SessionSection({
           <SessionListItem
             key={session.id}
             embeddedChat={embeddedChat}
-            onNavigate={onNavigate}
-            onRequestDelete={onRequestDelete}
+            onOpenContextMenu={onOpenContextMenu}
+            onOpenSession={onOpenSession}
             onTogglePinned={onTogglePinned}
             pinned={pinnedIds.includes(session.id)}
             session={session}
+            unread={unreadIds.includes(session.id)}
           />
         ))}
       </div>
@@ -897,18 +1131,20 @@ function SessionSection({
 
 function SessionListItem({
   embeddedChat,
-  onNavigate,
-  onRequestDelete,
+  onOpenContextMenu,
+  onOpenSession,
   onTogglePinned,
   pinned,
   session,
+  unread,
 }: {
   embeddedChat: boolean;
-  onNavigate: () => void;
-  onRequestDelete: (sessionId: string) => void;
+  onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
+  onOpenSession: (session: SessionInfo) => void;
   onTogglePinned: (sessionId: string) => void;
   pinned: boolean;
   session: SessionInfo;
+  unread: boolean;
 }) {
   const route = sessionRoute(session, embeddedChat);
   const location = useLocation();
@@ -919,7 +1155,11 @@ function SessionListItem({
   return (
     <NavLink
       to={route}
-      onClick={onNavigate}
+      onClick={(event) => {
+        event.preventDefault();
+        onOpenSession(session);
+      }}
+      onContextMenu={(event) => onOpenContextMenu(session, event)}
       className={cn(
         "group relative flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5",
         "text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
@@ -931,7 +1171,11 @@ function SessionListItem({
       <span
         className={cn(
           "h-2 w-2 shrink-0 rounded-full",
-          session.is_active ? "bg-success" : "bg-current/30",
+          unread
+            ? "bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-primary)_14%,transparent)]"
+            : session.is_active
+              ? "bg-success"
+              : "bg-current/30",
         )}
       />
       <span className="min-w-0 flex-1 truncate text-[0.82rem] font-medium leading-4">
@@ -967,27 +1211,173 @@ function SessionListItem({
       </button>
       <button
         type="button"
-        aria-label="Delete session"
-        title="Delete session"
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onRequestDelete(session.id);
-        }}
+        aria-label="Open chat menu"
+        title="Open chat menu"
+        onClick={(event) => onOpenContextMenu(session, event)}
         className={cn(
           "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
           "text-muted-foreground/45 opacity-55 transition-all",
-          "hover:bg-destructive/10 hover:text-destructive",
+          "hover:bg-accent hover:text-midground",
           "group-hover:opacity-100 focus-visible:opacity-100",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-destructive/50",
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
         )}
       >
-        <Trash2 className="h-[13px] w-[13px]" />
+        <MoreHorizontal className="h-[13px] w-[13px]" />
       </button>
       <span className="sr-only">
         {session.source ?? "local"} {timeAgo(session.last_active)}
       </span>
     </NavLink>
+  );
+}
+
+function SessionContextMenu({
+  menu,
+  pinned,
+  unread,
+  onArchive,
+  onClose,
+  onCopyDeeplink,
+  onCopySessionId,
+  onCopyWorkingDirectory,
+  onOpenFinder,
+  onOpenMiniWindow,
+  onRename,
+  onTogglePinned,
+  onToggleUnread,
+}: {
+  menu: SessionMenuState;
+  pinned: boolean;
+  unread: boolean;
+  onArchive: (session: SessionInfo) => void;
+  onClose: () => void;
+  onCopyDeeplink: (session: SessionInfo) => void;
+  onCopySessionId: (session: SessionInfo) => void;
+  onCopyWorkingDirectory: () => void;
+  onOpenFinder: (session: SessionInfo) => void;
+  onOpenMiniWindow: (session: SessionInfo) => void;
+  onRename: (session: SessionInfo) => void;
+  onTogglePinned: (session: SessionInfo) => void;
+  onToggleUnread: (session: SessionInfo) => void;
+}) {
+  const menuWidth = 264;
+  const menuHeight = 374;
+  const left =
+    typeof window === "undefined"
+      ? menu.x
+      : Math.min(menu.x, Math.max(8, window.innerWidth - menuWidth - 8));
+  const top =
+    typeof window === "undefined"
+      ? menu.y
+      : Math.min(menu.y, Math.max(8, window.innerHeight - menuHeight - 8));
+
+  const run = (action: () => void) => {
+    action();
+    onClose();
+  };
+
+  return createPortal(
+    <div
+      role="menu"
+      aria-label={`Options for ${sessionTitle(menu.session)}`}
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+      style={{ left, top }}
+      className={cn(
+        "fixed z-[100] w-[16.5rem] rounded-2xl p-1.5",
+        "bg-card/98 text-midground shadow-[0_18px_54px_color-mix(in_srgb,var(--midground-base)_22%,transparent),0_0_0_1px_color-mix(in_srgb,var(--midground-base)_14%,transparent)] backdrop-blur-xl",
+      )}
+    >
+      <SessionMenuButton
+        icon={Pin}
+        label={pinned ? "Unpin chat" : "Pin chat"}
+        onClick={() => run(() => onTogglePinned(menu.session))}
+      />
+      <SessionMenuButton
+        icon={Pencil}
+        label="Rename chat"
+        onClick={() => run(() => onRename(menu.session))}
+      />
+      <SessionMenuButton
+        icon={Archive}
+        label="Archive chat"
+        destructive
+        onClick={() => run(() => onArchive(menu.session))}
+      />
+      <SessionMenuButton
+        icon={MailOpen}
+        label={unread ? "Mark as read" : "Mark as unread"}
+        onClick={() => run(() => onToggleUnread(menu.session))}
+      />
+      <SessionMenuSeparator />
+      <SessionMenuButton
+        icon={FolderOpen}
+        label="Open in Finder"
+        onClick={() => run(() => onOpenFinder(menu.session))}
+      />
+      <SessionMenuButton
+        icon={Copy}
+        label="Copy working directory"
+        onClick={() => run(onCopyWorkingDirectory)}
+      />
+      <SessionMenuButton
+        icon={Copy}
+        label="Copy session ID"
+        onClick={() => run(() => onCopySessionId(menu.session))}
+      />
+      <SessionMenuButton
+        icon={ExternalLink}
+        label="Copy deeplink"
+        onClick={() => run(() => onCopyDeeplink(menu.session))}
+      />
+      <SessionMenuSeparator />
+      <SessionMenuButton
+        icon={Maximize2}
+        label="Open in mini window"
+        onClick={() => run(() => onOpenMiniWindow(menu.session))}
+      />
+    </div>,
+    document.body,
+  );
+}
+
+function SessionMenuSeparator() {
+  return (
+    <div className="my-1 h-px bg-[color-mix(in_srgb,var(--midground-base)_12%,transparent)]" />
+  );
+}
+
+function SessionMenuButton({
+  destructive = false,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  destructive?: boolean;
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+      className={cn(
+        "flex min-h-9 w-full items-center gap-3 rounded-xl px-3 text-left text-[0.9rem] font-semibold leading-none",
+        "transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+        destructive
+          ? "text-destructive hover:bg-destructive/10"
+          : "text-midground hover:bg-accent/80",
+      )}
+    >
+      <Icon className="h-4 w-4 shrink-0 opacity-75" />
+      <span className="truncate">{label}</span>
+    </button>
   );
 }
 

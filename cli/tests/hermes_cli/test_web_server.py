@@ -142,6 +142,52 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["agents"] == []
 
+    def test_update_session_title(self):
+        from elevate_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="rename-test-session", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.put(
+            "/api/sessions/rename-test-session/title",
+            json={"title": "Client prep notes"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "title": "Client prep notes"}
+
+        db = SessionDB()
+        try:
+            assert db.get_session("rename-test-session")["title"] == "Client prep notes"
+        finally:
+            db.close()
+
+    def test_reveal_session_opens_transcript(self, monkeypatch):
+        from elevate_cli.config import get_elevate_home
+        import elevate_cli.web_server as web_server
+        from elevate_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="reveal-test-session", source="cli")
+        finally:
+            db.close()
+
+        transcript = get_elevate_home() / "sessions" / "reveal-test-session.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{"role":"user","content":"hello"}\n')
+        popen = MagicMock()
+        monkeypatch.setattr(web_server.subprocess, "Popen", popen)
+
+        resp = self.client.post("/api/sessions/reveal-test-session/reveal")
+
+        assert resp.status_code == 200
+        assert resp.json()["path"] == str(transcript)
+        popen.assert_called_once()
+
     def test_gateway_ws_ready_and_clean_disconnect(self, monkeypatch):
         import elevate_cli.web_server as web_server
 

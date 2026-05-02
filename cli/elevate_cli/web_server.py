@@ -785,6 +785,10 @@ _ACTION_LOG_FILES: Dict[str, str] = {
 _ACTION_PROCS: Dict[str, subprocess.Popen] = {}
 
 
+class SessionTitleUpdate(BaseModel):
+    title: Optional[str] = None
+
+
 def _spawn_elevate_action(subcommand: List[str], name: str) -> subprocess.Popen:
     """Spawn ``elevate <subcommand>`` detached and record the Popen handle.
 
@@ -907,6 +911,32 @@ async def get_action_status(name: str, lines: int = 200):
         "pid": pid,
         "lines": tail,
     }
+
+
+def _session_reveal_target(session_id: str) -> Path:
+    sessions_dir = get_elevate_home() / "sessions"
+    transcript = sessions_dir / f"{session_id}.jsonl"
+    if transcript.exists():
+        return transcript
+    return sessions_dir
+
+
+def _open_in_file_manager(path: Path) -> None:
+    path = path.expanduser().resolve()
+    if sys.platform == "darwin":
+        cmd = ["open", "-R", str(path)] if path.is_file() else ["open", str(path)]
+    elif sys.platform == "win32":
+        selector = f"/select,{path}" if path.is_file() else str(path)
+        cmd = ["explorer", selector]
+    else:
+        cmd = ["xdg-open", str(path if path.is_dir() else path.parent)]
+
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 @app.get("/api/sessions")
@@ -2126,6 +2156,49 @@ async def get_session_messages(session_id: str):
             raise HTTPException(status_code=404, detail="Session not found")
         messages = db.get_messages(sid)
         return {"session_id": sid, "messages": messages}
+    finally:
+        db.close()
+
+
+@app.put("/api/sessions/{session_id}/title")
+async def update_session_title_endpoint(session_id: str, payload: SessionTitleUpdate):
+    from elevate_state import SessionDB
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        try:
+            updated = db.set_session_title(sid, payload.title or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not updated:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session = db.get_session(sid)
+        return {"ok": True, "title": session.get("title") if session else None}
+    finally:
+        db.close()
+
+
+@app.post("/api/sessions/{session_id}/reveal")
+async def reveal_session_endpoint(session_id: str):
+    from elevate_state import SessionDB
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid or not db.get_session(sid):
+            raise HTTPException(status_code=404, detail="Session not found")
+        target = _session_reveal_target(sid)
+        if target.suffix:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target.mkdir(parents=True, exist_ok=True)
+        _open_in_file_manager(target)
+        return {"ok": True, "path": str(target)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=f"File manager unavailable: {exc}")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not open session location: {exc}")
     finally:
         db.close()
 

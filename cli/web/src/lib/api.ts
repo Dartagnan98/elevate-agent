@@ -49,6 +49,22 @@ export const api = {
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
+  renameSession: (id: string, title: string | null) =>
+    fetchJSON<{ ok: boolean; title: string | null }>(
+      `/api/sessions/${encodeURIComponent(id)}/title`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      },
+    ),
+  revealSession: (id: string) =>
+    fetchJSON<{ ok: boolean; path: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/reveal`,
+      {
+        method: "POST",
+      },
+    ),
   deleteSession: (id: string) =>
     fetchJSON<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
