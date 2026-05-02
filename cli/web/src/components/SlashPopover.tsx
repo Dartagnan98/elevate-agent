@@ -192,6 +192,24 @@ function displayCommandLabel(display: unknown, text: string): string {
     .join(" ");
 }
 
+function displaySkillName(name: string): string {
+  return name
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function skillCommandText(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[ _]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug ? `/${slug}` : "";
+}
+
 function detectTrigger(input: string, caretIndex: number): Trigger | null {
   const caret = Math.max(0, Math.min(caretIndex, input.length));
   const before = input.slice(0, caret);
@@ -234,6 +252,26 @@ function matchesMention(item: Pick<PickerItem, "display" | "meta" | "text">, que
     .includes(q);
 }
 
+function matchesSlash(item: Pick<PickerItem, "display" | "meta" | "text">, query: string): boolean {
+  const q = query.toLowerCase();
+  if (!q) return true;
+  return [
+    asPlainText(item.display),
+    item.text.replace(/^\//, ""),
+    item.text,
+    item.meta ?? "",
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(q);
+}
+
+function slashCommandQuery(text: string): string | null {
+  const body = text.replace(/^\/+/, "");
+  if (/\s/.test(body)) return null;
+  return body.toLowerCase();
+}
+
 function mentionCatalogItems(
   catalog: MentionCatalog,
   agents: CompletionAgent[],
@@ -241,7 +279,7 @@ function mentionCatalogItems(
 ): PickerItem[] {
   const items: PickerItem[] = [];
 
-  for (const agent of agents.filter((agent) => agent.enabled).slice(0, MAX_GROUP_ITEMS)) {
+  for (const agent of agents.filter((agent) => agent.enabled)) {
     items.push({
       display: agent.name,
       group: "Agents",
@@ -252,7 +290,7 @@ function mentionCatalogItems(
     });
   }
 
-  for (const plugin of catalog.plugins.slice(0, MAX_GROUP_ITEMS)) {
+  for (const plugin of catalog.plugins) {
     items.push({
       display: plugin.label || plugin.name,
       group: "Plugins",
@@ -263,7 +301,7 @@ function mentionCatalogItems(
     });
   }
 
-  for (const toolset of catalog.toolsets.filter((toolset) => toolset.enabled).slice(0, MAX_GROUP_ITEMS)) {
+  for (const toolset of catalog.toolsets.filter((toolset) => toolset.enabled)) {
     items.push({
       display: toolset.label || toolset.name,
       group: "Toolsets",
@@ -274,13 +312,9 @@ function mentionCatalogItems(
     });
   }
 
-  for (const skill of catalog.skills.filter((skill) => skill.enabled).slice(0, 80)) {
+  for (const skill of catalog.skills.filter((skill) => skill.enabled)) {
     items.push({
-      display: skill.name
-        .split(/[-_]/)
-        .filter(Boolean)
-        .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
-        .join(" "),
+      display: displaySkillName(skill.name),
       group: "Skills",
       icon: Box,
       kind: "skill",
@@ -318,16 +352,65 @@ function classifyPathItem(item: CompletionItem): PickerItem {
   };
 }
 
-function normalizeSlashItem(item: CompletionItem): PickerItem {
+function slashSkillItems(catalog: MentionCatalog, query: string | null): PickerItem[] {
+  if (query === null) return [];
+  return catalog.skills
+    .filter((skill) => skill.enabled)
+    .map((skill) => {
+      const commandText = skillCommandText(skill.name);
+      return {
+        display: displaySkillName(skill.name),
+        group: "Skills",
+        icon: Sparkles,
+        kind: "skill" as const,
+        meta: [skill.description, skill.category].filter(Boolean).join(" · "),
+        text: commandText,
+      };
+    })
+    .filter((item) => item.text && matchesSlash(item, query))
+    .slice(0, MAX_GROUP_ITEMS);
+}
+
+function skillCommandMap(catalog: MentionCatalog): Map<string, SkillInfo> {
+  const mapped = new Map<string, SkillInfo>();
+  for (const skill of catalog.skills.filter((candidate) => candidate.enabled)) {
+    const commandText = skillCommandText(skill.name);
+    if (commandText) mapped.set(commandText.toLowerCase(), skill);
+  }
+  return mapped;
+}
+
+function normalizeSlashItem(
+  item: CompletionItem,
+  skillsByCommand: Map<string, SkillInfo>,
+): PickerItem {
   const commandText = item.text.startsWith("/") ? item.text : `/${item.text}`;
+  const skill = skillsByCommand.get(commandText.toLowerCase());
   return {
-    display: displayCommandLabel(item.display, commandText),
-    group: "Commands",
-    icon: commandIcon(commandText),
-    kind: "slash",
-    meta: item.meta,
+    display: skill ? displaySkillName(skill.name) : displayCommandLabel(item.display, commandText),
+    group: skill ? "Skills" : "Commands",
+    icon: skill ? Sparkles : commandIcon(commandText),
+    kind: skill ? "skill" : "slash",
+    meta: skill ? [skill.description, skill.category].filter(Boolean).join(" · ") : item.meta,
     text: commandText,
   };
+}
+
+function orderGroupedItems(items: PickerItem[], groupOrder: string[]): PickerItem[] {
+  const seen = new Set<string>();
+  const grouped = new Map<string, PickerItem[]>();
+  for (const item of items) {
+    const dedupeKey = `${item.group}:${item.text}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    const group = grouped.get(item.group) ?? [];
+    if (group.length < MAX_GROUP_ITEMS) {
+      group.push(item);
+      grouped.set(item.group, group);
+    }
+  }
+  return groupOrder.flatMap((group) => grouped.get(group) ?? []);
 }
 
 function shouldAppendSpace(item: PickerItem): boolean {
@@ -351,7 +434,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     const requestKeyRef = useRef("");
 
     useEffect(() => {
-      if (trigger?.mode !== "mention" || catalogLoadedRef.current) return;
+      if (!trigger || catalogLoadedRef.current) return;
       catalogLoadedRef.current = true;
       void Promise.allSettled([
         api.getSkills(),
@@ -364,7 +447,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           toolsets: toolsets.status === "fulfilled" ? toolsets.value : [],
         });
       });
-    }, [trigger?.mode]);
+    }, [trigger]);
 
     useEffect(() => {
       if (!trigger || !gw) {
@@ -374,7 +457,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
 
       const key =
         trigger.mode === "slash"
-          ? `slash:${trigger.text}`
+          ? `slash:${trigger.text}:${catalog.skills.length}`
           : `mention:${trigger.word}:${catalog.skills.length}:${catalog.toolsets.length}:${catalog.plugins.length}:${agents.length}`;
       requestKeyRef.current = key;
 
@@ -386,7 +469,13 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
             });
             if (requestKeyRef.current !== key) return;
             setSlashReplaceFrom(response?.replace_from ?? 1);
-            setItems((response?.items ?? []).map(normalizeSlashItem));
+            const query = slashCommandQuery(trigger.text);
+            const skillsByCommand = skillCommandMap(catalog);
+            const commandItems = (response?.items ?? [])
+              .map((item) => normalizeSlashItem(item, skillsByCommand))
+              .filter((item) => query === null || matchesSlash(item, query));
+            const skillItems = slashSkillItems(catalog, query);
+            setItems(orderGroupedItems([...commandItems, ...skillItems], ["Commands", "Skills"]));
             setSelected(0);
             return;
           }
@@ -402,15 +491,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
             matchesMention(item, trigger.query),
           );
           const merged = [...catalogItems, ...contextItems, ...fileItems];
-          const seen = new Set<string>();
-          setItems(
-            merged.filter((item) => {
-              const dedupeKey = `${item.group}:${item.text}`;
-              if (seen.has(dedupeKey)) return false;
-              seen.add(dedupeKey);
-              return true;
-            }),
-          );
+          setItems(orderGroupedItems(merged, ["Agents", "Plugins", "Toolsets", "Skills", "Context", "Files"]));
           setSelected(0);
         } catch {
           if (requestKeyRef.current === key) {
