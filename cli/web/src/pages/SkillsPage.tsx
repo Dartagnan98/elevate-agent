@@ -110,10 +110,16 @@ const REAL_ESTATE_WORKFLOWS = [
     names: ["mlc", "digisign", "webforms", "skyleigh-vault"],
   },
   {
-    key: "marketing",
+    key: "ads",
     icon: Megaphone,
-    label: "Marketing",
-    names: ["marketing", "humanizer", "graphify", "market-stats-watcher"],
+    label: "Ads",
+    names: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
+  },
+  {
+    key: "social-media",
+    icon: Paintbrush,
+    label: "Social Media",
+    names: ["social-media", "humanizer", "graphify"],
   },
 ] as const;
 

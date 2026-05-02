@@ -34,8 +34,14 @@ export function resolvePageTitle(
   if (normalized === "/deals") {
     return "Deals";
   }
+  if (normalized === "/ads") {
+    return "Ads";
+  }
+  if (normalized === "/social-media") {
+    return "Social Media";
+  }
   if (normalized === "/marketing") {
-    return "Marketing";
+    return "Ads";
   }
   if (normalized === "/tasks") {
     return "Tasks";

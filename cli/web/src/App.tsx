@@ -90,12 +90,13 @@ import ChatPage from "@/pages/ChatPage";
 import AgentHubPage from "@/pages/AgentHubPage";
 import ProjectPage from "@/pages/ProjectPage";
 import {
+  RealEstateAdsPage,
   RealEstateDealsPage,
   RealEstateApprovalsPage,
   RealEstateLeadsPage,
   RealEstateListingsPage,
-  RealEstateMarketingPage,
   RealEstateMemoryPage,
+  RealEstateSocialMediaPage,
   RealEstateTasksPage,
   RealEstateTodayPage,
 } from "@/pages/RealEstateHubPages";
@@ -113,6 +114,10 @@ function RootRedirect() {
   return <Navigate to="/today" replace />;
 }
 
+function MarketingRedirect() {
+  return <Navigate to="/ads" replace />;
+}
+
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
@@ -127,7 +132,9 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/leads": RealEstateLeadsPage,
   "/listings": RealEstateListingsPage,
   "/deals": RealEstateDealsPage,
-  "/marketing": RealEstateMarketingPage,
+  "/ads": RealEstateAdsPage,
+  "/social-media": RealEstateSocialMediaPage,
+  "/marketing": MarketingRedirect,
   "/tasks": RealEstateTasksPage,
   "/approvals": RealEstateApprovalsPage,
   "/memory": RealEstateMemoryPage,
@@ -165,8 +172,13 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: BriefcaseBusiness,
   },
   {
-    path: "/marketing",
-    label: "Marketing",
+    path: "/ads",
+    label: "Ads",
+    icon: BarChart3,
+  },
+  {
+    path: "/social-media",
+    label: "Social Media",
     icon: Megaphone,
   },
   {
@@ -1019,7 +1031,8 @@ function DesktopSidebar({
             <SidebarAction icon={Users} label="Leads" path="/leads" onNavigate={go} />
             <SidebarAction icon={Building2} label="Listings" path="/listings" onNavigate={go} />
             <SidebarAction icon={BriefcaseBusiness} label="Deals" path="/deals" onNavigate={go} />
-            <SidebarAction icon={Megaphone} label="Marketing" path="/marketing" onNavigate={go} />
+            <SidebarAction icon={BarChart3} label="Ads" path="/ads" onNavigate={go} />
+            <SidebarAction icon={Megaphone} label="Social Media" path="/social-media" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
             <SidebarAction icon={ShieldCheck} label="Approvals" path="/approvals" onNavigate={go} />
             <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />

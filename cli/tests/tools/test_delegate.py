@@ -1520,9 +1520,9 @@ class TestDispatchDelegateTask(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
         result = AIAgent._dispatch_delegate_task(parent, {
             "goal": "prepare listing campaign",
-            "agent_id": "marketing",
+            "agent_id": "ads",
             "expected_return": "draft campaign outline",
-            "handoff_reason": "marketing owns campaign strategy",
+            "handoff_reason": "ads owns campaign strategy",
             "priority": "high",
             "artifacts": ["listing-123"],
             "parent_run_id": "run-parent",
@@ -1530,9 +1530,9 @@ class TestDispatchDelegateTask(unittest.TestCase):
 
         self.assertEqual(result, '{"results": []}')
         _, kwargs = mock_delegate.call_args
-        self.assertEqual(kwargs["agent_id"], "marketing")
+        self.assertEqual(kwargs["agent_id"], "ads")
         self.assertEqual(kwargs["expected_return"], "draft campaign outline")
-        self.assertEqual(kwargs["handoff_reason"], "marketing owns campaign strategy")
+        self.assertEqual(kwargs["handoff_reason"], "ads owns campaign strategy")
         self.assertEqual(kwargs["priority"], "high")
         self.assertEqual(kwargs["artifacts"], ["listing-123"])
         self.assertEqual(kwargs["parent_run_id"], "run-parent")
@@ -1900,7 +1900,7 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
 
     def test_handoff_packet_uses_target_default_expected_return(self):
         packet = _build_handoff_packet(
-            source_agent_id="marketing",
+            source_agent_id="ads",
             target_agent_id="social-media",
             task="Turn campaign into posts",
             context=None,
@@ -1927,26 +1927,26 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
     def test_visible_agent_profile_loads_local_soul_and_agents_md(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            agent_dir = root / "orgs" / "skyleigh-elevate" / "agents" / "marketing"
+            agent_dir = root / "orgs" / "skyleigh-elevate" / "agents" / "ads"
             agent_dir.mkdir(parents=True)
-            (agent_dir / "IDENTITY.md").write_text("## Name\nMarketing\n", encoding="utf-8")
-            (agent_dir / "SOUL.md").write_text("# Soul\nMarketing voice and autonomy rules.", encoding="utf-8")
+            (agent_dir / "IDENTITY.md").write_text("## Name\nAds\n", encoding="utf-8")
+            (agent_dir / "SOUL.md").write_text("# Soul\nAds voice and autonomy rules.", encoding="utf-8")
             (agent_dir / "AGENTS.md").write_text("# Agent Instructions\nOwn campaigns and email.", encoding="utf-8")
             (agent_dir / "GOALS.md").write_text("# Goals\n- Launch seller campaign", encoding="utf-8")
             store = MagicMock()
             store.get_agent.return_value = {
-                "agent_id": "marketing",
-                "display_name": "Marketing",
-                "role": "Campaign lane",
+                "agent_id": "ads",
+                "display_name": "Ads",
+                "role": "Paid campaign lane",
                 "org": "skyleigh-elevate",
                 "metadata": {},
             }
 
             with patch.dict(os.environ, {"ELEVATE_FRAMEWORK_ROOT": str(root)}):
-                profile = _agent_job_profile("marketing", store=store)
+                profile = _agent_job_profile("ads", store=store)
             packet = _build_handoff_packet(
                 source_agent_id="executive-assistant",
-                target_agent_id="marketing",
+                target_agent_id="ads",
                 task="Draft campaign",
                 context=None,
                 target_profile=profile,
@@ -1954,17 +1954,18 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
             context = _context_with_handoff_packet(None, packet)
 
         self.assertEqual(Path(profile["local_context"]["agent_dir"]).resolve(), agent_dir.resolve())
-        self.assertIn("Marketing voice", profile["local_context"]["soul_md"])
+        self.assertIn("Ads voice", profile["local_context"]["soul_md"])
         self.assertIn("TARGET AGENT LOCAL CONTEXT:", context)
         self.assertIn("## SOUL.md", context)
         self.assertIn("## AGENTS.md", context)
         self.assertIn("Own campaigns and email", context)
 
-    def test_marketing_job_profile_owns_email_graphics_and_social_routing(self):
-        profile = _agent_job_profile("marketing")
-        self.assertIn("marketing emails", profile["owns"])
-        self.assertIn("graphics/creative direction", profile["owns"])
-        self.assertIn("social-media routing", profile["owns"])
+    def test_ads_job_profile_owns_paid_campaigns_without_social_routing(self):
+        profile = _agent_job_profile("ads")
+        self.assertIn("paid ads", profile["owns"])
+        self.assertIn("email campaign strategy", profile["owns"])
+        self.assertIn("ad creative direction", profile["owns"])
+        self.assertNotIn("social-media routing", profile["owns"])
 
     def test_handoff_route_blocks_builtin_unapproved_lateral_handoff(self):
         err = _handoff_route_error(

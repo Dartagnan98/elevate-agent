@@ -77,7 +77,7 @@ class TestLoadConfigDefaults:
             "Executive Assistant",
             "Admin",
             "Outreach",
-            "Marketing",
+            "Ads",
             "Social Media",
         }.issubset({agent["name"] for agent in DEFAULT_CONFIG["agent_hub"]["agents"]})
 

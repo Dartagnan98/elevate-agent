@@ -63,14 +63,16 @@ const REAL_ESTATE_SKILL_TARGETS = {
   leads: ["outreach", "outreach-send", "property-lookup", "gmail-doc-router"],
   listings: ["cma", "seller-updates", "showing-time", "weekly-listing", "relisting"],
   deals: ["mlc", "digisign", "webforms", "skyleigh-vault"],
-  marketing: ["marketing", "humanizer", "graphify", "market-stats-watcher"],
+  ads: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
+  "social-media": ["social-media", "humanizer", "graphify"],
 } as const;
 
 const WORKFLOW_LABELS: Record<keyof typeof REAL_ESTATE_SKILL_TARGETS, string> = {
   leads: "Leads",
   listings: "Listings",
   deals: "Deals",
-  marketing: "Marketing",
+  ads: "Ads",
+  "social-media": "Social Media",
 };
 
 const AREA_CONNECTORS: Record<
@@ -80,7 +82,8 @@ const AREA_CONNECTORS: Record<
   leads: ["telegram", "gmail", "google", "slack", "discord", "webhook"],
   listings: ["telegram", "gmail", "google", "webhook"],
   deals: ["gmail", "google", "telegram", "webhook"],
-  marketing: ["gmail", "google", "slack", "telegram", "webhook"],
+  ads: ["gmail", "google", "slack", "telegram", "webhook"],
+  "social-media": ["slack", "telegram", "instagram", "facebook", "buffer", "webhook"],
 };
 
 function useRealEstateHubData(): HubData {
@@ -340,7 +343,7 @@ function ConnectorReadiness({
   });
 
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
       {items.map((item) => (
         <Card key={item.key} className="bg-card/72">
           <CardHeader className="p-4">
@@ -737,7 +740,7 @@ export function RealEstateTodayPage() {
     <HubShell
       data={data}
       eyebrow="Real Estate Command Center"
-      hero="A local-first operating view for leads, listings, deals, marketing, and the agent team."
+      hero="A local-first operating view for leads, listings, deals, ads, social media, and the agent team."
       icon={Home}
       title="Elevate Agent is ready to run from one real-estate hub."
     >
@@ -886,41 +889,81 @@ export function RealEstateDealsPage() {
   );
 }
 
-export function RealEstateMarketingPage() {
+export function RealEstateAdsPage() {
   const data = useRealEstateHubData();
-  useHubHeader("Marketing", data);
+  useHubHeader("Ads", data);
   const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, ["marketing", "social", "campaign", "email", "copy", "buffer", "mailjet"]),
+    sessionMatches(session, ["ads", "paid", "campaign", "email", "copy", "mailjet", "listing ad", "audience"]),
   );
   const jobs = data.cronJobs.filter((job) =>
-    jobMatches(job, ["marketing", "social", "campaign", "email", "buffer", "mailjet", "market stats"]),
+    jobMatches(job, ["ads", "paid", "campaign", "email", "mailjet", "market stats", "listing ad"]),
   );
 
   return (
     <HubShell
       data={data}
-      eyebrow="Marketing Studio"
-      hero="Coordinate campaigns, email, social publishing, market stats, and brand-safe copy from the local skill stack."
-      icon={Megaphone}
-      title="Marketing is a production lane, not a pile of prompts."
+      eyebrow="Ads Studio"
+      hero="Plan listing ads, paid campaigns, email campaigns, market-update positioning, audiences, and creative briefs from the local skill stack."
+      icon={Target}
+      title="Ads handles paid demand, campaign angles, and conversion copy."
     >
       <WorkflowStrip
         items={[
-          { icon: Megaphone, label: "Campaign sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "marketing") && platform.configured).length ?? 0 },
-          { icon: CalendarClock, label: "Content schedules", value: jobs.length },
+          { icon: Target, label: "Ad sessions", value: sessions.length },
+          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "ads") && platform.configured).length ?? 0 },
+          { icon: CalendarClock, label: "Campaign schedules", value: jobs.length },
           { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ConnectorPanel area="marketing" data={data} title="Marketing connectors" />
-        <TimedTasks jobs={jobs} empty="No marketing schedules yet." title="Content schedules" />
+        <ConnectorPanel area="ads" data={data} title="Ads connectors" />
+        <TimedTasks jobs={jobs} empty="No ad schedules yet." title="Campaign schedules" />
       </div>
-      <SkillDirectoryNotice area="marketing" />
+      <SkillDirectoryNotice area="ads" />
       <RecentSessions
-        title="Marketing work"
+        title="Ad work"
         sessions={sessions}
-        empty="No marketing-specific sessions found yet."
+        empty="No ad-specific sessions found yet."
+      />
+    </HubShell>
+  );
+}
+
+export function RealEstateSocialMediaPage() {
+  const data = useRealEstateHubData();
+  useHubHeader("Social Media", data);
+  const sessions = data.sessions.filter((session) =>
+    sessionMatches(session, ["social", "caption", "hook", "post", "reel", "instagram", "facebook", "buffer"]),
+  );
+  const jobs = data.cronJobs.filter((job) =>
+    jobMatches(job, ["social", "caption", "hook", "post", "reel", "instagram", "facebook", "buffer"]),
+  );
+
+  return (
+    <HubShell
+      data={data}
+      eyebrow="Social Studio"
+      hero="Turn listing moments, market updates, and campaign ideas into organic posts, hooks, captions, platform plans, and posting schedules."
+      icon={Megaphone}
+      title="Social Media handles organic content and platform adaptation."
+    >
+      <WorkflowStrip
+        items={[
+          { icon: Megaphone, label: "Social sessions", value: sessions.length },
+          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "social-media") && platform.configured).length ?? 0 },
+          { icon: CalendarClock, label: "Post schedules", value: jobs.length },
+          { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+        ]}
+      />
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <ConnectorPanel area="social-media" data={data} title="Social connectors" />
+        <TimedTasks jobs={jobs} empty="No social schedules yet." title="Post schedules" />
+      </div>
+      <SkillDirectoryNotice area="social-media" />
+      <RecentSessions
+        title="Social work"
+        sessions={sessions}
+        empty="No social-media sessions found yet."
       />
     </HubShell>
   );

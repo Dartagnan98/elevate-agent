@@ -93,6 +93,6 @@ def test_agent_hub_defaults_include_starter_agents(tmp_path, monkeypatch):
         "Executive Assistant",
         "Admin",
         "Outreach",
-        "Marketing",
+        "Ads",
         "Social Media",
     }.issubset(names)

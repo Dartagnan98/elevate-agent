@@ -89,21 +89,21 @@ DEFAULT_ORCHESTRATION_AGENTS: tuple[dict[str, Any], ...] = (
         },
     },
     {
-        "agent_id": "marketing",
-        "display_name": "Marketing",
-        "role": "Campaign, listing, market update, newsletter, and offer positioning agent.",
+        "agent_id": "ads",
+        "display_name": "Ads",
+        "role": "Paid ads, listing campaigns, email campaign, and offer positioning agent.",
         "tier": "specialist",
         "reports_to": "executive-assistant",
-        "lane": "Marketing",
+        "lane": "Ads",
         "org": "standalone",
         "enabled": True,
         "status": "ready",
         "metadata": {
             "job_profile": {
-                "job": "Marketing router and production lane for campaigns, emails, graphics direction, listing positioning, newsletters, and offer framing.",
-                "owns": ["campaign planning", "listing positioning", "email/newsletter copy", "marketing emails", "graphics/creative direction", "market update framing", "offer/message strategy", "social-media routing"],
-                "not_for": ["routine scheduling", "CRM cleanup", "transaction checklist ownership"],
-                "default_expected_return": "Return campaign direction, core message, email/creative plan, draft copy, and next production step.",
+                "job": "Paid acquisition and campaign lane for listing ads, paid social/search strategy, email campaigns, offer framing, and creative briefs.",
+                "owns": ["paid ads", "listing ad strategy", "campaign planning", "email campaign strategy", "ad copy", "ad creative direction", "offer/message strategy", "market update framing"],
+                "not_for": ["routine scheduling", "CRM cleanup", "transaction checklist ownership", "organic social captions unless paired with Social Media"],
+                "default_expected_return": "Return the ad/campaign angle, audience, offer, channel plan, draft copy, and next production step.",
             }
         },
     },
@@ -112,16 +112,16 @@ DEFAULT_ORCHESTRATION_AGENTS: tuple[dict[str, Any], ...] = (
         "display_name": "Social Media",
         "role": "Short-form content, caption, hook, posting plan, and platform adaptation agent.",
         "tier": "specialist",
-        "reports_to": "marketing",
+        "reports_to": "executive-assistant",
         "lane": "Social Media",
         "org": "standalone",
         "enabled": True,
         "status": "ready",
         "metadata": {
             "job_profile": {
-                "job": "Optional production lane for short-form content, hooks, captions, posting plans, and platform adaptation under Marketing.",
-                "owns": ["short-form posts", "caption variants", "hooks", "platform adaptation", "posting schedule ideas", "campaign-to-social adaptation"],
-                "not_for": ["paperwork", "transaction operations", "full campaign strategy unless Marketing asks"],
+                "job": "Organic social production lane for short-form content, hooks, captions, posting plans, and platform-specific adaptation.",
+                "owns": ["short-form posts", "caption variants", "hooks", "platform adaptation", "posting schedule ideas", "content repurposing", "organic social calendar"],
+                "not_for": ["paperwork", "transaction operations", "paid ad strategy unless Ads asks"],
                 "default_expected_return": "Return platform-ready captions/hooks, format notes, and posting recommendation.",
             }
         },
@@ -593,6 +593,17 @@ class OrchestrationStore:
     def ensure_default_agents(self) -> None:
         now = _utc_now()
         with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE orchestration_agents
+                   SET enabled = 0,
+                       status = 'disabled',
+                       updated_at = ?
+                 WHERE agent_id = 'marketing'
+                   AND org = 'standalone'
+                """,
+                (now,),
+            )
             for item in DEFAULT_ORCHESTRATION_AGENTS:
                 conn.execute(
                     """

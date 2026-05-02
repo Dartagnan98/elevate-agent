@@ -96,8 +96,13 @@ _KNOWN_VISIBLE_AGENT_HINTS = {
     "executive-assistant",
     "admin",
     "outreach",
-    "marketing",
+    "ads",
     "social-media",
+}
+_VISIBLE_AGENT_ALIASES = {
+    "marketing": "ads",
+    "paid-ads": "ads",
+    "paid-media": "ads",
 }
 _HANDOFF_PRIORITIES = {"low", "normal", "high", "urgent"}
 _AGENT_MARKDOWN_CONTEXT_FILES = (
@@ -107,11 +112,11 @@ _AGENT_MARKDOWN_CONTEXT_FILES = (
     ("goals_md", "GOALS.md", 1200),
 )
 _DEFAULT_HANDOFF_ROUTES = {
-    "executive-assistant": {"admin", "outreach", "marketing", "social-media"},
-    "outreach": {"admin", "marketing", "executive-assistant"},
-    "marketing": {"social-media", "admin", "outreach", "executive-assistant"},
-    "social-media": {"marketing", "executive-assistant"},
-    "admin": {"executive-assistant", "outreach", "marketing"},
+    "executive-assistant": {"admin", "outreach", "ads", "social-media"},
+    "outreach": {"admin", "ads", "executive-assistant"},
+    "ads": {"social-media", "admin", "outreach", "executive-assistant"},
+    "social-media": {"ads", "executive-assistant"},
+    "admin": {"executive-assistant", "outreach", "ads"},
 }
 _AGENT_JOB_PROFILES = {
     "executive-assistant": {
@@ -154,32 +159,33 @@ _AGENT_JOB_PROFILES = {
         "not_for": ["transaction paperwork", "long-form campaign strategy", "platform-specific social formatting"],
         "default_expected_return": "Return the recommended outreach message, timing, and next follow-up action.",
     },
-    "marketing": {
-        "job": "Marketing router and production lane for campaigns, emails, graphics direction, listing positioning, newsletters, and offer framing.",
+    "ads": {
+        "job": "Paid acquisition and campaign lane for listing ads, paid social/search strategy, email campaigns, offer framing, and creative briefs.",
         "owns": [
+            "paid ads",
+            "listing ad strategy",
             "campaign planning",
-            "listing positioning",
-            "email/newsletter copy",
-            "marketing emails",
-            "graphics/creative direction",
-            "market update framing",
+            "email campaign strategy",
+            "ad copy",
+            "ad creative direction",
             "offer/message strategy",
-            "social-media routing",
+            "market update framing",
         ],
-        "not_for": ["routine scheduling", "CRM cleanup", "transaction checklist ownership"],
-        "default_expected_return": "Return campaign direction, core message, email/creative plan, draft copy, and next production step.",
+        "not_for": ["routine scheduling", "CRM cleanup", "transaction checklist ownership", "organic social captions unless paired with Social Media"],
+        "default_expected_return": "Return the ad/campaign angle, audience, offer, channel plan, draft copy, and next production step.",
     },
     "social-media": {
-        "job": "Optional production lane for short-form content, hooks, captions, posting plans, and platform adaptation under Marketing.",
+        "job": "Organic social production lane for short-form content, hooks, captions, posting plans, and platform-specific adaptation.",
         "owns": [
             "short-form posts",
             "caption variants",
             "hooks",
             "platform adaptation",
             "posting schedule ideas",
-            "campaign-to-social adaptation",
+            "content repurposing",
+            "organic social calendar",
         ],
-        "not_for": ["paperwork", "transaction operations", "full campaign strategy unless Marketing asks"],
+        "not_for": ["paperwork", "transaction operations", "paid ad strategy unless Ads asks"],
         "default_expected_return": "Return platform-ready captions/hooks, format notes, and posting recommendation.",
     },
 }
@@ -188,8 +194,8 @@ _VISIBLE_AGENT_JOB_HINT = (
     "Built-in Elevate job lanes: executive-assistant=main chat, daily updates, routing, final synthesis; "
     "admin=paperwork, scheduling, checklists, listing/transaction status; "
     "outreach=lead/client follow-up, client touchpoints, nurture messaging; "
-    "marketing=campaigns, listing positioning, emails/newsletters, graphics/creative direction, social routing; "
-    "social-media=optional platform production under Marketing for hooks, captions, posts, adaptations."
+    "ads=paid ads, listing ad strategy, email campaigns, ad copy, creative briefs; "
+    "social-media=organic platform production for hooks, captions, posts, adaptations."
 )
 
 
@@ -274,8 +280,13 @@ def _parent_orchestration_agent_id(parent_agent) -> str:
     """Return the visible lane this parent is currently acting as."""
     raw = getattr(parent_agent, "_orchestration_agent_id", None)
     if isinstance(raw, str) and raw.strip():
-        return raw.strip().lower()
+        return _normalize_visible_agent_id(raw)
     return "executive-assistant"
+
+
+def _normalize_visible_agent_id(value: Any) -> str:
+    raw = str(value or "executive-assistant").strip().lower().replace("_", "-")
+    return _VISIBLE_AGENT_ALIASES.get(raw, raw or "executive-assistant")
 
 
 def _clean_handoff_text(value: Any, *, max_chars: int = 1200) -> Optional[str]:
@@ -2427,7 +2438,7 @@ def delegate_task(
     for i, raw_task in enumerate(task_list):
         task = dict(raw_task)
         explicit_agent = task.get("agent_id") or task.get("agent") or agent_id
-        target_agent_id = str(explicit_agent or "executive-assistant").strip().lower()
+        target_agent_id = _normalize_visible_agent_id(explicit_agent)
         route_error = _handoff_route_error(
             source_agent_id=source_agent_id,
             target_agent_id=target_agent_id,
@@ -2512,7 +2523,7 @@ def delegate_task(
                 role=effective_role,
             )
             child._orchestration_agent_id = (
-                t.get("agent_id") or t.get("agent") or agent_id or "executive-assistant"
+                _normalize_visible_agent_id(t.get("agent_id") or t.get("agent") or agent_id)
             )
             child._handoff_packet = t.get("_handoff_packet") or {}
             child._parent_orchestration_run_id = t.get("_parent_orchestration_run_id")
@@ -2897,7 +2908,7 @@ DELEGATE_TASK_SCHEMA = {
         "delegation.orchestrator_enabled=false.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Use agent_id when the work belongs to a visible team lane like "
-        "'executive-assistant', 'admin', 'outreach', 'marketing', or "
+        "'executive-assistant', 'admin', 'outreach', 'ads', or "
         "'social-media'. Elevate records that run in the local "
         "orchestration registry for dashboards.\n"
         f"- Choose visible lanes by job ownership. {_VISIBLE_AGENT_JOB_HINT}\n"
@@ -2942,7 +2953,7 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Optional visible team lane for this delegation. Use one "
                     "of the configured Elevate agents such as "
-                    "'executive-assistant', 'admin', 'outreach', 'marketing', "
+                    "'executive-assistant', 'admin', 'outreach', 'ads', "
                     "or 'social-media'. This labels the run in the local "
                     f"orchestration registry. {_VISIBLE_AGENT_JOB_HINT}"
                 ),
@@ -2999,7 +3010,7 @@ DELEGATE_TASK_SCHEMA = {
                         },
                         "agent_id": {
                             "type": "string",
-                            "description": f"Visible Elevate agent lane for this task, e.g. 'marketing' or 'outreach'. {_VISIBLE_AGENT_JOB_HINT}",
+                            "description": f"Visible Elevate agent lane for this task, e.g. 'ads' or 'outreach'. {_VISIBLE_AGENT_JOB_HINT}",
                         },
                         "agent": {
                             "type": "string",

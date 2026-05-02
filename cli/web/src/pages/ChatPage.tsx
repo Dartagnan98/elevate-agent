@@ -281,11 +281,19 @@ const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
     status: "ready",
   },
   {
-    description: "Campaigns, listing positioning, emails, and creative direction.",
+    description: "Paid ads, listing campaigns, email campaigns, and creative briefs.",
     enabled: true,
-    id: "marketing",
-    name: "Marketing",
-    role: "Campaign lane",
+    id: "ads",
+    name: "Ads",
+    role: "Paid campaign lane",
+    status: "ready",
+  },
+  {
+    description: "Organic posts, captions, hooks, and platform adaptation.",
+    enabled: true,
+    id: "social-media",
+    name: "Social Media",
+    role: "Content lane",
     status: "ready",
   },
 ];
