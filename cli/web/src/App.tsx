@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentType,
   type ReactNode,
@@ -25,6 +26,7 @@ import {
   Download,
   Eye,
   FileText,
+  Folder,
   Globe,
   Heart,
   KeyRound,
@@ -32,8 +34,11 @@ import {
   Menu,
   MessageSquare,
   Package,
+  Pin,
+  Plus,
   Puzzle,
   RotateCw,
+  Search,
   Settings,
   Shield,
   Sparkles,
@@ -44,7 +49,8 @@ import {
   Zap,
 } from "lucide-react";
 import { SelectionSwitcher, Typography } from "@nous-research/ui";
-import { cn } from "@/lib/utils";
+import { api, type SessionInfo } from "@/lib/api";
+import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
@@ -380,7 +386,7 @@ export default function App() {
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
-              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-64 min-h-0 flex-col",
+              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-80 max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
               "border-r border-current/20",
               "bg-background-base/95 backdrop-blur-sm",
               "transition-transform duration-200 ease-out",
@@ -393,109 +399,11 @@ export default function App() {
               borderImage: "var(--component-sidebar-border-image)",
             }}
           >
-            <div
-              className={cn(
-                "flex h-14 shrink-0 items-center justify-between gap-2 px-5",
-                "border-b border-current/20",
-              )}
-            >
-              <Typography
-                className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground"
-                style={{ mixBlendMode: "plus-lighter" }}
-              >
-                Elevate
-              </Typography>
-
-              <button
-                type="button"
-                onClick={closeMobile}
-                aria-label={t.app.closeNavigation}
-                className={cn(
-                  "lg:hidden inline-flex h-7 w-7 items-center justify-center",
-                  "text-midground/70 hover:text-midground transition-colors cursor-pointer",
-                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-                )}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <PluginSlot name="header-left" />
-
-            <nav
-              className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden border-t border-current/10 py-2"
-              aria-label={t.app.navigation}
-            >
-              <ul className="flex flex-col">
-                {navItems.map(({ path, label, labelKey, icon: Icon }) => {
-                  const navLabel = labelKey
-                    ? ((t.app.nav as Record<string, string>)[labelKey] ?? label)
-                    : label;
-                  return (
-                    <li key={path}>
-                      <NavLink
-                        to={path}
-                        end={path === "/sessions"}
-                        onClick={closeMobile}
-                        className={({ isActive }) =>
-                          cn(
-                            "group relative flex items-center gap-3",
-                            "px-5 py-2.5",
-                            "font-mondwest text-[0.8rem] tracking-[0.12em]",
-                            "whitespace-nowrap transition-colors cursor-pointer",
-                            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-                            isActive
-                              ? "text-midground"
-                              : "opacity-60 hover:opacity-100",
-                          )
-                        }
-                        style={{
-                          clipPath: "var(--component-tab-clip-path)",
-                        }}
-                      >
-                        {({ isActive }) => (
-                          <>
-                            <Icon className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">{navLabel}</span>
-
-                            <span
-                              aria-hidden
-                              className="absolute inset-y-0.5 left-1.5 right-1.5 bg-midground opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-5"
-                            />
-
-                            {isActive && (
-                              <span
-                                aria-hidden
-                                className="absolute left-0 top-0 bottom-0 w-px bg-midground"
-                                style={{ mixBlendMode: "plus-lighter" }}
-                              />
-                            )}
-                          </>
-                        )}
-                      </NavLink>
-                    </li>
-                  );
-                })}
-              </ul>
-            </nav>
-
-            <SidebarSystemActions onNavigate={closeMobile} />
-
-            <div
-              className={cn(
-                "flex shrink-0 items-center justify-between gap-2",
-                "px-3 py-2",
-                "border-t border-current/20",
-              )}
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                <PluginSlot name="header-right" />
-                <ThemeSwitcher dropUp />
-                <LanguageSwitcher />
-              </div>
-            </div>
-
-            <SidebarFooter />
+            <DesktopSidebar
+              embeddedChat={embeddedChat}
+              navItems={navItems}
+              onNavigate={closeMobile}
+            />
           </aside>
 
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
@@ -531,6 +439,465 @@ export default function App() {
 
       <PluginSlot name="overlay" />
     </div>
+  );
+}
+
+const PINNED_SESSIONS_KEY = "elevate.sidebar.pinnedSessions";
+const SIDEBAR_SESSION_LIMIT = 48;
+
+function readPinnedSessionIds(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(PINNED_SESSIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePinnedSessionIds(ids: string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(ids));
+  } catch {
+    // Local pinning is a convenience only; failing closed keeps navigation usable.
+  }
+}
+
+function sessionTitle(session: SessionInfo): string {
+  const title = session.title?.trim();
+  if (title && title !== "Untitled") return title;
+  return session.preview?.trim() || "Untitled chat";
+}
+
+function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
+  if (!embeddedChat) return "/sessions";
+  return `/chat?resume=${encodeURIComponent(session.id)}`;
+}
+
+function DesktopSidebar({
+  embeddedChat,
+  navItems,
+  onNavigate,
+}: {
+  embeddedChat: boolean;
+  navItems: NavItem[];
+  onNavigate: () => void;
+}) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [sessionError, setSessionError] = useState(false);
+  const [query, setQuery] = useState("");
+  const [pinnedIds, setPinnedIds] = useState<string[]>(() => readPinnedSessionIds());
+  const { isBusy, pendingAction, runAction } = useSystemActions();
+
+  const loadSessions = useCallback(() => {
+    api
+      .getSessions(SIDEBAR_SESSION_LIMIT)
+      .then((resp) => {
+        setSessions(resp.sessions);
+        setSessionError(false);
+      })
+      .catch(() => setSessionError(true))
+      .finally(() => setSessionsLoading(false));
+  }, []);
+
+  useEffect(() => {
+    loadSessions();
+    const id = window.setInterval(loadSessions, 5000);
+    return () => window.clearInterval(id);
+  }, [loadSessions]);
+
+  useEffect(() => {
+    writePinnedSessionIds(pinnedIds);
+  }, [pinnedIds]);
+
+  const filteredSessions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((session) => {
+      const haystack = [
+        sessionTitle(session),
+        session.preview ?? "",
+        session.source ?? "",
+        session.model ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [query, sessions]);
+
+  const pinnedSessions = filteredSessions.filter((session) =>
+    pinnedIds.includes(session.id),
+  );
+  const liveSessions = filteredSessions.filter((session) => session.is_active);
+  const spotlightSessions = (pinnedSessions.length ? pinnedSessions : liveSessions)
+    .slice(0, 4);
+  const spotlightIds = new Set(spotlightSessions.map((session) => session.id));
+  const recentSessions = filteredSessions
+    .filter((session) => !spotlightIds.has(session.id))
+    .slice(0, 18);
+
+  const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
+  const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
+
+  const go = (path: string) => {
+    navigate(path);
+    onNavigate();
+  };
+
+  const focusSearch = () => {
+    searchRef.current?.focus();
+  };
+
+  const togglePinned = (sessionId: string) => {
+    setPinnedIds((prev) =>
+      prev.includes(sessionId)
+        ? prev.filter((id) => id !== sessionId)
+        : [sessionId, ...prev].slice(0, 8),
+    );
+  };
+
+  const navLabel = (item: NavItem) =>
+    item.labelKey
+      ? ((t.app.nav as Record<string, string>)[item.labelKey] ?? item.label)
+      : item.label;
+
+  return (
+    <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-sm tracking-normal text-midground">
+      <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-current/15 px-4">
+        <div className="flex items-center gap-2" aria-hidden>
+          <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
+          <span className="h-3 w-3 rounded-full bg-[#ffbd2e]" />
+          <span className="h-3 w-3 rounded-full bg-[#28c840]" />
+        </div>
+
+        <Typography
+          className="min-w-0 flex-1 truncate text-center font-semibold text-[0.95rem] leading-none text-midground"
+          style={{ mixBlendMode: "plus-lighter" }}
+        >
+          Elevate Agent
+        </Typography>
+
+        <button
+          type="button"
+          onClick={() => void runAction("update")}
+          disabled={isBusy}
+          className={cn(
+            "hidden shrink-0 items-center rounded-full px-3 py-1.5 text-xs font-semibold",
+            "bg-primary text-primary-foreground transition-opacity hover:opacity-90",
+            "disabled:cursor-not-allowed disabled:opacity-50 sm:inline-flex",
+          )}
+        >
+          {pendingAction === "update" ? "Updating" : "Update"}
+        </button>
+
+        <button
+          type="button"
+          onClick={onNavigate}
+          aria-label={t.app.closeNavigation}
+          className={cn(
+            "lg:hidden inline-flex h-8 w-8 shrink-0 items-center justify-center",
+            "rounded-md text-midground/70 hover:bg-foreground/10 hover:text-midground",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+          )}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      <PluginSlot name="header-left" />
+
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
+        <div className="space-y-1">
+          <SidebarAction
+            icon={Plus}
+            label="New chat"
+            path={embeddedChat ? "/chat" : "/hub"}
+            onNavigate={go}
+            primary
+          />
+          <button
+            type="button"
+            onClick={focusSearch}
+            className={sidebarActionClass(false)}
+          >
+            <Search className="h-4 w-4 shrink-0" />
+            <span className="truncate">Search</span>
+            <span className="ml-auto rounded-md border border-current/10 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+              /
+            </span>
+          </button>
+          <SidebarAction icon={Puzzle} label="Plugins" path="/skills" onNavigate={go} />
+          <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
+          <SidebarAction icon={Folder} label="Project" path="/hub" onNavigate={go} />
+        </div>
+
+        <div className="relative mt-3">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search chats"
+            className={cn(
+              "h-9 w-full rounded-md border border-border bg-background-base/35",
+              "pl-9 pr-8 text-sm text-midground placeholder:text-muted-foreground",
+              "outline-none transition-colors focus:border-primary/40 focus:bg-background-base/55",
+            )}
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              aria-label={t.common.clear}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-midground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        {spotlightSessions.length > 0 && (
+          <SessionSection
+            embeddedChat={embeddedChat}
+            label="Pinned"
+            onNavigate={onNavigate}
+            onTogglePinned={togglePinned}
+            pinnedIds={pinnedIds}
+            sessions={spotlightSessions}
+          />
+        )}
+
+        <SessionSection
+          embeddedChat={embeddedChat}
+          label="Chats"
+          loading={sessionsLoading}
+          onNavigate={onNavigate}
+          onTogglePinned={togglePinned}
+          pinnedIds={pinnedIds}
+          sessions={recentSessions}
+          statusText={
+            sessionError
+              ? "Sessions unavailable"
+              : !sessionsLoading && recentSessions.length === 0
+                ? "No chats yet"
+                : undefined
+          }
+        />
+
+        {toolNavItems.length > 0 && (
+          <div className="mt-5">
+            <SidebarSectionLabel>Tools</SidebarSectionLabel>
+            <div className="space-y-1">
+              {toolNavItems.map((item) => (
+                <SidebarAction
+                  key={item.path}
+                  icon={item.icon}
+                  label={navLabel(item)}
+                  path={item.path}
+                  onNavigate={go}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <SidebarSystemActions onNavigate={onNavigate} />
+
+      <div className="shrink-0 border-t border-current/15">
+        <button
+          type="button"
+          onClick={() => go("/config")}
+          className={cn(
+            "flex w-full items-center gap-3 px-4 py-3 text-left text-sm",
+            "text-midground/80 transition-colors hover:bg-foreground/10 hover:text-midground",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+          )}
+        >
+          <Settings className="h-4 w-4 shrink-0" />
+          <span className="truncate">Settings</span>
+        </button>
+
+        <div className="flex items-center justify-between gap-2 border-t border-current/10 px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <PluginSlot name="header-right" />
+            <ThemeSwitcher dropUp />
+            <LanguageSwitcher />
+          </div>
+        </div>
+
+        <SidebarFooter />
+      </div>
+    </div>
+  );
+}
+
+function SidebarSectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="mb-1 px-2 text-xs font-medium text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+function sidebarActionClass(active: boolean, primary = false) {
+  return cn(
+    "group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm",
+    "cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+    primary && "font-medium",
+    active
+      ? "bg-foreground/12 text-midground"
+      : "text-midground/78 hover:bg-foreground/10 hover:text-midground",
+  );
+}
+
+function SidebarAction({
+  icon: Icon,
+  label,
+  onNavigate,
+  path,
+  primary = false,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  onNavigate: (path: string) => void;
+  path: string;
+  primary?: boolean;
+}) {
+  return (
+    <NavLink
+      to={path}
+      end={path === "/hub" || path === "/sessions"}
+      onClick={(event) => {
+        event.preventDefault();
+        onNavigate(path);
+      }}
+      className={({ isActive }) => sidebarActionClass(isActive, primary)}
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      <span className="truncate">{label}</span>
+    </NavLink>
+  );
+}
+
+function SessionSection({
+  embeddedChat,
+  label,
+  loading = false,
+  onNavigate,
+  onTogglePinned,
+  pinnedIds,
+  sessions,
+  statusText,
+}: {
+  embeddedChat: boolean;
+  label: string;
+  loading?: boolean;
+  onNavigate: () => void;
+  onTogglePinned: (sessionId: string) => void;
+  pinnedIds: string[];
+  sessions: SessionInfo[];
+  statusText?: string;
+}) {
+  return (
+    <div className="mt-5">
+      <SidebarSectionLabel>{label}</SidebarSectionLabel>
+      <div className="space-y-1">
+        {sessions.map((session) => (
+          <SessionListItem
+            key={session.id}
+            embeddedChat={embeddedChat}
+            onNavigate={onNavigate}
+            onTogglePinned={onTogglePinned}
+            pinned={pinnedIds.includes(session.id)}
+            session={session}
+          />
+        ))}
+      </div>
+
+      {(loading || statusText) && sessions.length === 0 && (
+        <div className="px-3 py-2 text-xs text-muted-foreground">
+          {loading ? "Loading chats" : statusText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionListItem({
+  embeddedChat,
+  onNavigate,
+  onTogglePinned,
+  pinned,
+  session,
+}: {
+  embeddedChat: boolean;
+  onNavigate: () => void;
+  onTogglePinned: (sessionId: string) => void;
+  pinned: boolean;
+  session: SessionInfo;
+}) {
+  const route = sessionRoute(session, embeddedChat);
+  const location = useLocation();
+  const active =
+    embeddedChat &&
+    location.pathname === "/chat" &&
+    new URLSearchParams(location.search).get("resume") === session.id;
+  return (
+    <NavLink
+      to={route}
+      onClick={onNavigate}
+      className={cn(
+        "group relative flex min-h-11 items-center gap-2 rounded-lg px-3 py-2",
+        "text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+        active
+          ? "bg-foreground/12 text-midground"
+          : "text-midground/82 hover:bg-foreground/10 hover:text-midground",
+      )}
+    >
+      <span
+        className={cn(
+          "h-2 w-2 shrink-0 rounded-full",
+          session.is_active ? "bg-success" : "bg-current/25",
+        )}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm leading-5">
+          {sessionTitle(session)}
+        </span>
+        <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="truncate">{session.source ?? "local"}</span>
+          <span aria-hidden>·</span>
+          <span className="shrink-0">{timeAgo(session.last_active)}</span>
+        </span>
+      </span>
+      <button
+        type="button"
+        aria-label={pinned ? "Unpin chat" : "Pin chat"}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onTogglePinned(session.id);
+        }}
+        className={cn(
+          "shrink-0 rounded p-1 transition-opacity",
+          pinned
+            ? "text-primary opacity-100"
+            : "text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+        )}
+      >
+        <Pin className="h-3.5 w-3.5" />
+      </button>
+    </NavLink>
   );
 }
 
