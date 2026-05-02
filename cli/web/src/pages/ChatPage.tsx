@@ -1,6 +1,6 @@
 import { Markdown } from "@/components/Markdown";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
-import { ToolCall, type ToolEntry } from "@/components/ToolCall";
+import type { ToolEntry } from "@/components/ToolCall";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -21,14 +21,11 @@ import {
   FileCode2,
   FileText,
   Loader2,
-  MessageSquare,
   PanelRight,
   RotateCcw,
   Send,
-  Settings2,
   ShieldAlert,
   Square,
-  User,
   X,
 } from "lucide-react";
 import {
@@ -126,14 +123,6 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   error: "error",
   idle: "idle",
   open: "live",
-};
-
-const STATE_TONE: Record<ConnectionState, string> = {
-  closed: "bg-muted text-muted-foreground",
-  connecting: "bg-primary/10 text-primary",
-  error: "bg-destructive/10 text-destructive",
-  idle: "bg-muted text-muted-foreground",
-  open: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
 };
 
 function id(prefix: string): string {
@@ -946,7 +935,7 @@ export default function ChatPage() {
         <aside
           className={cn(
             "fixed right-0 top-0 z-[60] flex h-dvh w-[min(24rem,86vw)] flex-col",
-            "border-l border-border bg-background-base p-3 normal-case shadow-2xl",
+            "border-l border-[oklch(0.28_0.006_255)] bg-[oklch(0.16_0.006_255)] p-3 normal-case shadow-2xl",
             mobilePanelOpen ? "translate-x-0" : "translate-x-full",
             "transition-transform duration-200 ease-out",
           )}
@@ -969,55 +958,59 @@ export default function ChatPage() {
     );
 
   return (
-    <div className="flex min-h-[calc(100vh-7rem)] flex-col normal-case">
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <section className="flex min-h-0 flex-col rounded-lg border border-border bg-card/80 shadow-sm">
-          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+    <div className="relative -m-4 flex min-h-[calc(100vh-4.5rem)] flex-col overflow-hidden bg-[oklch(0.135_0.006_255)] text-[oklch(0.92_0.006_255)] normal-case sm:-m-6">
+      <div className="relative grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_18rem] xl:grid-cols-[minmax(0,1fr)_20rem]">
+        <section className="flex min-h-0 flex-col">
+          <header className="mx-auto flex w-full max-w-[52rem] flex-wrap items-center justify-between gap-3 px-4 pb-4 pt-5 sm:px-6">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <MessageSquare className="h-4 w-4 text-primary" />
-                <h1 className="truncate text-base font-semibold">
-                  Elevate Agent
+                <h1 className="truncate text-sm font-semibold text-[oklch(0.96_0.004_255)]">
+                  {resumeId ? "Resumed session" : "Elevate Agent"}
                 </h1>
-                <Badge className={STATE_TONE[state]}>
-                  {STATE_LABEL[state]}
-                </Badge>
+                <span className="h-1 w-1 rounded-full bg-[oklch(0.47_0.006_255)]" />
+                <span className="truncate text-xs text-[oklch(0.65_0.006_255)]">
+                  {modelLabel(info)}
+                </span>
               </div>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {resumeId ? `Resumed ${resumeId}` : "New chat"} ·{" "}
-                {modelLabel(info)}
-              </p>
             </div>
 
             <div className="flex items-center gap-2">
-              {busy && (
-                <Button
-                  onClick={() => void interrupt()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  <Square className="mr-1.5 h-3.5 w-3.5" />
-                  Stop
-                </Button>
-              )}
-              <Button
-                onClick={reconnect}
-                size="sm"
-                type="button"
-                variant="outline"
+              <span
+                className={cn(
+                  "inline-flex h-7 items-center rounded-full px-2.5 text-xs",
+                  state === "open"
+                    ? "bg-[oklch(0.24_0.055_150)] text-[oklch(0.86_0.08_150)]"
+                    : "bg-[oklch(0.22_0.006_255)] text-[oklch(0.72_0.006_255)]",
+                )}
               >
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                {STATE_LABEL[state]}
+              </span>
+              {busy && (
+                <button
+                  className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[oklch(0.34_0.006_255)] px-2.5 text-xs text-[oklch(0.78_0.006_255)] transition-colors hover:bg-[oklch(0.22_0.006_255)]"
+                  onClick={() => void interrupt()}
+                  type="button"
+                >
+                  <Square className="h-3 w-3" />
+                  Stop
+                </button>
+              )}
+              <button
+                className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[oklch(0.34_0.006_255)] px-2.5 text-xs text-[oklch(0.78_0.006_255)] transition-colors hover:bg-[oklch(0.22_0.006_255)]"
+                onClick={reconnect}
+                type="button"
+              >
+                <RotateCcw className="h-3 w-3" />
                 Restart
-              </Button>
+              </button>
             </div>
           </header>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-1 sm:px-6">
             {messages.length === 0 ? (
               <EmptyState state={state} />
             ) : (
-              <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+              <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-5 pb-6">
                 {messages.map((message) => (
                   <MessageRow key={message.id} message={message} />
                 ))}
@@ -1035,15 +1028,15 @@ export default function ChatPage() {
           </div>
 
           <form
-            className="border-t border-border bg-background-base/60 p-3"
+            className="border-t border-[oklch(0.20_0.006_255)] bg-[oklch(0.135_0.006_255)] px-4 pb-5 pt-3 sm:px-6"
             onSubmit={onSubmit}
           >
-            <div className="mx-auto flex max-w-4xl items-end gap-2">
-              <div className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 focus-within:ring-1 focus-within:ring-primary">
+            <div className="mx-auto flex max-w-[48rem] items-end gap-2 rounded-[1.4rem] border border-[oklch(0.28_0.006_255)] bg-[oklch(0.18_0.006_255)] p-2 shadow-[0_24px_80px_rgba(0,0,0,0.32)] focus-within:border-[oklch(0.43_0.05_255)]">
+              <div className="min-w-0 flex-1 px-2 pb-1 pt-1">
                 <textarea
                   ref={inputRef}
                   aria-label="Message Elevate Agent"
-                  className="max-h-40 min-h-12 w-full resize-none bg-transparent text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground"
+                  className="max-h-40 min-h-12 w-full resize-none bg-transparent text-sm leading-6 text-[oklch(0.94_0.004_255)] outline-none placeholder:text-[oklch(0.58_0.006_255)]"
                   disabled={state !== "open" || !sessionId}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={onComposerKeyDown}
@@ -1055,15 +1048,20 @@ export default function ChatPage() {
                   rows={2}
                   value={input}
                 />
-                <div className="flex items-center justify-between gap-2 text-[0.68rem] text-muted-foreground">
+                <div className="flex items-center justify-between gap-2 text-[0.68rem] text-[oklch(0.58_0.006_255)]">
                   <span className="truncate">{statusText}</span>
                   <span>{sessionId ?? "session pending"}</span>
                 </div>
               </div>
-              <Button
+              <button
                 aria-label="Send message"
+                className={cn(
+                  "mb-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors",
+                  canSend
+                    ? "bg-[oklch(0.92_0.006_255)] text-[oklch(0.14_0.006_255)] hover:bg-[oklch(0.98_0.004_255)]"
+                    : "bg-[oklch(0.25_0.006_255)] text-[oklch(0.52_0.006_255)]",
+                )}
                 disabled={!canSend}
-                size="icon"
                 type="submit"
               >
                 {busy ? (
@@ -1071,13 +1069,13 @@ export default function ChatPage() {
                 ) : (
                   <Send className="h-4 w-4" />
                 )}
-              </Button>
+              </button>
             </div>
           </form>
         </section>
 
-        <aside className="hidden min-h-0 lg:block">
-          <div className="sticky top-4 h-[calc(100vh-9rem)]">{activity}</div>
+        <aside className="hidden min-h-0 p-4 lg:block">
+          <div className="sticky top-4 h-[calc(100vh-7rem)]">{activity}</div>
         </aside>
       </div>
       {mobileActivityPortal}
@@ -1087,16 +1085,18 @@ export default function ChatPage() {
 
 function EmptyState({ state }: { state: ConnectionState }) {
   return (
-    <div className="mx-auto flex min-h-[28rem] max-w-xl flex-col items-center justify-center text-center">
-      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+    <div className="mx-auto flex min-h-[34rem] max-w-xl flex-col items-center justify-center text-center">
+      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-full border border-[oklch(0.30_0.006_255)] bg-[oklch(0.19_0.006_255)] text-[oklch(0.86_0.04_255)]">
         {state === "connecting" ? (
           <Loader2 className="h-5 w-5 animate-spin" />
         ) : (
           <Bot className="h-5 w-5" />
         )}
       </div>
-      <h2 className="text-xl font-semibold">Elevate Agent</h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+      <h2 className="text-xl font-semibold text-[oklch(0.96_0.004_255)]">
+        Elevate Agent
+      </h2>
+      <p className="mt-2 max-w-md text-sm leading-6 text-[oklch(0.63_0.006_255)]">
         Executive Assistant is ready.
       </p>
     </div>
@@ -1106,44 +1106,45 @@ function EmptyState({ state }: { state: ConnectionState }) {
 function MessageRow({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
-  const tone =
-    message.role === "system"
-      ? "border-warning/25 bg-warning/5"
-      : message.role === "tool"
-        ? "border-primary/20 bg-primary/[0.04]"
-        : isUser
-          ? "border-primary/20 bg-primary/10"
-          : "border-border bg-background";
 
   return (
     <article
       className={cn(
-        "flex gap-3",
+        "group flex w-full gap-3",
         isUser ? "flex-row-reverse text-right" : "text-left",
+        isAssistant && "border-t border-[oklch(0.22_0.006_255)] pt-5 first:border-t-0 first:pt-0",
       )}
     >
+      {!isUser && (
+        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[oklch(0.21_0.006_255)] text-[oklch(0.74_0.006_255)]">
+          <Bot className="h-3.5 w-3.5" />
+        </div>
+      )}
       <div
         className={cn(
-          "mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-          isUser ? "bg-primary text-primary-foreground" : "bg-muted",
+          "min-w-0 flex-1",
+          isUser && "flex justify-end",
+          !isUser && "max-w-[74ch]",
         )}
       >
-        {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
-      </div>
-      <div className={cn("min-w-0 max-w-[78ch] flex-1", isUser && "flex justify-end")}>
         <div
           className={cn(
-            "inline-block max-w-full rounded-lg border px-3 py-2 text-sm leading-6 shadow-sm",
-            tone,
+            "max-w-full text-sm leading-7",
+            isUser
+              ? "inline-block rounded-2xl bg-[oklch(0.22_0.006_255)] px-3.5 py-2 text-[oklch(0.94_0.004_255)] shadow-sm"
+              : message.role === "system"
+                ? "rounded-lg border border-[oklch(0.29_0.015_80)] bg-[oklch(0.20_0.012_80)] px-3 py-2 text-[oklch(0.82_0.03_80)]"
+                : "text-[oklch(0.92_0.004_255)]",
           )}
         >
           <div
             className={cn(
-              "mb-1 flex items-center gap-2 text-[0.68rem] text-muted-foreground",
+              "mb-1 flex items-center gap-2 text-[0.68rem] text-[oklch(0.58_0.006_255)]",
+              isAssistant && "mb-3",
               isUser && "justify-end",
             )}
           >
-            <span className="font-medium">
+            <span className="font-medium text-[oklch(0.68_0.006_255)]">
               {isUser
                 ? "You"
                 : isAssistant
@@ -1162,20 +1163,22 @@ function MessageRow({ message }: { message: ChatMessage }) {
           </div>
           {message.role === "assistant" ? (
             message.content ? (
-              <Markdown content={message.content} />
+              <div className="chat-message-prose [&>div]:text-[oklch(0.92_0.004_255)] [&_a]:text-[oklch(0.78_0.05_255)] [&_code]:bg-[oklch(0.22_0.006_255)] [&_code]:text-[oklch(0.86_0.04_255)] [&_pre]:border-[oklch(0.28_0.006_255)] [&_pre]:bg-[oklch(0.16_0.006_255)]">
+                <Markdown content={message.content} />
+              </div>
             ) : (
-              <div className="flex items-center gap-2 text-muted-foreground">
+              <div className="flex items-center gap-2 text-[oklch(0.62_0.006_255)]">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 Thinking...
               </div>
             )
           ) : (
-            <div className="whitespace-pre-wrap break-words text-foreground">
+            <div className="whitespace-pre-wrap break-words">
               {message.content}
             </div>
           )}
           {message.warning && (
-            <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning">
+            <div className="mt-3 rounded-lg border border-[oklch(0.45_0.08_80)] bg-[oklch(0.23_0.025_80)] px-3 py-2 text-xs text-[oklch(0.82_0.07_80)]">
               {message.warning}
             </div>
           )}
@@ -1198,16 +1201,16 @@ function PendingPromptCard({
 }) {
   if (pendingPrompt.type === "approval") {
     return (
-      <Card className="border-warning/30 bg-warning/5 p-3">
+      <Card className="border-[oklch(0.38_0.07_80)] bg-[oklch(0.20_0.018_80)] p-3 text-[oklch(0.90_0.018_80)]">
         <div className="flex items-start gap-3">
-          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[oklch(0.82_0.08_80)]" />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold">Approval needed</div>
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="mt-1 text-sm text-[oklch(0.68_0.02_80)]">
               {pendingPrompt.description}
             </p>
             {pendingPrompt.command && (
-              <pre className="mt-2 max-h-28 overflow-auto rounded-md bg-background px-2 py-1.5 text-xs">
+              <pre className="mt-2 max-h-28 overflow-auto rounded-lg bg-[oklch(0.15_0.006_255)] px-2 py-1.5 text-xs text-[oklch(0.80_0.006_255)]">
                 {pendingPrompt.command}
               </pre>
             )}
@@ -1252,7 +1255,7 @@ function PendingPromptCard({
         : pendingPrompt.prompt || `Secret${pendingPrompt.envVar ? `: ${pendingPrompt.envVar}` : ""}`;
 
   return (
-    <Card className="border-primary/25 bg-primary/[0.04] p-3">
+    <Card className="border-[oklch(0.32_0.035_255)] bg-[oklch(0.18_0.012_255)] p-3 text-[oklch(0.92_0.004_255)]">
       <div className="mb-2 text-sm font-semibold">{title}</div>
       {choices?.length ? (
         <div className="flex flex-wrap gap-2">
@@ -1272,7 +1275,7 @@ function PendingPromptCard({
         >
           <input
             autoFocus
-            className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-primary"
+            className="min-w-0 flex-1 rounded-lg border border-[oklch(0.30_0.006_255)] bg-[oklch(0.14_0.006_255)] px-3 py-2 text-sm text-[oklch(0.92_0.004_255)] outline-none focus:ring-1 focus:ring-[oklch(0.58_0.06_255)]"
             onChange={(event) => setPromptValue(event.target.value)}
             type={pendingPrompt.type === "sudo" ? "password" : "text"}
             value={promptValue}
@@ -1303,29 +1306,31 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
   return (
     <div
       className={cn(
-        "rounded-md border bg-background/60 px-2 py-2 text-xs",
-        artifact.status === "error" && "border-destructive/35 bg-destructive/[0.04]",
+        "rounded-xl border border-[oklch(0.28_0.006_255)] bg-[oklch(0.185_0.006_255)] px-2.5 py-2.5 text-xs transition-colors hover:bg-[oklch(0.205_0.006_255)]",
+        artifact.status === "error" && "border-[oklch(0.46_0.14_25)] bg-[oklch(0.20_0.025_25)]",
       )}
     >
       <div className="flex items-start gap-2">
-        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[oklch(0.14_0.006_255)] text-[oklch(0.78_0.05_255)]">
+          <Icon className="h-3.5 w-3.5" />
+        </div>
 
         <button
           className="min-w-0 flex-1 text-left"
           onClick={() => artifact.content && setOpen((value) => !value)}
           type="button"
         >
-          <div className="truncate font-medium text-foreground">
+          <div className="truncate font-medium text-[oklch(0.92_0.004_255)]">
             {artifact.title}
           </div>
-          <div className="mt-0.5 truncate text-[0.68rem] text-muted-foreground">
+          <div className="mt-0.5 truncate text-[0.68rem] text-[oklch(0.62_0.006_255)]">
             {artifact.detail || artifact.source || artifact.kind}
           </div>
         </button>
 
         <button
           aria-label="Copy artifact"
-          className="rounded p-1 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+          className="rounded-md p-1 text-[oklch(0.58_0.006_255)] transition-colors hover:bg-[oklch(0.27_0.006_255)] hover:text-[oklch(0.92_0.004_255)]"
           onClick={copy}
           type="button"
         >
@@ -1338,10 +1343,44 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
       </div>
 
       {open && artifact.content && (
-        <pre className="mt-2 max-h-48 overflow-auto rounded bg-muted/40 p-2 text-[0.68rem] leading-4 whitespace-pre-wrap">
+        <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-[oklch(0.14_0.006_255)] p-2 text-[0.68rem] leading-4 text-[oklch(0.78_0.006_255)] whitespace-pre-wrap">
           {artifact.content}
         </pre>
       )}
+    </div>
+  );
+}
+
+function ProgressItem({ tool }: { tool: ToolEntry }) {
+  const complete = tool.status === "done";
+  const failed = tool.status === "error";
+
+  return (
+    <div className="flex gap-2 text-sm leading-5">
+      <span
+        className={cn(
+          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
+          failed
+            ? "bg-[oklch(0.35_0.12_25)] text-[oklch(0.86_0.08_25)]"
+            : complete
+              ? "bg-[oklch(0.72_0.01_255)] text-[oklch(0.18_0.006_255)]"
+              : "bg-[oklch(0.25_0.006_255)] text-[oklch(0.78_0.006_255)]",
+        )}
+      >
+        {tool.status === "running" ? (
+          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+        ) : (
+          <CheckCircle2 className="h-2.5 w-2.5" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[oklch(0.78_0.006_255)]">{tool.name}</div>
+        {(tool.summary || tool.context || tool.preview || tool.error) && (
+          <div className="mt-0.5 line-clamp-2 text-xs text-[oklch(0.55_0.006_255)]">
+            {tool.error || tool.summary || tool.preview || tool.context}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1383,74 +1422,86 @@ function ActivityPanel({
   const [artifactsOpen, setArtifactsOpen] = useState(true);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 normal-case">
-      <Card className="p-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              Model
+    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-[oklch(0.27_0.006_255)] bg-[oklch(0.17_0.006_255)] p-4 normal-case shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
+      <section className="shrink-0">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h2 className="text-sm font-medium text-[oklch(0.70_0.006_255)]">
+            Progress
+          </h2>
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[0.68rem]",
+              state === "open"
+                ? "bg-[oklch(0.24_0.055_150)] text-[oklch(0.85_0.08_150)]"
+                : "bg-[oklch(0.23_0.006_255)] text-[oklch(0.62_0.006_255)]",
+            )}
+          >
+            {STATE_LABEL[state]}
+          </span>
+        </div>
+
+        <div className="space-y-3">
+          <div className="flex gap-2 text-sm leading-5">
+            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[oklch(0.72_0.01_255)] text-[oklch(0.18_0.006_255)]">
+              {busy ? (
+                <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="h-2.5 w-2.5" />
+              )}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[oklch(0.78_0.006_255)]">
+                {statusText}
+              </div>
+              <div className="mt-0.5 truncate text-xs text-[oklch(0.55_0.006_255)]">
+                {modelLabel(info)}
+              </div>
             </div>
-            <button
-              className="mt-0.5 flex max-w-full items-center gap-1 truncate text-left text-sm font-medium hover:underline disabled:cursor-not-allowed disabled:opacity-60 disabled:no-underline"
-              disabled={!canPickModel}
-              onClick={onOpenModel}
-              type="button"
-            >
-              <span className="truncate">{modelLabel(info)}</span>
-              {canPickModel && <ChevronDown className="h-3 w-3 shrink-0" />}
-            </button>
           </div>
-          <Badge className={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
+
+          {tools
+            .slice(-5)
+            .reverse()
+            .map((tool) => (
+              <ProgressItem key={tool.id} tool={tool} />
+            ))}
         </div>
-        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-          {busy ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          ) : (
-            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-          )}
-          <span className="min-w-0 truncate">{statusText}</span>
-        </div>
-      </Card>
+      </section>
 
       {banner && (
-        <Card className="border-destructive/35 bg-destructive/[0.04] p-3">
-          <div className="flex items-start gap-2 text-sm text-destructive">
+        <section className="mt-4 rounded-xl border border-[oklch(0.42_0.13_25)] bg-[oklch(0.20_0.025_25)] p-3">
+          <div className="flex items-start gap-2 text-sm text-[oklch(0.82_0.08_25)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <div className="break-words">{banner}</div>
-              <Button
-                className="mt-2"
+              <button
+                className="mt-2 rounded-full border border-[oklch(0.48_0.10_25)] px-2.5 py-1 text-xs transition-colors hover:bg-[oklch(0.25_0.035_25)]"
                 onClick={onReconnect}
-                size="sm"
-                variant="outline"
+                type="button"
               >
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
                 Reconnect
-              </Button>
+              </button>
             </div>
           </div>
-        </Card>
+        </section>
       )}
 
-      <Card className="flex max-h-64 min-h-0 flex-col p-2">
+      <section className="mt-4 flex min-h-0 flex-1 flex-col border-t border-[oklch(0.24_0.006_255)] pt-4">
         <button
-          className="flex items-center justify-between gap-2 px-1 pb-2 text-left text-xs uppercase tracking-wide text-muted-foreground"
+          className="mb-3 flex items-center justify-between gap-2 text-left text-sm font-medium text-[oklch(0.70_0.006_255)]"
           onClick={() => setArtifactsOpen((open) => !open)}
           type="button"
         >
-          <span className="flex items-center gap-1.5">
-            <FileText className="h-3.5 w-3.5" />
-            Artifacts
-          </span>
-          <Badge variant="secondary" className="text-[0.6rem]">
+          <span>Artifacts</span>
+          <span className="text-xs text-[oklch(0.50_0.006_255)]">
             {artifacts.length}
-          </Badge>
+          </span>
         </button>
 
         {artifactsOpen && (
-          <div className="flex min-h-0 flex-col gap-1.5 overflow-y-auto pr-1">
+          <div className="flex min-h-0 flex-col gap-2 overflow-y-auto pr-1">
             {artifacts.length === 0 ? (
-              <div className="px-2 py-5 text-center text-xs text-muted-foreground">
+              <div className="px-2 py-5 text-center text-xs text-[oklch(0.55_0.006_255)]">
                 No artifacts yet
               </div>
             ) : (
@@ -1463,35 +1514,47 @@ function ActivityPanel({
             )}
           </div>
         )}
-      </Card>
+      </section>
 
-      <Card className="flex min-h-0 flex-1 flex-col p-2">
+      <section className="mt-4 shrink-0 border-t border-[oklch(0.24_0.006_255)] pt-4">
         <button
-          className="flex items-center justify-between gap-2 px-1 pb-2 text-left text-xs uppercase tracking-wide text-muted-foreground"
+          className="flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-[oklch(0.70_0.006_255)]"
           onClick={() => setToolsOpen((open) => !open)}
           type="button"
         >
-          <span className="flex items-center gap-1.5">
-            <Settings2 className="h-3.5 w-3.5" />
-            Tools
-          </span>
-          <Badge variant="secondary" className="text-[0.6rem]">
+          <span>Tools</span>
+          <span className="text-xs text-[oklch(0.50_0.006_255)]">
             {tools.length}
-          </Badge>
+          </span>
         </button>
 
         {toolsOpen && (
-          <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
+          <div className="mt-3 max-h-44 space-y-2 overflow-y-auto pr-1">
             {tools.length === 0 ? (
-              <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+              <div className="px-2 py-3 text-center text-xs text-[oklch(0.55_0.006_255)]">
                 No tool calls yet
               </div>
             ) : (
-              tools.map((tool) => <ToolCall key={tool.id} tool={tool} />)
+              tools
+                .slice()
+                .reverse()
+                .map((tool) => <ProgressItem key={tool.id} tool={tool} />)
             )}
           </div>
         )}
-      </Card>
+      </section>
+
+      <section className="mt-4 shrink-0 border-t border-[oklch(0.24_0.006_255)] pt-4">
+        <button
+          className="flex w-full items-center justify-between gap-2 rounded-xl px-1 py-1 text-left text-sm text-[oklch(0.78_0.006_255)] transition-colors hover:bg-[oklch(0.20_0.006_255)] disabled:opacity-50"
+          disabled={!canPickModel}
+          onClick={onOpenModel}
+          type="button"
+        >
+          <span className="min-w-0 truncate">{modelLabel(info)}</span>
+          {canPickModel && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+        </button>
+      </section>
 
       {modelOpen && canPickModel && sessionId && (
         <ModelPickerDialog
