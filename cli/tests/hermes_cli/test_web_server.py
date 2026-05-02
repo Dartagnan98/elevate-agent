@@ -1924,6 +1924,34 @@ class TestPtyWebSocket:
                 pass
         assert captured.get("resume") == "sess-42"
 
+    def test_dashboard_chat_env_uses_current_python(self, monkeypatch):
+        import os
+        import sys
+
+        import elevate_cli.main as main_mod
+        import elevate_cli.web_server as ws_mod
+
+        monkeypatch.delenv("ELEVATE_PYTHON", raising=False)
+        monkeypatch.delenv("ELEVATE_PYTHON_SRC_ROOT", raising=False)
+        monkeypatch.delenv("ELEVATE_CWD", raising=False)
+        monkeypatch.setattr(
+            main_mod,
+            "_make_tui_argv",
+            lambda *_a, **_k: (["/bin/sh", "-c", "printf env-ok"], None),
+        )
+
+        _argv, _cwd, env = ws_mod._resolve_chat_argv(
+            resume="sess-42",
+            sidecar_url="ws://127.0.0.1:9119/api/pub?token=t&channel=c",
+        )
+
+        assert env is not None
+        assert env["ELEVATE_PYTHON"] == sys.executable
+        assert env["ELEVATE_PYTHON_SRC_ROOT"]
+        assert env["ELEVATE_CWD"] == os.getcwd()
+        assert env["ELEVATE_TUI_RESUME"] == "sess-42"
+        assert env["ELEVATE_TUI_SIDECAR_URL"].startswith("ws://127.0.0.1")
+
     def test_channel_param_propagates_sidecar_url(self, monkeypatch):
         """When /api/pty is opened with ?channel=, the PTY child gets a
         ELEVATE_TUI_SIDECAR_URL env var pointing back at /api/pub on the

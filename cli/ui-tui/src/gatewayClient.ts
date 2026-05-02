@@ -1,8 +1,9 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { delimiter, resolve } from 'node:path'
+import { delimiter, dirname, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
+import { fileURLToPath } from 'node:url'
 
 import type { GatewayEvent } from './gatewayTypes.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
@@ -13,6 +14,7 @@ const MAX_BUFFERED_EVENTS = 2000
 const MAX_LOG_PREVIEW = 240
 const STARTUP_TIMEOUT_MS = Math.max(5000, parseInt(process.env.ELEVATE_TUI_STARTUP_TIMEOUT_MS ?? '15000', 10) || 15000)
 const REQUEST_TIMEOUT_MS = Math.max(30000, parseInt(process.env.ELEVATE_TUI_RPC_TIMEOUT_MS ?? '120000', 10) || 120000)
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url))
 
 const truncateLine = (line: string) =>
   line.length > MAX_LOG_LINE_BYTES ? `${line.slice(0, MAX_LOG_LINE_BYTES)}… [truncated ${line.length} bytes]` : line
@@ -89,7 +91,7 @@ export class GatewayClient extends EventEmitter {
   }
 
   start() {
-    const root = process.env.ELEVATE_PYTHON_SRC_ROOT ?? resolve(import.meta.dirname, '../../')
+    const root = process.env.ELEVATE_PYTHON_SRC_ROOT ?? resolve(MODULE_DIR, '../../')
     const python = resolvePython(root)
     const cwd = process.env.ELEVATE_CWD || root
     const env = { ...process.env }

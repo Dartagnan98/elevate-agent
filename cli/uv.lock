@@ -1428,9 +1428,11 @@ daytona = [
 dev = [
     { name = "debugpy" },
     { name = "mcp" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32'" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist" },
+    { name = "pywinpty", marker = "sys_platform == 'win32'" },
     { name = "ruff" },
     { name = "ty" },
 ]
@@ -1583,6 +1585,7 @@ requires-dist = [
     { name = "openai", specifier = ">=2.21.0,<3" },
     { name = "parallel-web", specifier = ">=0.4.2,<1" },
     { name = "prompt-toolkit", specifier = ">=3.0.52,<4" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32' and extra == 'dev'", specifier = ">=0.7.0,<1" },
     { name = "ptyprocess", marker = "sys_platform != 'win32' and extra == 'pty'", specifier = ">=0.7.0,<1" },
     { name = "pydantic", specifier = ">=2.12.5,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.12.0,<3" },
@@ -1592,6 +1595,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.1,<2" },
     { name = "python-telegram-bot", extras = ["webhooks"], marker = "extra == 'messaging'", specifier = ">=22.6,<23" },
     { name = "python-telegram-bot", extras = ["webhooks"], marker = "extra == 'termux'", specifier = ">=22.6,<23" },
+    { name = "pywinpty", marker = "sys_platform == 'win32' and extra == 'dev'", specifier = ">=2.0.0,<3" },
     { name = "pywinpty", marker = "sys_platform == 'win32' and extra == 'pty'", specifier = ">=2.0.0,<3" },
     { name = "pyyaml", specifier = ">=6.0.2,<7" },
     { name = "qrcode", marker = "extra == 'dingtalk'", specifier = ">=7.0,<8" },

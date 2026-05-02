@@ -2513,16 +2513,18 @@ def _resolve_chat_argv(
     from elevate_cli.main import PROJECT_ROOT, _make_tui_argv
 
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
-    env: Optional[dict] = None
+    env = os.environ.copy()
+    env["ELEVATE_PYTHON_SRC_ROOT"] = os.environ.get(
+        "ELEVATE_PYTHON_SRC_ROOT", str(PROJECT_ROOT)
+    )
+    env.setdefault("ELEVATE_PYTHON", sys.executable)
+    env.setdefault("ELEVATE_CWD", os.getcwd())
 
-    if resume or sidecar_url:
-        env = os.environ.copy()
+    if resume:
+        env["ELEVATE_TUI_RESUME"] = resume
 
-        if resume:
-            env["ELEVATE_TUI_RESUME"] = resume
-
-        if sidecar_url:
-            env["ELEVATE_TUI_SIDECAR_URL"] = sidecar_url
+    if sidecar_url:
+        env["ELEVATE_TUI_SIDECAR_URL"] = sidecar_url
 
     return list(argv), str(cwd) if cwd else None, env
 
