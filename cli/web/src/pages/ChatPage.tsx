@@ -41,6 +41,7 @@ import {
   Shield,
   ShieldAlert,
   Sparkles,
+  Square,
   Wrench,
   Users,
   X,
@@ -520,13 +521,13 @@ function buildProgressSummaries({
   }
 
   const summaries: ProgressSummary[] = [];
-  const current = displayStatusText(statusText || "Thinking...");
+  const current = displayStatusText(statusText || "Working...");
   if (busy && tools.length === 0) {
     summaries.push({
       detail: "One active turn",
       details: current ? [current] : [],
       id: "current",
-      label: current || "Thinking through the request",
+      label: current || "Working on the request",
       status: "running",
     });
   }
@@ -666,17 +667,21 @@ function normalizeUsage(raw: unknown): UsageInfo | null {
 }
 
 function displayStatusText(text: string): string {
-  const clean = text.trim();
+  const clean = text
+    .trim()
+    .replace(/^[^A-Za-z0-9/[{]+/, "")
+    .replace(/\s+/g, " ");
   if (!clean) return "";
 
   const lower = clean.toLowerCase();
   if (
     lower.includes("computing") ||
     lower.includes("pondering") ||
+    lower.includes("reasoning") ||
     lower.includes("thinking") ||
     /[•_]>|-■/.test(clean)
   ) {
-    return "Thinking...";
+    return "Working...";
   }
   if (lower.includes("formulating")) {
     return "Writing response...";
@@ -1737,6 +1742,19 @@ export default function ChatPage() {
     [appendMessage, gw, sessionId],
   );
 
+  const interruptCurrentTurn = useCallback(() => {
+    if (!sessionId || state !== "open") return;
+
+    setQueuedInputs([]);
+    setStatusText("Interrupting...");
+    void gw
+      .request("session.interrupt", { session_id: sessionId })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setBanner(`Interrupt failed: ${message}`);
+      });
+  }, [gw, sessionId, state]);
+
   useEffect(() => {
     if (
       busy ||
@@ -2142,6 +2160,7 @@ export default function ChatPage() {
                   canSend={canSend}
                   info={info}
                   onOpenModel={() => setModelOpen(true)}
+                  onInterrupt={interruptCurrentTurn}
                   onSelectAgent={selectComposerAgent}
                   onToggleAgentMenu={() => {
                     setAgentMenuOpen((open) => !open);
@@ -2149,7 +2168,6 @@ export default function ChatPage() {
                   onToggleVoice={toggleVoiceInput}
                   selectedAgent={selectedAgent}
                   state={state}
-                  statusText={statusText}
                   usage={usage}
                   voiceListening={voiceListening}
                   voiceSupported={voiceSupported}
@@ -2439,12 +2457,12 @@ function ComposerActionBar({
   canSend,
   info,
   onOpenModel,
+  onInterrupt,
   onSelectAgent,
   onToggleAgentMenu,
   onToggleVoice,
   selectedAgent,
   state,
-  statusText,
   usage,
   voiceListening,
   voiceSupported,
@@ -2456,12 +2474,12 @@ function ComposerActionBar({
   canSend: boolean;
   info: SessionInfo;
   onOpenModel(): void;
+  onInterrupt(): void;
   onSelectAgent(agent: ComposerAgent): void;
   onToggleAgentMenu(): void;
   onToggleVoice(): void;
   selectedAgent: ComposerAgent;
   state: ConnectionState;
-  statusText: string;
   usage: UsageInfo | null;
   voiceListening: boolean;
   voiceSupported: boolean;
@@ -2569,27 +2587,24 @@ function ComposerActionBar({
         </button>
       </div>
 
-      <div className="ml-auto flex min-w-0 items-center gap-2">
-        <span
-          className={cn(
-            "h-1.5 w-1.5 shrink-0 rounded-full",
-            state === "open" ? "bg-[var(--chat-success)]" : "bg-[var(--chat-muted)]",
-          )}
-        />
-        <span className="max-w-[10rem] truncate">{statusText}</span>
+      <div className="ml-auto flex min-w-0 items-center">
         <button
-          aria-label="Send message"
+          aria-label={busy ? "Interrupt response" : "Send message"}
           className={cn(
             "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors",
-            canSend
-              ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
-              : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
+            busy
+              ? "bg-[var(--chat-warning)] text-[var(--chat-bg)] hover:opacity-90"
+              : canSend
+                ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
+                : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
           )}
-          disabled={!canSend}
-          type="submit"
+          disabled={busy ? state !== "open" : !canSend}
+          onClick={busy ? onInterrupt : undefined}
+          title={busy ? "Stop the current response" : "Send message"}
+          type={busy ? "button" : "submit"}
         >
           {busy ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Square className="h-3.5 w-3.5 fill-current" />
           ) : (
             <Send className="h-4 w-4" />
           )}
