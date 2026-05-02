@@ -20,7 +20,25 @@ export function resolvePageTitle(
 ): string {
   const normalized = pathname.replace(/\/$/, "") || "/";
   if (normalized === "/") {
-    return "Agent Hub";
+    return "Today";
+  }
+  if (normalized === "/today") {
+    return "Today";
+  }
+  if (normalized === "/leads") {
+    return "Leads";
+  }
+  if (normalized === "/listings") {
+    return "Listings";
+  }
+  if (normalized === "/deals") {
+    return "Deals";
+  }
+  if (normalized === "/marketing") {
+    return "Marketing";
+  }
+  if (normalized === "/tasks") {
+    return "Tasks";
   }
   if (normalized === "/hub") {
     return "Agent Hub";

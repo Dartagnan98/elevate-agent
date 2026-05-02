@@ -23,6 +23,8 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  BriefcaseBusiness,
+  Building2,
   Clock,
   Code,
   Copy,
@@ -35,7 +37,9 @@ import {
   FolderOpen,
   Globe,
   Heart,
+  Home,
   KeyRound,
+  ListChecks,
   Loader2,
   MailOpen,
   Maximize2,
@@ -54,6 +58,8 @@ import {
   Sparkles,
   Star,
   Terminal,
+  Megaphone,
+  Users,
   Wrench,
   X,
   Zap,
@@ -81,6 +87,14 @@ import SkillsPage from "@/pages/SkillsPage";
 import ChatPage from "@/pages/ChatPage";
 import AgentHubPage from "@/pages/AgentHubPage";
 import ProjectPage from "@/pages/ProjectPage";
+import {
+  RealEstateDealsPage,
+  RealEstateLeadsPage,
+  RealEstateListingsPage,
+  RealEstateMarketingPage,
+  RealEstateTasksPage,
+  RealEstateTodayPage,
+} from "@/pages/RealEstateHubPages";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -92,7 +106,7 @@ import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
 
 function RootRedirect() {
-  return <Navigate to="/hub" replace />;
+  return <Navigate to="/today" replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -105,6 +119,12 @@ const CHAT_NAV_ITEM: NavItem = {
 /** Built-in routes except /chat (only with `elevate dashboard --tui`). */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
+  "/today": RealEstateTodayPage,
+  "/leads": RealEstateLeadsPage,
+  "/listings": RealEstateListingsPage,
+  "/deals": RealEstateDealsPage,
+  "/marketing": RealEstateMarketingPage,
+  "/tasks": RealEstateTasksPage,
   "/hub": AgentHubPage,
   "/project": ProjectPage,
   "/sessions": SessionsPage,
@@ -118,6 +138,36 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
 };
 
 const BUILTIN_NAV_REST: NavItem[] = [
+  {
+    path: "/today",
+    label: "Today",
+    icon: Home,
+  },
+  {
+    path: "/leads",
+    label: "Leads",
+    icon: Users,
+  },
+  {
+    path: "/listings",
+    label: "Listings",
+    icon: Building2,
+  },
+  {
+    path: "/deals",
+    label: "Deals",
+    icon: BriefcaseBusiness,
+  },
+  {
+    path: "/marketing",
+    label: "Marketing",
+    icon: Megaphone,
+  },
+  {
+    path: "/tasks",
+    label: "Tasks",
+    icon: ListChecks,
+  },
   {
     path: "/hub",
     label: "Agent Hub",
@@ -175,6 +225,12 @@ const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   Star,
   Code,
   Eye,
+  Home,
+  Users,
+  Building2,
+  BriefcaseBusiness,
+  Megaphone,
+  ListChecks,
 };
 
 function resolveIcon(name: string): ComponentType<{ className?: string }> {
@@ -440,7 +496,7 @@ export default function App() {
                   {routes.map(({ key, path, element }) => (
                     <Route key={key} path={path} element={element} />
                   ))}
-                  <Route path="*" element={<Navigate to="/hub" replace />} />
+                  <Route path="*" element={<Navigate to="/today" replace />} />
                 </Routes>
               </div>
               <PluginSlot name="post-main" />
@@ -876,11 +932,15 @@ function DesktopSidebar({
           <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
         </div>
 
-        <Typography
-          className="min-w-0 flex-1 truncate text-center text-[0.88rem] font-semibold leading-none text-midground"
-        >
-          Elevate Agent
-        </Typography>
+        <div className="flex min-w-0 flex-1 justify-center">
+          <div className="flex h-8 min-w-0 items-center rounded-xl bg-[#f7f7f7] px-2 shadow-[0_0_0_1px_rgba(27,42,74,0.12),0_10px_26px_rgba(0,0,0,0.16)]">
+            <img
+              src="/elevate-agent-wordmark.svg"
+              alt="Elevate Agent"
+              className="h-7 max-w-[8.7rem] object-contain"
+            />
+          </div>
+        </div>
 
         <button
           type="button"
@@ -932,10 +992,28 @@ function DesktopSidebar({
               /
             </span>
           </button>
-          <SidebarAction icon={Puzzle} label="Plugins" path="/skills" onNavigate={go} />
-          <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
-          <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
-          <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
+        </div>
+
+        <div className="mt-3">
+          <SidebarSectionLabel>Real Estate</SidebarSectionLabel>
+          <div className="space-y-0.5">
+            <SidebarAction icon={Home} label="Today" path="/today" onNavigate={go} />
+            <SidebarAction icon={Users} label="Leads" path="/leads" onNavigate={go} />
+            <SidebarAction icon={Building2} label="Listings" path="/listings" onNavigate={go} />
+            <SidebarAction icon={BriefcaseBusiness} label="Deals" path="/deals" onNavigate={go} />
+            <SidebarAction icon={Megaphone} label="Marketing" path="/marketing" onNavigate={go} />
+            <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <SidebarSectionLabel>Agent</SidebarSectionLabel>
+          <div className="space-y-0.5">
+            <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
+            <SidebarAction icon={Puzzle} label="Skills" path="/skills" onNavigate={go} />
+            <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
+            <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
+          </div>
         </div>
 
         <div className="relative mt-2.5">
@@ -1078,7 +1156,7 @@ function SidebarAction({
   return (
     <NavLink
       to={path}
-      end={path === "/hub" || path === "/sessions"}
+      end={path === "/today" || path === "/hub" || path === "/sessions"}
       onClick={(event) => {
         event.preventDefault();
         onNavigate(path);
