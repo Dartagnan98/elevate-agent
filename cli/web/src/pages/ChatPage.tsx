@@ -1,5 +1,9 @@
 import { Markdown } from "@/components/Markdown";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
+import {
+  SlashPopover,
+  type SlashPopoverHandle,
+} from "@/components/SlashPopover";
 import type { ToolEntry } from "@/components/ToolCall";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,18 +23,23 @@ import {
   ChevronDown,
   ChevronUp,
   Clipboard,
+  Command,
   FileCode2,
   FileText,
+  Folder,
+  GitBranch,
   Loader2,
   Mic,
   MicOff,
   PanelRight,
+  Plug,
   RotateCcw,
   Send,
   Shield,
   ShieldAlert,
   Sparkles,
   Square,
+  Wrench,
   Users,
   X,
 } from "lucide-react";
@@ -557,6 +566,7 @@ export default function ChatPage() {
   const activeSessionRef = useRef<string | null>(null);
   const currentAssistantRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
 
@@ -565,6 +575,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [input, setInput] = useState("");
+  const [caretIndex, setCaretIndex] = useState(0);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
@@ -1223,6 +1234,22 @@ export default function ChatPage() {
     [],
   );
 
+  const applyComposerCompletion = useCallback(
+    (nextInput: string, nextCaret: number) => {
+      setInput(nextInput);
+      setCaretIndex(nextCaret);
+      setAgentMenuOpen(false);
+      setRichMenuOpen(false);
+      window.requestAnimationFrame(() => {
+        const target = inputRef.current;
+        if (!target) return;
+        target.focus();
+        target.setSelectionRange(nextCaret, nextCaret);
+      });
+    },
+    [],
+  );
+
   const submitPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
@@ -1298,6 +1325,10 @@ export default function ChatPage() {
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (commandPopoverRef.current?.handleKey(event)) {
+      return;
+    }
+
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void submitPrompt(input);
@@ -1571,14 +1602,34 @@ export default function ChatPage() {
             <div className="mx-auto max-w-[48rem]">
               <QueuedInputStrip queuedInputs={queuedInputs} />
 
-              <div className="rounded-[1.45rem] bg-[var(--chat-surface)] p-2.5 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
+              <div className="relative rounded-[1.45rem] bg-[var(--chat-surface)] p-2.5 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
+                <SlashPopover
+                  ref={commandPopoverRef}
+                  agents={activeComposerAgents}
+                  caretIndex={caretIndex}
+                  gw={gw}
+                  input={input}
+                  onApply={applyComposerCompletion}
+                />
+
                 <textarea
                   ref={inputRef}
                   aria-label="Message Elevate Agent"
                   className="max-h-40 min-h-14 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)]"
                   disabled={state !== "open" || !sessionId}
-                  onChange={(event) => setInput(event.target.value)}
+                  onChange={(event) => {
+                    setInput(event.target.value);
+                    setCaretIndex(event.currentTarget.selectionStart ?? event.target.value.length);
+                    setAgentMenuOpen(false);
+                    setRichMenuOpen(false);
+                  }}
+                  onClick={(event) =>
+                    setCaretIndex(event.currentTarget.selectionStart ?? input.length)
+                  }
                   onKeyDown={onComposerKeyDown}
+                  onKeyUp={(event) =>
+                    setCaretIndex(event.currentTarget.selectionStart ?? input.length)
+                  }
                   placeholder={
                     state === "open" && sessionId
                       ? "Message Elevate Agent..."
@@ -1587,6 +1638,8 @@ export default function ChatPage() {
                   rows={2}
                   value={input}
                 />
+
+                <ComposerTokenPreview input={input} />
 
                 <ComposerActionBar
                   agentMenuOpen={agentMenuOpen}
@@ -1686,6 +1739,70 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function ComposerTokenPreview({ input }: { input: string }) {
+  const tokens = useMemo(() => {
+    const matches = input.matchAll(
+      /(^|\s)(\/[a-z][\w-]*|@(agent|skill|toolset|plugin|file|folder|url|git):[^\s]+|@(diff|staged)\b)/gi,
+    );
+    return Array.from(matches)
+      .map((match) => match[2])
+      .filter(Boolean)
+      .slice(0, 8);
+  }, [input]);
+
+  if (!tokens.length) return null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 px-1.5 pb-1.5">
+      {tokens.map((token) => {
+        const normalized = token.toLowerCase();
+        const isSlash = token.startsWith("/");
+        const isFile = normalized.startsWith("@file:") || normalized.startsWith("@folder:");
+        const isAgent = normalized.startsWith("@agent:");
+        const isSkill = normalized.startsWith("@skill:");
+        const isToolset = normalized.startsWith("@toolset:");
+        const isPlugin = normalized.startsWith("@plugin:");
+        const isGit = normalized.startsWith("@git:") || normalized === "@diff" || normalized === "@staged";
+        const Icon = isSlash
+          ? Command
+          : isAgent
+            ? Bot
+            : isSkill
+              ? Sparkles
+              : isToolset
+                ? Wrench
+                : isPlugin
+                  ? Plug
+                  : isFile
+                    ? normalized.startsWith("@folder:")
+                      ? Folder
+                      : FileText
+                    : isGit
+                      ? GitBranch
+                      : FileText;
+        const rawLabel = isSlash
+          ? token
+          : token.replace(/^@[a-z]+:/i, "").replace(/^@/, "");
+        const label = rawLabel
+          .split(/[/-]/)
+          .filter(Boolean)
+          .slice(-2)
+          .join(" / ");
+
+        return (
+          <span
+            key={token}
+            className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full bg-[var(--chat-surface-soft)] px-2.5 py-1 text-xs text-[var(--chat-muted-strong)] shadow-[inset_0_0_0_1px_var(--chat-border)]"
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-accent)]" />
+            <span className="truncate">{label}</span>
+          </span>
+        );
+      })}
     </div>
   );
 }
