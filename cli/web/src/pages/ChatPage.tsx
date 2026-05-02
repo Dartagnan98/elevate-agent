@@ -154,6 +154,7 @@ interface SourceEntry {
 interface QueuedInput {
   createdAt: number;
   id: string;
+  routedText: string;
   status: "queued" | "error";
   text: string;
 }
@@ -560,6 +561,7 @@ export default function ChatPage() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const voiceBaseInputRef = useRef("");
+  const queueDispatchRef = useRef(false);
 
   const [info, setInfo] = useState<SessionInfo>({});
   const [usage, setUsage] = useState<UsageInfo | null>(null);
@@ -992,7 +994,9 @@ export default function ChatPage() {
         );
         currentAssistantRef.current = null;
         setBusy(false);
-        setQueuedInputs([]);
+        if (status === "interrupted") {
+          setQueuedInputs([]);
+        }
         setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
       }),
     );
@@ -1261,18 +1265,66 @@ export default function ChatPage() {
     [],
   );
 
+  const submitGatewayPrompt = useCallback(
+    async (text: string, routedText: string, status = "Sending...") => {
+      if (!sessionId) return;
+
+      appendMessage("user", text);
+      setBusy(true);
+      setStatusText(status);
+
+      try {
+        await gw.request("prompt.submit", {
+          session_id: sessionId,
+          text: routedText,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendMessage("system", message, { status: "error" });
+        setBusy(false);
+        setStatusText("Error");
+      }
+    },
+    [appendMessage, gw, sessionId],
+  );
+
+  useEffect(() => {
+    if (
+      busy ||
+      queueDispatchRef.current ||
+      state !== "open" ||
+      !sessionId ||
+      queuedInputs.length === 0
+    ) {
+      return;
+    }
+
+    const next = queuedInputs.find((item) => item.status === "queued");
+    if (!next) return;
+
+    queueDispatchRef.current = true;
+    setQueuedInputs((prev) => prev.filter((item) => item.id !== next.id));
+    void submitGatewayPrompt(
+      next.text,
+      next.routedText,
+      "Sending queued follow-up...",
+    ).finally(() => {
+      queueDispatchRef.current = false;
+    });
+  }, [busy, queuedInputs, sessionId, state, submitGatewayPrompt]);
+
   const submitPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || !sessionId) return;
 
-      appendMessage("user", trimmed);
       setInput("");
       setComposerScrollTop(0);
       setBanner(null);
       setAgentMenuOpen(false);
 
       if (trimmed.startsWith("/")) {
+        appendMessage("user", trimmed);
         await executeSlash({
           callbacks: {
             send: submitPrompt,
@@ -1291,43 +1343,18 @@ export default function ChatPage() {
         const queued: QueuedInput = {
           createdAt: Date.now(),
           id: id("queued"),
+          routedText,
           status: "queued",
           text: trimmed,
         };
         setQueuedInputs((prev) => [...prev, queued].slice(-5));
-        setStatusText("Queued for current turn");
-        try {
-          await gw.request("session.steer", {
-            session_id: sessionId,
-            text: routedText,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          setQueuedInputs((prev) =>
-            prev.map((item) =>
-              item.id === queued.id ? { ...item, status: "error" } : item,
-            ),
-          );
-          appendMessage("system", message, { status: "error" });
-        }
+        setStatusText("Queued follow-up");
         return;
       }
 
-      setBusy(true);
-      setStatusText("Sending...");
-      try {
-        await gw.request("prompt.submit", {
-          session_id: sessionId,
-          text: routedText,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        appendMessage("system", message, { status: "error" });
-        setBusy(false);
-        setStatusText("Error");
-      }
+      await submitGatewayPrompt(trimmed, routedText);
     },
-    [appendMessage, busy, gw, selectedAgent, sessionId],
+    [appendMessage, busy, gw, selectedAgent, sessionId, submitGatewayPrompt],
   );
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
