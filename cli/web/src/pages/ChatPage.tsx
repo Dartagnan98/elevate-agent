@@ -7,7 +7,6 @@ import {
 import type { ToolEntry } from "@/components/ToolCall";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { usePageHeader } from "@/contexts/usePageHeader";
 import {
   api,
   type AgentHubAgent,
@@ -35,14 +34,11 @@ import {
   Loader2,
   Mic,
   MicOff,
-  PanelRight,
   Plug,
-  RotateCcw,
   Send,
   Shield,
   ShieldAlert,
   Sparkles,
-  Square,
   Wrench,
   Users,
   X,
@@ -273,9 +269,54 @@ function id(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
+function parseObjectPayload(text: string): Record<string, unknown> | null {
+  const clean = text.trim();
+  if (!clean || (!clean.startsWith("{") && !clean.startsWith("["))) return null;
+  try {
+    const parsed = JSON.parse(clean);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRawToolPayload(text: string): boolean {
+  const clean = text.trim();
+  if (!clean) return false;
+  const parsed = parseObjectPayload(clean);
+  if (parsed) {
+    return [
+      "content",
+      "duration_seconds",
+      "error",
+      "files",
+      "is_binary",
+      "matches",
+      "output",
+      "status",
+      "tool_calls_made",
+      "total_count",
+      "total_lines",
+    ].some((key) => key in parsed);
+  }
+  return clean.length > 420 && /^[{\[]/.test(clean);
+}
+
+function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
+  const clean = content.trim();
+  if (!clean) return false;
+  if (role === "tool") return false;
+  if (role !== "user" && isRawToolPayload(clean)) return false;
+  return true;
+}
+
 function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage[] {
   return (messages ?? [])
-    .filter((m) => m.text || m.context)
+    .filter((m) =>
+      shouldKeepTranscriptMessage(m.role, String(m.text ?? m.context ?? "")),
+    )
     .map((m, index) => ({
       content: String(m.text ?? m.context ?? ""),
       createdAt: Date.now() - Math.max(0, (messages?.length ?? 0) - index),
@@ -295,7 +336,12 @@ function timestampMillis(value: unknown, fallback: number): number {
 
 function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
   return (messages ?? [])
-    .filter((m) => typeof m.content === "string" && m.content.trim())
+    .filter((m) =>
+      shouldKeepTranscriptMessage(
+        m.role,
+        typeof m.content === "string" ? m.content : "",
+      ),
+    )
     .map((m, index) => ({
       content: String(m.content ?? ""),
       createdAt: timestampMillis(
@@ -352,11 +398,77 @@ function compactLine(value: string | undefined, fallback = ""): string {
   return (value || fallback).replace(/\s+/g, " ").trim();
 }
 
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${Math.round(value)} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function summarizeRawToolPayload(text: string, fallback: string): string | null {
+  const clean = text.trim();
+  const parsed = parseObjectPayload(clean);
+
+  if (parsed) {
+    const totalCount = typeof parsed.total_count === "number" ? parsed.total_count : undefined;
+    const files = Array.isArray(parsed.files) ? parsed.files.map(String) : [];
+    if (totalCount !== undefined && files.length) {
+      const keyFiles = files
+        .filter((file) => /\.(pdf|html|md|json|txt|csv|xlsx|docx)$/i.test(file))
+        .slice(0, 3)
+        .map(fileName);
+      return `Found ${plural(totalCount, "output file")} ${keyFiles.length ? `(${keyFiles.join(", ")})` : ""}`.trim();
+    }
+
+    const matches = Array.isArray(parsed.matches) ? parsed.matches : [];
+    if (totalCount !== undefined && matches.length) {
+      return `Found ${plural(totalCount, "match", "matches")}`;
+    }
+
+    const totalLines =
+      typeof parsed.total_lines === "number" ? parsed.total_lines : undefined;
+    const fileSize = typeof parsed.file_size === "number" ? parsed.file_size : undefined;
+    if (typeof parsed.content === "string" && totalLines !== undefined) {
+      return `Read ${plural(totalLines, "line")} ${fileSize ? `(${formatBytes(fileSize)})` : ""}`.trim();
+    }
+
+    const status = typeof parsed.status === "string" ? parsed.status : undefined;
+    const calls =
+      typeof parsed.tool_calls_made === "number"
+        ? parsed.tool_calls_made
+        : undefined;
+    const duration =
+      typeof parsed.duration_seconds === "number"
+        ? `${parsed.duration_seconds.toFixed(1)}s`
+        : undefined;
+    if (status || calls !== undefined || duration) {
+      return [
+        status ? status[0].toUpperCase() + status.slice(1) : "Completed",
+        calls !== undefined ? plural(calls, "tool call") : "",
+        duration ? `in ${duration}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    if (typeof parsed.output === "string") {
+      const lines = parsed.output.split("\n").filter((line) => line.trim());
+      if (lines.length > 1) return `Collected ${plural(lines.length, "output line")}`;
+      if (lines[0]) return compactLine(lines[0]).slice(0, 180);
+    }
+  }
+
+  if (clean.length > 360 || clean.split("\n").length > 8) {
+    return `${fallback} produced ${formatBytes(clean.length)} of output`;
+  }
+
+  return null;
+}
+
 function toolDetail(tool: ToolEntry): string {
-  return compactLine(
-    tool.summary || tool.preview || tool.context || tool.error,
-    tool.name,
-  ).slice(0, 220);
+  const raw = tool.summary || tool.preview || tool.context || tool.error || "";
+  const summarized = summarizeRawToolPayload(raw, tool.name);
+  return (summarized ?? compactLine(raw, tool.name)).slice(0, 180);
 }
 
 function toolKind(tool: ToolEntry): "edit" | "other" | "read" | "run" | "search" {
@@ -379,7 +491,7 @@ function summaryStatus(tools: ToolEntry[]): ProgressState {
 }
 
 function detailsFor(tools: ToolEntry[]): string[] {
-  return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-8);
+  return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-4);
 }
 
 function buildProgressSummaries({
@@ -407,12 +519,12 @@ function buildProgressSummaries({
 
   const summaries: ProgressSummary[] = [];
   const current = displayStatusText(statusText || "Thinking...");
-  if (busy) {
+  if (busy && tools.length === 0) {
     summaries.push({
-      detail: "Current step",
+      detail: "One active turn",
       details: current ? [current] : [],
       id: "current",
-      label: current || "Thinking through the next step",
+      label: current || "Thinking through the request",
       status: "running",
     });
   }
@@ -426,7 +538,7 @@ function buildProgressSummaries({
       detail: "Code and context inspection",
       details: detailsFor([...groups.read, ...groups.search]),
       id: "explore",
-      label: `Explored ${parts.join(", ") || plural(groups.read.length + groups.search.length, "item")}`,
+      label: `Checked ${parts.join(", ") || plural(groups.read.length + groups.search.length, "item")}`,
       status: summaryStatus([...groups.read, ...groups.search]),
     });
   }
@@ -556,7 +668,12 @@ function displayStatusText(text: string): string {
   if (!clean) return "";
 
   const lower = clean.toLowerCase();
-  if (lower.includes("pondering") || lower.includes("thinking")) {
+  if (
+    lower.includes("computing") ||
+    lower.includes("pondering") ||
+    lower.includes("thinking") ||
+    /[•_]>|-■/.test(clean)
+  ) {
     return "Thinking...";
   }
   if (lower.includes("formulating")) {
@@ -595,6 +712,18 @@ function nowLabel(ts: number): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function deriveChatTitle(
+  messages: ChatMessage[],
+  resumeId: string | null,
+  resumeFallback: boolean,
+): string {
+  if (resumeFallback) return "New chat";
+  const firstUser = messages.find((message) => message.role === "user");
+  const base = firstUser?.content.split("\n")[0].trim();
+  if (base) return base.length > 54 ? `${base.slice(0, 51)}...` : base;
+  return resumeId ? "Resumed chat" : "New chat";
 }
 
 function compactToolPayload(payload: unknown) {
@@ -832,7 +961,6 @@ export default function ChatPage() {
       ? window.matchMedia("(max-width: 1279px)").matches
       : false,
   );
-  const { setEnd } = usePageHeader();
 
   const activeComposerAgents = useMemo(() => {
     const enabled = composerAgents.filter((agent) => agent.enabled);
@@ -979,31 +1107,6 @@ export default function ChatPage() {
       document.removeEventListener("keydown", onKey);
     };
   }, [mobilePanelOpen]);
-
-  useEffect(() => {
-    if (!narrow) {
-      setEnd(null);
-      return;
-    }
-
-    setEnd(
-      <button
-        type="button"
-        onClick={() => setMobilePanelOpen(true)}
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded border border-current/20 px-2 py-1",
-          "text-[0.65rem] font-medium normal-case text-midground/80",
-          "hover:bg-midground/5 hover:text-midground",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-        )}
-      >
-        <PanelRight className="h-3 w-3" />
-        Activity
-      </button>,
-    );
-
-    return () => setEnd(null);
-  }, [narrow, setEnd]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -1691,20 +1794,6 @@ export default function ChatPage() {
     setVersion((value) => value + 1);
   };
 
-  const interrupt = async () => {
-    if (!sessionId) return;
-    setStatusText("Interrupting...");
-    try {
-      await gw.request("session.interrupt", { session_id: sessionId });
-      setBusy(false);
-      setQueuedInputs([]);
-      setStatusText("Interrupted");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendMessage("system", message, { status: "error" });
-    }
-  };
-
   const respondToPrompt = async (value: string) => {
     if (!pendingPrompt) return;
 
@@ -1813,9 +1902,19 @@ export default function ChatPage() {
 
   const canSend = !!input.trim() && state === "open" && !!sessionId;
   const canPickModel = state === "open" && !!sessionId;
+  const visibleMessages = useMemo(
+    () =>
+      messages.filter((message) =>
+        shouldKeepTranscriptMessage(message.role, message.content),
+      ),
+    [messages],
+  );
+  const chatTitle = useMemo(
+    () => deriveChatTitle(visibleMessages, resumeId, resumeFallback),
+    [resumeFallback, resumeId, visibleMessages],
+  );
   const activity = (
     <ActivityPanel
-      activityTrace={activityTrace}
       artifacts={artifacts}
       banner={banner}
       busy={busy}
@@ -1865,66 +1964,24 @@ export default function ChatPage() {
     );
 
   return (
-    <div className="elevate-chat-shell relative -m-4 flex min-h-[calc(100vh-4.5rem)] flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6">
+    <div className="elevate-chat-shell relative -m-4 flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6">
       <div className="relative flex min-h-0 flex-1">
         <section className="flex min-h-0 flex-1 flex-col xl:pr-[23rem]">
-          <header className="mx-auto flex w-full max-w-[52rem] flex-wrap items-center justify-between gap-3 px-4 pb-4 pt-5 sm:px-6">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h1 className="truncate text-sm font-semibold text-[var(--chat-text)]">
-                  {resumeId && !resumeFallback ? "Resumed session" : "Elevate Agent"}
-                </h1>
-                <span className="h-1 w-1 rounded-full bg-[var(--chat-border-strong)]" />
-                <span className="truncate text-xs text-[var(--chat-muted)]">
-                  {modelLabel(info)}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "inline-flex h-7 items-center rounded-full px-2.5 text-xs",
-                  state === "open"
-                    ? "bg-[color-mix(in_srgb,var(--chat-success)_18%,var(--chat-bg))] text-[var(--chat-success)]"
-                    : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
-                )}
-              >
-                {STATE_LABEL[state]}
-              </span>
-              {busy && (
-                <button
-                  className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[var(--chat-border-strong)] px-2.5 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)]"
-                  onClick={() => void interrupt()}
-                  type="button"
-                >
-                  <Square className="h-3 w-3" />
-                  Stop
-                </button>
-              )}
-              <button
-                className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[var(--chat-border-strong)] px-2.5 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)]"
-                onClick={reconnect}
-                type="button"
-              >
-                <RotateCcw className="h-3 w-3" />
-                Restart
-              </button>
-            </div>
-          </header>
-
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-1 sm:px-6">
-            {messages.length === 0 ? (
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-5 sm:px-6">
+            {visibleMessages.length === 0 ? (
               <EmptyState state={state} />
             ) : (
               <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-5 pb-6">
-                {messages.map((message, index) => (
+                <ChatTitleLine
+                  chatTitle={chatTitle}
+                />
+                {visibleMessages.map((message, index) => (
                   <MessageRow
                     key={message.id}
                     activityText={
                       message.role === "assistant" &&
                       message.status === "streaming" &&
-                      index === messages.length - 1
+                      index === visibleMessages.length - 1
                         ? statusText
                         : undefined
                     }
@@ -2044,6 +2101,15 @@ export default function ChatPage() {
         </aside>
       </div>
       {mobileActivityPortal}
+      {narrow && !mobilePanelOpen && (
+        <button
+          className="fixed right-4 top-4 z-40 rounded-full bg-[var(--chat-surface)] px-3 py-1.5 text-xs font-medium text-[var(--chat-muted-strong)] shadow-[0_12px_38px_rgba(0,0,0,0.18),inset_0_0_0_1px_var(--chat-border)]"
+          onClick={() => setMobilePanelOpen(true)}
+          type="button"
+        >
+          Activity
+        </button>
+      )}
       {modelOpen && canPickModel && sessionId && (
         <ModelPickerDialog
           gw={gw}
@@ -2063,6 +2129,20 @@ export default function ChatPage() {
           sessionId={sessionId}
         />
       )}
+    </div>
+  );
+}
+
+function ChatTitleLine({
+  chatTitle,
+}: {
+  chatTitle: string;
+}) {
+  return (
+    <div className="mb-1 min-w-0 text-xs text-[var(--chat-muted)]">
+      <div className="truncate text-sm font-semibold text-[var(--chat-text)]">
+        {chatTitle}
+      </div>
     </div>
   );
 }
@@ -2448,6 +2528,15 @@ function MessageRow({
 }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
+  if (
+    message.role === "tool" ||
+    (message.role !== "user" && isRawToolPayload(message.content))
+  ) {
+    return null;
+  }
+  if (isAssistant && !message.content.trim()) {
+    return null;
+  }
 
   return (
     <article
@@ -2501,14 +2590,6 @@ function MessageRow({
   );
 }
 
-function ThinkingShimmer({ text }: { text: string }) {
-  return (
-    <div className="elevate-thinking-shimmer inline-flex min-h-7 items-center rounded-full px-2 text-sm text-[var(--chat-muted)]">
-      {displayStatusText(text || "Thinking...")}
-    </div>
-  );
-}
-
 function ChatActivityDigest({
   activityTrace,
   artifacts,
@@ -2535,6 +2616,7 @@ function ChatActivityDigest({
   const duration = formatDuration(end - start);
   const latestTrace = activityTrace.slice(-1)[0]?.text || statusText;
   const compactSummaries = summaries.filter((summary) => summary.id !== "ready").slice(0, 3);
+  const primary = compactSummaries[0]?.label || displayStatusText(latestTrace || statusText);
 
   return (
     <section className="border-t border-[var(--chat-border)] pt-3 text-[var(--chat-muted)]">
@@ -2552,32 +2634,28 @@ function ChatActivityDigest({
         />
       </button>
 
-      <div className="mt-3 space-y-2">
-        {busy && <ThinkingShimmer text={latestTrace} />}
-        {compactSummaries.map((summary) => (
-          <ProgressSummaryRow key={`chat-${summary.id}`} summary={summary} />
-        ))}
+      <div
+        className={cn(
+          "mt-3 flex max-w-[38rem] items-center gap-2 rounded-2xl px-3 py-2 text-sm",
+          busy
+            ? "elevate-thinking-shimmer text-[var(--chat-muted-strong)]"
+            : "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
+        )}
+      >
+        {busy ? (
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+        ) : (
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+        )}
+        <span className="min-w-0 flex-1 truncate">
+          {primary || (busy ? "Working..." : "Done")}
+        </span>
       </div>
 
       {open && (
-        <div className="mt-3 space-y-2 pl-6 text-sm leading-6 text-[var(--chat-muted)]">
-          {activityTrace.slice(-8).map((trace) => (
-            <div key={trace.id}>
-              <span className="text-[var(--chat-muted-strong)]">
-                {trace.kind === "reasoning"
-                  ? "Reasoning"
-                  : trace.kind === "thinking"
-                    ? "Thinking"
-                    : "Status"}
-              </span>
-              <span className="mx-2 text-[var(--chat-border-strong)]">/</span>
-              <span>{trace.text}</span>
-            </div>
-          ))}
-          {tools.slice(-8).map((tool) => (
-            <div key={`detail-${tool.id}`} className="truncate">
-              {tool.name}: {toolDetail(tool)}
-            </div>
+        <div className="mt-3 space-y-2">
+          {compactSummaries.map((summary) => (
+            <ProgressSummaryRow key={`chat-${summary.id}`} summary={summary} />
           ))}
         </div>
       )}
@@ -2874,7 +2952,6 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
 }
 
 function ActivityPanel({
-  activityTrace,
   artifacts,
   banner,
   busy,
@@ -2885,7 +2962,6 @@ function ActivityPanel({
   statusText,
   tools,
 }: {
-  activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   banner: string | null;
   busy: boolean;
@@ -2960,26 +3036,6 @@ function ActivityPanel({
       )}
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-2.5 py-2.5">
-        <section className="rounded-2xl bg-[var(--chat-surface-soft)] p-3">
-          <div className="flex gap-2 text-sm leading-5">
-            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
-              {busy ? (
-                <Loader2 className="h-2.5 w-2.5 animate-spin" />
-              ) : (
-                <CheckCircle2 className="h-2.5 w-2.5" />
-              )}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[var(--chat-muted-strong)]">
-                {statusText}
-              </div>
-              <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
-                {activityTrace.slice(-1)[0]?.text || modelLabel(info)}
-              </div>
-            </div>
-          </div>
-        </section>
-
         <section className="space-y-2">
           <PortalSectionHeader
             count={progress.length}

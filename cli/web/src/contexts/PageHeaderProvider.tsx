@@ -48,46 +48,38 @@ export function PageHeaderProvider({
   return (
     <PageHeaderContext.Provider value={value}>
       <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        <header
-          className={cn(
-            "z-1 w-full shrink-0",
-            "box-border h-14 min-h-14",
-            "border-b border-border",
-            "bg-background-base/72 backdrop-blur-sm",
-            "overflow-hidden",
-            "sm:min-h-0",
-          )}
-          role="banner"
-        >
-          <div
+        {!isChatRoute && (
+          <header
             className={cn(
-              "flex h-full w-full min-w-0 flex-1 gap-2 px-3 py-2 sm:gap-3 sm:px-6 sm:py-0",
-              isChatRoute
-                ? "flex-row items-center"
-                : "flex-col justify-center sm:flex-row sm:items-center",
+              "z-1 w-full shrink-0",
+              "box-border h-14 min-h-14",
+              "border-b border-border",
+              "bg-background-base/72 backdrop-blur-sm",
+              "overflow-hidden",
+              "sm:min-h-0",
             )}
+            role="banner"
           >
-            <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-              <h1
-                className="min-w-0 truncate text-sm font-semibold tracking-normal text-midground"
-              >
-                {displayTitle}
-              </h1>
-              {afterTitle}
-            </div>
-
-            {end ? (
-              <div
-                className={cn(
-                  "flex min-w-0 justify-end sm:max-w-md sm:flex-1",
-                  isChatRoute ? "w-auto shrink-0" : "w-full",
-                )}
-              >
-                {end}
+            <div
+              className="flex h-full w-full min-w-0 flex-1 flex-col justify-center gap-2 px-3 py-2 sm:flex-row sm:items-center sm:gap-3 sm:px-6 sm:py-0"
+            >
+              <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+                <h1
+                  className="min-w-0 truncate text-sm font-semibold tracking-normal text-midground"
+                >
+                  {displayTitle}
+                </h1>
+                {afterTitle}
               </div>
-            ) : null}
-          </div>
-        </header>
+
+              {end ? (
+                <div className="flex w-full min-w-0 justify-end sm:max-w-md sm:flex-1">
+                  {end}
+                </div>
+              ) : null}
+            </div>
+          </header>
+        )}
 
         <main
           className={cn(
