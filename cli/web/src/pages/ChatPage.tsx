@@ -220,6 +220,24 @@ function modelLabel(info: SessionInfo): string {
   return model.split("/").slice(-1)[0] || model;
 }
 
+function displayStatusText(text: string): string {
+  const clean = text.trim();
+  if (!clean) return "";
+
+  const lower = clean.toLowerCase();
+  if (lower.includes("pondering") || lower.includes("thinking")) {
+    return "Thinking...";
+  }
+  if (lower.includes("formulating")) {
+    return "Writing response...";
+  }
+  return clean;
+}
+
+function syntheticToolId(name: string): string {
+  return `progress:${name || "tool"}`;
+}
+
 function nowLabel(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "numeric",
@@ -605,22 +623,53 @@ export default function ChatPage() {
       if (ev.type === "tool.start") {
         const toolId = String(payload.tool_id ?? "");
         if (!toolId) return;
+        const name = String(payload.name ?? "tool");
+        const context = typeof payload.context === "string" ? payload.context : "";
 
         setTools((prev) =>
-          [
-            ...prev,
-            {
-              context:
-                typeof payload.context === "string" ? payload.context : "",
-              id: id(`tool-${toolId}`),
-              kind: "tool" as const,
-              name: String(payload.name ?? "tool"),
-              startedAt: Date.now(),
-              status: "running" as const,
-              tool_id: toolId,
-            },
-          ].slice(-TOOL_LIMIT),
+          prev.some((tool) => tool.tool_id === toolId)
+            ? prev.map((tool) =>
+                tool.tool_id === toolId
+                  ? {
+                      ...tool,
+                      context,
+                      name,
+                      status: "running" as const,
+                    }
+                  : tool,
+              )
+            : prev.some(
+                  (tool) =>
+                    tool.status === "running" &&
+                    tool.name === name &&
+                    tool.tool_id === syntheticToolId(name),
+                )
+              ? prev.map((tool) =>
+                  tool.status === "running" &&
+                  tool.name === name &&
+                  tool.tool_id === syntheticToolId(name)
+                    ? {
+                        ...tool,
+                        context,
+                        name,
+                        tool_id: toolId,
+                      }
+                    : tool,
+                )
+              : [
+                  ...prev,
+                  {
+                    context,
+                    id: id(`tool-${toolId}`),
+                    kind: "tool" as const,
+                    name,
+                    startedAt: Date.now(),
+                    status: "running" as const,
+                    tool_id: toolId,
+                  },
+                ].slice(-TOOL_LIMIT),
         );
+        setStatusText(`Running ${name}`);
         return;
       }
 
@@ -629,23 +678,56 @@ export default function ChatPage() {
         const preview = String(payload.preview ?? "");
         if (!name || !preview) return;
 
-        setTools((prev) =>
-          prev.map((tool) =>
-            tool.status === "running" && tool.name === name
-              ? { ...tool, preview }
-              : tool,
-          ),
-        );
+        setTools((prev) => {
+          const hasRunning = prev.some(
+            (tool) => tool.status === "running" && tool.name === name,
+          );
+          if (hasRunning) {
+            return prev.map((tool) =>
+              tool.status === "running" && tool.name === name
+                ? { ...tool, preview }
+                : tool,
+            );
+          }
+
+          return [
+            ...prev,
+            {
+              id: id(`tool-${name}`),
+              kind: "tool" as const,
+              name,
+              preview,
+              startedAt: Date.now(),
+              status: "running" as const,
+              tool_id: syntheticToolId(name),
+            },
+          ].slice(-TOOL_LIMIT);
+        });
+        setStatusText(`Running ${name}`);
         return;
       }
 
       if (ev.type === "tool.complete") {
         const toolId = String(payload.tool_id ?? "");
-        if (!toolId) return;
+        const name = String(payload.name ?? "");
+        if (!toolId && !name) return;
 
-        setTools((prev) =>
-          prev.map((tool) =>
-            tool.tool_id === toolId
+        setTools((prev) => {
+          const hasToolId = toolId
+            ? prev.some((tool) => tool.tool_id === toolId)
+            : false;
+          const fallbackIndex = !hasToolId && name
+            ? prev.reduce(
+                (match, tool, index) =>
+                  tool.status === "running" && tool.name === name
+                    ? index
+                    : match,
+                -1,
+              )
+            : -1;
+
+          return prev.map((tool, index) =>
+            (toolId && tool.tool_id === toolId) || index === fallbackIndex
               ? {
                   ...tool,
                   completedAt: Date.now(),
@@ -664,8 +746,11 @@ export default function ChatPage() {
                       : undefined,
                 }
               : tool,
-          ),
-        );
+          );
+        });
+        if (name) {
+          setStatusText(payload.error ? `${name} failed` : `${name} complete`);
+        }
         addArtifacts(artifactsFromToolComplete(payload));
       }
     };
@@ -696,7 +781,7 @@ export default function ChatPage() {
         currentAssistantRef.current = null;
         ensureAssistant();
         setBusy(true);
-        setStatusText("Thinking...");
+        setStatusText("Working...");
       }),
     );
     unsubs.push(
@@ -727,6 +812,18 @@ export default function ChatPage() {
         if (text) {
           addArtifacts(artifactsFromText(text, "assistant"));
         }
+        setTools((prev) =>
+          prev.map((tool) =>
+            tool.status === "running" && tool.tool_id.startsWith("progress:")
+              ? {
+                  ...tool,
+                  completedAt: Date.now(),
+                  status: "done" as const,
+                  summary: tool.preview ?? tool.summary,
+                }
+              : tool,
+          ),
+        );
         currentAssistantRef.current = null;
         setBusy(false);
         setQueuedInputs([]);
@@ -737,21 +834,21 @@ export default function ChatPage() {
       gw.on("status.update", (ev) => {
         if (!accepts(ev)) return;
         const text = eventString(ev, "text");
-        if (text) setStatusText(text);
+        if (text) setStatusText(displayStatusText(text));
       }),
     );
     unsubs.push(
       gw.on("thinking.delta", (ev) => {
         if (!accepts(ev)) return;
         const text = eventText(ev);
-        if (text) setStatusText(text);
+        if (text) setStatusText(displayStatusText(text));
       }),
     );
     unsubs.push(
       gw.on("reasoning.delta", (ev) => {
         if (!accepts(ev)) return;
         const text = eventText(ev);
-        if (text) setStatusText(text);
+        if (text) setStatusText(displayStatusText(text));
       }),
     );
     unsubs.push(gw.on("tool.start", trackTool));
@@ -762,7 +859,29 @@ export default function ChatPage() {
       gw.on("tool.generating", (ev) => {
         if (!accepts(ev)) return;
         const name = eventString(ev, "name");
-        if (name) setStatusText(`Preparing ${name}`);
+        if (!name) return;
+        setStatusText(`Preparing ${name}`);
+        setTools((prev) =>
+          prev.some(
+            (tool) =>
+              tool.status === "running" &&
+              tool.name === name &&
+              tool.tool_id === syntheticToolId(name),
+          )
+            ? prev
+            : [
+                ...prev,
+                {
+                  id: id(`tool-${name}`),
+                  kind: "tool" as const,
+                  name,
+                  preview: `Preparing ${name}`,
+                  startedAt: Date.now(),
+                  status: "running" as const,
+                  tool_id: syntheticToolId(name),
+                },
+              ].slice(-TOOL_LIMIT),
+        );
       }),
     );
     unsubs.push(
@@ -1233,8 +1352,18 @@ export default function ChatPage() {
               <EmptyState state={state} />
             ) : (
               <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-5 pb-6">
-                {messages.map((message) => (
-                  <MessageRow key={message.id} message={message} />
+                {messages.map((message, index) => (
+                  <MessageRow
+                    key={message.id}
+                    activityText={
+                      message.role === "assistant" &&
+                      message.status === "streaming" &&
+                      index === messages.length - 1
+                        ? statusText
+                        : undefined
+                    }
+                    message={message}
+                  />
                 ))}
                 {pendingPrompt && (
                   <PendingPromptCard
@@ -1462,7 +1591,13 @@ function ComposerStatusBar({
   );
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function MessageRow({
+  activityText,
+  message,
+}: {
+  activityText?: string;
+  message: ChatMessage;
+}) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
 
@@ -1528,7 +1663,7 @@ function MessageRow({ message }: { message: ChatMessage }) {
             ) : (
               <div className="flex items-center gap-2 text-[var(--chat-muted)]">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Thinking...
+                {displayStatusText(activityText || "Working...")}
               </div>
             )
           ) : (
@@ -1902,7 +2037,9 @@ function ActivityPanel({
             <div className="space-y-2">
               {tools.length === 0 ? (
                 <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
-                  Tool activity will appear here
+                  {busy
+                    ? "Waiting for the first tool event..."
+                    : "Tool activity will appear here"}
                 </div>
               ) : (
                 tools
