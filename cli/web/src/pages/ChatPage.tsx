@@ -1,128 +1,203 @@
-/**
- * ChatPage — embeds `elevate --tui` inside the dashboard.
- *
- *   <div host> (dashboard chrome)                                         .
- *     └─ <div wrapper> (rounded, dark bg, padded — the "terminal window"  .
- *         look that gives the page a distinct visual identity)            .
- *         └─ @xterm/xterm Terminal (WebGL renderer, Unicode 11 widths)    .
- *              │ onData      keystrokes → WebSocket → PTY master          .
- *              │ onResize    terminal resize → `\x1b[RESIZE:cols;rows]`   .
- *              │ write(data) PTY output bytes → VT100 parser              .
- *              ▼                                                          .
- *     WebSocket /api/pty?token=<session>                                  .
- *          ▼                                                              .
- *     FastAPI pty_ws  (elevate_cli/web_server.py)                          .
- *          ▼                                                              .
- *     POSIX PTY → `node ui-tui/dist/entry.js` → tui_gateway + AIAgent     .
- */
-
-import { FitAddon } from "@xterm/addon-fit";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal } from "@xterm/xterm";
-import "@xterm/xterm/css/xterm.css";
-import { Typography } from "@nous-research/ui/ui/components/typography/index";
+import { Markdown } from "@/components/Markdown";
+import { ModelPickerDialog } from "@/components/ModelPickerDialog";
+import { ToolCall, type ToolEntry } from "@/components/ToolCall";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { usePageHeader } from "@/contexts/usePageHeader";
+import {
+  GatewayClient,
+  type ConnectionState,
+  type GatewayEvent,
+} from "@/lib/gatewayClient";
+import { executeSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
-import { Copy, PanelRight, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertCircle,
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  Loader2,
+  MessageSquare,
+  PanelRight,
+  RotateCcw,
+  Send,
+  Settings2,
+  ShieldAlert,
+  Square,
+  User,
+  X,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { FormEvent, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
-import { ChatSidebar } from "@/components/ChatSidebar";
-import { usePageHeader } from "@/contexts/usePageHeader";
-import { useI18n } from "@/i18n";
-
-function buildWsUrl(
-  token: string,
-  resume: string | null,
-  channel: string,
-): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const qs = new URLSearchParams({ token, channel });
-  if (resume) qs.set("resume", resume);
-  return `${proto}//${window.location.host}/api/pty?${qs.toString()}`;
+interface SessionInfo {
+  config_warning?: string;
+  credential_warning?: string;
+  cwd?: string;
+  model?: string;
+  provider?: string;
 }
 
-// Channel id ties this chat tab's PTY child (publisher) to its sidebar
-// (subscriber).  Generated once per mount so a tab refresh starts a fresh
-// channel — the previous PTY child terminates with the old WS, and its
-// channel auto-evicts when no subscribers remain.
-function generateChannelId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `chat-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+interface GatewayTranscriptMessage {
+  context?: string;
+  name?: string;
+  role: "assistant" | "system" | "tool" | "user";
+  text?: string;
 }
 
-// Colors for the terminal body. Matches the dashboard's deep blue canvas
-// with pale blue foreground; we intentionally don't pick monokai or a loud
-// theme, because the TUI's skin engine already paints the content; the
-// terminal chrome just needs to sit quietly inside the dashboard.
-const TERMINAL_THEME = {
-  background: "#0b213f",
-  foreground: "#e7f0ff",
-  cursor: "#9cc7ff",
-  cursorAccent: "#0b213f",
-  selectionBackground: "#9cc7ff44",
+interface SessionCreateResponse {
+  info?: SessionInfo;
+  session_id: string;
+}
+
+interface SessionResumeResponse extends SessionCreateResponse {
+  messages?: GatewayTranscriptMessage[];
+  resumed?: string;
+}
+
+type ChatRole = "assistant" | "system" | "tool" | "user";
+
+interface ChatMessage {
+  content: string;
+  createdAt: number;
+  id: string;
+  role: ChatRole;
+  status?: "streaming" | "complete" | "error" | "interrupted";
+  title?: string;
+  warning?: string;
+}
+
+type PendingPrompt =
+  | {
+      choices?: string[] | null;
+      question: string;
+      requestId: string;
+      type: "clarify";
+    }
+  | {
+      command: string;
+      description: string;
+      type: "approval";
+    }
+  | {
+      requestId: string;
+      type: "sudo";
+    }
+  | {
+      envVar?: string;
+      prompt?: string;
+      requestId: string;
+      type: "secret";
+    };
+
+const TOOL_LIMIT = 24;
+
+const STATE_LABEL: Record<ConnectionState, string> = {
+  closed: "closed",
+  connecting: "connecting",
+  error: "error",
+  idle: "idle",
+  open: "live",
 };
 
-/**
- * CSS width for xterm font tiers.
- *
- * Prefer the terminal host's `clientWidth` — Chrome DevTools device mode often
- * keeps `window.innerWidth` at the full desktop value while the *drawn* layout
- * is phone-sized, which made us pick desktop font sizes (~14px) and look huge.
- */
-function terminalTierWidthPx(host: HTMLElement | null): number {
-  if (typeof window === "undefined") return 1280;
-  const fromHost = host?.clientWidth ?? 0;
-  if (fromHost > 2) return Math.round(fromHost);
-  const doc = document.documentElement?.clientWidth ?? 0;
-  const vv = window.visualViewport;
-  const inner = window.innerWidth;
-  const vvw = vv?.width ?? inner;
-  const layout = Math.min(inner, vvw, doc > 0 ? doc : inner);
-  return Math.max(1, Math.round(layout));
+const STATE_TONE: Record<ConnectionState, string> = {
+  closed: "bg-muted text-muted-foreground",
+  connecting: "bg-primary/10 text-primary",
+  error: "bg-destructive/10 text-destructive",
+  idle: "bg-muted text-muted-foreground",
+  open: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+};
+
+function id(prefix: string): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+
+  return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
-function terminalFontSizeForWidth(layoutWidthPx: number): number {
-  if (layoutWidthPx < 300) return 7;
-  if (layoutWidthPx < 360) return 8;
-  if (layoutWidthPx < 420) return 9;
-  if (layoutWidthPx < 520) return 10;
-  if (layoutWidthPx < 720) return 11;
-  if (layoutWidthPx < 1024) return 12;
-  return 14;
+function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage[] {
+  return (messages ?? [])
+    .filter((m) => m.text || m.context)
+    .map((m, index) => ({
+      content: String(m.text ?? m.context ?? ""),
+      createdAt: Date.now() - Math.max(0, (messages?.length ?? 0) - index),
+      id: id(`history-${index}`),
+      role: m.role,
+      status: "complete" as const,
+      title: m.name,
+    }));
 }
 
-function terminalLineHeightForWidth(layoutWidthPx: number): number {
-  return layoutWidthPx < 1024 ? 1.02 : 1.15;
+function eventText(ev: GatewayEvent): string {
+  const payload = ev.payload;
+  if (!payload || typeof payload !== "object") return "";
+  const raw = (payload as Record<string, unknown>).text;
+  return typeof raw === "string" ? raw : "";
+}
+
+function eventString(ev: GatewayEvent, key: string): string {
+  const payload = ev.payload;
+  if (!payload || typeof payload !== "object") return "";
+  const raw = (payload as Record<string, unknown>)[key];
+  return typeof raw === "string" ? raw : "";
+}
+
+function modelLabel(info: SessionInfo): string {
+  const model = info.model || "model";
+  return model.split("/").slice(-1)[0] || model;
+}
+
+function nowLabel(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function compactToolPayload(payload: unknown) {
+  return (payload && typeof payload === "object"
+    ? payload
+    : {}) as Record<string, unknown>;
 }
 
 export default function ChatPage() {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const [searchParams] = useSearchParams();
-  // Lazy-init: the missing-token check happens at construction so the effect
-  // body doesn't have to setState (React 19's set-state-in-effect rule).
+  const resumeId = searchParams.get("resume");
+  const [version, setVersion] = useState(0);
+  const gw = useMemo(() => new GatewayClient(), [version]);
+
+  const [state, setState] = useState<ConnectionState>("idle");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const activeSessionRef = useRef<string | null>(null);
+  const currentAssistantRef = useRef<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  const [info, setInfo] = useState<SessionInfo>({});
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [tools, setTools] = useState<ToolEntry[]>([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [statusText, setStatusText] = useState("Connecting...");
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
       : null,
   );
-  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
-  const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
+  const [promptValue, setPromptValue] = useState("");
+  const [modelOpen, setModelOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
-  const { setEnd } = usePageHeader();
-  const { t } = useI18n();
-  const closeMobilePanel = useCallback(() => setMobilePanelOpen(false), []);
-  const modelToolsLabel = useMemo(
-    () => `${t.app.modelToolsSheetTitle} ${t.app.modelToolsSheetSubtitle}`,
-    [t.app.modelToolsSheetSubtitle, t.app.modelToolsSheetTitle],
-  );
   const [portalRoot] = useState<HTMLElement | null>(() =>
     typeof document !== "undefined" ? document.body : null,
   );
@@ -131,9 +206,49 @@ export default function ChatPage() {
       ? window.matchMedia("(max-width: 1023px)").matches
       : false,
   );
+  const { setEnd } = usePageHeader();
 
-  const resumeRef = useRef<string | null>(searchParams.get("resume"));
-  const channel = useMemo(() => generateChannelId(), []);
+  const appendMessage = useCallback(
+    (role: ChatRole, content: string, extras: Partial<ChatMessage> = {}) => {
+      const message: ChatMessage = {
+        content,
+        createdAt: Date.now(),
+        id: id(role),
+        role,
+        ...extras,
+      };
+      setMessages((prev) => [...prev, message]);
+      return message.id;
+    },
+    [],
+  );
+
+  const ensureAssistant = useCallback(() => {
+    if (currentAssistantRef.current) return currentAssistantRef.current;
+    const messageId = id("assistant");
+    currentAssistantRef.current = messageId;
+    setMessages((prev) => [
+      ...prev,
+      {
+        content: "",
+        createdAt: Date.now(),
+        id: messageId,
+        role: "assistant",
+        status: "streaming",
+      },
+    ]);
+    return messageId;
+  }, []);
+
+  const updateAssistant = useCallback(
+    (updater: (message: ChatMessage) => ChatMessage) => {
+      const messageId = ensureAssistant();
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? updater(m) : m)),
+      );
+    },
+    [ensureAssistant],
+  );
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
@@ -145,599 +260,968 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!mobilePanelOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeMobilePanel();
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMobilePanelOpen(false);
     };
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
+    const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKey);
     return () => {
+      document.body.style.overflow = previous;
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
     };
-  }, [mobilePanelOpen, closeMobilePanel]);
-
-  useEffect(() => {
-    const mql = window.matchMedia("(min-width: 1024px)");
-    const onChange = (e: MediaQueryListEvent) => {
-      if (e.matches) setMobilePanelOpen(false);
-    };
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, []);
+  }, [mobilePanelOpen]);
 
   useEffect(() => {
     if (!narrow) {
       setEnd(null);
       return;
     }
+
     setEnd(
       <button
         type="button"
         onClick={() => setMobilePanelOpen(true)}
         className={cn(
-          "inline-flex items-center gap-1.5 rounded border border-current/20",
-          "px-2 py-1 text-[0.65rem] font-medium tracking-wide normal-case",
-          "text-midground/80 hover:text-midground hover:bg-midground/5",
+          "inline-flex items-center gap-1.5 rounded border border-current/20 px-2 py-1",
+          "text-[0.65rem] font-medium normal-case text-midground/80",
+          "hover:bg-midground/5 hover:text-midground",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-          "shrink-0 cursor-pointer",
         )}
-        aria-expanded={mobilePanelOpen}
-        aria-controls="chat-side-panel"
       >
-        <PanelRight className="h-3 w-3 shrink-0" />
-        {modelToolsLabel}
+        <PanelRight className="h-3 w-3" />
+        Activity
       </button>,
     );
-    return () => setEnd(null);
-  }, [narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
 
-  const handleCopyLast = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Send the slash as a burst, wait long enough for Ink's tokenizer to
-    // emit a keypress event for each character (not coalesce them into a
-    // paste), then send Return as its own event.  The timing here is
-    // empirical — 100ms is safely past Node's default stdin coalescing
-    // window and well inside UI responsiveness.
-    ws.send("/copy");
-    setTimeout(() => {
-      const s = wsRef.current;
-      if (s && s.readyState === WebSocket.OPEN) s.send("\r");
-    }, 100);
-    setCopyState("copied");
-    if (copyResetRef.current) clearTimeout(copyResetRef.current);
-    copyResetRef.current = setTimeout(() => setCopyState("idle"), 1500);
-    termRef.current?.focus();
-  };
+    return () => setEnd(null);
+  }, [narrow, setEnd]);
 
   useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
+    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [messages, tools, pendingPrompt]);
 
-    const token = window.__ELEVATE_SESSION_TOKEN__;
-    // Banner already initialised above; just bail before wiring xterm/WS.
-    if (!token) {
-      return;
-    }
+  useEffect(() => {
+    let cancelled = false;
+    const unsubs: Array<() => void> = [];
 
-    const tierW0 = terminalTierWidthPx(host);
-    const term = new Terminal({
-      allowProposedApi: true,
-      cursorBlink: true,
-      fontFamily:
-        "'JetBrains Mono', 'Cascadia Mono', 'Fira Code', 'MesloLGS NF', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace",
-      fontSize: terminalFontSizeForWidth(tierW0),
-      lineHeight: terminalLineHeightForWidth(tierW0),
-      letterSpacing: 0,
-      fontWeight: "400",
-      fontWeightBold: "700",
-      macOptionIsMeta: true,
-      scrollback: 0,
-      theme: TERMINAL_THEME,
-    });
-    termRef.current = term;
+    activeSessionRef.current = null;
+    currentAssistantRef.current = null;
+    setSessionId(null);
+    setInfo({});
+    setTools([]);
+    setPendingPrompt(null);
+    setPromptValue("");
+    setBusy(false);
+    setBanner(null);
+    setStatusText("Connecting...");
 
-    // --- Clipboard integration ---------------------------------------
-    //
-    // Three independent paths all route to the system clipboard:
-    //
-    //   1. **Selection → Ctrl+C (or Cmd+C on macOS).**  Ink's own handler
-    //      in useInputHandlers.ts turns Ctrl+C into a copy when the
-    //      terminal has a selection, then emits an OSC 52 escape.  Our
-    //      OSC 52 handler below decodes that escape and writes to the
-    //      browser clipboard — so the flow works just like it does in
-    //      `elevate --tui`.
-    //
-    //   2. **Ctrl/Cmd+Shift+C.**  Belt-and-suspenders shortcut that
-    //      operates directly on xterm's selection, useful if the TUI
-    //      ever stops listening (e.g. overlays / pickers) or if the user
-    //      has selected with the mouse outside of Ink's selection model.
-    //
-    //   3. **Ctrl/Cmd+Shift+V.**  Reads the system clipboard and feeds
-    //      it to the terminal as keyboard input.  xterm's paste() wraps
-    //      it with bracketed-paste if the host has that mode enabled.
-    //
-    // OSC 52 reads (terminal asking to read the clipboard) are not
-    // supported — that would let any content the TUI renders exfiltrate
-    // the user's clipboard.
-    term.parser.registerOscHandler(52, (data) => {
-      // Format: "<targets>;<base64 | '?'>"
-      const semi = data.indexOf(";");
-      if (semi < 0) return false;
-      const payload = data.slice(semi + 1);
-      if (payload === "?" || payload === "") return false; // read/clear — ignore
-      try {
-        // atob returns a binary string (one byte per char); we need UTF-8
-        // decode so multi-byte codepoints (≥, →, emoji, CJK) round-trip
-        // correctly.  Without this step, the three UTF-8 bytes of `≥`
-        // would land in the clipboard as the three separate Latin-1
-        // characters `â‰¥`.
-        const binary = atob(payload);
-        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-        const text = new TextDecoder("utf-8").decode(bytes);
-        navigator.clipboard.writeText(text).catch(() => {});
-      } catch {
-        // Malformed base64 — silently drop.
-      }
-      return true;
-    });
+    const accepts = (ev: GatewayEvent) => {
+      const active = activeSessionRef.current;
+      return !active || !ev.session_id || ev.session_id === active;
+    };
 
-    const isMac =
-      typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+    const trackTool = (ev: GatewayEvent) => {
+      if (!accepts(ev)) return;
+      const payload = compactToolPayload(ev.payload);
 
-    term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type !== "keydown") return true;
+      if (ev.type === "tool.start") {
+        const toolId = String(payload.tool_id ?? "");
+        if (!toolId) return;
 
-      const copyModifier = isMac ? ev.metaKey : ev.ctrlKey && ev.shiftKey;
-      const pasteModifier = isMac ? ev.metaKey : ev.ctrlKey && ev.shiftKey;
-
-      if (copyModifier && ev.key.toLowerCase() === "c") {
-        const sel = term.getSelection();
-        if (sel) {
-          navigator.clipboard.writeText(sel).catch(() => {});
-          ev.preventDefault();
-          return false;
-        }
+        setTools((prev) =>
+          [
+            ...prev,
+            {
+              context:
+                typeof payload.context === "string" ? payload.context : "",
+              id: id(`tool-${toolId}`),
+              kind: "tool" as const,
+              name: String(payload.name ?? "tool"),
+              startedAt: Date.now(),
+              status: "running" as const,
+              tool_id: toolId,
+            },
+          ].slice(-TOOL_LIMIT),
+        );
+        return;
       }
 
-      if (pasteModifier && ev.key.toLowerCase() === "v") {
-        navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text) term.paste(text);
-          })
-          .catch(() => {});
-        ev.preventDefault();
-        return false;
+      if (ev.type === "tool.progress") {
+        const name = String(payload.name ?? "");
+        const preview = String(payload.preview ?? "");
+        if (!name || !preview) return;
+
+        setTools((prev) =>
+          prev.map((tool) =>
+            tool.status === "running" && tool.name === name
+              ? { ...tool, preview }
+              : tool,
+          ),
+        );
+        return;
       }
 
-      return true;
-    });
+      if (ev.type === "tool.complete") {
+        const toolId = String(payload.tool_id ?? "");
+        if (!toolId) return;
 
-    const fit = new FitAddon();
-    fitRef.current = fit;
-    term.loadAddon(fit);
-
-    const unicode11 = new Unicode11Addon();
-    term.loadAddon(unicode11);
-    term.unicode.activeVersion = "11";
-
-    term.loadAddon(new WebLinksAddon());
-
-    term.open(host);
-
-    // WebGL draws from a texture atlas sized with device pixels. On phones and
-    // in DevTools device mode that often produces *visually* much larger cells
-    // than `fontSize` suggests — users see "huge" text even at 7–9px settings.
-    // The canvas/DOM renderer tracks `fontSize` faithfully; use it for narrow
-    // hosts.  Wide layouts still get WebGL for crisp box-drawing.
-    const useWebgl = terminalTierWidthPx(host) >= 768;
-    if (useWebgl) {
-      try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        term.loadAddon(webgl);
-      } catch (err) {
-        console.warn(
-          "[elevate-chat] WebGL renderer unavailable; falling back to default",
-          err,
+        setTools((prev) =>
+          prev.map((tool) =>
+            tool.tool_id === toolId
+              ? {
+                  ...tool,
+                  completedAt: Date.now(),
+                  error:
+                    typeof payload.error === "string"
+                      ? payload.error
+                      : undefined,
+                  inline_diff:
+                    typeof payload.inline_diff === "string"
+                      ? payload.inline_diff
+                      : undefined,
+                  status: payload.error ? "error" : "done",
+                  summary:
+                    typeof payload.summary === "string"
+                      ? payload.summary
+                      : undefined,
+                }
+              : tool,
+          ),
         );
       }
-    }
-
-    // Initial fit + resize observer.  fit.fit() reads the container's
-    // current bounding box and resizes the terminal grid to match.
-    //
-    // The subtle bit: the dashboard has CSS transitions on the container
-    // (backdrop fade-in, rounded corners settling as fonts load).  If we
-    // call fit() at mount time, the bounding box we measure is often 1-2
-    // cell widths off from the final size.  ResizeObserver *does* fire
-    // when the container settles, but if the pixel delta happens to be
-    // smaller than one cell's width, fit() computes the same integer
-    // (cols, rows) as before and doesn't emit onResize — so the PTY
-    // never learns the final size.  Users see truncated long lines until
-    // they resize the browser window.
-    //
-    // We force one extra fit + explicit RESIZE send after two animation
-    // frames.  rAF→rAF guarantees one layout commit between the two
-    // callbacks, giving CSS transitions and font metrics time to finalize
-    // before we take the authoritative measurement.
-    let hostSyncRaf = 0;
-    const scheduleHostSync = () => {
-      if (hostSyncRaf) return;
-      hostSyncRaf = requestAnimationFrame(() => {
-        hostSyncRaf = 0;
-        syncTerminalMetrics();
-      });
     };
 
-    let metricsDebounce: ReturnType<typeof setTimeout> | null = null;
-    const syncTerminalMetrics = () => {
-      const w = terminalTierWidthPx(host);
-      const nextSize = terminalFontSizeForWidth(w);
-      const nextLh = terminalLineHeightForWidth(w);
-      const fontChanged =
-        term.options.fontSize !== nextSize ||
-        term.options.lineHeight !== nextLh;
-      if (fontChanged) {
-        term.options.fontSize = nextSize;
-        term.options.lineHeight = nextLh;
-      }
-      try {
-        fit.fit();
-      } catch {
-        return;
-      }
-      if (fontChanged && term.rows > 0) {
-        try {
-          term.refresh(0, term.rows - 1);
-        } catch {
-          /* ignore */
+    unsubs.push(gw.onState(setState));
+    unsubs.push(
+      gw.on<SessionInfo>("session.info", (ev) => {
+        if (!accepts(ev)) return;
+        if (ev.session_id) {
+          activeSessionRef.current = ev.session_id;
+          setSessionId(ev.session_id);
         }
-      }
-      if (
-        fontChanged &&
-        wsRef.current &&
-        wsRef.current.readyState === WebSocket.OPEN
-      ) {
-        wsRef.current.send(`\x1b[RESIZE:${term.cols};${term.rows}]`);
-      }
-    };
+        if (ev.payload) {
+          setInfo((prev) => ({ ...prev, ...ev.payload }));
+          setBanner(ev.payload.credential_warning ?? ev.payload.config_warning ?? null);
+        }
+        setStatusText("Ready");
+      }),
+    );
+    unsubs.push(
+      gw.on("message.start", (ev) => {
+        if (!accepts(ev)) return;
+        currentAssistantRef.current = null;
+        ensureAssistant();
+        setBusy(true);
+        setStatusText("Thinking...");
+      }),
+    );
+    unsubs.push(
+      gw.on("message.delta", (ev) => {
+        if (!accepts(ev)) return;
+        const text = eventText(ev);
+        if (!text) return;
+        updateAssistant((message) => ({
+          ...message,
+          content: message.content + text,
+          status: "streaming",
+        }));
+      }),
+    );
+    unsubs.push(
+      gw.on("message.complete", (ev) => {
+        if (!accepts(ev)) return;
+        const text = eventText(ev);
+        const status = eventString(ev, "status") || "complete";
+        const warning = eventString(ev, "warning");
 
-    const scheduleSyncTerminalMetrics = () => {
-      if (metricsDebounce) clearTimeout(metricsDebounce);
-      metricsDebounce = setTimeout(() => {
-        metricsDebounce = null;
-        syncTerminalMetrics();
-      }, 60);
-    };
+        updateAssistant((message) => ({
+          ...message,
+          content: text || message.content,
+          status: status === "interrupted" ? "interrupted" : "complete",
+          warning: warning || undefined,
+        }));
+        currentAssistantRef.current = null;
+        setBusy(false);
+        setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
+      }),
+    );
+    unsubs.push(
+      gw.on("status.update", (ev) => {
+        if (!accepts(ev)) return;
+        const text = eventString(ev, "text");
+        if (text) setStatusText(text);
+      }),
+    );
+    unsubs.push(
+      gw.on("thinking.delta", (ev) => {
+        if (!accepts(ev)) return;
+        const text = eventText(ev);
+        if (text) setStatusText(text);
+      }),
+    );
+    unsubs.push(
+      gw.on("reasoning.delta", (ev) => {
+        if (!accepts(ev)) return;
+        const text = eventText(ev);
+        if (text) setStatusText(text);
+      }),
+    );
+    unsubs.push(gw.on("tool.start", trackTool));
+    unsubs.push(gw.on("tool.progress", trackTool));
+    unsubs.push(gw.on("tool.complete", trackTool));
+    unsubs.push(
+      gw.on("tool.generating", (ev) => {
+        if (!accepts(ev)) return;
+        const name = eventString(ev, "name");
+        if (name) setStatusText(`Preparing ${name}`);
+      }),
+    );
+    unsubs.push(
+      gw.on("clarify.request", (ev) => {
+        if (!accepts(ev)) return;
+        const payload = compactToolPayload(ev.payload);
+        setPendingPrompt({
+          choices: Array.isArray(payload.choices)
+            ? payload.choices.map(String)
+            : null,
+          question: String(payload.question ?? "Clarify"),
+          requestId: String(payload.request_id ?? ""),
+          type: "clarify",
+        });
+        setPromptValue("");
+        setStatusText("Waiting for input");
+      }),
+    );
+    unsubs.push(
+      gw.on("approval.request", (ev) => {
+        if (!accepts(ev)) return;
+        const payload = compactToolPayload(ev.payload);
+        setPendingPrompt({
+          command: String(payload.command ?? ""),
+          description: String(payload.description ?? "Approval needed"),
+          type: "approval",
+        });
+        setStatusText("Approval needed");
+      }),
+    );
+    unsubs.push(
+      gw.on("sudo.request", (ev) => {
+        if (!accepts(ev)) return;
+        setPendingPrompt({
+          requestId: eventString(ev, "request_id"),
+          type: "sudo",
+        });
+        setPromptValue("");
+        setStatusText("Password needed");
+      }),
+    );
+    unsubs.push(
+      gw.on("secret.request", (ev) => {
+        if (!accepts(ev)) return;
+        setPendingPrompt({
+          envVar: eventString(ev, "env_var"),
+          prompt: eventString(ev, "prompt"),
+          requestId: eventString(ev, "request_id"),
+          type: "secret",
+        });
+        setPromptValue("");
+        setStatusText("Secret needed");
+      }),
+    );
+    unsubs.push(
+      gw.on("background.complete", (ev) => {
+        if (!accepts(ev)) return;
+        appendMessage("system", eventText(ev) || "Background task complete");
+      }),
+    );
+    unsubs.push(
+      gw.on("btw.complete", (ev) => {
+        if (!accepts(ev)) return;
+        appendMessage("system", eventText(ev) || "Background task complete");
+      }),
+    );
+    unsubs.push(
+      gw.on("error", (ev) => {
+        if (!accepts(ev)) return;
+        const message = eventString(ev, "message") || "Gateway error";
+        setBanner(message);
+        appendMessage("system", message, { status: "error" });
+        setBusy(false);
+        setStatusText("Error");
+      }),
+    );
 
-    const ro = new ResizeObserver(() => scheduleHostSync());
-    ro.observe(host);
+    gw.connect()
+      .then(async () => {
+        if (cancelled) return;
+        const created = resumeId
+          ? await gw.request<SessionResumeResponse>("session.resume", {
+              cols: 100,
+              session_id: resumeId,
+            })
+          : await gw.request<SessionCreateResponse>("session.create", {
+              cols: 100,
+            });
 
-    window.addEventListener("resize", scheduleSyncTerminalMetrics);
-    window.visualViewport?.addEventListener("resize", scheduleSyncTerminalMetrics);
-    window.visualViewport?.addEventListener("scroll", scheduleSyncTerminalMetrics);
-    scheduleHostSync();
-    requestAnimationFrame(() => scheduleHostSync());
-
-    // Double-rAF authoritative fit.  On the second frame the layout has
-    // committed at least once since mount; fit.fit() then reads the
-    // stable container size.  We always send a RESIZE escape afterwards
-    // (even if fit's cols/rows didn't change, so the PTY has the same
-    // dims registered as our JS state — prevents a drift where Ink
-    // thinks the terminal is one col bigger than what's on screen).
-    let settleRaf1 = 0;
-    let settleRaf2 = 0;
-    settleRaf1 = requestAnimationFrame(() => {
-      settleRaf1 = 0;
-      settleRaf2 = requestAnimationFrame(() => {
-        settleRaf2 = 0;
-        syncTerminalMetrics();
-      });
-    });
-
-    // WebSocket
-    const url = buildWsUrl(token, resumeRef.current, channel);
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-    // Suppress banner/terminal side-effects when cleanup() calls `ws.close()`
-    // (React StrictMode remount, route change) so we never write to a
-    // disposed xterm or setState on an unmounted tree.
-    let unmounting = false;
-
-    ws.onopen = () => {
-      setBanner(null);
-      // Send the initial RESIZE immediately so Ink has *a* size to lay
-      // out against on its first paint.  The double-rAF block above will
-      // follow up with the authoritative measurement — at worst Ink
-      // reflows once after the PTY boots, which is imperceptible.
-      ws.send(`\x1b[RESIZE:${term.cols};${term.rows}]`);
-    };
-
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === "string") {
-        term.write(ev.data);
-      } else {
-        term.write(new Uint8Array(ev.data as ArrayBuffer));
-      }
-    };
-
-    ws.onclose = (ev) => {
-      wsRef.current = null;
-      if (unmounting) {
-        return;
-      }
-      if (ev.code === 4401) {
-        setBanner("Auth failed. Reload the page to refresh the session token.");
-        return;
-      }
-      if (ev.code === 4403) {
-        setBanner("Chat is only reachable from localhost.");
-        return;
-      }
-      if (ev.code === 1011) {
-        // Server already wrote an ANSI error frame.
-        return;
-      }
-      term.write("\r\n\x1b[90m[session ended]\x1b[0m\r\n");
-    };
-
-    // Keystrokes + mouse events → PTY, with cell-level dedup for motion.
-    //
-    // Ink enables `\x1b[?1003h` (any-motion tracking), which asks the
-    // terminal to report every mouse-move as an SGR mouse event even with
-    // no button held.  xterm.js happily emits one report per pixel of
-    // mouse motion; without deduping, a casual mouse-over floods Ink with
-    // hundreds of redraw-triggering reports and the UI goes laggy
-    // (scrolling stutters, clicks land on stale positions by the time
-    // Ink finishes processing the motion backlog).
-    //
-    // We keep track of the last cell we reported a motion for.  Press,
-    // release, and wheel events always pass through; motion events only
-    // pass through if the cell changed.  Parsing is cheap — SGR reports
-    // are short literal strings.
-    // eslint-disable-next-line no-control-regex -- intentional ESC byte in xterm SGR mouse report parser
-    const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
-    let lastMotionCell = { col: -1, row: -1 };
-    let lastMotionCb = -1;
-    const onDataDisposable = term.onData((data) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-
-      const m = SGR_MOUSE_RE.exec(data);
-      if (m) {
-        const cb = parseInt(m[1], 10);
-        const col = parseInt(m[2], 10);
-        const row = parseInt(m[3], 10);
-        const released = m[4] === "m";
-        // Motion events have bit 0x20 (32) set in the button code.
-        // Wheel events have bit 0x40 (64); always forward wheel.
-        const isMotion = (cb & 0x20) !== 0 && (cb & 0x40) === 0;
-        const isWheel = (cb & 0x40) !== 0;
-        if (isMotion && !isWheel && !released) {
-          if (
-            col === lastMotionCell.col &&
-            row === lastMotionCell.row &&
-            cb === lastMotionCb
-          ) {
-            return; // same cell + same button state; skip redundant report
-          }
-          lastMotionCell = { col, row };
-          lastMotionCb = cb;
+        if (cancelled) return;
+        activeSessionRef.current = created.session_id;
+        setSessionId(created.session_id);
+        setInfo(created.info ?? {});
+        if (created.info?.credential_warning || created.info?.config_warning) {
+          setBanner(
+            created.info.credential_warning ?? created.info.config_warning ?? null,
+          );
+        }
+        if ("messages" in created) {
+          const resumed = created as Partial<SessionResumeResponse>;
+          setMessages(
+            normalizeTranscript(
+              Array.isArray(resumed.messages) ? resumed.messages : undefined,
+            ),
+          );
         } else {
-          // Non-motion event (press, release, wheel) — reset dedup state
-          // so the next motion after this always reports.
-          lastMotionCell = { col: -1, row: -1 };
-          lastMotionCb = -1;
+          setMessages([]);
         }
-      }
-
-      ws.send(data);
-    });
-
-    const onResizeDisposable = term.onResize(({ cols, rows }) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(`\x1b[RESIZE:${cols};${rows}]`);
-      }
-    });
-
-    term.focus();
+        setStatusText("Ready");
+      })
+      .catch((error: Error) => {
+        if (cancelled) return;
+        setBanner(error.message);
+        setStatusText("Connection failed");
+      });
 
     return () => {
-      unmounting = true;
-      onDataDisposable.dispose();
-      onResizeDisposable.dispose();
-      if (metricsDebounce) clearTimeout(metricsDebounce);
-      window.removeEventListener("resize", scheduleSyncTerminalMetrics);
-      window.visualViewport?.removeEventListener(
-        "resize",
-        scheduleSyncTerminalMetrics,
-      );
-      window.visualViewport?.removeEventListener(
-        "scroll",
-        scheduleSyncTerminalMetrics,
-      );
-      ro.disconnect();
-      if (hostSyncRaf) cancelAnimationFrame(hostSyncRaf);
-      if (settleRaf1) cancelAnimationFrame(settleRaf1);
-      if (settleRaf2) cancelAnimationFrame(settleRaf2);
-      ws.close();
-      wsRef.current = null;
-      term.dispose();
-      termRef.current = null;
-      fitRef.current = null;
-      if (copyResetRef.current) {
-        clearTimeout(copyResetRef.current);
-        copyResetRef.current = null;
-      }
+      cancelled = true;
+      unsubs.forEach((unsub) => unsub());
+      gw.close();
     };
-  }, [channel]);
+  }, [appendMessage, ensureAssistant, gw, resumeId, updateAssistant]);
 
-  // Layout:
-  //   outer flex column — sits inside the dashboard's content area
-  //   row split — terminal pane (flex-1) + sidebar (fixed width, lg+)
-  //   terminal wrapper — rounded, dark, padded — the "terminal window"
-  //   floating copy button — bottom-right corner, transparent with a
-  //     subtle border; stays out of the way until hovered.  Sends
-  //     `/copy\n` to Ink, which emits OSC 52 → our clipboard handler.
-  //   sidebar — ChatSidebar opens its own JSON-RPC sidecar; renders
-  //     model badge, tool-call list, model picker. Best-effort: if the
-  //     sidecar fails to connect the terminal pane keeps working.
-  //
-  // `normal-case` opts out of the dashboard's global `uppercase` rule on
-  // the root `<div>` in App.tsx — terminal output must preserve case.
-  //
-  // Mobile model/tools sheet is portaled to `document.body` so it stacks
-  // above the app sidebar (`z-50`) and mobile chrome (`z-40`).  The main
-  // dashboard column uses `relative z-2`, which traps `position:fixed`
-  // descendants below those layers (see Toast.tsx).
-  const mobileModelToolsPortal =
+  const submitPrompt = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || !sessionId) return;
+
+      appendMessage("user", trimmed);
+      setInput("");
+      setBanner(null);
+
+      if (trimmed.startsWith("/")) {
+        await executeSlash({
+          callbacks: {
+            send: submitPrompt,
+            sys: (body) => appendMessage("system", body),
+          },
+          command: trimmed,
+          gw,
+          sessionId,
+        });
+        return;
+      }
+
+      if (busy) {
+        try {
+          await gw.request("session.steer", {
+            session_id: sessionId,
+            text: trimmed,
+          });
+          appendMessage("system", "Added to the running turn.");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          appendMessage("system", message, { status: "error" });
+        }
+        return;
+      }
+
+      setBusy(true);
+      setStatusText("Sending...");
+      try {
+        await gw.request("prompt.submit", {
+          session_id: sessionId,
+          text: trimmed,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendMessage("system", message, { status: "error" });
+        setBusy(false);
+        setStatusText("Error");
+      }
+    },
+    [appendMessage, busy, gw, sessionId],
+  );
+
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void submitPrompt(input);
+  };
+
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitPrompt(input);
+    }
+  };
+
+  const reconnect = () => {
+    setVersion((value) => value + 1);
+  };
+
+  const interrupt = async () => {
+    if (!sessionId) return;
+    setStatusText("Interrupting...");
+    try {
+      await gw.request("session.interrupt", { session_id: sessionId });
+      setBusy(false);
+      setStatusText("Interrupted");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendMessage("system", message, { status: "error" });
+    }
+  };
+
+  const respondToPrompt = async (value: string) => {
+    if (!pendingPrompt) return;
+
+    try {
+      if (pendingPrompt.type === "approval") {
+        await gw.request("approval.respond", {
+          choice: value,
+          session_id: sessionId,
+        });
+      } else {
+        const method =
+          pendingPrompt.type === "clarify"
+            ? "clarify.respond"
+            : pendingPrompt.type === "sudo"
+              ? "sudo.respond"
+              : "secret.respond";
+        const key =
+          pendingPrompt.type === "clarify"
+            ? "answer"
+            : pendingPrompt.type === "sudo"
+              ? "password"
+              : "value";
+        await gw.request(method, {
+          [key]: value,
+          request_id: pendingPrompt.requestId,
+        });
+      }
+      setPendingPrompt(null);
+      setPromptValue("");
+      setStatusText("Running...");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendMessage("system", message, { status: "error" });
+    }
+  };
+
+  const canSend = !!input.trim() && state === "open" && !!sessionId;
+  const canPickModel = state === "open" && !!sessionId;
+  const activity = (
+    <ActivityPanel
+      banner={banner}
+      busy={busy}
+      canPickModel={canPickModel}
+      gw={gw}
+      info={info}
+      modelOpen={modelOpen}
+      onCloseModel={() => setModelOpen(false)}
+      onModelSubmit={(slashCommand) => {
+        if (!sessionId) return;
+        void executeSlash({
+          callbacks: {
+            send: submitPrompt,
+            sys: (body) => appendMessage("system", body),
+          },
+          command: slashCommand,
+          gw,
+          sessionId,
+        });
+        setModelOpen(false);
+      }}
+      onOpenModel={() => setModelOpen(true)}
+      onReconnect={reconnect}
+      sessionId={sessionId}
+      state={state}
+      statusText={statusText}
+      tools={tools}
+    />
+  );
+
+  const mobileActivityPortal =
     narrow &&
     portalRoot &&
     createPortal(
       <>
         {mobilePanelOpen && (
           <button
+            aria-label="Close activity"
+            className="fixed inset-0 z-[55] bg-black/55 backdrop-blur-sm"
+            onClick={() => setMobilePanelOpen(false)}
             type="button"
-            aria-label={t.app.closeModelTools}
-            onClick={closeMobilePanel}
-            className={cn(
-              "fixed inset-0 z-[55]",
-              "bg-black/60 backdrop-blur-sm cursor-pointer",
-            )}
           />
         )}
-
-        <div
-          id="chat-side-panel"
-          role="complementary"
-          aria-label={modelToolsLabel}
+        <aside
           className={cn(
-            "font-mondwest fixed top-0 right-0 z-[60] flex h-dvh max-h-dvh w-64 min-w-0 flex-col antialiased",
-            "border-l border-current/20 text-midground",
-            "bg-background-base/95 backdrop-blur-sm",
+            "fixed right-0 top-0 z-[60] flex h-dvh w-[min(24rem,86vw)] flex-col",
+            "border-l border-border bg-background-base p-3 normal-case shadow-2xl",
+            mobilePanelOpen ? "translate-x-0" : "translate-x-full",
             "transition-transform duration-200 ease-out",
-            "[background:var(--component-sidebar-background)]",
-            "[clip-path:var(--component-sidebar-clip-path)]",
-            "[border-image:var(--component-sidebar-border-image)]",
-            mobilePanelOpen
-              ? "translate-x-0"
-              : "pointer-events-none translate-x-full",
           )}
         >
-          <div
-            className={cn(
-              "flex h-14 shrink-0 items-center justify-between gap-2 border-b border-current/20 px-5",
-            )}
-          >
-            <Typography
-              className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground"
-              style={{ mixBlendMode: "plus-lighter" }}
-            >
-              {t.app.modelToolsSheetTitle}
-              <br />
-              {t.app.modelToolsSheetSubtitle}
-            </Typography>
-
-            <button
-              type="button"
-              onClick={closeMobilePanel}
-              aria-label={t.app.closeModelTools}
-              className={cn(
-                "inline-flex h-7 w-7 items-center justify-center",
-                "text-midground/70 hover:text-midground transition-colors cursor-pointer",
-                "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-              )}
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold">Activity</div>
+            <Button
+              aria-label="Close activity"
+              onClick={() => setMobilePanelOpen(false)}
+              size="sm"
+              variant="ghost"
             >
               <X className="h-4 w-4" />
-            </button>
+            </Button>
           </div>
-
-          <div
-            className={cn(
-              "min-h-0 flex-1 overflow-y-auto overflow-x-hidden",
-              "border-t border-current/10",
-            )}
-          >
-            <ChatSidebar channel={channel} />
-          </div>
-        </div>
+          {activity}
+        </aside>
       </>,
       portalRoot,
     );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2 normal-case">
-      {mobileModelToolsPortal}
-
-      {banner && (
-        <div className="border border-warning/50 bg-warning/10 text-warning px-3 py-2 text-xs tracking-wide">
-          {banner}
-        </div>
-      )}
-
-      <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row lg:gap-3">
-        <div
-          className={cn(
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
-            "p-2 sm:p-3",
-          )}
-          style={{
-            backgroundColor: TERMINAL_THEME.background,
-            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
-          }}
-        >
-          <div
-            ref={hostRef}
-            className="elevate-chat-xterm-host min-h-0 min-w-0 flex-1"
-          />
-
-          <button
-            type="button"
-            onClick={handleCopyLast}
-            title="Copy last assistant response as raw markdown"
-            aria-label="Copy last assistant response"
-            className={cn(
-              "absolute z-10 flex items-center gap-1.5",
-              "rounded border border-current/30",
-              "bg-black/20 backdrop-blur-sm",
-              "opacity-60 hover:opacity-100 hover:border-current/60",
-              "transition-opacity duration-150",
-              "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current",
-              "cursor-pointer",
-              "bottom-2 right-2 px-2 py-1 text-[0.65rem] sm:bottom-3 sm:right-3 sm:px-2.5 sm:py-1.5 sm:text-xs",
-              "lg:bottom-4 lg:right-4",
-            )}
-            style={{ color: TERMINAL_THEME.foreground }}
-          >
-            <Copy className="h-3 w-3 shrink-0" />
-            <span className="hidden min-[400px]:inline tracking-wide">
-              {copyState === "copied" ? "copied" : "copy last response"}
-            </span>
-          </button>
-        </div>
-
-        {!narrow && (
-          <div
-            id="chat-side-panel"
-            role="complementary"
-            aria-label={modelToolsLabel}
-            className="flex min-h-0 shrink-0 flex-col lg:h-full lg:w-80"
-          >
-            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-              <ChatSidebar channel={channel} />
+    <div className="flex min-h-[calc(100vh-7rem)] flex-col normal-case">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <section className="flex min-h-0 flex-col rounded-lg border border-border bg-card/80 shadow-sm">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="h-4 w-4 text-primary" />
+                <h1 className="truncate text-base font-semibold">
+                  Elevate Agent
+                </h1>
+                <Badge className={STATE_TONE[state]}>
+                  {STATE_LABEL[state]}
+                </Badge>
+              </div>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {resumeId ? `Resumed ${resumeId}` : "New chat"} ·{" "}
+                {modelLabel(info)}
+              </p>
             </div>
+
+            <div className="flex items-center gap-2">
+              {busy && (
+                <Button
+                  onClick={() => void interrupt()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <Square className="mr-1.5 h-3.5 w-3.5" />
+                  Stop
+                </Button>
+              )}
+              <Button
+                onClick={reconnect}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Restart
+              </Button>
+            </div>
+          </header>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+            {messages.length === 0 ? (
+              <EmptyState state={state} />
+            ) : (
+              <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+                {messages.map((message) => (
+                  <MessageRow key={message.id} message={message} />
+                ))}
+                {pendingPrompt && (
+                  <PendingPromptCard
+                    pendingPrompt={pendingPrompt}
+                    promptValue={promptValue}
+                    setPromptValue={setPromptValue}
+                    onRespond={(value) => void respondToPrompt(value)}
+                  />
+                )}
+                <div ref={endRef} />
+              </div>
+            )}
           </div>
-        )}
+
+          <form
+            className="border-t border-border bg-background-base/60 p-3"
+            onSubmit={onSubmit}
+          >
+            <div className="mx-auto flex max-w-4xl items-end gap-2">
+              <div className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 focus-within:ring-1 focus-within:ring-primary">
+                <textarea
+                  ref={inputRef}
+                  aria-label="Message Elevate Agent"
+                  className="max-h-40 min-h-12 w-full resize-none bg-transparent text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground"
+                  disabled={state !== "open" || !sessionId}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={onComposerKeyDown}
+                  placeholder={
+                    state === "open" && sessionId
+                      ? "Message Elevate Agent..."
+                      : "Connecting..."
+                  }
+                  rows={2}
+                  value={input}
+                />
+                <div className="flex items-center justify-between gap-2 text-[0.68rem] text-muted-foreground">
+                  <span className="truncate">{statusText}</span>
+                  <span>{sessionId ?? "session pending"}</span>
+                </div>
+              </div>
+              <Button
+                aria-label="Send message"
+                disabled={!canSend}
+                size="icon"
+                type="submit"
+              >
+                {busy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+          </form>
+        </section>
+
+        <aside className="hidden min-h-0 lg:block">
+          <div className="sticky top-4 h-[calc(100vh-9rem)]">{activity}</div>
+        </aside>
       </div>
+      {mobileActivityPortal}
     </div>
   );
 }
 
-declare global {
-  interface Window {
-    __ELEVATE_SESSION_TOKEN__?: string;
+function EmptyState({ state }: { state: ConnectionState }) {
+  return (
+    <div className="mx-auto flex min-h-[28rem] max-w-xl flex-col items-center justify-center text-center">
+      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+        {state === "connecting" ? (
+          <Loader2 className="h-5 w-5 animate-spin" />
+        ) : (
+          <Bot className="h-5 w-5" />
+        )}
+      </div>
+      <h2 className="text-xl font-semibold">Elevate Agent</h2>
+      <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+        Executive Assistant is ready.
+      </p>
+    </div>
+  );
+}
+
+function MessageRow({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user";
+  const isAssistant = message.role === "assistant";
+  const tone =
+    message.role === "system"
+      ? "border-warning/25 bg-warning/5"
+      : message.role === "tool"
+        ? "border-primary/20 bg-primary/[0.04]"
+        : isUser
+          ? "border-primary/20 bg-primary/10"
+          : "border-border bg-background";
+
+  return (
+    <article
+      className={cn(
+        "flex gap-3",
+        isUser ? "flex-row-reverse text-right" : "text-left",
+      )}
+    >
+      <div
+        className={cn(
+          "mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+          isUser ? "bg-primary text-primary-foreground" : "bg-muted",
+        )}
+      >
+        {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
+      </div>
+      <div className={cn("min-w-0 max-w-[78ch] flex-1", isUser && "flex justify-end")}>
+        <div
+          className={cn(
+            "inline-block max-w-full rounded-lg border px-3 py-2 text-sm leading-6 shadow-sm",
+            tone,
+          )}
+        >
+          <div
+            className={cn(
+              "mb-1 flex items-center gap-2 text-[0.68rem] text-muted-foreground",
+              isUser && "justify-end",
+            )}
+          >
+            <span className="font-medium">
+              {isUser
+                ? "You"
+                : isAssistant
+                  ? "Executive Assistant"
+                  : message.title || message.role}
+            </span>
+            <span>{nowLabel(message.createdAt)}</span>
+            {message.status === "streaming" && (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            )}
+            {message.status === "interrupted" && (
+              <Badge variant="secondary" className="text-[0.6rem]">
+                interrupted
+              </Badge>
+            )}
+          </div>
+          {message.role === "assistant" ? (
+            message.content ? (
+              <Markdown content={message.content} />
+            ) : (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Thinking...
+              </div>
+            )
+          ) : (
+            <div className="whitespace-pre-wrap break-words text-foreground">
+              {message.content}
+            </div>
+          )}
+          {message.warning && (
+            <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning">
+              {message.warning}
+            </div>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function PendingPromptCard({
+  onRespond,
+  pendingPrompt,
+  promptValue,
+  setPromptValue,
+}: {
+  onRespond(value: string): void;
+  pendingPrompt: PendingPrompt;
+  promptValue: string;
+  setPromptValue(value: string): void;
+}) {
+  if (pendingPrompt.type === "approval") {
+    return (
+      <Card className="border-warning/30 bg-warning/5 p-3">
+        <div className="flex items-start gap-3">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold">Approval needed</div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {pendingPrompt.description}
+            </p>
+            {pendingPrompt.command && (
+              <pre className="mt-2 max-h-28 overflow-auto rounded-md bg-background px-2 py-1.5 text-xs">
+                {pendingPrompt.command}
+              </pre>
+            )}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" onClick={() => onRespond("once")}>
+                Allow Once
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onRespond("session")}
+              >
+                Allow Session
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onRespond("always")}
+              >
+                Always
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => onRespond("deny")}
+              >
+                Deny
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Card>
+    );
   }
+
+  const choices = pendingPrompt.type === "clarify" ? pendingPrompt.choices : null;
+  const title =
+    pendingPrompt.type === "clarify"
+      ? pendingPrompt.question
+      : pendingPrompt.type === "sudo"
+        ? "Sudo password"
+        : pendingPrompt.prompt || `Secret${pendingPrompt.envVar ? `: ${pendingPrompt.envVar}` : ""}`;
+
+  return (
+    <Card className="border-primary/25 bg-primary/[0.04] p-3">
+      <div className="mb-2 text-sm font-semibold">{title}</div>
+      {choices?.length ? (
+        <div className="flex flex-wrap gap-2">
+          {choices.map((choice) => (
+            <Button key={choice} size="sm" onClick={() => onRespond(choice)}>
+              {choice}
+            </Button>
+          ))}
+        </div>
+      ) : (
+        <form
+          className="flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onRespond(promptValue);
+          }}
+        >
+          <input
+            autoFocus
+            className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-primary"
+            onChange={(event) => setPromptValue(event.target.value)}
+            type={pendingPrompt.type === "sudo" ? "password" : "text"}
+            value={promptValue}
+          />
+          <Button type="submit">Send</Button>
+        </form>
+      )}
+    </Card>
+  );
+}
+
+function ActivityPanel({
+  banner,
+  busy,
+  canPickModel,
+  gw,
+  info,
+  modelOpen,
+  onCloseModel,
+  onModelSubmit,
+  onOpenModel,
+  onReconnect,
+  sessionId,
+  state,
+  statusText,
+  tools,
+}: {
+  banner: string | null;
+  busy: boolean;
+  canPickModel: boolean;
+  gw: GatewayClient;
+  info: SessionInfo;
+  modelOpen: boolean;
+  onCloseModel(): void;
+  onModelSubmit(slashCommand: string): void;
+  onOpenModel(): void;
+  onReconnect(): void;
+  sessionId: string | null;
+  state: ConnectionState;
+  statusText: string;
+  tools: ToolEntry[];
+}) {
+  const [toolsOpen, setToolsOpen] = useState(true);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-3 normal-case">
+      <Card className="p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+              Model
+            </div>
+            <button
+              className="mt-0.5 flex max-w-full items-center gap-1 truncate text-left text-sm font-medium hover:underline disabled:cursor-not-allowed disabled:opacity-60 disabled:no-underline"
+              disabled={!canPickModel}
+              onClick={onOpenModel}
+              type="button"
+            >
+              <span className="truncate">{modelLabel(info)}</span>
+              {canPickModel && <ChevronDown className="h-3 w-3 shrink-0" />}
+            </button>
+          </div>
+          <Badge className={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
+        </div>
+        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+          ) : (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+          )}
+          <span className="min-w-0 truncate">{statusText}</span>
+        </div>
+      </Card>
+
+      {banner && (
+        <Card className="border-destructive/35 bg-destructive/[0.04] p-3">
+          <div className="flex items-start gap-2 text-sm text-destructive">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="break-words">{banner}</div>
+              <Button
+                className="mt-2"
+                onClick={onReconnect}
+                size="sm"
+                variant="outline"
+              >
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Reconnect
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <Card className="flex min-h-0 flex-1 flex-col p-2">
+        <button
+          className="flex items-center justify-between gap-2 px-1 pb-2 text-left text-xs uppercase tracking-wide text-muted-foreground"
+          onClick={() => setToolsOpen((open) => !open)}
+          type="button"
+        >
+          <span className="flex items-center gap-1.5">
+            <Settings2 className="h-3.5 w-3.5" />
+            Tools
+          </span>
+          <Badge variant="secondary" className="text-[0.6rem]">
+            {tools.length}
+          </Badge>
+        </button>
+
+        {toolsOpen && (
+          <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
+            {tools.length === 0 ? (
+              <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+                No tool calls yet
+              </div>
+            ) : (
+              tools.map((tool) => <ToolCall key={tool.id} tool={tool} />)
+            )}
+          </div>
+        )}
+      </Card>
+
+      {modelOpen && canPickModel && sessionId && (
+        <ModelPickerDialog
+          gw={gw}
+          onClose={onCloseModel}
+          onSubmit={onModelSubmit}
+          sessionId={sessionId}
+        />
+      )}
+    </div>
+  );
 }
