@@ -71,6 +71,28 @@ class TestLoadConfigDefaults:
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
 
+    def test_default_config_exposes_agent_hub_memory_plugin_and_platforms(self):
+        assert DEFAULT_CONFIG["agent_hub"]["default_agent"] == "executive-assistant"
+        assert {
+            "Executive Assistant",
+            "Admin",
+            "Outreach",
+            "Marketing",
+            "Social Media",
+        }.issubset({agent["name"] for agent in DEFAULT_CONFIG["agent_hub"]["agents"]})
+
+        memory_plugin = DEFAULT_CONFIG["plugins"]["elevate-memory-store"]
+        assert memory_plugin["turn_journal_enabled"] is True
+        assert memory_plugin["organize_every_n_turns"] == 6
+        assert memory_plugin["daily_organize_enabled"] is True
+        assert memory_plugin["embedding_provider"] == "openai"
+        assert memory_plugin["embedding_model"] == "text-embedding-3-small"
+        assert memory_plugin["embedding_enabled"] is False
+
+        assert DEFAULT_CONFIG["platforms"]["telegram"]["enabled"] is False
+        assert DEFAULT_CONFIG["platforms"]["telegram"]["reply_to_mode"] == "first"
+        assert DEFAULT_CONFIG["platforms"]["api_server"]["enabled"] is False
+
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"

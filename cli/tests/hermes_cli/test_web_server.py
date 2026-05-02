@@ -414,6 +414,33 @@ class TestBuildSchemaFromConfig:
         assert "privacy" not in categories  # merged into security
         assert "context" not in categories  # merged into agent
 
+    def test_agent_hub_memory_access_and_platform_schema_exposed(self):
+        from elevate_cli.web_server import CONFIG_SCHEMA, _CATEGORY_ORDER
+
+        assert CONFIG_SCHEMA["agent_hub.default_agent"]["category"] == "agent_hub"
+        assert CONFIG_SCHEMA["agent_hub.agents"]["type"] == "json"
+        assert CONFIG_SCHEMA["plugins.elevate-memory-store.embedding_enabled"]["category"] == "memory"
+        assert CONFIG_SCHEMA["plugins.elevate-memory-store.embedding_provider"]["options"] == [
+            "openai",
+            "ollama",
+            "openai_compatible",
+            "local_minilm",
+        ]
+        assert CONFIG_SCHEMA["plugins.elevate-memory-store.organize_every_n_turns"]["type"] == "number"
+        assert CONFIG_SCHEMA["access.profile"]["options"] == [
+            "standalone",
+            "exp",
+            "skyleigh_downline",
+        ]
+        assert CONFIG_SCHEMA["platforms.telegram.reply_to_mode"]["options"] == [
+            "off",
+            "first",
+            "all",
+        ]
+        assert _CATEGORY_ORDER.index("agent_hub") < _CATEGORY_ORDER.index("memory")
+        assert "access" in _CATEGORY_ORDER
+        assert "platforms" in _CATEGORY_ORDER
+
     def test_no_single_field_categories(self):
         """After merging, no category should have just 1 field."""
         from elevate_cli.web_server import CONFIG_SCHEMA

@@ -279,6 +279,16 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Web dashboard visual theme",
         "options": ["default", "midnight", "ember", "mono", "cyberpunk", "rose"],
     },
+    "agent_hub.default_agent": {
+        "type": "string",
+        "description": "Default Agent Hub persona for new local chat sessions",
+        "category": "agent_hub",
+    },
+    "agent_hub.agents": {
+        "type": "json",
+        "description": "Agent Hub personas/orchestration metadata",
+        "category": "agent_hub",
+    },
     "display.resume_display": {
         "type": "select",
         "description": "How resumed sessions display history",
@@ -292,7 +302,143 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "memory.provider": {
         "type": "select",
         "description": "Memory provider plugin",
-        "options": ["builtin", "honcho"],
+        "options": ["", "builtin", "holographic", "honcho", "openviking", "mem0", "hindsight", "retaindb", "byterover"],
+    },
+    "plugins.elevate-memory-store.db_path": {
+        "type": "string",
+        "description": "Holographic memory SQLite database path",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.auto_extract": {
+        "type": "boolean",
+        "description": "Auto-extract durable facts at session end",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.turn_journal_enabled": {
+        "type": "boolean",
+        "description": "Record completed turns locally for daily/session memory organization",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.organize_on_session_end": {
+        "type": "boolean",
+        "description": "Organize pending journal turns when a session ends",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.organize_every_n_turns": {
+        "type": "number",
+        "description": "Also organize pending journal turns every N completed turns (0 disables)",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.daily_organize_enabled": {
+        "type": "boolean",
+        "description": "Run local daily journal organization even when sessions stay open",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.daily_organize_hour": {
+        "type": "number",
+        "description": "Local hour for daily journal organization",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.daily_organize_minute": {
+        "type": "number",
+        "description": "Local minute for daily journal organization",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.daily_organize_max_batches": {
+        "type": "number",
+        "description": "Maximum memory organization batches in one daily pass",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.turn_journal_max_chars": {
+        "type": "number",
+        "description": "Maximum characters saved per side of a turn",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.organize_batch_limit": {
+        "type": "number",
+        "description": "Maximum pending turns to organize in one pass",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.layered_prefetch_enabled": {
+        "type": "boolean",
+        "description": "Inject recent, durable, and graph memory lanes instead of one flat memory list",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.recent_recall_enabled": {
+        "type": "boolean",
+        "description": "Include recent same-session journal recall",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.graph_recall_enabled": {
+        "type": "boolean",
+        "description": "Include wiki-style entity graph recall",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_enabled": {
+        "type": "boolean",
+        "description": "Enable semantic embeddings for durable memory search",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_provider": {
+        "type": "select",
+        "description": "Embedding backend",
+        "options": ["openai", "ollama", "openai_compatible", "local_minilm"],
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_model": {
+        "type": "string",
+        "description": "Embedding model name",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_dimensions": {
+        "type": "string",
+        "description": "Optional embedding dimensions override",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_base_url": {
+        "type": "string",
+        "description": "Optional OpenAI-compatible embedding base URL",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_api_key_env": {
+        "type": "string",
+        "description": "Environment variable containing the embedding API key",
+        "category": "memory",
+    },
+    "plugins.elevate-memory-store.embedding_cache_dir": {
+        "type": "string",
+        "description": "Optional local model cache directory for local_minilm",
+        "category": "memory",
+    },
+    "access.profile": {
+        "type": "select",
+        "description": "Access profile for local entitlement gates",
+        "options": ["standalone", "exp", "skyleigh_downline"],
+        "category": "access",
+    },
+    "access.affiliation.status": {
+        "type": "select",
+        "description": "Affiliation status used by team/EXP skill access gates",
+        "options": ["active", "inactive", "left", "paused"],
+        "category": "access",
+    },
+    "platforms.telegram.reply_to_mode": {
+        "type": "select",
+        "description": "Telegram reply threading mode",
+        "options": ["off", "first", "all"],
+        "category": "platforms",
+    },
+    "platforms.telegram.extra.unauthorized_dm_behavior": {
+        "type": "select",
+        "description": "Telegram behavior for unpaired direct messages",
+        "options": ["pair", "ignore"],
+        "category": "platforms",
+    },
+    "platforms.api_server.reply_to_mode": {
+        "type": "select",
+        "description": "API server reply threading mode",
+        "options": ["off", "first", "all"],
+        "category": "platforms",
     },
     "approvals.mode": {
         "type": "select",
@@ -338,13 +484,14 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "human_delay": "display",
     "dashboard": "display",
     "code_execution": "agent",
+    "prompt_caching": "agent",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
 _CATEGORY_ORDER = [
-    "general", "agent", "terminal", "display", "delegation",
-    "memory", "compression", "security", "browser", "voice",
-    "tts", "stt", "logging", "discord", "auxiliary",
+    "general", "agent", "agent_hub", "platforms", "terminal", "display",
+    "delegation", "memory", "access", "plugins", "compression", "security",
+    "browser", "voice", "tts", "stt", "logging", "discord", "auxiliary",
 ]
 
 
@@ -397,6 +544,8 @@ def _build_schema_from_config(
             # Apply manual overrides
             if full_key in _SCHEMA_OVERRIDES:
                 entry.update(_SCHEMA_OVERRIDES[full_key])
+            if full_key.startswith("plugins.elevate-memory-store."):
+                entry["category"] = "memory"
             # Merge small categories
             entry["category"] = _CATEGORY_MERGE.get(entry["category"], entry["category"])
             schema[full_key] = entry
@@ -2719,7 +2868,7 @@ def _parse_theme_layer(value: Any, default_hex: str, default_alpha: float = 1.0)
 
 
 _THEME_DEFAULT_TYPOGRAPHY: Dict[str, str] = {
-    "fontSans": 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    "fontSans": 'Aptos, "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif',
     "fontMono": 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace',
     "baseSize": "15px",
     "lineHeight": "1.55",

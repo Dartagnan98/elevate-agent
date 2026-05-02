@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
@@ -25,6 +26,17 @@ export function AutoField({
 }: AutoFieldProps) {
   const rawLabel = schemaKey.split(".").pop() ?? schemaKey;
   const label = rawLabel.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const jsonValue = useMemo(() => {
+    if (schema.type !== "json") return "";
+    return JSON.stringify(value ?? null, null, 2);
+  }, [schema.type, value]);
+  const [jsonText, setJsonText] = useState(jsonValue);
+  const [jsonError, setJsonError] = useState("");
+
+  useEffect(() => {
+    setJsonText(jsonValue);
+    setJsonError("");
+  }, [jsonValue]);
 
   if (schema.type === "boolean") {
     return (
@@ -110,6 +122,31 @@ export function AutoField({
           }
           placeholder="comma-separated values"
         />
+      </div>
+    );
+  }
+
+  if (schema.type === "json") {
+    return (
+      <div className="grid gap-1.5">
+        <Label className="text-sm">{label}</Label>
+        <FieldHint schema={schema} schemaKey={schemaKey} />
+        <textarea
+          className="flex min-h-[240px] w-full border border-input bg-transparent px-3 py-2 font-mono text-xs leading-relaxed shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          value={jsonText}
+          onChange={(e) => {
+            const next = e.target.value;
+            setJsonText(next);
+            try {
+              onChange(JSON.parse(next));
+              setJsonError("");
+            } catch (err) {
+              setJsonError(err instanceof Error ? err.message : "Invalid JSON");
+            }
+          }}
+          spellCheck={false}
+        />
+        {jsonError && <div className="text-xs text-destructive">{jsonError}</div>}
       </div>
     );
   }

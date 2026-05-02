@@ -27,6 +27,8 @@ import {
   Wrench,
   FileQuestion,
   Filter,
+  Network,
+  ShieldCheck,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
@@ -47,10 +49,14 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 const CATEGORY_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   general: Settings,
   agent: Bot,
+  agent_hub: Users,
+  platforms: Network,
   terminal: Monitor,
   display: Palette,
   delegation: Users,
   memory: Brain,
+  access: ShieldCheck,
+  plugins: Package,
   compression: Package,
   security: Lock,
   browser: Globe,

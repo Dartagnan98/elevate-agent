@@ -658,6 +658,76 @@ DEFAULT_CONFIG = {
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
     },
 
+    # Agent Hub definitions shown in the local dashboard.  The runtime uses
+    # these as orchestration/persona metadata; empty skills/toolsets means the
+    # agent inherits the normal Elevate defaults.
+    "agent_hub": {
+        "enabled": True,
+        "default_agent": "executive-assistant",
+        "agents": [
+            {
+                "id": "executive-assistant",
+                "name": "Executive Assistant",
+                "role": "main",
+                "description": "Primary Elevate assistant.",
+                "enabled": True,
+                "platforms": ["local", "telegram"],
+                "session_sources": ["cli", "telegram", "api_server", "webhook", "cron"],
+                "skills": [],
+                "toolsets": [],
+                "prompt": "",
+            },
+            {
+                "id": "admin",
+                "name": "Admin",
+                "role": "support",
+                "description": "Operations, scheduling, and admin support.",
+                "enabled": True,
+                "platforms": ["local"],
+                "session_sources": ["cli", "cron"],
+                "skills": [],
+                "toolsets": [],
+                "prompt": "",
+            },
+            {
+                "id": "outreach",
+                "name": "Outreach",
+                "role": "support",
+                "description": "Lead follow-up and relationship workflows.",
+                "enabled": True,
+                "platforms": ["local"],
+                "session_sources": ["cli", "webhook"],
+                "skills": [],
+                "toolsets": [],
+                "prompt": "",
+            },
+            {
+                "id": "marketing",
+                "name": "Marketing",
+                "role": "support",
+                "description": "Listing, campaign, and brand workflows.",
+                "enabled": True,
+                "platforms": ["local"],
+                "session_sources": ["cli", "cron"],
+                "skills": [],
+                "toolsets": [],
+                "prompt": "",
+            },
+            {
+                "id": "social-media",
+                "name": "Social Media",
+                "role": "support",
+                "description": "Social posts and content repurposing.",
+                "enabled": True,
+                "platforms": ["local"],
+                "session_sources": ["cli"],
+                "skills": [],
+                "toolsets": [],
+                "prompt": "",
+            },
+        ],
+    },
+
     # Privacy settings
     "privacy": {
         "redact_pii": False,  # When True, hash user IDs and strip phone numbers from LLM context
@@ -752,6 +822,45 @@ DEFAULT_CONFIG = {
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
         "provider": "",
+    },
+
+    # Plugin manager + bundled holographic memory plugin settings.  The
+    # external memory provider is activated by memory.provider; plugins.enabled
+    # controls only general-purpose plugin loading.
+    "plugins": {
+        "enabled": [],
+        "disabled": [],
+        "elevate-memory-store": {
+            "db_path": "$ELEVATE_HOME/memory_store.db",
+            "auto_extract": False,
+            "turn_journal_enabled": True,
+            "organize_on_session_end": True,
+            "organize_every_n_turns": 6,
+            "daily_organize_enabled": True,
+            "daily_organize_hour": 23,
+            "daily_organize_minute": 55,
+            "daily_organize_max_batches": 50,
+            "turn_journal_max_chars": 8000,
+            "organize_batch_limit": 20,
+            "layered_prefetch_enabled": True,
+            "recent_recall_enabled": True,
+            "graph_recall_enabled": True,
+            "recent_recall_limit": 4,
+            "durable_recall_limit": 4,
+            "graph_recall_limit": 2,
+            "recent_turn_max_chars": 240,
+            "default_trust": 0.5,
+            "min_trust_threshold": 0.3,
+            "temporal_decay_half_life": 0,
+            "hrr_dim": 1024,
+            "embedding_enabled": False,
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "embedding_dimensions": "",
+            "embedding_base_url": "",
+            "embedding_api_key_env": "OPENAI_API_KEY",
+            "embedding_cache_dir": "",
+        },
     },
 
     # Subagent delegation — override the provider:model used by delegate_task
@@ -893,6 +1002,32 @@ DEFAULT_CONFIG = {
         "channel_prompts": {},         # Per-chat/topic ephemeral system prompts (topics inherit from parent group)
     },
 
+    # Gateway platform connection settings.  Secrets may also live in .env
+    # (for example TELEGRAM_BOT_TOKEN), which overrides these token fields.
+    "platforms": {
+        "telegram": {
+            "enabled": False,
+            "token": "",
+            "api_key": "",
+            "reply_to_mode": "first",
+            "home_channel": {
+                "platform": "telegram",
+                "chat_id": "",
+                "name": "Home",
+            },
+            "extra": {
+                "unauthorized_dm_behavior": "pair",
+            },
+        },
+        "api_server": {
+            "enabled": False,
+            "token": "",
+            "api_key": "",
+            "reply_to_mode": "first",
+            "extra": {},
+        },
+    },
+
     # Slack platform settings (gateway mode)
     "slack": {
         "channel_prompts": {},         # Per-channel ephemeral system prompts
@@ -1026,7 +1161,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 22,
+    "_config_version": 23,
 }
 
 # =============================================================================
@@ -2257,8 +2392,14 @@ _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation", "access",
-    "auxiliary", "custom_providers", "context", "memory", "gateway",
-    "sessions",
+    "agent_hub", "auxiliary", "custom_providers", "context", "memory",
+    "plugins", "gateway", "sessions", "dashboard", "privacy", "tts", "stt",
+    "voice", "human_delay", "prefill_messages_file", "honcho", "timezone",
+    "discord", "whatsapp", "telegram", "slack", "mattermost", "platforms",
+    "approvals", "command_allowlist", "quick_commands", "hooks",
+    "hooks_auto_accept", "personalities", "security", "cron",
+    "code_execution", "network", "prompt_caching", "bedrock",
+    "file_read_max_chars", "tool_output", "browser", "checkpoints",
 }
 
 # Valid fields inside a custom_providers list entry

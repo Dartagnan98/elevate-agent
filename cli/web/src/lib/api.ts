@@ -358,6 +358,12 @@ export interface AgentHubSnapshot {
     entitlements: Record<string, { status?: string; owned_snapshot?: boolean }>;
   };
   agents: AgentHubAgent[];
+  orchestration?: {
+    agents: unknown[];
+    runs: unknown[];
+    active_runs: number;
+    error?: string;
+  };
   platforms: AgentHubPlatform[];
   sessions: AgentHubSessionSummary;
   memory: {

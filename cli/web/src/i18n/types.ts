@@ -256,10 +256,14 @@ export interface Translations {
     categories: {
       general: string;
       agent: string;
+      agent_hub: string;
+      platforms: string;
       terminal: string;
       display: string;
       delegation: string;
       memory: string;
+      access: string;
+      plugins: string;
       compression: string;
       security: string;
       browser: string;
