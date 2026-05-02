@@ -117,6 +117,7 @@ interface ChatMessage {
 }
 
 type ArtifactKind = "diff" | "file" | "output";
+type ActivityTab = "artifacts" | "progress" | "sources";
 
 interface ArtifactEntry {
   content?: string;
@@ -128,6 +129,13 @@ interface ArtifactEntry {
   path?: string;
   source?: string;
   status?: "error" | "ok";
+  title: string;
+}
+
+interface SourceEntry {
+  detail: string;
+  id: string;
+  kind: "artifact" | "model" | "session" | "tool";
   title: string;
 }
 
@@ -356,6 +364,56 @@ function artifactsFromSubagentEvent(
   return artifacts;
 }
 
+function buildSourceEntries({
+  artifacts,
+  info,
+  sessionId,
+  tools,
+}: {
+  artifacts: ArtifactEntry[];
+  info: SessionInfo;
+  sessionId: string | null;
+  tools: ToolEntry[];
+}): SourceEntry[] {
+  const entries: SourceEntry[] = [];
+
+  entries.push({
+    detail: [info.provider, info.model].filter(Boolean).join(" / ") || "model pending",
+    id: "model",
+    kind: "model",
+    title: "Model",
+  });
+
+  if (sessionId) {
+    entries.push({
+      detail: sessionId,
+      id: "session",
+      kind: "session",
+      title: "Session",
+    });
+  }
+
+  for (const tool of tools.slice(-8).reverse()) {
+    entries.push({
+      detail: tool.summary || tool.context || tool.preview || tool.status,
+      id: `tool:${tool.id}`,
+      kind: "tool",
+      title: tool.name,
+    });
+  }
+
+  for (const artifact of artifacts.slice(-8).reverse()) {
+    entries.push({
+      detail: artifact.detail || artifact.path || artifact.source || artifact.kind,
+      id: `artifact:${artifact.id}`,
+      kind: "artifact",
+      title: artifact.title,
+    });
+  }
+
+  return entries.slice(0, 14);
+}
+
 export default function ChatPage() {
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
@@ -393,7 +451,7 @@ export default function ChatPage() {
   );
   const [narrow, setNarrow] = useState(() =>
     typeof window !== "undefined"
-      ? window.matchMedia("(max-width: 1023px)").matches
+      ? window.matchMedia("(max-width: 1279px)").matches
       : false,
   );
   const { setEnd } = usePageHeader();
@@ -458,7 +516,7 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    const mql = window.matchMedia("(max-width: 1023px)");
+    const mql = window.matchMedia("(max-width: 1279px)");
     const sync = () => setNarrow(mql.matches);
     sync();
     mql.addEventListener("change", sync);
@@ -1069,9 +1127,9 @@ export default function ChatPage() {
         )}
         <aside
           className={cn(
-            "fixed right-0 top-0 z-[60] flex h-dvh w-[min(24rem,86vw)] flex-col",
-            "border-l border-[var(--chat-border)] bg-[var(--chat-bg)] p-3 normal-case shadow-2xl",
-            mobilePanelOpen ? "translate-x-0" : "translate-x-full",
+            "fixed bottom-4 right-4 top-4 z-[60] flex w-[min(24rem,calc(100vw-2rem))] flex-col",
+            "normal-case",
+            mobilePanelOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]",
             "transition-transform duration-200 ease-out",
           )}
         >
@@ -1094,8 +1152,8 @@ export default function ChatPage() {
 
   return (
     <div className="elevate-chat-shell relative -m-4 flex min-h-[calc(100vh-4.5rem)] flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6">
-      <div className="relative grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_18rem] xl:grid-cols-[minmax(0,1fr)_20rem]">
-        <section className="flex min-h-0 flex-col">
+      <div className="relative flex min-h-0 flex-1">
+        <section className="flex min-h-0 flex-1 flex-col xl:pr-[23rem]">
           <header className="mx-auto flex w-full max-w-[52rem] flex-wrap items-center justify-between gap-3 px-4 pb-4 pt-5 sm:px-6">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
@@ -1220,8 +1278,8 @@ export default function ChatPage() {
           </form>
         </section>
 
-        <aside className="hidden min-h-0 p-4 lg:block">
-          <div className="sticky top-4 h-[calc(100vh-7rem)]">{activity}</div>
+        <aside className="pointer-events-none absolute bottom-5 right-5 top-5 hidden w-[21.5rem] xl:block">
+          <div className="pointer-events-auto h-full">{activity}</div>
         </aside>
       </div>
       {mobileActivityPortal}
@@ -1691,58 +1749,60 @@ function ActivityPanel({
   statusText: string;
   tools: ToolEntry[];
 }) {
-  const [toolsOpen, setToolsOpen] = useState(true);
-  const [artifactsOpen, setArtifactsOpen] = useState(true);
+  const [activeTab, setActiveTab] = useState<ActivityTab>("progress");
+  const sources = useMemo(
+    () => buildSourceEntries({ artifacts, info, sessionId, tools }),
+    [artifacts, info, sessionId, tools],
+  );
+  const runningTools = tools.filter((tool) => tool.status === "running").length;
+  const tabItems: Array<{
+    count: number;
+    id: ActivityTab;
+    label: string;
+  }> = [
+    { count: tools.length, id: "progress", label: "Progress" },
+    { count: artifacts.length, id: "artifacts", label: "Artifacts" },
+    { count: sources.length, id: "sources", label: "Sources" },
+  ];
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface)] p-4 normal-case shadow-[0_24px_80px_rgba(0,0,0,0.18)]">
-      <section className="shrink-0">
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-medium text-[var(--chat-muted-strong)]">
-            Progress
-          </h2>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] border border-[var(--chat-border)] bg-[var(--chat-surface)] normal-case shadow-[0_32px_90px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.03] backdrop-blur-xl">
+      <header className="shrink-0 px-4 pb-3 pt-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  state === "open"
+                    ? "bg-[var(--chat-success)] shadow-[0_0_18px_color-mix(in_srgb,var(--chat-success)_55%,transparent)]"
+                    : "bg-[var(--chat-muted)]",
+                )}
+              />
+              <h2 className="truncate text-[0.9rem] font-semibold leading-5 text-[var(--chat-text)]">
+                Activity Portal
+              </h2>
+            </div>
+            <p className="mt-1 truncate text-[0.72rem] leading-4 text-[var(--chat-muted)]">
+              Progress, artifacts, and sources
+            </p>
+          </div>
+
           <span
             className={cn(
-              "rounded-full px-2 py-0.5 text-[0.68rem]",
+              "rounded-full px-2.5 py-1 text-[0.68rem] font-medium",
               state === "open"
-                ? "bg-[color-mix(in_srgb,var(--chat-success)_18%,var(--chat-bg))] text-[var(--chat-success)]"
+                ? "bg-[color-mix(in_srgb,var(--chat-success)_16%,var(--chat-bg))] text-[var(--chat-success)]"
                 : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
             )}
           >
             {STATE_LABEL[state]}
           </span>
         </div>
-
-        <div className="space-y-3">
-          <div className="flex gap-2 text-sm leading-5">
-            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
-              {busy ? (
-                <Loader2 className="h-2.5 w-2.5 animate-spin" />
-              ) : (
-                <CheckCircle2 className="h-2.5 w-2.5" />
-              )}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[var(--chat-muted-strong)]">
-                {statusText}
-              </div>
-              <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
-                {modelLabel(info)}
-              </div>
-            </div>
-          </div>
-
-          {tools
-            .slice(-5)
-            .reverse()
-            .map((tool) => (
-              <ProgressItem key={tool.id} tool={tool} />
-            ))}
-        </div>
-      </section>
+      </header>
 
       {banner && (
-        <section className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3">
+        <section className="mx-3 mb-3 rounded-2xl border border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3">
           <div className="flex items-start gap-2 text-sm text-[var(--chat-danger)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
@@ -1759,23 +1819,77 @@ function ActivityPanel({
         </section>
       )}
 
-      <section className="mt-4 flex min-h-0 flex-1 flex-col border-t border-[var(--chat-border)] pt-4">
-        <button
-          className="mb-3 flex items-center justify-between gap-2 text-left text-sm font-medium text-[var(--chat-muted-strong)]"
-          onClick={() => setArtifactsOpen((open) => !open)}
-          type="button"
-        >
-          <span>Artifacts</span>
-          <span className="text-xs text-[var(--chat-muted)]">
-            {artifacts.length}
-          </span>
-        </button>
+      <div className="shrink-0 border-y border-[var(--chat-border)] px-3 py-2">
+        <div className="grid grid-cols-3 gap-1 rounded-2xl bg-[var(--chat-surface-soft)] p-1">
+          {tabItems.map((item) => (
+            <button
+              key={item.id}
+              className={cn(
+                "flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-xl px-2 text-[0.72rem] font-medium transition-colors",
+                activeTab === item.id
+                  ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)] shadow-[0_8px_22px_rgba(0,0,0,0.12)]"
+                  : "text-[var(--chat-muted)] hover:text-[var(--chat-muted-strong)]",
+              )}
+              onClick={() => setActiveTab(item.id)}
+              type="button"
+            >
+              <span className="truncate">{item.label}</span>
+              <span className="text-[0.64rem] text-[var(--chat-muted)]">
+                {item.count}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
 
-        {artifactsOpen && (
-          <div className="flex min-h-0 flex-col gap-2 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {activeTab === "progress" && (
+          <section className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <PortalMetric label="Running" value={busy ? runningTools || 1 : 0} />
+              <PortalMetric label="Tool calls" value={tools.length} />
+            </div>
+
+            <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] p-3">
+              <div className="flex gap-2 text-sm leading-5">
+                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
+                  {busy ? (
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-2.5 w-2.5" />
+                  )}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[var(--chat-muted-strong)]">
+                    {statusText}
+                  </div>
+                  <div className="mt-0.5 truncate text-xs text-[var(--chat-muted)]">
+                    {modelLabel(info)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {tools.length === 0 ? (
+                <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
+                  Tool activity will appear here
+                </div>
+              ) : (
+                tools
+                  .slice()
+                  .reverse()
+                  .map((tool) => <ProgressItem key={tool.id} tool={tool} />)
+              )}
+            </div>
+          </section>
+        )}
+
+        {activeTab === "artifacts" && (
+          <section className="space-y-2">
             {artifacts.length === 0 ? (
-              <div className="px-2 py-5 text-center text-xs text-[var(--chat-muted)]">
-                No artifacts yet
+              <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-8 text-center text-xs text-[var(--chat-muted)]">
+                Files, diffs, and outputs will land here
               </div>
             ) : (
               artifacts
@@ -1785,41 +1899,21 @@ function ActivityPanel({
                   <ArtifactCard key={artifact.id} artifact={artifact} />
                 ))
             )}
-          </div>
+          </section>
         )}
-      </section>
 
-      <section className="mt-4 shrink-0 border-t border-[var(--chat-border)] pt-4">
-        <button
-          className="flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-[var(--chat-muted-strong)]"
-          onClick={() => setToolsOpen((open) => !open)}
-          type="button"
-        >
-          <span>Tools</span>
-          <span className="text-xs text-[var(--chat-muted)]">
-            {tools.length}
-          </span>
-        </button>
-
-        {toolsOpen && (
-          <div className="mt-3 max-h-44 space-y-2 overflow-y-auto pr-1">
-            {tools.length === 0 ? (
-              <div className="px-2 py-3 text-center text-xs text-[var(--chat-muted)]">
-                No tool calls yet
-              </div>
-            ) : (
-              tools
-                .slice()
-                .reverse()
-                .map((tool) => <ProgressItem key={tool.id} tool={tool} />)
-            )}
-          </div>
+        {activeTab === "sources" && (
+          <section className="space-y-2">
+            {sources.map((source) => (
+              <SourceCard key={source.id} source={source} />
+            ))}
+          </section>
         )}
-      </section>
+      </div>
 
-      <section className="mt-4 shrink-0 border-t border-[var(--chat-border)] pt-4">
+      <section className="shrink-0 border-t border-[var(--chat-border)] px-3 py-3">
         <button
-          className="flex w-full items-center justify-between gap-2 rounded-xl px-1 py-1 text-left text-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] disabled:opacity-50"
+          className="flex w-full items-center justify-between gap-2 rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2.5 text-left text-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] disabled:opacity-50"
           disabled={!canPickModel}
           onClick={onOpenModel}
           type="button"
@@ -1837,6 +1931,48 @@ function ActivityPanel({
           sessionId={sessionId}
         />
       )}
+    </div>
+  );
+}
+
+function PortalMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2.5">
+      <div className="text-[1.05rem] font-semibold leading-none text-[var(--chat-text)]">
+        {value}
+      </div>
+      <div className="mt-1 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function SourceCard({ source }: { source: SourceEntry }) {
+  const Icon =
+    source.kind === "model"
+      ? Bot
+      : source.kind === "session"
+        ? Shield
+        : source.kind === "tool"
+          ? CheckCircle2
+          : FileText;
+
+  return (
+    <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2.5">
+      <div className="flex items-start gap-2.5">
+        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]">
+          <Icon className="h-3.5 w-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-[var(--chat-text)]">
+            {source.title}
+          </div>
+          <div className="mt-0.5 line-clamp-2 text-xs leading-4 text-[var(--chat-muted)]">
+            {source.detail || source.kind}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
