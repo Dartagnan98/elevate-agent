@@ -1,7 +1,13 @@
 import { useEffect, useLayoutEffect, useState, useMemo } from "react";
 import {
+  BriefcaseBusiness,
+  Building2,
+  CheckCircle2,
   Package,
   Search,
+  Megaphone,
+  Route,
+  Users,
   Wrench,
   X,
   Cpu,
@@ -82,6 +88,102 @@ function toolsetIcon(
     if (lower.includes(key)) return icon;
   }
   return Wrench;
+}
+
+const REAL_ESTATE_WORKFLOWS = [
+  {
+    key: "leads",
+    icon: Users,
+    label: "Leads",
+    names: ["outreach", "outreach-send", "property-lookup", "gmail-doc-router"],
+  },
+  {
+    key: "listings",
+    icon: Building2,
+    label: "Listings",
+    names: ["cma", "seller-updates", "showing-time", "weekly-listing", "relisting"],
+  },
+  {
+    key: "deals",
+    icon: BriefcaseBusiness,
+    label: "Deals",
+    names: ["mlc", "digisign", "webforms", "skyleigh-vault"],
+  },
+  {
+    key: "marketing",
+    icon: Megaphone,
+    label: "Marketing",
+    names: ["marketing", "humanizer", "graphify", "market-stats-watcher"],
+  },
+] as const;
+
+function WorkflowSkillCard({
+  onToggle,
+  skillsByName,
+  togglingSkills,
+  workflow,
+}: {
+  onToggle: (skill: SkillInfo) => void;
+  skillsByName: Map<string, SkillInfo>;
+  togglingSkills: Set<string>;
+  workflow: (typeof REAL_ESTATE_WORKFLOWS)[number];
+}) {
+  const Icon = workflow.icon;
+  const present = workflow.names
+    .map((name) => skillsByName.get(name))
+    .filter((skill): skill is SkillInfo => Boolean(skill));
+  const missing = workflow.names.filter((name) => !skillsByName.has(name));
+  const enabled = present.filter((skill) => skill.enabled).length;
+
+  return (
+    <div className="rounded-2xl border border-border/70 bg-background/35 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Icon className="h-4 w-4 shrink-0 text-primary" />
+          <div className="truncate text-sm font-semibold text-foreground">
+            {workflow.label}
+          </div>
+        </div>
+        <Badge variant={missing.length ? "warning" : "success"}>
+          {present.length}/{workflow.names.length}
+        </Badge>
+      </div>
+      <div className="mt-3 space-y-1.5">
+        {present.map((skill) => (
+          <div
+            key={skill.name}
+            className="flex items-center justify-between gap-2 rounded-xl bg-card/45 px-2.5 py-1.5"
+          >
+            <div className="min-w-0">
+              <div className="truncate text-xs font-medium text-foreground">
+                {skill.name}
+              </div>
+              <div className="mt-0.5 flex items-center gap-1 text-[0.65rem] text-muted-foreground">
+                {skill.enabled && <CheckCircle2 className="h-3 w-3 text-success" />}
+                {skill.enabled ? "Enabled" : "Disabled"}
+              </div>
+            </div>
+            <Switch
+              checked={skill.enabled}
+              disabled={togglingSkills.has(skill.name)}
+              onCheckedChange={() => onToggle(skill)}
+            />
+          </div>
+        ))}
+        {missing.map((name) => (
+          <div
+            key={name}
+            className="rounded-xl border border-dashed border-border bg-background/25 px-2.5 py-1.5 text-xs text-muted-foreground"
+          >
+            {name} missing
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 text-[0.68rem] leading-4 text-muted-foreground">
+        {enabled} enabled in this workflow.
+      </div>
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -182,6 +284,10 @@ export default function SkillsPage() {
   }, [skills, t]);
 
   const enabledCount = skills.filter((s) => s.enabled).length;
+  const skillsByName = useMemo(
+    () => new Map(skills.map((skill) => [skill.name, skill])),
+    [skills],
+  );
 
   useLayoutEffect(() => {
     if (loading) {
@@ -252,6 +358,34 @@ export default function SkillsPage() {
   return (
     <div className="flex flex-col gap-4">
       <Toast toast={toast} />
+
+      <section className="rounded-[1.45rem] border border-border bg-card/70 p-4 shadow-[0_20px_70px_color-mix(in_srgb,var(--background-base)_48%,transparent)]">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+              <Route className="h-3.5 w-3.5 text-primary" />
+              Real estate workflow skills
+            </div>
+            <h2 className="mt-1 text-lg font-semibold text-foreground">
+              Skills live here; dashboards show connectors.
+            </h2>
+          </div>
+          <Badge variant="outline">
+            {enabledCount}/{skills.length} enabled
+          </Badge>
+        </div>
+        <div className="mt-4 grid gap-3 lg:grid-cols-4">
+          {REAL_ESTATE_WORKFLOWS.map((workflow) => (
+            <WorkflowSkillCard
+              key={workflow.key}
+              workflow={workflow}
+              skillsByName={skillsByName}
+              togglingSkills={togglingSkills}
+              onToggle={handleToggleSkill}
+            />
+          ))}
+        </div>
+      </section>
 
       {/* ═══════════════ Filter panel + Content ═══════════════ */}
       <div className="flex flex-col sm:flex-row sm:items-start gap-4">

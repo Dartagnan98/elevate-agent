@@ -23,6 +23,7 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  Brain,
   BriefcaseBusiness,
   Building2,
   Clock,
@@ -55,6 +56,7 @@ import {
   Search,
   Settings,
   Shield,
+  ShieldCheck,
   Sparkles,
   Star,
   Terminal,
@@ -89,9 +91,11 @@ import AgentHubPage from "@/pages/AgentHubPage";
 import ProjectPage from "@/pages/ProjectPage";
 import {
   RealEstateDealsPage,
+  RealEstateApprovalsPage,
   RealEstateLeadsPage,
   RealEstateListingsPage,
   RealEstateMarketingPage,
+  RealEstateMemoryPage,
   RealEstateTasksPage,
   RealEstateTodayPage,
 } from "@/pages/RealEstateHubPages";
@@ -125,6 +129,8 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/deals": RealEstateDealsPage,
   "/marketing": RealEstateMarketingPage,
   "/tasks": RealEstateTasksPage,
+  "/approvals": RealEstateApprovalsPage,
+  "/memory": RealEstateMemoryPage,
   "/hub": AgentHubPage,
   "/project": ProjectPage,
   "/sessions": SessionsPage,
@@ -167,6 +173,16 @@ const BUILTIN_NAV_REST: NavItem[] = [
     path: "/tasks",
     label: "Tasks",
     icon: ListChecks,
+  },
+  {
+    path: "/approvals",
+    label: "Approvals",
+    icon: ShieldCheck,
+  },
+  {
+    path: "/memory",
+    label: "Memory",
+    icon: Brain,
   },
   {
     path: "/hub",
@@ -218,7 +234,9 @@ const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   Terminal,
   Globe,
   Database,
+  Brain,
   Shield,
+  ShieldCheck,
   Wrench,
   Zap,
   Heart,
@@ -1003,6 +1021,8 @@ function DesktopSidebar({
             <SidebarAction icon={BriefcaseBusiness} label="Deals" path="/deals" onNavigate={go} />
             <SidebarAction icon={Megaphone} label="Marketing" path="/marketing" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
+            <SidebarAction icon={ShieldCheck} label="Approvals" path="/approvals" onNavigate={go} />
+            <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
           </div>
         </div>
 

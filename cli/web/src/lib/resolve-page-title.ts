@@ -40,8 +40,17 @@ export function resolvePageTitle(
   if (normalized === "/tasks") {
     return "Tasks";
   }
+  if (normalized === "/approvals") {
+    return "Approvals";
+  }
+  if (normalized === "/memory") {
+    return "Memory";
+  }
   if (normalized === "/hub") {
     return "Agent Hub";
+  }
+  if (normalized === "/config") {
+    return "Settings";
   }
   const plugin = pluginTabs.find((p) => p.path === normalized);
   if (plugin) {
