@@ -1133,17 +1133,15 @@ export default function ChatPage() {
             "transition-transform duration-200 ease-out",
           )}
         >
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-sm font-semibold">Activity</div>
-            <Button
-              aria-label="Close activity"
-              onClick={() => setMobilePanelOpen(false)}
-              size="sm"
-              variant="ghost"
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
+          <Button
+            aria-label="Close activity"
+            className="absolute right-3 top-3 z-10 h-8 w-8 rounded-full bg-[var(--chat-surface-strong)] p-0 text-[var(--chat-muted-strong)] shadow-sm hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+            onClick={() => setMobilePanelOpen(false)}
+            size="sm"
+            variant="ghost"
+          >
+            <X className="h-4 w-4" />
+          </Button>
           {activity}
         </aside>
       </>,
@@ -1221,13 +1219,13 @@ export default function ChatPage() {
           </div>
 
           <form
-            className="border-t border-[var(--chat-border)] bg-[var(--chat-bg)] px-4 pb-5 pt-3 sm:px-6"
+            className="bg-[linear-gradient(180deg,transparent,var(--chat-bg)_18%)] px-4 pb-5 pt-3 sm:px-6"
             onSubmit={onSubmit}
           >
             <div className="mx-auto max-w-[48rem]">
               <QueuedInputStrip queuedInputs={queuedInputs} />
 
-              <div className="flex items-end gap-2 rounded-[1.4rem] border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-2 shadow-[0_24px_80px_rgba(0,0,0,0.22)] focus-within:border-[var(--chat-accent)]">
+              <div className="flex items-end gap-2 rounded-[1.4rem] bg-[var(--chat-surface)] p-2 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
                 <div className="min-w-0 flex-1 px-2 pb-1 pt-1">
                   <ComposerStatusBar
                     canPickModel={canPickModel}
@@ -1290,7 +1288,7 @@ export default function ChatPage() {
 function EmptyState({ state }: { state: ConnectionState }) {
   return (
     <div className="mx-auto flex min-h-[34rem] max-w-xl flex-col items-center justify-center text-center">
-      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-full border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-accent)]">
+      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-full bg-[var(--chat-surface)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border-strong)]">
         {state === "connecting" ? (
           <Loader2 className="h-5 w-5 animate-spin" />
         ) : (
@@ -1311,7 +1309,7 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
   if (!queuedInputs.length) return null;
 
   return (
-    <div className="mb-2 rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2">
+    <div className="mb-2 rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2">
       <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
         <span className="font-medium text-[var(--chat-muted-strong)]">
           Queued follow-ups
@@ -1372,7 +1370,7 @@ function ComposerStatusBar({
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <span
           className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--chat-border)] px-2",
+            "inline-flex h-6 items-center gap-1.5 rounded-full px-2",
             "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
           )}
           title="Tool access"
@@ -1386,9 +1384,9 @@ function ComposerStatusBar({
           onClick={onOpenModel}
           disabled={!canPickModel}
           className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--chat-border)] px-2",
+            "inline-flex h-6 items-center gap-1.5 rounded-full px-2",
             "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:border-[var(--chat-border-strong)] hover:text-[var(--chat-text)]",
+            "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
             "disabled:cursor-not-allowed disabled:opacity-50",
           )}
           title="Change model"
@@ -1402,12 +1400,12 @@ function ComposerStatusBar({
           onClick={onToggleVoice}
           disabled={!voiceSupported}
           className={cn(
-            "inline-flex h-6 items-center gap-1.5 rounded-full border border-[var(--chat-border)] px-2",
+            "inline-flex h-6 items-center gap-1.5 rounded-full px-2",
             "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:border-[var(--chat-border-strong)] hover:text-[var(--chat-text)]",
+            "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
             "disabled:cursor-not-allowed disabled:opacity-45",
             voiceListening &&
-              "border-[var(--chat-accent)] bg-[var(--chat-accent-soft)] text-[var(--chat-text)]",
+              "bg-[var(--chat-accent-soft)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-accent)]",
           )}
           title={voiceSupported ? "Voice to text" : "Voice input unavailable"}
         >
@@ -1442,7 +1440,7 @@ function MessageRow({ message }: { message: ChatMessage }) {
       className={cn(
         "group flex w-full gap-3",
         isUser ? "flex-row-reverse text-right" : "text-left",
-        isAssistant && "border-t border-[var(--chat-border)] pt-5 first:border-t-0 first:pt-0",
+        isAssistant && "pt-3 first:pt-0",
       )}
     >
       {!isUser && (
@@ -1636,9 +1634,9 @@ function ArtifactCard({ artifact }: { artifact: ArtifactEntry }) {
   return (
     <div
       className={cn(
-        "rounded-xl border border-[var(--chat-border)] bg-[var(--chat-surface)] px-2.5 py-2.5 text-xs transition-colors hover:bg-[var(--chat-surface-strong)]",
+        "rounded-xl bg-[var(--chat-surface-soft)] px-2.5 py-2.5 text-xs transition-colors hover:bg-[var(--chat-surface-strong)]",
         artifact.status === "error" &&
-          "border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))]",
+          "bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_40%,transparent)]",
       )}
     >
       <div className="flex items-start gap-2">
@@ -1766,8 +1764,8 @@ function ActivityPanel({
   ];
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] border border-[var(--chat-border)] bg-[var(--chat-surface)] normal-case shadow-[0_32px_90px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.03] backdrop-blur-xl">
-      <header className="shrink-0 px-4 pb-3 pt-4">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] bg-[var(--chat-surface)] normal-case shadow-[0_32px_90px_rgba(0,0,0,0.24),inset_0_0_0_1px_var(--chat-border)] ring-1 ring-white/[0.025] backdrop-blur-xl">
+      <header className="shrink-0 px-3.5 pb-2.5 pt-3.5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -1802,13 +1800,13 @@ function ActivityPanel({
       </header>
 
       {banner && (
-        <section className="mx-3 mb-3 rounded-2xl border border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3">
+        <section className="mx-3 mb-3 rounded-2xl bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_38%,transparent)]">
           <div className="flex items-start gap-2 text-sm text-[var(--chat-danger)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <div className="break-words">{banner}</div>
               <button
-                className="mt-2 rounded-full border border-[color-mix(in_srgb,var(--chat-danger)_45%,transparent)] px-2.5 py-1 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
+                className="mt-2 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_12%,var(--chat-bg))] px-2.5 py-1 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
                 onClick={onReconnect}
                 type="button"
               >
@@ -1819,22 +1817,22 @@ function ActivityPanel({
         </section>
       )}
 
-      <div className="shrink-0 border-y border-[var(--chat-border)] px-3 py-2">
-        <div className="grid grid-cols-3 gap-1 rounded-2xl bg-[var(--chat-surface-soft)] p-1">
+      <div className="shrink-0 px-2.5 pb-2">
+        <div className="grid grid-cols-3 gap-0.5 rounded-xl bg-[var(--chat-surface-soft)] p-0.5">
           {tabItems.map((item) => (
             <button
               key={item.id}
               className={cn(
-                "flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-xl px-2 text-[0.72rem] font-medium transition-colors",
+                "flex h-7 min-w-0 items-center justify-center gap-1 rounded-lg px-1.5 text-[0.68rem] font-medium transition-colors",
                 activeTab === item.id
-                  ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)] shadow-[0_8px_22px_rgba(0,0,0,0.12)]"
+                  ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)] shadow-sm"
                   : "text-[var(--chat-muted)] hover:text-[var(--chat-muted-strong)]",
               )}
               onClick={() => setActiveTab(item.id)}
               type="button"
             >
               <span className="truncate">{item.label}</span>
-              <span className="text-[0.64rem] text-[var(--chat-muted)]">
+              <span className="text-[0.6rem] text-[var(--chat-muted)]">
                 {item.count}
               </span>
             </button>
@@ -1842,15 +1840,15 @@ function ActivityPanel({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2.5">
         {activeTab === "progress" && (
-          <section className="space-y-3">
+          <section className="space-y-2">
             <div className="grid grid-cols-2 gap-2">
               <PortalMetric label="Running" value={busy ? runningTools || 1 : 0} />
               <PortalMetric label="Tool calls" value={tools.length} />
             </div>
 
-            <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] p-3">
+            <div className="rounded-2xl bg-[var(--chat-surface-soft)] p-3">
               <div className="flex gap-2 text-sm leading-5">
                 <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]">
                   {busy ? (
@@ -1872,7 +1870,7 @@ function ActivityPanel({
 
             <div className="space-y-2">
               {tools.length === 0 ? (
-                <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
+                <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-5 text-center text-xs text-[var(--chat-muted)]">
                   Tool activity will appear here
                 </div>
               ) : (
@@ -1888,7 +1886,7 @@ function ActivityPanel({
         {activeTab === "artifacts" && (
           <section className="space-y-2">
             {artifacts.length === 0 ? (
-              <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-8 text-center text-xs text-[var(--chat-muted)]">
+              <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-8 text-center text-xs text-[var(--chat-muted)]">
                 Files, diffs, and outputs will land here
               </div>
             ) : (
@@ -1911,9 +1909,9 @@ function ActivityPanel({
         )}
       </div>
 
-      <section className="shrink-0 border-t border-[var(--chat-border)] px-3 py-3">
+      <section className="shrink-0 px-2.5 pb-2.5 pt-1">
         <button
-          className="flex w-full items-center justify-between gap-2 rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2.5 text-left text-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] disabled:opacity-50"
+          className="flex w-full items-center justify-between gap-2 rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2.5 text-left text-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] disabled:opacity-50"
           disabled={!canPickModel}
           onClick={onOpenModel}
           type="button"
@@ -1937,7 +1935,7 @@ function ActivityPanel({
 
 function PortalMetric({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2.5">
+    <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2.5">
       <div className="text-[1.05rem] font-semibold leading-none text-[var(--chat-text)]">
         {value}
       </div>
@@ -1959,7 +1957,7 @@ function SourceCard({ source }: { source: SourceEntry }) {
           : FileText;
 
   return (
-    <div className="rounded-2xl border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-3 py-2.5">
+    <div className="rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2.5">
       <div className="flex items-start gap-2.5">
         <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]">
           <Icon className="h-3.5 w-3.5" />

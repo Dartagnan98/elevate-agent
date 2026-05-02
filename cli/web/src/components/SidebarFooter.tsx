@@ -11,8 +11,7 @@ export function SidebarFooter() {
     <div
       className={cn(
         "flex shrink-0 items-center justify-between gap-2",
-        "px-5 py-2.5",
-        "border-t border-current/10",
+        "px-3 py-2",
       )}
     >
       <Typography
