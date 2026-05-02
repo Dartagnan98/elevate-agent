@@ -60,14 +60,23 @@
 
   /* Typography tokens — rewritten by ThemeProvider. Defaults match the
      system stack so themes that don't override look native. */
-  --theme-font-sans: system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  --theme-font-sans: Aptos, "Avenir Next", "Segoe UI Variable", "Segoe UI",
+    system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --theme-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo,
     Consolas, monospace;
   --theme-font-display: var(--theme-font-sans);
   --theme-base-size: 15px;
   --theme-line-height: 1.55;
   --theme-letter-spacing: 0;
+
+  /* The upstream UI kit ships decorative display utilities
+     (Mondwest/Rules/Courier). Elevate keeps the chrome clean and sans-serif;
+     code/log surfaces still opt into --theme-font-mono explicitly. */
+  --font-sans: var(--theme-font-sans);
+  --font-mondwest: var(--theme-font-sans);
+  --font-rules-compressed: var(--theme-font-sans);
+  --font-rules-expanded: var(--theme-font-sans);
+  --font-courier: var(--theme-font-sans);
 
   /* Layout tokens. */
   --radius: 0.5rem;
@@ -98,6 +107,13 @@ body {
 
 code, kbd, pre, samp, .font-mono, .font-mono-ui {
   font-family: var(--theme-font-mono);
+}
+
+html .font-mondwest,
+html .font-expanded,
+html .font-compressed,
+html .font-courier {
+  font-family: var(--theme-font-sans);
 }
 
 /* Density: scale the shadcn spacing utilities via a multiplier. The DS
@@ -190,11 +206,7 @@ code { font-size: 0.875rem; }
   mix-blend-mode: plus-lighter;
 }
 
-/* System UI-monospace stack — distinct from `font-courier` (Courier
-   Prime), used for dense data readouts where the display font would
-   break the grid. Routes through the theme's mono stack so themes
-   with a different monospace (JetBrains Mono, IBM Plex Mono, etc.)
-   still apply here. */
+/* Monospace stack for dense data readouts, code, and terminal-adjacent UI. */
 .font-mono-ui {
   font-family: var(--theme-font-mono);
 }

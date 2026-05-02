@@ -3,9 +3,9 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
 /**
  * Built-in dashboard themes.
  *
- * Each theme defines its own palette, typography, and layout so switching
- * themes produces visible changes beyond just color — fonts, density, and
- * corner-radius all shift to match the theme's personality.
+ * Each theme defines its own palette and layout so switching themes produces
+ * visible changes beyond color while keeping Elevate's app typography clean,
+ * sans-serif, and offline-friendly.
  *
  * Theme names must stay in sync with the backend's
  * `_BUILTIN_DASHBOARD_THEMES` list in `elevate_cli/web_server.py`.
@@ -15,9 +15,9 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
 // Shared typography / layout presets
 // ---------------------------------------------------------------------------
 
-/** Default system stack — neutral, safe fallback for every platform. */
+/** Sans stack for the local app shell: polished on macOS/Windows, no webfont dependency. */
 const SYSTEM_SANS =
-  'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  'Aptos, "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif';
 const SYSTEM_MONO =
   'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
 
@@ -74,13 +74,9 @@ export const midnightTheme: DashboardTheme = {
     noiseOpacity: 0.8,
   },
   typography: {
-    fontSans: `"Inter", ${SYSTEM_SANS}`,
-    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap",
+    ...DEFAULT_TYPOGRAPHY,
     baseSize: "14px",
     lineHeight: "1.6",
-    letterSpacing: "-0.005em",
   },
   layout: {
     radius: "0.75rem",
@@ -100,13 +96,9 @@ export const emberTheme: DashboardTheme = {
     noiseOpacity: 1,
   },
   typography: {
-    fontSans: `"Spectral", Georgia, "Times New Roman", serif`,
-    fontMono: `"IBM Plex Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;700&display=swap",
+    ...DEFAULT_TYPOGRAPHY,
     baseSize: "15px",
     lineHeight: "1.6",
-    letterSpacing: "0",
   },
   layout: {
     radius: "0.25rem",
@@ -130,13 +122,9 @@ export const monoTheme: DashboardTheme = {
     noiseOpacity: 0.6,
   },
   typography: {
-    fontSans: `"IBM Plex Sans", ${SYSTEM_SANS}`,
-    fontMono: `"IBM Plex Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap",
+    ...DEFAULT_TYPOGRAPHY,
     baseSize: "13px",
     lineHeight: "1.5",
-    letterSpacing: "0",
   },
   layout: {
     radius: "0",
@@ -156,13 +144,9 @@ export const cyberpunkTheme: DashboardTheme = {
     noiseOpacity: 1.2,
   },
   typography: {
-    fontSans: `"Share Tech Mono", "JetBrains Mono", ${SYSTEM_MONO}`,
-    fontMono: `"Share Tech Mono", "JetBrains Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=JetBrains+Mono:wght@400;700&display=swap",
+    ...DEFAULT_TYPOGRAPHY,
     baseSize: "14px",
     lineHeight: "1.5",
-    letterSpacing: "0.02em",
   },
   layout: {
     radius: "0",
@@ -187,13 +171,9 @@ export const roseTheme: DashboardTheme = {
     noiseOpacity: 0.9,
   },
   typography: {
-    fontSans: `"Fraunces", Georgia, serif`,
-    fontMono: `"DM Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=DM+Mono:wght@400;500&display=swap",
+    ...DEFAULT_TYPOGRAPHY,
     baseSize: "16px",
     lineHeight: "1.7",
-    letterSpacing: "0",
   },
   layout: {
     radius: "1rem",
