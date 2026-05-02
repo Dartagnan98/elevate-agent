@@ -55,16 +55,16 @@ function generateChannelId(): string {
   return `chat-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
-// Colors for the terminal body.  Matches the dashboard's dark teal canvas
-// with cream foreground — we intentionally don't pick monokai or a loud
+// Colors for the terminal body. Matches the dashboard's deep blue canvas
+// with pale blue foreground; we intentionally don't pick monokai or a loud
 // theme, because the TUI's skin engine already paints the content; the
 // terminal chrome just needs to sit quietly inside the dashboard.
 const TERMINAL_THEME = {
-  background: "#0d2626",
-  foreground: "#f0e6d2",
-  cursor: "#f0e6d2",
-  cursorAccent: "#0d2626",
-  selectionBackground: "#f0e6d244",
+  background: "#0b213f",
+  foreground: "#e7f0ff",
+  cursor: "#9cc7ff",
+  cursorAccent: "#0b213f",
+  selectionBackground: "#9cc7ff44",
 };
 
 /**

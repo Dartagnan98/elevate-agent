@@ -79,7 +79,7 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
         </div>
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 bg-[#ffe6cb]" />
+            <div className="h-2.5 w-2.5" style={{ background: "var(--midground)" }} />
             {t.analytics.input}
           </div>
           <div className="flex items-center gap-1.5">
@@ -111,8 +111,11 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
                 </div>
                 {/* Input bar */}
                 <div
-                  className="w-full bg-[#ffe6cb]/70"
-                  style={{ height: Math.max(inputH, total > 0 ? 1 : 0) }}
+                  className="w-full"
+                  style={{
+                    backgroundColor: "color-mix(in srgb, var(--midground-base) 70%, transparent)",
+                    height: Math.max(inputH, total > 0 ? 1 : 0),
+                  }}
                 />
                 {/* Output bar */}
                 <div
@@ -168,7 +171,7 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
                     <td className="py-2 pr-4 font-medium">{formatDate(d.day)}</td>
                     <td className="text-right py-2 px-4 text-muted-foreground">{d.sessions}</td>
                     <td className="text-right py-2 px-4">
-                      <span className="text-[#ffe6cb]">{formatTokens(d.input_tokens)}</span>
+                      <span style={{ color: "var(--midground)" }}>{formatTokens(d.input_tokens)}</span>
                     </td>
                     <td className="text-right py-2 pl-4">
                       <span className="text-emerald-400">{formatTokens(d.output_tokens)}</span>
@@ -218,7 +221,7 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
                   </td>
                   <td className="text-right py-2 px-4 text-muted-foreground">{m.sessions}</td>
                   <td className="text-right py-2 pl-4">
-                    <span className="text-[#ffe6cb]">{formatTokens(m.input_tokens)}</span>
+                    <span style={{ color: "var(--midground)" }}>{formatTokens(m.input_tokens)}</span>
                     {" / "}
                     <span className="text-emerald-400">{formatTokens(m.output_tokens)}</span>
                   </td>

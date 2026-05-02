@@ -40,17 +40,26 @@ const DEFAULT_LAYOUT: ThemeLayout = {
 
 export const defaultTheme: DashboardTheme = {
   name: "default",
-  label: "Elevate Teal",
-  description: "Classic dark teal — the canonical Elevate look",
+  label: "Elevate Blue",
+  description: "Deep command blue with warm real-estate accents",
   palette: {
-    background: { hex: "#041c1c", alpha: 1 },
-    midground: { hex: "#ffe6cb", alpha: 1 },
+    background: { hex: "#07182f", alpha: 1 },
+    midground: { hex: "#e7f0ff", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(255, 189, 56, 0.35)",
-    noiseOpacity: 1,
+    warmGlow: "rgba(76, 141, 255, 0.34)",
+    noiseOpacity: 0.95,
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,
+  colorOverrides: {
+    primary: "#9cc7ff",
+    primaryForeground: "#07182f",
+    destructive: "#f07070",
+    destructiveForeground: "#07182f",
+    success: "#35d58b",
+    warning: "#f3bf67",
+    ring: "#9cc7ff",
+  },
 };
 
 export const midnightTheme: DashboardTheme = {
