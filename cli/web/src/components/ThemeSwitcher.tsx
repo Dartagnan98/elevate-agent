@@ -52,8 +52,8 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         className={cn(
-          "inline-flex h-8 items-center gap-2 rounded-lg border border-border px-2.5 text-xs",
-          "bg-card text-muted-foreground transition-colors hover:text-foreground",
+          "inline-flex h-8 items-center gap-2 rounded-lg border border-border px-2.5 text-[0.82rem]",
+          "bg-card text-[var(--sidebar-text)] transition-colors hover:text-[var(--sidebar-text-active)]",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
         title={t.theme?.switchTheme ?? "Switch theme"}
@@ -61,9 +61,9 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
         aria-expanded={open}
         aria-haspopup="listbox"
       >
-        <ActiveIcon className="h-3.5 w-3.5" />
+        <ActiveIcon className="h-4 w-4 text-[var(--sidebar-icon)]" />
         <Typography
-          className="hidden text-xs font-medium normal-case tracking-normal sm:inline"
+          className="hidden text-[0.82rem] font-medium normal-case tracking-normal sm:inline"
         >
           {label}
         </Typography>

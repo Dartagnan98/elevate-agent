@@ -27,21 +27,21 @@ export function SidebarStatusStrip() {
       className={cn(
         "block text-left",
         "px-5 pb-2 pt-0.5",
-        "text-muted-foreground/70",
-        "transition-colors hover:text-muted-foreground/90",
+        "text-[var(--sidebar-text-muted)]",
+        "transition-colors hover:text-[var(--sidebar-text)]",
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40",
         "focus-visible:ring-inset",
       )}
     >
-      <div className="flex flex-col gap-1 font-mondwest text-[0.55rem] leading-snug tracking-[0.12em]">
+      <div className="flex flex-col gap-1 font-mondwest text-[0.66rem] leading-snug tracking-[0.08em]">
         <p className="break-words">
-          <span className="text-muted-foreground/50">{gatewayStatusLabel}</span>{" "}
+          <span className="text-[var(--sidebar-text-faint)]">{gatewayStatusLabel}</span>{" "}
           <span className={cn("font-medium", gw.tone)}>{gw.label}</span>
         </p>
 
         <p className="break-words">
-          <span className="text-muted-foreground/50">{activeSessionsLabel}</span>{" "}
-          <span className="tabular-nums text-muted-foreground/70">
+          <span className="text-[var(--sidebar-text-faint)]">{activeSessionsLabel}</span>{" "}
+          <span className="tabular-nums text-[var(--sidebar-text-muted)]">
             {status.active_sessions}
           </span>
         </p>
@@ -59,12 +59,12 @@ function gatewayLine(
     running: { label: g.running, tone: "text-success" },
     starting: { label: g.starting, tone: "text-warning" },
     startup_failed: { label: g.failed, tone: "text-destructive" },
-    stopped: { label: g.stopped, tone: "text-muted-foreground" },
+    stopped: { label: g.stopped, tone: "text-[var(--sidebar-text-muted)]" },
   };
   if (status.gateway_state && byState[status.gateway_state]) {
     return byState[status.gateway_state];
   }
   return status.gateway_running
     ? { label: g.running, tone: "text-success" }
-    : { label: g.off, tone: "text-muted-foreground" };
+    : { label: g.off, tone: "text-[var(--sidebar-text-muted)]" };
 }

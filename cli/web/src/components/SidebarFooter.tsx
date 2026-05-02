@@ -16,7 +16,7 @@ export function SidebarFooter() {
     >
       <Typography
         mondwest
-        className="font-mono-ui text-[0.7rem] tabular-nums tracking-[0.1em] text-muted-foreground/70"
+        className="font-mono-ui text-[0.74rem] tabular-nums tracking-[0.08em] text-[var(--sidebar-text-muted)]"
       >
         {status?.version != null ? `v${status.version}` : "—"}
       </Typography>
@@ -26,7 +26,7 @@ export function SidebarFooter() {
         target="_blank"
         rel="noopener noreferrer"
         className={cn(
-          "font-mondwest text-[0.65rem] tracking-[0.15em] text-midground",
+          "font-mondwest text-[0.72rem] tracking-[0.12em] text-[var(--sidebar-text-strong)]",
           "transition-opacity hover:opacity-90",
           "focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40",
         )}

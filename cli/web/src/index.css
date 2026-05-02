@@ -105,6 +105,13 @@
   --sidebar-row-hover: color-mix(in srgb, var(--midground-base) 8%, transparent);
   --sidebar-row-active: color-mix(in srgb, var(--color-primary, #7fb2ff) 15%, var(--midground-base) 7%);
   --sidebar-border: color-mix(in srgb, var(--midground-base) 10%, transparent);
+  --sidebar-text: color-mix(in srgb, var(--midground-base) 76%, transparent);
+  --sidebar-text-strong: color-mix(in srgb, var(--midground-base) 90%, transparent);
+  --sidebar-text-active: color-mix(in srgb, var(--midground-base) 96%, transparent);
+  --sidebar-text-muted: color-mix(in srgb, var(--midground-base) 64%, transparent);
+  --sidebar-text-faint: color-mix(in srgb, var(--midground-base) 50%, transparent);
+  --sidebar-icon: color-mix(in srgb, var(--midground-base) 78%, transparent);
+  --sidebar-icon-muted: color-mix(in srgb, var(--midground-base) 54%, transparent);
 }
 
 /* Theme tokens cascade into the document root so every descendant inherits

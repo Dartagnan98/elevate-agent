@@ -918,7 +918,7 @@ function DesktopSidebar({
       : item.label;
 
   return (
-    <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-[13px] tracking-normal text-midground">
+    <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-[14px] tracking-normal text-[var(--sidebar-text)]">
       <Toast toast={toast} />
       <DeleteConfirmDialog
         open={sessionArchive.isOpen}
@@ -1008,7 +1008,7 @@ function DesktopSidebar({
             onClick={startNewChat}
             className={sidebarActionClass(false, true)}
           >
-            <Plus className="h-[15px] w-[15px] shrink-0" />
+            <Plus className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
             <span className="truncate">New chat</span>
           </button>
           <button
@@ -1016,9 +1016,9 @@ function DesktopSidebar({
             onClick={focusSearch}
             className={sidebarActionClass(false)}
           >
-            <Search className="h-[15px] w-[15px] shrink-0" />
+            <Search className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
             <span className="truncate">Search</span>
-            <span className="ml-auto rounded-md bg-card/70 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+            <span className="ml-auto rounded-md bg-card/70 px-1.5 py-0.5 text-[0.7rem] leading-none text-[var(--sidebar-text-muted)]">
               /
             </span>
           </button>
@@ -1050,15 +1050,15 @@ function DesktopSidebar({
         </div>
 
         <div className="relative mt-2.5">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />
           <input
             ref={searchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search chats"
             className={cn(
-              "h-8 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)]",
-              "pl-8 pr-8 text-[0.8rem] text-midground placeholder:text-muted-foreground",
+              "h-9 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)]",
+              "pl-9 pr-8 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)]",
               "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
             )}
           />
@@ -1067,7 +1067,7 @@ function DesktopSidebar({
               type="button"
               onClick={() => setQuery("")}
               aria-label={t.common.clear}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-midground"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)]"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -1131,12 +1131,12 @@ function DesktopSidebar({
           type="button"
           onClick={() => go("/config")}
           className={cn(
-            "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[0.84rem]",
-            "text-muted-foreground transition-colors hover:bg-accent hover:text-midground",
+            "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[0.92rem] font-medium",
+            "text-[var(--sidebar-text)] transition-colors hover:bg-accent hover:text-[var(--sidebar-text-active)]",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
         >
-          <Settings className="h-[15px] w-[15px] shrink-0" />
+          <Settings className="h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)]" />
           <span className="truncate">Settings</span>
         </button>
 
@@ -1156,7 +1156,7 @@ function DesktopSidebar({
 
 function SidebarSectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1 px-2 text-[0.64rem] font-semibold normal-case text-muted-foreground">
+    <div className="mb-1.5 px-2 text-[0.72rem] font-semibold normal-case text-[var(--sidebar-text-muted)]">
       {children}
     </div>
   );
@@ -1164,12 +1164,12 @@ function SidebarSectionLabel({ children }: { children: ReactNode }) {
 
 function sidebarActionClass(active: boolean, primary = false) {
   return cn(
-    "group flex min-h-7 w-full items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[0.8rem]",
+    "group flex min-h-8 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.92rem] font-medium",
     "cursor-pointer transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-    primary && "font-semibold",
+    primary && "font-semibold text-[var(--sidebar-text-strong)]",
     active
-      ? "bg-[var(--sidebar-row-active)] text-midground"
-      : "text-muted-foreground hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
+      ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
+      : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
   );
 }
 
@@ -1196,7 +1196,7 @@ function SidebarAction({
       }}
       className={({ isActive }) => sidebarActionClass(isActive, primary)}
     >
-      <Icon className="h-[15px] w-[15px] shrink-0" />
+      <Icon className="h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)]" />
       <span className="truncate">{label}</span>
     </NavLink>
   );
@@ -1244,7 +1244,7 @@ function SessionSection({
       </div>
 
       {(loading || statusText) && sessions.length === 0 && (
-        <div className="px-2.5 py-1 text-[0.72rem] text-muted-foreground">
+        <div className="px-2.5 py-1 text-[0.8rem] text-[var(--sidebar-text-muted)]">
           {loading ? "Loading chats" : statusText}
         </div>
       )}
@@ -1284,11 +1284,11 @@ function SessionListItem({
       }}
       onContextMenu={(event) => onOpenContextMenu(session, event)}
       className={cn(
-        "group relative flex min-h-7 items-center gap-2 rounded-lg px-2.5 py-1",
+        "group relative flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5",
         "text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
         active
-          ? "bg-[var(--sidebar-row-active)] text-midground"
-          : "text-muted-foreground hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
+          ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
+          : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
       )}
     >
       <span
@@ -1301,10 +1301,10 @@ function SessionListItem({
               : "bg-current/30",
         )}
       />
-      <span className="min-w-0 flex-1 truncate text-[0.8rem] font-medium leading-4">
+      <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5">
         {sessionTitle(session)}
       </span>
-      <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.66rem] leading-none text-muted-foreground">
+      <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.72rem] leading-none text-[var(--sidebar-text-muted)]">
         {session.source && session.source !== "local" && (
           <span className="max-w-[3.25rem] truncate">{session.source}</span>
         )}
@@ -1322,12 +1322,12 @@ function SessionListItem({
           "flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-colors",
           pinned
             ? "text-primary"
-            : "text-muted-foreground/45 hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
+            : "text-[var(--sidebar-icon-muted)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-icon)]",
         )}
       >
         <Pin
           className={cn(
-            "h-3 w-3 transition-opacity",
+            "h-3.5 w-3.5 transition-opacity",
             pinned ? "opacity-100" : "opacity-45 group-hover:opacity-100",
           )}
         />
@@ -1339,13 +1339,13 @@ function SessionListItem({
         onClick={(event) => onOpenContextMenu(session, event)}
         className={cn(
           "flex h-5 w-5 shrink-0 items-center justify-center rounded-md",
-          "text-muted-foreground/45 opacity-55 transition-all",
-          "hover:bg-[var(--sidebar-row-hover)] hover:text-midground",
+          "text-[var(--sidebar-icon-muted)] opacity-65 transition-all",
+          "hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-icon)]",
           "group-hover:opacity-100 focus-visible:opacity-100",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
         )}
       >
-        <MoreHorizontal className="h-3 w-3" />
+        <MoreHorizontal className="h-3.5 w-3.5" />
       </button>
       <span className="sr-only">
         {session.source ?? "local"} {timeAgo(session.last_active)}
@@ -1543,7 +1543,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
       <span
         className={cn(
           "px-2.5 pt-0.5 pb-1",
-          "text-[0.68rem] font-semibold tracking-normal text-muted-foreground",
+          "text-[0.72rem] font-semibold tracking-normal text-[var(--sidebar-text-muted)]",
         )}
       >
         {t.app.system}
@@ -1570,21 +1570,21 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
                 className={cn(
                   "group relative flex w-full items-center gap-3",
                   "rounded-lg px-2.5 py-1.5",
-                  "text-[0.82rem] font-medium tracking-normal",
+                  "text-[0.92rem] font-medium tracking-normal",
                   "text-left whitespace-nowrap transition-colors cursor-pointer",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
                   busy
-                    ? "bg-accent/85 text-midground"
-                    : "text-muted-foreground hover:bg-accent/55 hover:text-midground",
+                    ? "bg-accent/85 text-[var(--sidebar-text-active)]"
+                    : "text-[var(--sidebar-text)] hover:bg-accent/55 hover:text-[var(--sidebar-text-active)]",
                   "disabled:cursor-not-allowed disabled:opacity-30",
                 )}
               >
                 {isPending ? (
-                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--sidebar-icon)]" />
                 ) : (
                   <Icon
                     className={cn(
-                      "h-[15px] w-[15px] shrink-0",
+                      "h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)]",
                       isActionRunning && spin && "animate-spin",
                       isActionRunning && !spin && "animate-pulse",
                     )}
