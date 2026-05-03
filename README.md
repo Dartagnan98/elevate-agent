@@ -4,6 +4,25 @@ AI chief of staff for real estate agents. By Ctrl Strategies.
 
 Subscription-gated skill library on top of an open-source agent runtime. Agents bring their own LLM key (Anthropic or OpenAI); Elevate adds the skills, the install, and the support.
 
+## Current Work Handoff
+
+As of May 3, 2026, the active build focus is the local-first Elevate Hub for real-estate operators.
+
+The Hub should lead with actionable work, not passive contact inventory:
+
+1. **Today / Leads top priority** — hot leads, open threads, draft follow-ups, timed tasks, and approval gates should appear before contact overview.
+2. **Source inbox** — Apple Messages and Lofty CRM already feed normalized local source records. Composio social has a prepared `social` source folder/contract, but the actual Instagram/Facebook import worker still needs to be built.
+3. **Draft follow-ups** — approval-gated message drafts now flow through the source inbox. The UI supports Approve, Edit, and Skip; approval marks a draft ready and must not auto-send.
+4. **Contact overview** — useful for context, dedupe, and CRM/message matching, but it belongs below the active workboards.
+5. **Next connector work** — build the Composio social importer so connected Instagram/Facebook DMs/comments/posts write normalized records into `data/sources/social/`.
+
+Relevant implementation files:
+
+- `cli/elevate_cli/source_connectors.py`
+- `cli/elevate_cli/web_server.py`
+- `cli/web/src/lib/api.ts`
+- `cli/web/src/pages/RealEstateHubPages.tsx`
+
 ## Layout
 
 ```

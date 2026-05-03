@@ -276,6 +276,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceId, threadId, action }),
     }),
+  updateSourceInboxDraft: (sourceId: string, taskId: string, action: "approve" | "edit" | "skip" | "restore" | "open", draftText = "") =>
+    fetchJSON<SourceInboxResponse>("/api/source-inbox/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceId, taskId, action, draftText }),
+    }),
   scaffoldSourceConnector: (sourceId: string) =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {
       method: "POST",
@@ -420,6 +426,48 @@ export interface SourceInboxThread {
   record: SourceRecord;
 }
 
+export interface SourceInboxProfile {
+  id: string;
+  displayName: string;
+  sources: string[];
+  sourceIds: string[];
+  channels: string[];
+  phones: string[];
+  emails: string[];
+  threadIds: string[];
+  threadCount: number;
+  latestText: string;
+  latestAt: string;
+  heatScore: number;
+  heatLabel: "hot" | "warm" | "watch" | "normal" | string;
+  hasCrm: boolean;
+  hasConversation: boolean;
+  isPotentialLead: boolean;
+  crmStage: string | null;
+  leadSource: string | null;
+  tags: string[];
+}
+
+export interface SourceInboxDraft {
+  id: string;
+  sourceId: string;
+  sourceLabel: string;
+  taskId: string;
+  threadId: string;
+  contactId: string | null;
+  conversationId: string | null;
+  personName: string;
+  channel: string;
+  title: string;
+  draftText: string;
+  context: string;
+  latestAt: string;
+  status: "pending" | "approved" | "skipped" | string;
+  approvalRequired: boolean;
+  generated: boolean;
+  record: SourceRecord;
+}
+
 export interface SourceInboxResponse {
   toolsRoot: string;
   toolsRootSource: string;
@@ -429,7 +477,9 @@ export interface SourceInboxResponse {
   recordCounts: Record<string, number>;
   hiddenCounts: Record<string, number>;
   sources: SourceConnectorStatus[];
+  profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
+  drafts: SourceInboxDraft[];
 }
 
 export interface CrmIntegrationForm {

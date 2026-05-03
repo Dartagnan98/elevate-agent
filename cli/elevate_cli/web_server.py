@@ -2422,6 +2422,19 @@ class SourceConnectorAction(BaseModel):
     sourceId: str
 
 
+class SourceInboxThreadAction(BaseModel):
+    action: str
+    sourceId: str
+    threadId: str
+
+
+class SourceInboxDraftAction(BaseModel):
+    action: str
+    sourceId: str
+    taskId: str
+    draftText: str = ""
+
+
 class IntegrationSettingsUpdate(BaseModel):
     provider: str = "custom"
     label: str = "CRM"
@@ -2522,6 +2535,61 @@ async def get_source_connectors():
     except Exception as exc:
         _log.exception("GET /api/source-connectors failed")
         raise HTTPException(status_code=500, detail=f"Source connectors failed: {exc}")
+
+
+@app.get("/api/source-connectors/{source_id}/records")
+async def get_source_connector_records(source_id: str, limit: int = 12):
+    try:
+        from elevate_cli.source_connectors import build_source_records_response
+
+        return build_source_records_response(source_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/source-connectors/%s/records failed", source_id)
+        raise HTTPException(status_code=500, detail=f"Source records failed: {exc}")
+
+
+@app.get("/api/source-inbox")
+async def get_source_inbox(limit: int = 16):
+    try:
+        from elevate_cli.source_connectors import build_source_inbox_response
+
+        return build_source_inbox_response(limit=limit)
+    except Exception as exc:
+        _log.exception("GET /api/source-inbox failed")
+        raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")
+
+
+@app.post("/api/source-inbox/thread")
+async def update_source_inbox_thread(body: SourceInboxThreadAction):
+    try:
+        from elevate_cli.source_connectors import update_source_thread_state
+
+        return update_source_thread_state(body.sourceId, body.threadId, body.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/source-inbox/thread failed")
+        raise HTTPException(status_code=500, detail=f"Source inbox update failed: {exc}")
+
+
+@app.post("/api/source-inbox/draft")
+async def update_source_inbox_draft(body: SourceInboxDraftAction):
+    try:
+        from elevate_cli.source_connectors import update_source_task_state
+
+        return update_source_task_state(
+            body.sourceId,
+            body.taskId,
+            body.action,
+            draft_text=body.draftText,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/source-inbox/draft failed")
+        raise HTTPException(status_code=500, detail=f"Source draft update failed: {exc}")
 
 
 @app.post("/api/source-connectors")

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import sqlite3
 import urllib.parse
 import urllib.request
+from collections import deque
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -210,6 +212,8 @@ COMPOSIO_SOCIAL_CONTRACT = """Use Composio as the social account hub:
 - Social apps such as Instagram, Facebook, LinkedIn, YouTube, TikTok, X, or Threads are added inside Composio.
 - Elevate reads through the configured local MCP/tool connection and writes normalized local source records.
 - Metrics become Social Media pulse inputs; DMs/comments that look like leads become Leads records; outbound replies stay approval-gated.
+- Write social DMs/comments as conversations.jsonl plus messages.jsonl records with platform, channel, display_name, participant_handles, direction, timestamp, text, permalink/source_url, lead_score or tags when available.
+- Write reply drafts/follow-up recommendations into tasks.jsonl with task_type=message_draft or follow_up, approval_required=true, draft_text, channel, contact_id or conversation_id, and source_record_id.
 - Never ask for raw social passwords. If an app is not connected in Composio, write the exact next operator step instead."""
 
 
@@ -289,6 +293,533 @@ def _count_jsonl(path: Path) -> int:
             return sum(1 for line in fh if line.strip())
     except Exception:
         return 0
+
+
+def _record_timestamp(record: JsonRecord) -> str:
+    for key in ("timestamp", "last_message_at", "last_seen_at", "last_sync_at", "day"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _read_jsonl_records(path: Path, *, limit: int = 12, tail: bool = False) -> list[JsonRecord]:
+    safe_limit = max(1, min(int(limit or 12), 100))
+    if not path.exists():
+        return []
+
+    raw_lines: list[str]
+    try:
+        if tail:
+            recent: deque[str] = deque(maxlen=safe_limit)
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip():
+                        recent.append(line)
+            raw_lines = list(recent)
+        else:
+            raw_lines = []
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    raw_lines.append(line)
+                    if len(raw_lines) >= safe_limit:
+                        break
+    except Exception:
+        return []
+
+    records: list[JsonRecord] = []
+    for line in raw_lines:
+        try:
+            value = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return sorted(records, key=_record_timestamp, reverse=True)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _parse_record_dt(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        number = int(raw)
+        if number > 10_000_000_000:
+            number = number // 1000
+        try:
+            return datetime.fromtimestamp(number, tz=timezone.utc)
+        except Exception:
+            return None
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _tag_text(value: Any) -> str:
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.extend(str(v) for v in item.values() if isinstance(v, (str, int, float)))
+            else:
+                parts.append(str(item))
+        return " ".join(parts).lower()
+    if isinstance(value, dict):
+        return " ".join(str(v) for v in value.values() if isinstance(v, (str, int, float))).lower()
+    return str(value or "").lower()
+
+
+def _source_ui_state_path(source_dir: Path) -> Path:
+    return source_dir / "ui-state.json"
+
+
+def _read_source_ui_state(source_dir: Path) -> JsonRecord:
+    state = _read_json(_source_ui_state_path(source_dir))
+    if not state:
+        return {"threads": {}}
+    threads = state.get("threads")
+    if not isinstance(threads, dict):
+        state["threads"] = {}
+    return state
+
+
+def _write_source_ui_state(source_dir: Path, state: JsonRecord) -> None:
+    state["updated_at"] = _now()
+    _write_json(_source_ui_state_path(source_dir), state)
+
+
+def _thread_key(record: JsonRecord) -> str:
+    for key in ("conversation_id", "source_record_id", "contact_id", "handle", "chat_identifier"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown-thread"
+
+
+def _record_person_name(record: JsonRecord) -> str:
+    for key in ("display_name", "name", "full_name", "contact_name", "handle", "chat_identifier", "conversation_id"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return "Client conversation"
+
+
+def _channel_label(source_id: str, source: JsonRecord, record: JsonRecord) -> str:
+    service = str(record.get("service") or "").strip()
+    if service:
+        return service
+    raw_channel = str(record.get("channel") or "").strip()
+    if raw_channel == "apple-messages":
+        return "Messages"
+    if raw_channel.lower().replace("-", " ") == "lofty crm":
+        return "Lofty CRM"
+    if raw_channel:
+        return raw_channel.replace("-", " ").title()
+    return str(source.get("label") or source_id).strip() or source_id
+
+
+def _latest_text(record: JsonRecord) -> str:
+    for key in ("last_text", "text", "summary", "title"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return "No preview text yet."
+
+
+def _heat_score_for_record(record: JsonRecord) -> tuple[int, str]:
+    explicit = record.get("heat_score") or record.get("lead_score") or record.get("score")
+    score = _safe_int(explicit, 35 if explicit is None else 0)
+    haystack = " ".join(
+        _tag_text(record.get(key))
+        for key in ("ai_stage", "stage", "status", "priority", "tags", "source", "summary", "title")
+    )
+    if any(word in haystack for word in ("high_priority", "hot", "urgent", "overdue", "new lead", "needs follow")):
+        score += 34
+    if any(word in haystack for word in ("warm", "active", "prospecting", "ai_prospecting", "buyer", "seller")):
+        score += 18
+    if record.get("direction") == "inbound":
+        score += 16
+    score += min(_safe_int(record.get("inbound_count")), 18)
+
+    latest = _parse_record_dt(_record_timestamp(record))
+    if latest:
+        age = datetime.now(timezone.utc) - latest
+        if age <= timedelta(hours=24):
+            score += 16
+        elif age <= timedelta(days=7):
+            score += 8
+
+    score = max(0, min(score, 100))
+    if score >= 76:
+        label = "hot"
+    elif score >= 54:
+        label = "warm"
+    elif score >= 35:
+        label = "watch"
+    else:
+        label = "normal"
+    return score, label
+
+
+def _thread_from_record(source: JsonRecord, record: JsonRecord, status: str | None = None) -> JsonRecord:
+    source_id = str(source.get("id") or record.get("source_id") or "").strip()
+    thread_id = _thread_key(record)
+    heat_score, heat_label = _heat_score_for_record(record)
+    return {
+        "id": f"{source_id}:{thread_id}",
+        "sourceId": source_id,
+        "sourceLabel": str(source.get("label") or source_id),
+        "sourceState": source.get("state"),
+        "threadId": thread_id,
+        "conversationId": record.get("conversation_id") or record.get("source_record_id"),
+        "contactId": record.get("contact_id"),
+        "personName": _record_person_name(record),
+        "channel": _channel_label(source_id, source, record),
+        "latestText": _latest_text(record),
+        "latestAt": _record_timestamp(record),
+        "direction": str(record.get("direction") or "").strip() or None,
+        "messageCount": _safe_int(record.get("total_messages") or record.get("message_count"), 1),
+        "inboundCount": _safe_int(record.get("inbound_count")),
+        "outboundCount": _safe_int(record.get("outbound_count")),
+        "heatScore": heat_score,
+        "heatLabel": heat_label,
+        "status": status or "open",
+        "record": record,
+    }
+
+
+def _task_key(record: JsonRecord) -> str:
+    for key in ("task_id", "source_record_id", "id", "conversation_id", "contact_id", "title"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return hashlib.sha1(json.dumps(record, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def _draft_text_for_task(record: JsonRecord) -> str:
+    for key in ("draft_text", "draft", "message", "proposed_text", "reply_text", "text"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return str(record.get("summary") or "").strip()
+
+
+def _is_message_draft_task(record: JsonRecord) -> bool:
+    haystack = " ".join(
+        _tag_text(record.get(key))
+        for key in ("task_type", "title", "summary", "tags", "channel", "target_ui_surfaces")
+    )
+    if "connector_setup" in haystack:
+        return False
+    if record.get("approval_required") is True:
+        return True
+    return any(
+        token in haystack
+        for token in (
+            "message_draft",
+            "draft reply",
+            "reply draft",
+            "follow_up",
+            "follow-up",
+            "text message",
+            "dm reply",
+            "comment reply",
+            "outreach",
+        )
+    )
+
+
+def _draft_recipient(record: JsonRecord, fallback: str = "Client") -> str:
+    return _record_person_name(record) or fallback
+
+
+def _fallback_draft_for_thread(thread: JsonRecord) -> str:
+    name = str(thread.get("personName") or "there").strip()
+    first = name.split()[0] if name and name.lower() not in {"client", "conversation"} else "there"
+    source = str(thread.get("sourceLabel") or thread.get("channel") or "your message").strip()
+    if str(thread.get("sourceId") or "").lower() in SOCIAL_SOURCE_IDS or "instagram" in source.lower() or "facebook" in source.lower():
+        return (
+            f"Hi {first}, thanks for reaching out. Are you looking for more details on a specific property, "
+            "or are you starting to explore buying or selling?"
+        )
+    if str(thread.get("sourceId") or "").lower() == "crm":
+        return f"Hi {first}, just checking in. Are you still looking for help with your next real estate step?"
+    return f"Hi {first}, thanks for the message. What would be the most helpful next step for you right now?"
+
+
+def _draft_from_task(source: JsonRecord, record: JsonRecord, state: JsonRecord | None = None) -> JsonRecord:
+    state = state or {}
+    source_id = str(source.get("id") or record.get("source_id") or "").strip()
+    task_id = _task_key(record)
+    draft_text = str(state.get("draft_text") or _draft_text_for_task(record)).strip()
+    return {
+        "id": f"{source_id}:{task_id}",
+        "sourceId": source_id,
+        "sourceLabel": str(source.get("label") or source_id),
+        "taskId": task_id,
+        "threadId": _thread_key(record),
+        "contactId": record.get("contact_id"),
+        "conversationId": record.get("conversation_id") or record.get("source_record_id"),
+        "personName": _draft_recipient(record),
+        "channel": _channel_label(source_id, source, record),
+        "title": str(record.get("title") or "Review draft follow-up").strip(),
+        "draftText": draft_text or "Draft text has not been generated yet.",
+        "context": str(record.get("summary") or record.get("latest_text") or record.get("text") or "").strip(),
+        "latestAt": _record_timestamp(record),
+        "status": str(state.get("status") or record.get("status") or "pending"),
+        "approvalRequired": bool(record.get("approval_required", True)),
+        "generated": False,
+        "record": record,
+    }
+
+
+def _draft_from_thread(source: JsonRecord, thread: JsonRecord) -> JsonRecord:
+    source_id = str(thread.get("sourceId") or source.get("id") or "").strip()
+    thread_id = str(thread.get("threadId") or _thread_key(_as_dict(thread.get("record"))))
+    return {
+        "id": f"{source_id}:thread-draft:{thread_id}",
+        "sourceId": source_id,
+        "sourceLabel": str(thread.get("sourceLabel") or source.get("label") or source_id),
+        "taskId": f"thread-draft:{thread_id}",
+        "threadId": thread_id,
+        "contactId": thread.get("contactId"),
+        "conversationId": thread.get("conversationId"),
+        "personName": str(thread.get("personName") or "Client"),
+        "channel": str(thread.get("channel") or _channel_label(source_id, source, _as_dict(thread.get("record")))),
+        "title": "Draft follow-up",
+        "draftText": _fallback_draft_for_thread(thread),
+        "context": str(thread.get("latestText") or "").strip(),
+        "latestAt": str(thread.get("latestAt") or ""),
+        "status": "pending",
+        "approvalRequired": True,
+        "generated": True,
+        "record": thread.get("record") or {},
+    }
+
+
+def _source_record_counts(source: JsonRecord) -> dict[str, int]:
+    counts = source.get("recordCounts")
+    return counts if isinstance(counts, dict) else {}
+
+
+def _source_has_inbox_records(source: JsonRecord) -> bool:
+    counts = _source_record_counts(source)
+    return any(int(counts.get(key) or 0) > 0 for key in ("messages", "conversations", "contacts"))
+
+
+def _string_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(_string_values(item))
+        return values
+    if isinstance(value, dict):
+        values = []
+        for key in ("value", "phone", "email", "number", "address", "name", "label", "id"):
+            if key in value:
+                values.extend(_string_values(value.get(key)))
+        return values
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _phone_key(value: str) -> str | None:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if len(digits) < 7:
+        return None
+    return f"phone:{digits[-10:] if len(digits) >= 10 else digits}"
+
+
+def _email_key(value: str) -> str | None:
+    text = value.strip().lower()
+    if "@" not in text or "." not in text.split("@")[-1]:
+        return None
+    return f"email:{text}"
+
+
+def _name_key(value: str) -> str | None:
+    normalized = " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in value).split())
+    if len(normalized) < 4 or normalized in {"client conversation", "lofty lead", "apple messages conversation"}:
+        return None
+    return f"name:{normalized}"
+
+
+def _profile_match_keys(record: JsonRecord, thread: JsonRecord) -> list[str]:
+    candidates: list[str] = []
+    for field in ("phones", "phone", "handle", "chat_identifier", "participant_handles"):
+        for value in _string_values(record.get(field)):
+            key = _phone_key(value) or _email_key(value)
+            if key:
+                candidates.append(key)
+    for field in ("emails", "email"):
+        for value in _string_values(record.get(field)):
+            key = _email_key(value)
+            if key:
+                candidates.append(key)
+    name = str(thread.get("personName") or record.get("display_name") or "").strip()
+    name_match = _name_key(name)
+    if name_match:
+        candidates.append(name_match)
+    seen: set[str] = set()
+    return [key for key in candidates if not (key in seen or seen.add(key))]
+
+
+def _profile_contact_values(record: JsonRecord) -> tuple[list[str], list[str]]:
+    phones: list[str] = []
+    emails: list[str] = []
+    for field in ("phones", "phone", "handle", "chat_identifier", "participant_handles"):
+        for value in _string_values(record.get(field)):
+            if _phone_key(value):
+                phones.append(value)
+            elif _email_key(value):
+                emails.append(value)
+    for field in ("emails", "email"):
+        for value in _string_values(record.get(field)):
+            if _email_key(value):
+                emails.append(value)
+    return sorted(set(phones)), sorted(set(emails))
+
+
+SOCIAL_SOURCE_IDS = {"social", "instagram", "facebook", "facebook-messenger", "meta", "tiktok", "linkedin"}
+SOCIAL_INTENT_WORDS = (
+    "buy",
+    "buyer",
+    "sell",
+    "seller",
+    "home",
+    "house",
+    "condo",
+    "listing",
+    "showing",
+    "mortgage",
+    "preapproved",
+    "pre-approved",
+    "relocate",
+    "moving",
+    "price",
+    "valuation",
+    "cma",
+    "realtor",
+    "agent",
+)
+
+
+def _is_social_intent(source: JsonRecord, thread: JsonRecord) -> bool:
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (
+            source.get("id"),
+            source.get("label"),
+            thread.get("channel"),
+            thread.get("latestText"),
+        )
+    )
+    is_social = any(source_id in haystack for source_id in SOCIAL_SOURCE_IDS)
+    return is_social and any(word in haystack for word in SOCIAL_INTENT_WORDS)
+
+
+def _profile_label(score: int) -> str:
+    if score >= 76:
+        return "hot"
+    if score >= 54:
+        return "warm"
+    if score >= 35:
+        return "watch"
+    return "normal"
+
+
+def _merge_profile(profile: JsonRecord, source: JsonRecord, thread: JsonRecord) -> None:
+    record = _as_dict(thread.get("record"))
+    phones, emails = _profile_contact_values(record)
+    profile["sources"] = sorted({*profile.get("sources", []), str(thread.get("sourceLabel") or source.get("label") or "")})
+    profile["sourceIds"] = sorted({*profile.get("sourceIds", []), str(thread.get("sourceId") or source.get("id") or "")})
+    profile["channels"] = sorted({*profile.get("channels", []), str(thread.get("channel") or "")})
+    profile["phones"] = sorted({*profile.get("phones", []), *phones})
+    profile["emails"] = sorted({*profile.get("emails", []), *emails})
+    profile["threadIds"] = sorted({*profile.get("threadIds", []), str(thread.get("id") or "")})
+    profile["threadCount"] = len(profile["threadIds"])
+    profile["hasConversation"] = True
+    source_id = str(thread.get("sourceId") or source.get("id") or "")
+    if source_id == "crm" or "crm" in str(thread.get("sourceLabel") or "").lower():
+        profile["hasCrm"] = True
+        profile["crmStage"] = record.get("stage") or profile.get("crmStage")
+        profile["leadSource"] = record.get("lead_source") or record.get("source") or profile.get("leadSource")
+    if _is_social_intent(source, thread):
+        profile["isPotentialLead"] = True
+    score = max(_safe_int(profile.get("heatScore")), _safe_int(thread.get("heatScore")))
+    profile["heatScore"] = score
+    profile["heatLabel"] = _profile_label(score)
+    latest = _parse_record_dt(thread.get("latestAt"))
+    current_latest = _parse_record_dt(profile.get("latestAt"))
+    if latest and (not current_latest or latest >= current_latest):
+        profile["latestAt"] = thread.get("latestAt")
+        profile["latestText"] = thread.get("latestText")
+    if not profile.get("displayName") or str(profile.get("displayName")) == "Client conversation":
+        profile["displayName"] = thread.get("personName") or profile.get("displayName")
+    tags = _string_values(record.get("tags"))
+    profile["tags"] = sorted({*profile.get("tags", []), *tags})[:12]
+
+
+def _profiles_from_threads(threads: list[JsonRecord], source_by_id: dict[str, JsonRecord]) -> list[JsonRecord]:
+    profiles: dict[str, JsonRecord] = {}
+    key_to_profile: dict[str, str] = {}
+    for thread in threads:
+        source = source_by_id.get(str(thread.get("sourceId") or ""), {})
+        record = _as_dict(thread.get("record"))
+        keys = _profile_match_keys(record, thread)
+        profile_id = next((key_to_profile[key] for key in keys if key in key_to_profile), "")
+        if not profile_id:
+            profile_id = keys[0] if keys else f"thread:{thread.get('id')}"
+        profile = profiles.setdefault(
+            profile_id,
+            {
+                "id": profile_id,
+                "displayName": thread.get("personName") or "Client conversation",
+                "sources": [],
+                "sourceIds": [],
+                "channels": [],
+                "phones": [],
+                "emails": [],
+                "threadIds": [],
+                "threadCount": 0,
+                "latestText": thread.get("latestText"),
+                "latestAt": thread.get("latestAt"),
+                "heatScore": thread.get("heatScore") or 0,
+                "heatLabel": thread.get("heatLabel") or "normal",
+                "hasCrm": False,
+                "hasConversation": False,
+                "isPotentialLead": False,
+                "crmStage": None,
+                "leadSource": None,
+                "tags": [],
+            },
+        )
+        for key in keys:
+            key_to_profile[key] = profile_id
+        _merge_profile(profile, source, thread)
+    return sorted(
+        profiles.values(),
+        key=lambda item: (
+            1 if item.get("hasCrm") else 0,
+            _safe_int(item.get("heatScore")),
+            _parse_record_dt(item.get("latestAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        ),
+        reverse=True,
+    )
 
 
 def _replace_jsonl(path: Path, records: list[JsonRecord]) -> None:
@@ -959,10 +1490,13 @@ def connector_view(source_root: Path, source_id: str) -> JsonRecord | None:
     owner_agent = ""
     if isinstance(source, dict):
         owner_agent = str(source.get("owner_agent") or "").strip()
+    label = blueprint["source"]
+    if isinstance(source, dict):
+        label = str(source.get("provider") or source.get("account_label") or label).strip() or label
 
     return {
         "id": source_id,
-        "label": blueprint["source"],
+        "label": label,
         "category": blueprint.get("category", "operations"),
         "state": state,
         "sourceExists": source_exists,
@@ -1010,6 +1544,563 @@ def build_source_connectors_response(config: dict[str, Any] | None = None) -> Js
         "promptCategories": list(SOURCE_PROMPT_CATEGORIES),
         "connectors": connectors,
     }
+
+
+def build_source_records_response(
+    source_id: str,
+    *,
+    config: dict[str, Any] | None = None,
+    limit: int = 12,
+) -> JsonRecord:
+    """Return normalized local source records for an operator-facing dashboard.
+
+    This is intentionally record-shaped, not connector-shaped: pages such as
+    Leads should be able to render the latest client messages without exposing
+    backend setup internals.
+    """
+    config = config or load_config()
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    source = connector_view(source_root, source_id)
+    if source is None:
+        raise ValueError(f"Unknown source connector: {source_id}")
+
+    source_dir = _source_dir(source_root, source_id)
+    safe_limit = max(1, min(int(limit or 12), 100))
+    records = {
+        "contacts": _read_jsonl_records(source_dir / "contacts.jsonl", limit=safe_limit),
+        "conversations": _read_jsonl_records(source_dir / "conversations.jsonl", limit=safe_limit),
+        "messages": _read_jsonl_records(source_dir / "messages.jsonl", limit=safe_limit, tail=True),
+        "messageDays": _read_jsonl_records(source_dir / "message-days.jsonl", limit=safe_limit),
+        "leadEvents": _read_jsonl_records(source_dir / "lead-events.jsonl", limit=safe_limit),
+        "tasks": _read_jsonl_records(source_dir / "tasks.jsonl", limit=safe_limit),
+    }
+    return {
+        **info,
+        "sourceId": source_id,
+        "source": source,
+        "limit": safe_limit,
+        "records": records,
+    }
+
+
+def _combined_env(config: dict[str, Any]) -> dict[str, str]:
+    values = dict(load_env())
+    tools_env = _candidate_tools_root(config) / ".env"
+    try:
+        if tools_env.exists():
+            for line in tools_env.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if "=" not in line or line.lstrip().startswith("#"):
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key and key not in values:
+                    values[key] = value.strip().strip("\"'")
+    except Exception:
+        pass
+    return values
+
+
+def _candidate_records_for_source(source_dir: Path, source: JsonRecord, safe_limit: int) -> list[JsonRecord]:
+    records = _read_jsonl_records(source_dir / "conversations.jsonl", limit=safe_limit)
+    if not records and str(source.get("category") or "") == "leads":
+        records = _read_jsonl_records(source_dir / "contacts.jsonl", limit=safe_limit)
+    if not records:
+        records = _read_jsonl_records(source_dir / "messages.jsonl", limit=safe_limit, tail=True)
+    return records
+
+
+def build_source_inbox_response(
+    config: dict[str, Any] | None = None,
+    *,
+    limit: int = 16,
+) -> JsonRecord:
+    config = config or load_config()
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    safe_limit = max(1, min(int(limit or 16), 100))
+    connectors = [
+        view
+        for item in SOURCE_CONNECTION_BLUEPRINTS
+        if (view := connector_view(source_root, str(item["id"]))) is not None
+    ]
+
+    threads: list[JsonRecord] = []
+    drafts: list[JsonRecord] = []
+    hidden_counts = {"done": 0, "archived": 0}
+    totals = {
+        "sources": 0,
+        "threads": 0,
+        "messages": 0,
+        "conversations": 0,
+        "contacts": 0,
+        "hotThreads": 0,
+        "drafts": 0,
+    }
+    seen: set[str] = set()
+    seen_drafts: set[str] = set()
+    task_state_by_source: dict[str, JsonRecord] = {}
+
+    for source in connectors:
+        counts = _source_record_counts(source)
+        totals["sources"] += 1 if _source_has_inbox_records(source) else 0
+        totals["messages"] += _safe_int(counts.get("messages"))
+        totals["conversations"] += _safe_int(counts.get("conversations"))
+        totals["contacts"] += _safe_int(counts.get("contacts"))
+        source_id = str(source.get("id") or "")
+        source_dir = _source_dir(source_root, source_id)
+        ui_state = _read_source_ui_state(source_dir)
+        thread_states = _as_dict(ui_state.get("threads"))
+        task_states = _as_dict(ui_state.get("tasks"))
+        task_state_by_source[source_id] = task_states
+
+        for record in _candidate_records_for_source(source_dir, source, 100):
+            thread_id = _thread_key(record)
+            state = _as_dict(thread_states.get(thread_id))
+            status = str(state.get("status") or "open")
+            if status in ("done", "archived"):
+                hidden_counts[status] = hidden_counts.get(status, 0) + 1
+                continue
+            thread = _thread_from_record(source, record, status=status)
+            if thread["id"] in seen:
+                continue
+            seen.add(thread["id"])
+            if thread["heatLabel"] == "hot":
+                totals["hotThreads"] += 1
+            threads.append(thread)
+
+        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=100):
+            if not _is_message_draft_task(record):
+                continue
+            task_id = _task_key(record)
+            state = _as_dict(task_states.get(task_id))
+            status = str(state.get("status") or record.get("status") or "pending").lower()
+            if status in {"approved", "skipped", "done", "archived"}:
+                continue
+            draft = _draft_from_task(source, record, state)
+            if draft["id"] in seen_drafts:
+                continue
+            seen_drafts.add(draft["id"])
+            drafts.append(draft)
+
+    threads.sort(
+        key=lambda item: (
+            _safe_int(item.get("heatScore")),
+            _parse_record_dt(item.get("latestAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        ),
+        reverse=True,
+    )
+    source_by_id = {str(source.get("id") or ""): source for source in connectors}
+    for thread in threads:
+        if len(drafts) >= 24:
+            break
+        if str(thread.get("direction") or "") != "inbound":
+            continue
+        if str(thread.get("heatLabel") or "") not in {"hot", "warm"} and not _is_social_intent(
+            source_by_id.get(str(thread.get("sourceId") or ""), {}),
+            thread,
+        ):
+            continue
+        source_id = str(thread.get("sourceId") or "")
+        task_id = f"thread-draft:{thread.get('threadId')}"
+        state = _as_dict(task_state_by_source.get(source_id, {}).get(task_id))
+        status = str(state.get("status") or "").lower()
+        if status in {"approved", "skipped", "done", "archived"}:
+            continue
+        generated_id = f"{source_id}:{task_id}"
+        if generated_id in seen_drafts:
+            continue
+        seen_drafts.add(generated_id)
+        generated_draft = _draft_from_thread(source_by_id.get(source_id, {}), thread)
+        if state.get("draft_text"):
+            generated_draft["draftText"] = str(state.get("draft_text"))
+        drafts.append(generated_draft)
+
+    drafts.sort(
+        key=lambda item: (
+            1 if item.get("generated") is False else 0,
+            _parse_record_dt(item.get("latestAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        ),
+        reverse=True,
+    )
+    profiles = _profiles_from_threads(threads, source_by_id)
+    visible_threads = threads[:safe_limit]
+    totals["threads"] = len(threads)
+    totals["drafts"] = len(drafts)
+    totals["people"] = len(profiles)
+    totals["crmPeople"] = sum(1 for profile in profiles if profile.get("hasCrm"))
+    totals["conversationPeople"] = sum(1 for profile in profiles if profile.get("hasConversation"))
+    totals["potentialLeads"] = sum(1 for profile in profiles if profile.get("isPotentialLead") and not profile.get("hasCrm"))
+    return {
+        **info,
+        "limit": safe_limit,
+        "recordCounts": totals,
+        "hiddenCounts": hidden_counts,
+        "sources": connectors,
+        "profiles": profiles[:safe_limit],
+        "threads": visible_threads,
+        "drafts": drafts[:safe_limit],
+    }
+
+
+def update_source_thread_state(
+    source_id: str,
+    thread_id: str,
+    action: str,
+    config: dict[str, Any] | None = None,
+) -> JsonRecord:
+    config = config or load_config()
+    if not _blueprint(source_id):
+        raise ValueError(f"Unknown source connector: {source_id}")
+    normalized = str(action or "").strip().lower()
+    if normalized not in {"done", "archive", "restore", "open"}:
+        raise ValueError("Unsupported thread action")
+
+    info = get_source_root_info(config)
+    source_dir = _source_dir(Path(info["sourceRoot"]), source_id)
+    state = _read_source_ui_state(source_dir)
+    threads = _as_dict(state.get("threads"))
+    if normalized in {"restore", "open"}:
+        threads.pop(thread_id, None)
+    else:
+        threads[thread_id] = {
+            "status": "archived" if normalized == "archive" else "done",
+            "updated_at": _now(),
+        }
+    state["threads"] = threads
+    _write_source_ui_state(source_dir, state)
+    return build_source_inbox_response(config)
+
+
+def update_source_task_state(
+    source_id: str,
+    task_id: str,
+    action: str,
+    *,
+    draft_text: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> JsonRecord:
+    config = config or load_config()
+    if not _blueprint(source_id):
+        raise ValueError(f"Unknown source connector: {source_id}")
+    normalized = str(action or "").strip().lower()
+    if normalized not in {"approve", "edit", "skip", "restore", "open"}:
+        raise ValueError("Unsupported draft action")
+
+    info = get_source_root_info(config)
+    source_dir = _source_dir(Path(info["sourceRoot"]), source_id)
+    state = _read_source_ui_state(source_dir)
+    tasks = _as_dict(state.get("tasks"))
+    if normalized in {"restore", "open"}:
+        tasks.pop(task_id, None)
+    else:
+        status = "approved" if normalized == "approve" else "skipped" if normalized == "skip" else "pending"
+        existing = _as_dict(tasks.get(task_id))
+        existing.update(
+            {
+                "status": status,
+                "updated_at": _now(),
+            }
+        )
+        if draft_text is not None:
+            existing["draft_text"] = str(draft_text)
+        tasks[task_id] = existing
+    state["tasks"] = tasks
+    _write_source_ui_state(source_dir, state)
+    return build_source_inbox_response(config)
+
+
+def _lofty_lead_name(lead: JsonRecord) -> str:
+    full = str(lead.get("name") or lead.get("fullName") or lead.get("leadName") or "").strip()
+    if full:
+        return full
+    first = str(lead.get("firstName") or "").strip()
+    last = str(lead.get("lastName") or "").strip()
+    return " ".join(part for part in (first, last) if part).strip() or "Lofty lead"
+
+
+def _lofty_timestamp(lead: JsonRecord) -> str:
+    for key in ("updatedAt", "lastActivityTime", "lastModified", "createdAt", "created", "updated"):
+        parsed = _parse_record_dt(lead.get(key))
+        if parsed:
+            return parsed.isoformat()
+    return _now()
+
+
+def _list_text(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _tag_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    tags: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            raw = item.get("name") or item.get("tagName") or item.get("label") or item.get("value")
+        else:
+            raw = item
+        text = str(raw or "").strip()
+        if text:
+            tags.append(text)
+    return tags
+
+
+def _extract_lead_records(payload: Any) -> list[JsonRecord]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("workingLeads", "leads", "data", "items", "results", "records", "list"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _lofty_headers(env_values: dict[str, str]) -> tuple[dict[str, str], str]:
+    access_token = str(env_values.get("LOFTY_ACCESS_TOKEN") or "").strip()
+    api_key = str(env_values.get("LOFTY_API_KEY") or "").strip()
+    if access_token:
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        }, "oauth_access_token"
+    if api_key:
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"token {api_key}",
+        }, "api_key"
+    return {"Accept": "application/json", "Content-Type": "application/json"}, "missing"
+
+
+def _lofty_get(path: str, env_values: dict[str, str], params: dict[str, Any] | None = None) -> Any:
+    headers, _auth_type = _lofty_headers(env_values)
+    if headers.get("Authorization") is None:
+        raise RuntimeError("LOFTY_API_KEY or LOFTY_ACCESS_TOKEN is not set")
+    base = "https://api.lofty.com"
+    url = f"{base}/{path.lstrip('/')}"
+    if params:
+        query = urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
+        url = f"{url}?{query}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=18) as response:
+        raw = response.read(1024 * 1024 * 4)
+    return json.loads(raw.decode("utf-8") or "{}")
+
+
+def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 50) -> JsonRecord:
+    config = config or load_config()
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    source_dir = _source_dir(source_root, "crm")
+    artifacts_dir = source_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    now = _now()
+    surfaces = UI_BY_SOURCE["crm"]
+    owner = OWNER_BY_SOURCE["crm"]
+    env_values = _combined_env(config)
+    headers, auth_type = _lofty_headers(env_values)
+
+    if not headers.get("Authorization"):
+        _write_json(
+            source_dir / "source.json",
+            {
+                "source_id": "crm",
+                "provider": "Lofty CRM",
+                "account_label": "Lofty CRM",
+                "connection_type": "lofty_api",
+                "auth_status": "missing_secret",
+                "sync_mode": "crm_lead_snapshot",
+                "owner_agent": owner,
+                "enabled_ui_surfaces": surfaces,
+                "setup_status": "needs_operator",
+                "last_sync_at": None,
+                "setup_notes": "Add LOFTY_API_KEY or LOFTY_ACCESS_TOKEN to ~/.elevate/.env or the tools root .env.",
+            },
+        )
+        _write_json(
+            source_dir / "status.json",
+            {
+                "connected": False,
+                "import_only": False,
+                "blocked": False,
+                "last_error": None,
+                "next_operator_step": "Add the Lofty API key, then initialize/sync CRM again.",
+                "last_checked_at": now,
+            },
+        )
+        for file_name in JSONL_FILES:
+            _replace_jsonl(source_dir / file_name, [])
+        view = connector_view(source_root, "crm")
+        if view is None:
+            raise RuntimeError("Lofty CRM source could not be read")
+        return view
+
+    leads: list[JsonRecord] = []
+    attempted: list[str] = []
+    errors: list[str] = []
+    for path, params in (
+        ("/v2.0/working-leads", {"aiStage": "HIGH_PRIORITY", "limit": min(limit, 100), "offset": 0, "sort": "UpdateTime", "desc": "true"}),
+        ("/v1.0/leads", {"limit": min(limit, 100), "offset": 0}),
+    ):
+        attempted.append(path)
+        try:
+            payload = _lofty_get(path, env_values, params)
+            extracted = _extract_lead_records(payload)
+            if extracted:
+                leads.extend(extracted)
+        except Exception as exc:
+            errors.append(f"{path}: {exc}")
+
+    deduped: list[JsonRecord] = []
+    seen_ids: set[str] = set()
+    for lead in leads:
+        lead_id = str(lead.get("leadId") or lead.get("id") or lead.get("lead_id") or "").strip()
+        if not lead_id:
+            lead_id = f"unknown-{len(seen_ids) + 1}"
+        if lead_id in seen_ids:
+            continue
+        seen_ids.add(lead_id)
+        deduped.append(lead)
+
+    contact_records: list[JsonRecord] = []
+    conversation_records: list[JsonRecord] = []
+    lead_events: list[JsonRecord] = []
+    task_records: list[JsonRecord] = []
+    for lead in deduped:
+        lead_id = str(lead.get("leadId") or lead.get("id") or lead.get("lead_id") or "").strip()
+        record_id = f"lofty-lead:{lead_id or len(contact_records) + 1}"
+        name = _lofty_lead_name(lead)
+        timestamp = _lofty_timestamp(lead)
+        stage = str(lead.get("stage") or lead.get("aiStage") or lead.get("status") or "").strip()
+        source = str(lead.get("source") or lead.get("leadSource") or "").strip()
+        tags = _tag_names(lead.get("tags"))
+        score = _safe_int(lead.get("score") or lead.get("leadScore"), 45)
+        summary = (
+            f"{name} from Lofty"
+            + (f" is in {stage}" if stage else "")
+            + (f" via {source}" if source else "")
+            + "."
+        )
+        base_record = {
+            "source_id": "crm",
+            "source_record_id": record_id,
+            "conversation_id": record_id,
+            "contact_id": record_id,
+            "display_name": name,
+            "channel": "Lofty CRM",
+            "timestamp": timestamp,
+            "last_seen_at": timestamp,
+            "last_message_at": timestamp,
+            "text": summary,
+            "summary": summary,
+            "lead_id": lead_id or None,
+            "stage": stage or None,
+            "lead_source": source or None,
+            "assigned_user": lead.get("assignedUser") or lead.get("assignedAgent"),
+            "emails": lead.get("emails") or lead.get("email"),
+            "phones": lead.get("phones") or lead.get("phone"),
+            "score": score,
+            "tags": [*tags, "lofty-crm", "crm-lead"],
+            "confidence": 0.86,
+            "target_ui_surfaces": surfaces,
+        }
+        contact_records.append(base_record)
+        conversation_records.append(
+            {
+                **base_record,
+                "total_messages": _safe_int(lead.get("activityCount") or lead.get("taskCount"), 1),
+                "inbound_count": 0,
+                "outbound_count": 0,
+                "last_text": summary,
+            }
+        )
+        lead_events.append(
+            {
+                **base_record,
+                "type": "crm_lead_synced",
+                "title": "Lofty lead synced",
+            }
+        )
+        heat_score, heat_label = _heat_score_for_record(base_record)
+        if heat_label in {"hot", "warm"}:
+            task_records.append(
+                {
+                    **base_record,
+                    "source_record_id": f"{record_id}:follow-up",
+                    "title": f"Review {name}",
+                    "status": "open",
+                    "task_type": "lead_follow_up",
+                    "approval_required": False,
+                    "owner_agent": owner,
+                    "summary": f"{name} looks {heat_label} in Lofty. Review source, stage, notes, and next outreach step.",
+                    "heat_score": heat_score,
+                    "target_ui_surfaces": ["Leads", "Today", "Outreach"],
+                }
+            )
+
+    _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
+    _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
+    _replace_jsonl(source_dir / "messages.jsonl", [])
+    _replace_jsonl(source_dir / "message-days.jsonl", [])
+    _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
+    _replace_jsonl(source_dir / "tasks.jsonl", task_records)
+    _write_json(
+        source_dir / "source.json",
+        {
+            "source_id": "crm",
+            "provider": "Lofty CRM",
+            "account_label": "Lofty CRM",
+            "connection_type": "lofty_api",
+            "auth_status": f"{auth_type}_configured",
+            "sync_mode": "crm_lead_snapshot",
+            "owner_agent": owner,
+            "enabled_ui_surfaces": surfaces,
+            "setup_status": "connected" if deduped else "needs_operator",
+            "last_sync_at": now,
+            "setup_notes": "Read-only Lofty lead snapshot normalized into the local Elevate source inbox.",
+            "attempted_endpoints": attempted,
+            "record_counts": {
+                "contacts": len(contact_records),
+                "conversations": len(conversation_records),
+                "lead_events": len(lead_events),
+                "tasks": len(task_records),
+            },
+        },
+    )
+    _write_json(
+        source_dir / "status.json",
+        {
+            "connected": bool(deduped),
+            "import_only": True,
+            "blocked": False,
+            "last_error": "; ".join(errors) if errors and not deduped else None,
+            "next_operator_step": (
+                "Review the hot/warm lead cards and decide which conversations should become outreach tasks."
+                if deduped
+                else "Lofty auth was found, but no lead rows were returned. Check the key scope/OAuth permissions, then sync again."
+            ),
+            "last_checked_at": now,
+            "last_imported_at": now if deduped else None,
+            "counts": {
+                "contacts": len(contact_records),
+                "conversations": len(conversation_records),
+                "lead_events": len(lead_events),
+                "tasks": len(task_records),
+            },
+        },
+    )
+    if errors:
+        _write_json(artifacts_dir / "last-sync-errors.json", {"checked_at": now, "errors": errors})
+    view = connector_view(source_root, "crm")
+    if view is None:
+        raise RuntimeError("Lofty CRM sync finished but could not be read")
+    return view
 
 
 def scaffold_composio_social_source(config: dict[str, Any] | None = None) -> JsonRecord:
@@ -1132,6 +2223,8 @@ def scaffold_source(source_id: str, config: dict[str, Any] | None = None) -> Jso
         return initialize_apple_messages_source(config)
     if source_id == "social":
         return scaffold_composio_social_source(config)
+    if source_id == "crm":
+        return sync_lofty_crm_source(config)
 
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
@@ -1296,11 +2389,30 @@ def get_integration_settings(config: dict[str, Any] | None = None) -> JsonRecord
     config = config or load_config()
     integrations = _as_dict(config.get("integrations"))
     crm = _merge_crm(integrations.get("crm"))
+    env_values = _combined_env(config)
+    if env_values.get("LOFTY_API_KEY") and not str(crm.get("base_url") or "").strip():
+        crm.update(
+            {
+                "provider": "lofty",
+                "label": "Lofty CRM",
+                "api_key_env": "LOFTY_API_KEY",
+                "base_url": "https://api.lofty.com",
+                "auth_type": "header",
+                "auth_header": "Authorization",
+                "auth_prefix": "token ",
+                "endpoints": {
+                    **_as_dict(crm.get("endpoints")),
+                    "leads": "/v1.0/leads",
+                    "lead": "/v1.0/leads/:id",
+                    "notes": "/v2.0/leads/:id/activities",
+                },
+            }
+        )
     return {
         "configPath": str(get_config_path()),
         "secretsPath": str(get_env_path()),
         "sourceRoot": get_source_root_info(config)["sourceRoot"],
-        "crm": _crm_to_ui(crm, load_env()),
+        "crm": _crm_to_ui(crm, env_values),
     }
 
 
@@ -1344,7 +2456,7 @@ def save_integration_settings(form: JsonRecord) -> JsonRecord:
 def test_crm_connection(form: JsonRecord) -> JsonRecord:
     crm = _ui_crm_to_config(form)
     env_key = str(crm.get("api_key_env") or "CRM_API_KEY")
-    api_key = str(form.get("apiKey") or load_env().get(env_key) or "")
+    api_key = str(form.get("apiKey") or _combined_env(load_config()).get(env_key) or "")
     base_url = str(crm.get("base_url") or "").rstrip("/")
     leads_path = str(_as_dict(crm.get("endpoints")).get("leads") or "/v1/leads")
     if not base_url:

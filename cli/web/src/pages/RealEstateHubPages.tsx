@@ -24,10 +24,13 @@ import {
   Megaphone,
   MessageSquare,
   Network,
+  PencilLine,
   RefreshCw,
+  Send,
   ShieldCheck,
   Target,
   Users,
+  XCircle,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
@@ -37,6 +40,8 @@ import type {
   CronJob,
   PaginatedSessions,
   SessionInfo,
+  SourceInboxDraft,
+  SourceInboxProfile,
   SourceInboxResponse,
   SourceInboxThread,
   StatusResponse,
@@ -76,7 +81,7 @@ function useRealEstateHubData(): HubData {
         api.getStatus(),
         api.getSessions(36),
         api.getCronJobs(),
-        api.getSourceInbox(16),
+        api.getSourceInbox(64),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -297,20 +302,6 @@ type BoardAction = {
   variant?: "success" | "warning" | "outline";
 };
 
-function pendingApprovalCount(data: HubData): number {
-  const pendingPairings =
-    data.snapshot?.platforms.reduce(
-      (total, platform) => total + platform.pending_pairings.length,
-      0,
-    ) ?? 0;
-  const waitingRuns =
-    data.snapshot?.orchestration?.runs?.filter((run) => {
-      if (!run || typeof run !== "object") return false;
-      return JSON.stringify(run).toLowerCase().includes("waiting_for_approval");
-    }).length ?? 0;
-  return pendingPairings + waitingRuns;
-}
-
 function sessionAction(
   session: SessionInfo,
   titlePrefix: string,
@@ -485,9 +476,9 @@ function threadWhen(thread: SourceInboxThread): string {
   return thread.latestAt ? isoTimeAgo(thread.latestAt) : "unsynced";
 }
 
-function heatVariant(thread: SourceInboxThread): "default" | "success" | "warning" | "outline" {
-  if (thread.heatLabel === "hot") return "warning";
-  if (thread.heatLabel === "warm") return "success";
+function heatVariant(item: { heatLabel: string }): "default" | "success" | "warning" | "outline" {
+  if (item.heatLabel === "hot") return "warning";
+  if (item.heatLabel === "warm") return "success";
   return "outline";
 }
 
@@ -600,6 +591,436 @@ function ClientInboxPreview({
                 {source.label} {source.importOnly ? "snapshot" : "live"}
               </Badge>
             ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function leadThreadBuckets(threads: SourceInboxThread[]) {
+  const hot = threads.filter((thread) => thread.heatLabel === "hot").slice(0, 10);
+  const followUp = threads
+    .filter((thread) => thread.heatLabel !== "hot" && (thread.direction === "inbound" || thread.heatLabel === "warm"))
+    .slice(0, 10);
+  const watch = threads
+    .filter((thread) => !hot.includes(thread) && !followUp.includes(thread))
+    .slice(0, 10);
+  return { followUp, hot, watch };
+}
+
+function sourceSummary(data: HubData): Array<{ label: string; count: number; state: string }> {
+  const sources = data.sourceInbox?.sources ?? [];
+  return sources
+    .filter((source) => Number(source.recordCounts?.conversations ?? source.recordCounts?.contacts ?? 0) > 0)
+    .map((source) => ({
+      label: source.label,
+      count: Number(source.recordCounts?.conversations ?? source.recordCounts?.contacts ?? 0),
+      state: source.importOnly ? "snapshot" : source.connected ? "live" : source.state,
+    }))
+    .slice(0, 5);
+}
+
+function contactBuckets(profiles: SourceInboxProfile[]) {
+  const crmContacts = profiles.filter((profile) => profile.hasCrm).slice(0, 12);
+  const active = profiles
+    .filter((profile) => !profile.hasCrm && profile.hasConversation && !profile.isPotentialLead)
+    .slice(0, 8);
+  const potential = profiles
+    .filter((profile) => profile.isPotentialLead && !profile.hasCrm)
+    .slice(0, 8);
+  return { active, crmContacts, potential };
+}
+
+function profileWhen(profile: SourceInboxProfile): string {
+  return profile.latestAt ? isoTimeAgo(profile.latestAt) : "unsynced";
+}
+
+function ContactProfileRow({ profile }: { profile: SourceInboxProfile }) {
+  return (
+    <div className="rounded-2xl border border-border/55 bg-background/35 px-3 py-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <span
+          className={cn(
+            "mt-1 h-2.5 w-2.5 shrink-0 rounded-full",
+            profile.heatLabel === "hot" ? "bg-warning" : profile.heatLabel === "warm" ? "bg-success" : "bg-muted-foreground/45",
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+              {profile.displayName}
+            </div>
+            <Badge variant={profile.hasCrm ? "success" : profile.isPotentialLead ? "warning" : "outline"}>
+              {profile.hasCrm ? "CRM" : profile.isPotentialLead ? "potential" : "conversation"}
+            </Badge>
+          </div>
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+            {profile.latestText || "No recent context yet."}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <Badge variant={heatVariant(profile)}>
+              {profile.heatLabel} {profile.heatScore}
+            </Badge>
+            {profile.crmStage && <Badge variant="outline">{profile.crmStage}</Badge>}
+            {profile.leadSource && <Badge variant="outline">{profile.leadSource}</Badge>}
+            {profile.sources.slice(0, 2).map((source) => (
+              <Badge key={source} variant="outline">{source}</Badge>
+            ))}
+            {profile.channels.slice(0, 2).map((channel) => (
+              <Badge key={channel} variant="outline">{channel}</Badge>
+            ))}
+            <Badge variant="outline">{profileWhen(profile)}</Badge>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContactColumn({
+  empty,
+  profiles,
+  title,
+}: {
+  empty: string;
+  profiles: SourceInboxProfile[];
+  title: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-muted-foreground">{title}</div>
+        <Badge variant={profiles.length ? "outline" : "secondary"}>{profiles.length}</Badge>
+      </div>
+      <div className="space-y-2">
+        {profiles.length ? (
+          profiles.map((profile) => <ContactProfileRow key={profile.id} profile={profile} />)
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-3 py-6 text-xs leading-5 text-muted-foreground">
+            {empty}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ContactOverviewBoard({ data }: { data: HubData }) {
+  const profiles = data.sourceInbox?.profiles ?? [];
+  const buckets = contactBuckets(profiles);
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle>Contact overview</CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              CRM contacts are the main source of truth. Conversations from Messages, SMS, email, and social attach when phone, email, or name matches.
+            </p>
+          </div>
+          <Badge variant="outline">{profiles.length} people</Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.9fr)_minmax(0,0.85fr)]">
+          <ContactColumn
+            title="CRM contacts"
+            profiles={buckets.crmContacts}
+            empty="No CRM contacts are synced yet. Lofty/FUB/CRM people will anchor this column."
+          />
+          <ContactColumn
+            title="Current conversations"
+            profiles={buckets.active}
+            empty="No unmatched active conversations yet."
+          />
+          <ContactColumn
+            title="Potential social leads"
+            profiles={buckets.potential}
+            empty="No out-of-CRM social leads yet. Facebook/Instagram DMs with buyer/seller language will appear here."
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LeadBoardRow({
+  data,
+  thread,
+}: {
+  data: HubData;
+  thread: SourceInboxThread;
+}) {
+  const mark = async (action: "done" | "archive") => {
+    await api.updateSourceInboxThread(thread.sourceId, thread.threadId, action);
+    await data.refresh();
+  };
+
+  return (
+    <div className="group rounded-2xl border border-border/55 bg-background/35 px-3 py-3 transition-colors hover:bg-background/55">
+      <div className="flex items-start gap-3">
+        <span
+          className={cn(
+            "mt-1 h-2.5 w-2.5 shrink-0 rounded-full",
+            thread.heatLabel === "hot" ? "bg-warning" : thread.heatLabel === "warm" ? "bg-success" : "bg-muted-foreground/45",
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+              {thread.personName}
+            </div>
+            <Badge variant={heatVariant(thread)}>{thread.heatScore}</Badge>
+          </div>
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+            {thread.latestText}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <Badge variant="outline">{thread.sourceLabel}</Badge>
+            <Badge variant="outline">{thread.channel}</Badge>
+            <Badge variant="outline">{threadWhen(thread)}</Badge>
+            {thread.messageCount > 1 && <Badge variant="outline">{thread.messageCount} msgs</Badge>}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 flex justify-end gap-1.5">
+        <Button size="sm" variant="outline" onClick={() => void mark("done")}>
+          Done
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => void mark("archive")}>
+          Remove
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function LeadBoardColumn({
+  data,
+  empty,
+  threads,
+  title,
+}: {
+  data: HubData;
+  empty: string;
+  threads: SourceInboxThread[];
+  title: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-muted-foreground">{title}</div>
+        <Badge variant={threads.length ? "outline" : "secondary"}>{threads.length}</Badge>
+      </div>
+      <div className="space-y-2">
+        {threads.length ? (
+          threads.map((thread) => <LeadBoardRow key={thread.id} data={data} thread={thread} />)
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-3 py-6 text-xs leading-5 text-muted-foreground">
+            {empty}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LeadWorkBoard({
+  data,
+}: {
+  data: HubData;
+}) {
+  const threads = data.sourceInbox?.threads ?? [];
+  const buckets = leadThreadBuckets(threads);
+  const sources = sourceSummary(data);
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle>Lead workboard</CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Prioritized people from CRM, Messages, and other lead sources. Checking a row off hides it from this board without deleting source data.
+            </p>
+          </div>
+          <Badge variant={threads.length ? "warning" : "outline"}>{threads.length} open</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {sources.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {sources.map((source) => (
+              <div
+                key={source.label}
+                className="flex items-center gap-2 rounded-full border border-border/60 bg-background/35 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <span className="font-semibold text-foreground">{source.label}</span>
+                <span>{source.count}</span>
+                <Badge variant="outline">{source.state}</Badge>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="grid gap-4 xl:grid-cols-3">
+          <LeadBoardColumn
+            data={data}
+            title="Hot now"
+            threads={buckets.hot}
+            empty="No hot leads yet. Lofty, Messages, and future CRM imports will promote high-priority people here."
+          />
+          <LeadBoardColumn
+            data={data}
+            title="Needs follow-up"
+            threads={buckets.followUp}
+            empty="No reply-needed or warm leads waiting."
+          />
+          <LeadBoardColumn
+            data={data}
+            title="Watch list"
+            threads={buckets.watch}
+            empty="No lower-priority leads to watch."
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function draftWhen(draft: SourceInboxDraft): string {
+  return draft.latestAt ? isoTimeAgo(draft.latestAt) : "unsynced";
+}
+
+function DraftMessagesBoard({
+  data,
+  title = "Draft follow-ups",
+}: {
+  data: HubData;
+  title?: string;
+}) {
+  const drafts = data.sourceInbox?.drafts ?? [];
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
+
+  const updateDraft = async (
+    draft: SourceInboxDraft,
+    action: "approve" | "edit" | "skip",
+    text = draft.draftText,
+  ) => {
+    await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
+    setEditingId(null);
+    setDraftEdits((current) => {
+      const next = { ...current };
+      delete next[draft.id];
+      return next;
+    });
+    await data.refresh();
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle>{title}</CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Approval-gated replies for follow-ups, texts, DMs, and comments. Approving only marks the draft ready; it does not send automatically.
+            </p>
+          </div>
+          <Badge variant={drafts.length ? "warning" : "outline"}>{drafts.length} waiting</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {drafts.length ? (
+          drafts.slice(0, 8).map((draft) => {
+            const isEditing = editingId === draft.id;
+            const draftText = draftEdits[draft.id] ?? draft.draftText;
+            return (
+              <div
+                key={draft.id}
+                className="rounded-2xl border border-border/60 bg-background/35 px-3 py-3 transition-colors hover:bg-background/55"
+              >
+                <div className="flex min-w-0 items-start gap-3">
+                  <span className="mt-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-warning/12 text-warning">
+                    <MessageSquare className="h-3.5 w-3.5" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                        {draft.personName}
+                      </div>
+                      <Badge variant={draft.generated ? "outline" : "warning"}>
+                        {draft.generated ? "suggested" : "draft"}
+                      </Badge>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <Badge variant="outline">{draft.sourceLabel}</Badge>
+                      <Badge variant="outline">{draft.channel}</Badge>
+                      <Badge variant="outline">{draftWhen(draft)}</Badge>
+                    </div>
+                    {draft.context && (
+                      <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {draft.context}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                {isEditing ? (
+                  <div className="mt-3 space-y-2">
+                    <textarea
+                      value={draftText}
+                      onChange={(event) =>
+                        setDraftEdits((current) => ({ ...current, [draft.id]: event.target.value }))
+                      }
+                      className="min-h-24 w-full resize-y rounded-2xl border border-border/70 bg-background/60 px-3 py-2 text-sm leading-6 text-foreground outline-none transition focus:border-primary/45 focus:ring-2 focus:ring-primary/10"
+                    />
+                    <div className="flex justify-end gap-1.5">
+                      <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>
+                        Cancel
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => void updateDraft(draft, "edit", draftText)}>
+                        Save edit
+                      </Button>
+                      <Button size="sm" onClick={() => void updateDraft(draft, "approve", draftText)}>
+                        Approve
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <p className="mt-3 rounded-2xl bg-card/45 px-3 py-3 text-sm leading-6 text-foreground">
+                      {draft.draftText}
+                    </p>
+                    <div className="mt-3 flex flex-wrap justify-end gap-1.5">
+                      <Button size="sm" variant="ghost" onClick={() => void updateDraft(draft, "skip")}>
+                        <XCircle className="h-3.5 w-3.5" />
+                        Skip
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setEditingId(draft.id);
+                          setDraftEdits((current) => ({ ...current, [draft.id]: draft.draftText }));
+                        }}
+                      >
+                        <PencilLine className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
+                      <Button size="sm" onClick={() => void updateDraft(draft, "approve")}>
+                        <Send className="h-3.5 w-3.5" />
+                        Approve
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm leading-6 text-muted-foreground">
+            No draft replies are waiting. Composio social imports, CRM follow-ups, and outreach tasks can feed approval-gated messages here.
           </div>
         )}
       </CardContent>
@@ -747,8 +1168,10 @@ export function RealEstateTodayPage() {
   useHubHeader("Today", data);
 
   const liveSessions = data.sessions.filter((session) => session.is_active);
-  const enabledAgents = data.snapshot?.agents.filter((agent) => agent.enabled) ?? [];
   const enabledJobs = data.cronJobs.filter((job) => job.enabled);
+  const openLeadThreads = Number(data.sourceInbox?.recordCounts?.threads ?? 0);
+  const hotLeadThreads = sourceRecordCount(data, "hotThreads");
+  const draftCount = sourceRecordCount(data, "drafts");
   const todayActions = [
     ...approvalActions(data),
     ...liveSessions.slice(0, 3).map((session) => sessionAction(session, "Continue", MessageSquare)),
@@ -765,31 +1188,46 @@ export function RealEstateTodayPage() {
     >
       <WorkflowStrip
         items={[
-          { icon: Bot, label: "Agent team", value: enabledAgents.length },
-          { icon: MessageSquare, label: "Messages", value: sourceRecordCount(data, "messages") },
-          { icon: Clock, label: "Running tasks", value: enabledJobs.length },
-          {
-            icon: ShieldCheck,
-            label: "Today approvals",
-            value: pendingApprovalCount(data),
-          },
+          { icon: Target, label: "Hot leads", value: hotLeadThreads },
+          { icon: MessageSquare, label: "Open threads", value: openLeadThreads },
+          { icon: Send, label: "Drafts waiting", value: draftCount },
+          { icon: Clock, label: "Timed tasks", value: enabledJobs.length },
         ]}
       />
+      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_28rem]">
+        <LeadWorkBoard data={data} />
+        <DraftMessagesBoard data={data} title="Drafts waiting" />
+      </div>
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <ActionBoard
           actions={todayActions}
           empty="Nothing urgent is waiting. Start a chat, schedule a pulse, or continue a recent session when work comes in."
           title="Today's action board"
         />
-        <ClientInboxPreview data={data} title="Today's lead inbox" />
+        <TimedTasks jobs={enabledJobs} empty="No enabled timed tasks yet." />
       </div>
+      <ClientInboxPreview data={data} title="Today's lead inbox" />
+      <ContactOverviewBoard data={data} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <RecentSessions
           title="Recent operator activity"
           sessions={data.sessions}
           empty="No local sessions have been recorded yet."
         />
-        <TimedTasks jobs={enabledJobs} empty="No enabled timed tasks yet." />
+        <ActionBoard
+          actions={data.snapshot?.agents.filter((agent) => agent.enabled).slice(0, 4).map((agent) => ({
+            detail: agent.description || "Agent is available for routed real-estate work.",
+            icon: Bot,
+            id: `agent-${agent.id}`,
+            meta: agent.role || "agent team",
+            status: agent.status,
+            title: agent.name,
+            to: "/hub",
+            variant: agent.status === "online" ? "success" : "outline" as const,
+          })) ?? []}
+          empty="No enabled agents are configured yet."
+          title="Agent team"
+        />
       </div>
     </HubShell>
   );
@@ -804,7 +1242,11 @@ export function RealEstateLeadsPage() {
   const jobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
   );
-  const activeSessions = sessions.filter((session) => session.is_active);
+  const openLeadThreads = Number(data.sourceInbox?.recordCounts?.threads ?? 0);
+  const hotLeadThreads = sourceRecordCount(data, "hotThreads");
+  const people = sourceRecordCount(data, "people");
+  const crmPeople = sourceRecordCount(data, "crmPeople");
+  const potentialLeads = sourceRecordCount(data, "potentialLeads");
   const actions = [
     ...approvalCueActions(sessions, jobs, "Lead"),
     ...jobs
@@ -827,33 +1269,38 @@ export function RealEstateLeadsPage() {
     >
       <WorkflowStrip
         items={[
+          { icon: Target, label: "Hot leads", value: hotLeadThreads },
+          { icon: Send, label: "Drafts waiting", value: sourceRecordCount(data, "drafts") },
+          { icon: MessageSquare, label: "Open threads", value: openLeadThreads },
           {
-            icon: MessageSquare,
-            label: "Messages",
-            value: sourceRecordCount(data, "messages"),
-          },
-          { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
-          {
-            icon: Target,
-            label: "Active threads",
-            value: activeSessions.length,
-          },
-          {
-            icon: CheckCircle2,
-            label: "Review gates",
-            value: approvalCueCount(sessions, jobs),
+            icon: CalendarClock,
+            label: "Follow-up tasks",
+            value: jobs.length,
           },
         ]}
       />
+      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_28rem]">
+        <LeadWorkBoard data={data} />
+        <DraftMessagesBoard data={data} />
+      </div>
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <ActionBoard
           actions={actions}
           title="Lead action board"
           empty="No lead actions are waiting yet. When outreach sessions, follow-up schedules, or approvals exist, they will show up here."
         />
-        <ClientInboxPreview data={data} />
+        <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
       </div>
-      <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
+      <WorkflowStrip
+        items={[
+          { icon: Users, label: "People", value: people },
+          { icon: DatabaseIcon, label: "CRM matched", value: crmPeople },
+          { icon: Megaphone, label: "Social potentials", value: potentialLeads },
+          { icon: CheckCircle2, label: "Review gates", value: approvalCueCount(sessions, jobs) },
+        ]}
+      />
+      <ClientInboxPreview data={data} title="Source preview" />
+      <ContactOverviewBoard data={data} />
       <RecentSessions
         title="Lead conversations"
         sessions={sessions}
