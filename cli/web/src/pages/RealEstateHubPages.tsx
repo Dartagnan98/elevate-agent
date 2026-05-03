@@ -18,8 +18,6 @@ import {
   Database as DatabaseIcon,
   FileCheck2,
   Home,
-  KeyRound,
-  Link2,
   Loader2,
   Megaphone,
   MessageSquare,
@@ -37,12 +35,10 @@ import type {
   CronJob,
   PaginatedSessions,
   SessionInfo,
-  SourceConnectorsResponse,
-  SourceConnectorStatus,
   StatusResponse,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { MemoryConstellation } from "@/components/MemoryConstellation";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -54,49 +50,13 @@ type HubData = {
   loading: boolean;
   refresh: () => Promise<void>;
   sessions: SessionInfo[];
-  sourceConnectors: SourceConnectorsResponse | null;
   snapshot: AgentHubSnapshot | null;
   status: StatusResponse | null;
-};
-
-const REAL_ESTATE_SKILL_TARGETS = {
-  leads: ["outreach", "outreach-send", "property-lookup", "gmail-doc-router"],
-  admin: [
-    "cma",
-    "seller-updates",
-    "showing-time",
-    "weekly-listing",
-    "relisting",
-    "mlc",
-    "digisign",
-    "webforms",
-    "skyleigh-vault",
-  ],
-  "social-media": ["social-media", "humanizer", "graphify"],
-  ads: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
-} as const;
-
-const WORKFLOW_LABELS: Record<keyof typeof REAL_ESTATE_SKILL_TARGETS, string> = {
-  leads: "Leads",
-  admin: "Admin",
-  "social-media": "Social Media",
-  ads: "Ads",
-};
-
-const AREA_CONNECTORS: Record<
-  keyof typeof REAL_ESTATE_SKILL_TARGETS,
-  string[]
-> = {
-  leads: ["apple-messages", "sms-provider", "android-device", "rcs", "crm", "social", "email"],
-  admin: ["crm", "skills", "admin-requirements", "document-storage", "forms-signing", "market-stats"],
-  "social-media": ["social", "skills", "market-stats", "email"],
-  ads: ["market-stats", "skills", "email", "social"],
 };
 
 function useRealEstateHubData(): HubData {
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [sourceConnectors, setSourceConnectors] = useState<SourceConnectorsResponse | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -104,13 +64,12 @@ function useRealEstateHubData(): HubData {
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [hubResult, statusResult, sessionsResult, cronResult, sourceResult] =
+    const [hubResult, statusResult, sessionsResult, cronResult] =
       await Promise.allSettled([
         api.getAgentHub(),
         api.getStatus(),
         api.getSessions(36),
         api.getCronJobs(),
-        api.getSourceConnectors(),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -119,14 +78,12 @@ function useRealEstateHubData(): HubData {
       setSessions((sessionsResult.value as PaginatedSessions).sessions);
     }
     if (cronResult.status === "fulfilled") setCronJobs(cronResult.value);
-    if (sourceResult.status === "fulfilled") setSourceConnectors(sourceResult.value);
 
     const failed = [
       hubResult,
       statusResult,
       sessionsResult,
       cronResult,
-      sourceResult,
     ].find((result) => result.status === "rejected");
 
     if (failed?.status === "rejected") {
@@ -149,7 +106,7 @@ function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
-  return { cronJobs, error, loading, refresh, sessions, sourceConnectors, snapshot, status };
+  return { cronJobs, error, loading, refresh, sessions, snapshot, status };
 }
 
 function useHubHeader(title: string, data: HubData) {
@@ -312,209 +269,197 @@ function HubMetric({
   );
 }
 
-function sourceReady(connector: SourceConnectorStatus): boolean {
-  return connector.state === "connected" || connector.state === "import_only";
-}
-
-function sourceMatchesArea(connector: SourceConnectorStatus, area: keyof typeof AREA_CONNECTORS): boolean {
-  return AREA_CONNECTORS[area].includes(connector.id);
-}
-
-function readyConnectorCount(data: HubData, area?: keyof typeof AREA_CONNECTORS): number {
-  const connectors = data.sourceConnectors?.connectors ?? [];
-  return connectors.filter((connector) => {
-    if (area && !sourceMatchesArea(connector, area)) return false;
-    return sourceReady(connector);
-  }).length;
-}
-
-function connectorsById(data: HubData, sourceIds: string[]): SourceConnectorStatus[] {
-  const wanted = new Set(sourceIds);
-  return (data.sourceConnectors?.connectors ?? []).filter((connector) => wanted.has(connector.id));
-}
-
-function connectorRecordTotal(connector: SourceConnectorStatus, keys?: string[]): number {
-  const wanted = keys ? new Set(keys) : null;
-  return Object.entries(connector.recordCounts).reduce((total, [key, value]) => {
-    if (wanted && !wanted.has(key)) return total;
-    return total + value;
-  }, 0);
-}
-
-function sourceRecordCount(data: HubData, sourceIds: string[], keys?: string[]): number {
-  return connectorsById(data, sourceIds).reduce(
-    (total, connector) => total + connectorRecordTotal(connector, keys),
-    0,
-  );
-}
-
 function platformDisplayName(name: string): string {
   const cleaned = name.replace(/[-_]/g, " ");
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
-function sourceStateVariant(state: SourceConnectorStatus["state"]): "success" | "warning" | "outline" {
-  if (state === "connected" || state === "import_only") return "success";
-  if (state === "needs_operator" || state === "error" || state === "blocked") return "warning";
-  return "outline";
+type BoardAction = {
+  detail: string;
+  icon: ComponentType<{ className?: string }>;
+  id: string;
+  meta: string;
+  status: string;
+  title: string;
+  to: string;
+  variant?: "success" | "warning" | "outline";
+};
+
+function pendingApprovalCount(data: HubData): number {
+  const pendingPairings =
+    data.snapshot?.platforms.reduce(
+      (total, platform) => total + platform.pending_pairings.length,
+      0,
+    ) ?? 0;
+  const waitingRuns =
+    data.snapshot?.orchestration?.runs?.filter((run) => {
+      if (!run || typeof run !== "object") return false;
+      return JSON.stringify(run).toLowerCase().includes("waiting_for_approval");
+    }).length ?? 0;
+  return pendingPairings + waitingRuns;
 }
 
-function ConnectorReadiness({
-  data,
-}: {
-  data: HubData;
-}) {
-  const items = (Object.keys(AREA_CONNECTORS) as Array<keyof typeof AREA_CONNECTORS>).map((key) => {
-    const connectors = data.sourceConnectors?.connectors.filter((connector) =>
-      sourceMatchesArea(connector, key),
-    ) ?? [];
-    const ready = connectors.filter(sourceReady).length;
-    const pending = connectors.filter((connector) => connector.state === "needs_operator" || connector.state === "not_configured").length;
-    return {
-      connectors,
-      key,
-      label: WORKFLOW_LABELS[key],
-      pending,
-      ready,
-    };
-  });
+function sessionAction(
+  session: SessionInfo,
+  titlePrefix: string,
+  icon: ComponentType<{ className?: string }>,
+): BoardAction {
+  return {
+    detail: session.preview?.trim() || `${session.message_count} saved message${session.message_count === 1 ? "" : "s"}.`,
+    icon,
+    id: `session-${session.id}`,
+    meta: `${session.source ?? "local"} / ${timeAgo(session.last_active)}`,
+    status: session.is_active ? "active" : "resume",
+    title: `${titlePrefix}: ${sessionTitle(session)}`,
+    to: `/chat?resume=${encodeURIComponent(session.id)}`,
+    variant: session.is_active ? "success" : "outline",
+  };
+}
 
+function jobAction(
+  job: CronJob,
+  titlePrefix: string,
+  icon: ComponentType<{ className?: string }>,
+): BoardAction {
+  return {
+    detail: job.prompt,
+    icon,
+    id: `job-${job.id}`,
+    meta: job.next_run_at ? `Next ${isoTimeAgo(job.next_run_at)}` : job.schedule_display || job.schedule.display,
+    status: job.last_error ? "error" : job.enabled ? "scheduled" : "paused",
+    title: `${titlePrefix}: ${job.name || job.prompt.slice(0, 68)}`,
+    to: "/cron",
+    variant: job.last_error ? "warning" : job.enabled ? "success" : "outline",
+  };
+}
+
+function approvalActions(data: HubData): BoardAction[] {
+  const pairingActions =
+    data.snapshot?.platforms.flatMap((platform) =>
+      platform.pending_pairings.map((pairing) => ({
+        detail: `${pairing.user_name || pairing.user_id} is waiting to pair with ${platformDisplayName(platform.name)}.`,
+        icon: ShieldCheck,
+        id: `pairing-${platform.name}-${pairing.code}`,
+        meta: `${pairing.age_minutes}m old`,
+        status: "approve",
+        title: `Approve ${platformDisplayName(platform.name)} pairing`,
+        to: "/today",
+        variant: "warning" as const,
+      })),
+    ) ?? [];
+  const waitingRunCount =
+    data.snapshot?.orchestration?.runs?.filter((run) => {
+      if (!run || typeof run !== "object") return false;
+      return JSON.stringify(run).toLowerCase().includes("waiting_for_approval");
+    }).length ?? 0;
+  const runAction =
+    waitingRunCount > 0
+      ? [
+          {
+            detail: `${waitingRunCount} agent run${waitingRunCount === 1 ? "" : "s"} need a human decision before continuing.`,
+            icon: AlertTriangle,
+            id: "waiting-runs",
+            meta: "agent orchestration",
+            status: "review",
+            title: "Review waiting agent approvals",
+            to: "/today",
+            variant: "warning" as const,
+          },
+        ]
+      : [];
+  return [...pairingActions, ...runAction];
+}
+
+const APPROVAL_CUE_KEYWORDS = ["approval", "approve", "review", "send", "gate"];
+
+function approvalCueCount(sessions: SessionInfo[], jobs: CronJob[]): number {
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      {items.map((item) => (
-        <Card key={item.key} className="bg-card/72">
-          <CardHeader className="p-4">
-            <div className="flex items-center justify-between gap-3">
-              <CardTitle>{item.label}</CardTitle>
-              <Badge variant={item.ready ? "success" : "outline"}>
-                {item.ready}/{item.connectors.length}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3 p-4 pt-0">
-            <div className="grid gap-1.5">
-              {item.connectors.slice(0, 4).map((connector) => {
-                return (
-                  <div
-                    key={connector.id}
-                    className="flex items-center justify-between gap-2 rounded-xl bg-background/35 px-2.5 py-1.5 text-xs"
-                  >
-                    <span className="truncate text-foreground">{connector.label}</span>
-                    <Badge variant={sourceStateVariant(connector.state)}>{connector.state.replace(/_/g, " ")}</Badge>
-                  </div>
-                );
-              })}
-              {!item.connectors.length && (
-                <div className="rounded-xl border border-dashed border-border bg-background/25 px-3 py-3 text-xs text-muted-foreground">
-                  No connector surface is configured for this lane yet.
-                </div>
-              )}
-            </div>
-            <div className="flex items-center justify-between gap-2 text-xs leading-5 text-muted-foreground">
-              <span>
-                {item.pending
-                  ? `${item.pending} connector setup item${item.pending === 1 ? "" : "s"} waiting`
-                  : "Connector status, records, and setup prompts live here."}
-              </span>
-              <Link
-                to="/config"
-                className="shrink-0 text-primary hover:underline"
-              >
-                Settings
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
-      ))}
-    </div>
+    sessions.filter((session) => sessionMatches(session, APPROVAL_CUE_KEYWORDS)).length +
+    jobs.filter((job) => jobMatches(job, APPROVAL_CUE_KEYWORDS)).length
   );
 }
 
-function SourceDataBoard({
-  data,
-  empty = "No source data is available yet.",
-  note = "Connector setup, API credentials, imports, and source repair live in Settings. This page only shows the local data that exists now.",
-  sourceIds,
+function approvalCueActions(
+  sessions: SessionInfo[],
+  jobs: CronJob[],
+  lane: string,
+): BoardAction[] {
+  const sessionCues = sessions
+    .filter((session) => sessionMatches(session, APPROVAL_CUE_KEYWORDS))
+    .slice(0, 3)
+    .map((session) => ({
+      ...sessionAction(session, `${lane} approval`, ShieldCheck),
+      status: "review",
+      variant: "warning" as const,
+    }));
+  const jobCues = jobs
+    .filter((job) => jobMatches(job, APPROVAL_CUE_KEYWORDS))
+    .slice(0, 3)
+    .map((job) => ({
+      ...jobAction(job, `${lane} review`, ShieldCheck),
+      status: "review",
+      variant: "warning" as const,
+    }));
+  return [...sessionCues, ...jobCues];
+}
+
+function ActionBoard({
+  actions,
+  empty,
   title,
 }: {
-  data: HubData;
-  empty?: string;
-  note?: string;
-  sourceIds: string[];
+  actions: BoardAction[];
+  empty: string;
   title: string;
 }) {
-  const connectors = connectorsById(data, sourceIds);
-
   return (
     <Card>
       <CardHeader>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center justify-between gap-3">
           <CardTitle>{title}</CardTitle>
-          <Badge variant="outline">{connectors.reduce((total, connector) => total + connectorRecordTotal(connector), 0)} records</Badge>
+          <Badge variant={actions.length ? "warning" : "success"}>{actions.length}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {connectors.length ? (
-          <div className="grid gap-3 md:grid-cols-2">
-            {connectors.map((connector) => (
+      <CardContent className="space-y-2">
+        {actions.length ? (
+          actions.slice(0, 8).map((action) => {
+            const Icon = action.icon;
+            return (
               <div
-                key={connector.id}
-                className="rounded-2xl border border-border/55 bg-background/35 p-3"
+                key={action.id}
+                className="flex items-start gap-3 rounded-2xl border border-border/55 bg-background/35 px-3 py-3"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-foreground">
-                      {connector.label}
+                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/20">
+                  <Icon className="h-4 w-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                      {action.title}
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-1.5">
-                      <Badge variant={sourceStateVariant(connector.state)}>
-                        {connector.state.replace(/_/g, " ")}
-                      </Badge>
-                      <Badge variant="outline">{connector.ownerAgent}</Badge>
-                      {connector.connectionType && (
-                        <Badge variant="outline">{connector.connectionType}</Badge>
-                      )}
-                    </div>
+                    <Badge variant={action.variant ?? "outline"}>{action.status}</Badge>
                   </div>
-                  <div className="text-right">
-                    <div className="text-lg font-semibold text-foreground">
-                      {connectorRecordTotal(connector)}
-                    </div>
-                    <div className="text-[0.68rem] text-muted-foreground">records</div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                    {action.detail}
+                  </p>
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    <span className="truncate text-[0.72rem] text-muted-foreground">{action.meta}</span>
+                    <Link
+                      className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-7 px-2.5")}
+                      to={action.to}
+                    >
+                      Open
+                    </Link>
                   </div>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {Object.entries(connector.recordCounts)
-                    .filter(([, value]) => value > 0)
-                    .slice(0, 6)
-                    .map(([key, value]) => (
-                      <Badge key={key} variant="outline">
-                        {key}: {value}
-                      </Badge>
-                    ))}
-                  {!connectorRecordTotal(connector) && (
-                    <span className="text-xs text-muted-foreground">No imported records yet.</span>
-                  )}
-                </div>
-                {connector.nextOperatorStep && (
-                  <div className="mt-3 rounded-xl bg-background/35 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
-                    {connector.nextOperatorStep}
-                  </div>
-                )}
               </div>
-            ))}
-          </div>
+            );
+          })
         ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
+          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm text-muted-foreground">
             {empty}
           </div>
         )}
-        <div className="flex flex-col gap-2 rounded-2xl border border-border/45 bg-background/25 px-3 py-2 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-          <span>{note}</span>
-          <Link to="/config" className="shrink-0 text-primary hover:underline">
-            Open Settings
-          </Link>
-        </div>
       </CardContent>
     </Card>
   );
@@ -533,104 +478,6 @@ function MemoryGraphView({
       edges={edges}
       nodes={nodes}
     />
-  );
-}
-
-function ApprovalInbox({ data }: { data: HubData }) {
-  const pendingPairings =
-    data.snapshot?.platforms.flatMap((platform) =>
-      platform.pending_pairings.map((pairing) => ({ pairing, platform })),
-    ) ?? [];
-  const waitingRuns =
-    data.snapshot?.orchestration?.runs?.filter((run) => {
-      if (!run || typeof run !== "object") return false;
-      return JSON.stringify(run).toLowerCase().includes("waiting_for_approval");
-    }).length ?? 0;
-  const approvalSurfaces =
-    data.snapshot?.harness && "safety" in data.snapshot.harness
-      ? data.snapshot.harness.safety.approval_surfaces
-      : [];
-
-  return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle>Pending approvals</CardTitle>
-            <Badge variant={pendingPairings.length || waitingRuns ? "warning" : "success"}>
-              {pendingPairings.length + waitingRuns}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {pendingPairings.map(({ pairing, platform }) => (
-            <div
-              key={`${platform.name}-${pairing.code}`}
-              className="rounded-2xl border border-warning/25 bg-warning/10 px-3 py-3"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-foreground">
-                    {platformDisplayName(platform.name)} pairing
-                  </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {pairing.user_name || pairing.user_id} / {pairing.age_minutes}m old
-                  </div>
-                </div>
-                <Badge variant="warning">{pairing.code}</Badge>
-              </div>
-              <div className="mt-2 rounded-xl bg-background/35 px-2.5 py-1.5 text-xs text-muted-foreground">
-                Approve from CLI or platform command until dashboard approval actions are wired.
-              </div>
-            </div>
-          ))}
-          {waitingRuns > 0 && (
-            <div className="rounded-2xl border border-warning/25 bg-warning/10 px-3 py-3 text-sm">
-              {waitingRuns} orchestration run{waitingRuns === 1 ? "" : "s"} waiting for approval.
-            </div>
-          )}
-          {!pendingPairings.length && waitingRuns === 0 && (
-            <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm text-muted-foreground">
-              No approvals are waiting. Pairing codes, send gates, and command approvals will collect here.
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Approval policy</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-2 gap-2">
-            <HubMetric
-              icon={ShieldCheck}
-              label="External actions"
-              value={
-                data.snapshot?.harness && "safety" in data.snapshot.harness
-                  ? data.snapshot.harness.safety.external_actions_policy
-                  : "review"
-              }
-            />
-            <HubMetric
-              icon={AlertTriangle}
-              label="Waiting runs"
-              value={waitingRuns}
-            />
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {(approvalSurfaces.length ? approvalSurfaces : ["terminal", "messaging", "send gate"]).map((surface) => (
-              <Badge key={surface} variant="outline">
-                {surface}
-              </Badge>
-            ))}
-          </div>
-          <p className="text-xs leading-5 text-muted-foreground">
-            Approvals should be visible before an agent sends messages, runs risky terminal work, or pairs a new messaging user.
-          </p>
-        </CardContent>
-      </Card>
-    </div>
   );
 }
 
@@ -760,12 +607,17 @@ export function RealEstateTodayPage() {
   const liveSessions = data.sessions.filter((session) => session.is_active);
   const enabledAgents = data.snapshot?.agents.filter((agent) => agent.enabled) ?? [];
   const enabledJobs = data.cronJobs.filter((job) => job.enabled);
+  const todayActions = [
+    ...approvalActions(data),
+    ...liveSessions.slice(0, 3).map((session) => sessionAction(session, "Continue", MessageSquare)),
+    ...enabledJobs.slice(0, 4).map((job) => jobAction(job, "Scheduled", CalendarClock)),
+  ];
 
   return (
     <HubShell
       data={data}
       eyebrow="Real Estate Command Center"
-      hero="A local-first operating view for lead priority, admin/document process, social pulse, and the agent team. Ads stays visible as a later lane."
+      hero="A local-first operating board for lead priority, admin/document work, social pulse, approvals, and the agent team. Ads stays visible as a later lane."
       icon={Home}
       title="Elevate Agent is ready to run from one real-estate hub."
     >
@@ -775,13 +627,17 @@ export function RealEstateTodayPage() {
           { icon: MessageSquare, label: "Live sessions", value: liveSessions.length },
           { icon: Clock, label: "Running tasks", value: enabledJobs.length },
           {
-            icon: Link2,
-            label: "Connectors ready",
-            value: readyConnectorCount(data),
+            icon: ShieldCheck,
+            label: "Today approvals",
+            value: pendingApprovalCount(data),
           },
         ]}
       />
-      <ConnectorReadiness data={data} />
+      <ActionBoard
+        actions={todayActions}
+        empty="Nothing urgent is waiting. Start a chat, schedule a pulse, or continue a recent session when work comes in."
+        title="Today's action board"
+      />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <RecentSessions
           title="Recent operator activity"
@@ -803,42 +659,52 @@ export function RealEstateLeadsPage() {
   const jobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
   );
+  const activeSessions = sessions.filter((session) => session.is_active);
+  const actions = [
+    ...approvalCueActions(sessions, jobs, "Lead"),
+    ...jobs
+      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((job) => jobAction(job, "Follow up", CalendarClock)),
+    ...sessions
+      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((session) => sessionAction(session, "Lead thread", MessageSquare)),
+  ];
 
   return (
     <HubShell
       data={data}
       eyebrow="Lead Desk"
-      hero="Shows imported lead/message records, lead events, matching sessions, and scheduled follow-up jobs. Setup and imports stay in Settings."
+      hero="A sales board for who needs a reply, which conversations should be resumed, what follow-ups are scheduled, and what outreach needs approval."
       icon={Users}
-      title="Leads is the sales data view."
+      title="Leads shows the next sales moves."
     >
       <WorkflowStrip
         items={[
           {
             icon: MessageSquare,
-            label: "Lead records",
-            value: sourceRecordCount(data, AREA_CONNECTORS.leads),
+            label: "Lead chats",
+            value: sessions.length,
           },
           { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
           {
             icon: Target,
-            label: "Lead events",
-            value: sourceRecordCount(data, AREA_CONNECTORS.leads, ["lead-events"]),
+            label: "Active threads",
+            value: activeSessions.length,
           },
           {
             icon: CheckCircle2,
-            label: "Ready sources",
-            value: readyConnectorCount(data, "leads"),
+            label: "Review gates",
+            value: approvalCueCount(sessions, jobs),
           },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SourceDataBoard
-          data={data}
-          sourceIds={AREA_CONNECTORS.leads}
-          title="Lead source data"
-          empty="No lead source data has been imported yet."
-          note="Lead scoring and outreach should be derived from these local records. Connect or import lead/message sources in Settings."
+        <ActionBoard
+          actions={actions}
+          title="Lead action board"
+          empty="No lead actions are waiting yet. When outreach sessions, follow-up schedules, or approvals exist, they will show up here."
         />
         <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
       </div>
@@ -893,42 +759,52 @@ export function RealEstateAdminPage() {
       "skyslope",
     ]),
   );
+  const activeSessions = sessions.filter((session) => session.is_active);
+  const actions = [
+    ...approvalCueActions(sessions, jobs, "Admin"),
+    ...jobs
+      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((job) => jobAction(job, "Admin check", CalendarClock)),
+    ...sessions
+      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((session) => sessionAction(session, "Admin workflow", FileCheck2)),
+  ];
 
   return (
     <HubShell
       data={data}
       eyebrow="Admin Desk"
-      hero="Shows local listing, deal, document, form, brokerage checklist, skill-output, session, and nightly admin job data."
+      hero="An admin board for listings, deals, CMA work, seller updates, forms, signatures, brokerage checklists, and nightly follow-through."
       icon={BriefcaseBusiness}
-      title="Admin is the listings and deals data view."
+      title="Admin shows the next listing and deal moves."
     >
       <WorkflowStrip
         items={[
           {
             icon: Building2,
-            label: "Admin records",
-            value: sourceRecordCount(data, AREA_CONNECTORS.admin),
+            label: "Admin sessions",
+            value: sessions.length,
           },
           { icon: CalendarClock, label: "Nightly checks", value: jobs.length },
           {
             icon: FileCheck2,
-            label: "Source tasks",
-            value: sourceRecordCount(data, AREA_CONNECTORS.admin, ["tasks"]),
+            label: "Active workflows",
+            value: activeSessions.length,
           },
           {
             icon: CheckCircle2,
-            label: "Ready sources",
-            value: readyConnectorCount(data, "admin"),
+            label: "Review gates",
+            value: approvalCueCount(sessions, jobs),
           },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SourceDataBoard
-          data={data}
-          sourceIds={AREA_CONNECTORS.admin}
-          title="Admin source data"
-          empty="No admin/listing/deal source data has been imported yet."
-          note="Listings, deals, documents, forms, brokerage requirements, and skill outputs belong here only after sources produce local records. Configure them in Settings."
+        <ActionBoard
+          actions={actions}
+          title="Admin action board"
+          empty="No admin actions are waiting yet. CMA, seller-update, MLC, signing, and listing/deal sessions will appear here."
         />
         <TimedTasks jobs={jobs} empty="No admin/document schedules yet." title="Admin automations" />
       </div>
@@ -950,42 +826,52 @@ export function RealEstateAdsPage() {
   const jobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["ads", "paid", "campaign", "email", "mailjet", "market stats", "listing ad"]),
   );
+  const activeSessions = sessions.filter((session) => session.is_active);
+  const actions = [
+    ...approvalCueActions(sessions, jobs, "Ads"),
+    ...jobs
+      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((job) => jobAction(job, "Campaign check", CalendarClock)),
+    ...sessions
+      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((session) => sessionAction(session, "Ads work", Target)),
+  ];
 
   return (
     <HubShell
       data={data}
       eyebrow="Ads Studio"
-      hero="Shows ad-related source records, sessions, and schedules for now. Facebook and Google Ads views can be ported here later."
+      hero="A lightweight paid-media board for campaign checks, launch prep, creative review, and approvals. Full ad account views can come later."
       icon={Target}
-      title="Ads is a light data lane for now."
+      title="Ads shows paid-media work waiting on the operator."
     >
       <WorkflowStrip
         items={[
           {
             icon: Target,
-            label: "Ad records",
-            value: sourceRecordCount(data, AREA_CONNECTORS.ads),
+            label: "Ad sessions",
+            value: sessions.length,
           },
           { icon: CalendarClock, label: "Campaign schedules", value: jobs.length },
           {
             icon: Activity,
-            label: "Ad sessions",
-            value: sessions.length,
+            label: "Active work",
+            value: activeSessions.length,
           },
           {
             icon: Megaphone,
-            label: "Ready sources",
-            value: readyConnectorCount(data, "ads"),
+            label: "Review gates",
+            value: approvalCueCount(sessions, jobs),
           },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SourceDataBoard
-          data={data}
-          sourceIds={AREA_CONNECTORS.ads}
-          title="Ads source data"
-          empty="No ads source data exists yet."
-          note="Ads stays as a data readout for now. Facebook, Google, and paid-media account setup belongs in Settings before this lane shows real campaign data."
+        <ActionBoard
+          actions={actions}
+          title="Ads action board"
+          empty="No paid-media actions are waiting yet. Campaign schedules and ad sessions will appear here."
         />
         <TimedTasks jobs={jobs} empty="No ad schedules yet." title="Campaign schedules" />
       </div>
@@ -1007,42 +893,52 @@ export function RealEstateSocialMediaPage() {
   const jobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["social", "caption", "hook", "post", "reel", "instagram", "facebook", "buffer"]),
   );
+  const activeSessions = sessions.filter((session) => session.is_active);
+  const actions = [
+    ...approvalCueActions(sessions, jobs, "Social"),
+    ...jobs
+      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((job) => jobAction(job, "Social pulse", CalendarClock)),
+    ...sessions
+      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
+      .slice(0, 5)
+      .map((session) => sessionAction(session, "Content work", Megaphone)),
+  ];
 
   return (
     <HubShell
       data={data}
       eyebrow="Social Studio"
-      hero="Shows Composio/social source records, synced metrics, message signals, content tasks, sessions, and scheduled social pulse jobs."
+      hero="A content board for best-post reviews, last-30-day pulse checks, hooks, captions, approvals, and scheduled social follow-through."
       icon={Megaphone}
-      title="Social Media is the content data view."
+      title="Social Media shows the next content moves."
     >
       <WorkflowStrip
         items={[
           {
             icon: Megaphone,
-            label: "Social records",
-            value: sourceRecordCount(data, AREA_CONNECTORS["social-media"]),
+            label: "Social sessions",
+            value: sessions.length,
           },
           { icon: CalendarClock, label: "Post schedules", value: jobs.length },
           {
             icon: Activity,
-            label: "Social sessions",
-            value: sessions.length,
+            label: "Active work",
+            value: activeSessions.length,
           },
           {
             icon: MessageSquare,
-            label: "Ready sources",
-            value: readyConnectorCount(data, "social-media"),
+            label: "Review gates",
+            value: approvalCueCount(sessions, jobs),
           },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SourceDataBoard
-          data={data}
-          sourceIds={AREA_CONNECTORS["social-media"]}
-          title="Social source data"
-          empty="No social source data has been imported yet."
-          note="Composio is the account hub for social apps. Connect accounts in Settings, then this page shows synced metrics, messages, content tasks, and lead signals."
+        <ActionBoard
+          actions={actions}
+          title="Social action board"
+          empty="No social actions are waiting yet. Pulse schedules, caption work, and content approvals will appear here."
         />
         <TimedTasks jobs={jobs} empty="No social schedules yet." title="Post schedules" />
       </div>
@@ -1086,59 +982,6 @@ export function RealEstateTasksPage() {
           empty="No sessions are active right now."
         />
       </div>
-    </HubShell>
-  );
-}
-
-export function RealEstateApprovalsPage() {
-  const data = useRealEstateHubData();
-  useHubHeader("Approvals", data);
-  const pendingPairings =
-    data.snapshot?.platforms.reduce(
-      (total, platform) => total + platform.pending_pairings.length,
-      0,
-    ) ?? 0;
-
-  return (
-    <HubShell
-      data={data}
-      eyebrow="Approval Center"
-      hero="Review pairing codes, send gates, risky command approval policy, and orchestration waits before anything leaves the local agent."
-      icon={ShieldCheck}
-      title="Approvals are the trust gate for local agent work."
-    >
-      <WorkflowStrip
-        items={[
-          { icon: KeyRound, label: "Pairing approvals", value: pendingPairings },
-          {
-            icon: ShieldCheck,
-            label: "External policy",
-            value:
-              data.snapshot?.harness && "safety" in data.snapshot.harness
-                ? data.snapshot.harness.safety.external_actions_policy
-                : "review",
-          },
-          {
-            icon: AlertTriangle,
-            label: "Review required",
-            value:
-              data.snapshot?.harness && "safety" in data.snapshot.harness
-                ? data.snapshot.harness.safety.human_communication_requires_review
-                  ? "Yes"
-                  : "No"
-                : "Unknown",
-          },
-          {
-            icon: Network,
-            label: "Approval surfaces",
-            value:
-              data.snapshot?.harness && "safety" in data.snapshot.harness
-                ? data.snapshot.harness.safety.approval_surfaces.length
-                : 0,
-          },
-        ]}
-      />
-      <ApprovalInbox data={data} />
     </HubShell>
   );
 }

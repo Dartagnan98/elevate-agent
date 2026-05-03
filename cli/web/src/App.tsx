@@ -92,7 +92,6 @@ import ProjectPage from "@/pages/ProjectPage";
 import {
   RealEstateAdminPage,
   RealEstateAdsPage,
-  RealEstateApprovalsPage,
   RealEstateLeadsPage,
   RealEstateMemoryPage,
   RealEstateSocialMediaPage,
@@ -121,6 +120,10 @@ function AdminRedirect() {
   return <Navigate to="/admin" replace />;
 }
 
+function ApprovalsRedirect() {
+  return <Navigate to="/today" replace />;
+}
+
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
@@ -140,7 +143,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/social-media": RealEstateSocialMediaPage,
   "/marketing": MarketingRedirect,
   "/tasks": RealEstateTasksPage,
-  "/approvals": RealEstateApprovalsPage,
+  "/approvals": ApprovalsRedirect,
   "/memory": RealEstateMemoryPage,
   "/hub": AgentHubPage,
   "/project": ProjectPage,
@@ -184,11 +187,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
     path: "/tasks",
     label: "Tasks",
     icon: ListChecks,
-  },
-  {
-    path: "/approvals",
-    label: "Approvals",
-    icon: ShieldCheck,
   },
   {
     path: "/memory",
@@ -1032,7 +1030,6 @@ function DesktopSidebar({
             <SidebarAction icon={Megaphone} label="Social Media" path="/social-media" onNavigate={go} />
             <SidebarAction icon={BarChart3} label="Ads" path="/ads" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
-            <SidebarAction icon={ShieldCheck} label="Approvals" path="/approvals" onNavigate={go} />
             <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
           </div>
         </div>

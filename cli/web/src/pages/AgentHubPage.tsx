@@ -318,7 +318,7 @@ function SetupRunway({
       label: "Messaging",
       detail: pendingPairings ? `${pendingPairings} pairing code${pendingPairings === 1 ? "" : "s"} waiting` : `${configuredPlatforms} connector${configuredPlatforms === 1 ? "" : "s"} configured`,
       state: pendingPairings ? "review" : configuredPlatforms ? "ready" : "blank",
-      to: "/approvals",
+      to: "/today",
     },
     {
       icon: Brain,

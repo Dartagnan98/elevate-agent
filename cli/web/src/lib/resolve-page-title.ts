@@ -50,7 +50,7 @@ export function resolvePageTitle(
     return "Tasks";
   }
   if (normalized === "/approvals") {
-    return "Approvals";
+    return "Today";
   }
   if (normalized === "/memory") {
     return "Memory";
