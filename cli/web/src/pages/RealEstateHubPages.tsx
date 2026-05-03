@@ -328,6 +328,26 @@ function readyConnectorCount(data: HubData, area?: keyof typeof AREA_CONNECTORS)
   }).length;
 }
 
+function connectorsById(data: HubData, sourceIds: string[]): SourceConnectorStatus[] {
+  const wanted = new Set(sourceIds);
+  return (data.sourceConnectors?.connectors ?? []).filter((connector) => wanted.has(connector.id));
+}
+
+function connectorRecordTotal(connector: SourceConnectorStatus, keys?: string[]): number {
+  const wanted = keys ? new Set(keys) : null;
+  return Object.entries(connector.recordCounts).reduce((total, [key, value]) => {
+    if (wanted && !wanted.has(key)) return total;
+    return total + value;
+  }, 0);
+}
+
+function sourceRecordCount(data: HubData, sourceIds: string[], keys?: string[]): number {
+  return connectorsById(data, sourceIds).reduce(
+    (total, connector) => total + connectorRecordTotal(connector, keys),
+    0,
+  );
+}
+
 function platformDisplayName(name: string): string {
   const cleaned = name.replace(/[-_]/g, " ");
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
@@ -410,52 +430,90 @@ function ConnectorReadiness({
   );
 }
 
-function SalesFocusBoard({
-  items,
-  note = "Connector setup, API credentials, imports, and source repair live in Settings. This page is for doing the work after the data is available.",
+function SourceDataBoard({
+  data,
+  empty = "No source data is available yet.",
+  note = "Connector setup, API credentials, imports, and source repair live in Settings. This page only shows the local data that exists now.",
+  sourceIds,
   title,
 }: {
-  items: Array<{
-    icon: ComponentType<{ className?: string }>;
-    label: string;
-    summary: string;
-    value: string | number;
-  }>;
+  data: HubData;
+  empty?: string;
   note?: string;
+  sourceIds: string[];
   title: string;
 }) {
+  const connectors = connectorsById(data, sourceIds);
+
   return (
     <Card>
       <CardHeader>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle>{title}</CardTitle>
-          <Badge variant="outline">operations</Badge>
+          <Badge variant="outline">{connectors.reduce((total, connector) => total + connectorRecordTotal(connector), 0)} records</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-3 md:grid-cols-2">
-          {items.map((item) => (
-            <div
-              key={item.label}
-              className="rounded-2xl border border-border/55 bg-background/35 p-3"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 items-start gap-2.5">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/20">
-                    <item.icon className="h-4 w-4" />
-                  </span>
+        {connectors.length ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            {connectors.map((connector) => (
+              <div
+                key={connector.id}
+                className="rounded-2xl border border-border/55 bg-background/35 p-3"
+              >
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-sm font-semibold text-foreground">{item.label}</div>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.summary}</p>
+                    <div className="truncate text-sm font-semibold text-foreground">
+                      {connector.label}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <Badge variant={sourceStateVariant(connector.state)}>
+                        {connector.state.replace(/_/g, " ")}
+                      </Badge>
+                      <Badge variant="outline">{connector.ownerAgent}</Badge>
+                      {connector.connectionType && (
+                        <Badge variant="outline">{connector.connectionType}</Badge>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-lg font-semibold text-foreground">
+                      {connectorRecordTotal(connector)}
+                    </div>
+                    <div className="text-[0.68rem] text-muted-foreground">records</div>
                   </div>
                 </div>
-                <Badge variant="outline">{item.value}</Badge>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {Object.entries(connector.recordCounts)
+                    .filter(([, value]) => value > 0)
+                    .slice(0, 6)
+                    .map(([key, value]) => (
+                      <Badge key={key} variant="outline">
+                        {key}: {value}
+                      </Badge>
+                    ))}
+                  {!connectorRecordTotal(connector) && (
+                    <span className="text-xs text-muted-foreground">No imported records yet.</span>
+                  )}
+                </div>
+                {connector.nextOperatorStep && (
+                  <div className="mt-3 rounded-xl bg-background/35 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+                    {connector.nextOperatorStep}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
-        </div>
-        <div className="rounded-2xl border border-border/45 bg-background/25 px-3 py-2 text-xs leading-5 text-muted-foreground">
-          {note}
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
+            {empty}
+          </div>
+        )}
+        <div className="flex flex-col gap-2 rounded-2xl border border-border/45 bg-background/25 px-3 py-2 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+          <span>{note}</span>
+          <Link to="/config" className="shrink-0 text-primary hover:underline">
+            Open Settings
+          </Link>
         </div>
       </CardContent>
     </Card>
@@ -750,47 +808,37 @@ export function RealEstateLeadsPage() {
     <HubShell
       data={data}
       eyebrow="Lead Desk"
-      hero="Prioritize who needs work, who is cooling off, what leads just came through, and which outreach workflow should run next. Setup and imports stay in Settings."
+      hero="Shows imported lead/message records, lead events, matching sessions, and scheduled follow-up jobs. Setup and imports stay in Settings."
       icon={Users}
-      title="Leads shows the people who need attention now."
+      title="Leads is the sales data view."
     >
       <WorkflowStrip
         items={[
-          { icon: MessageSquare, label: "Lead conversations", value: sessions.length },
+          {
+            icon: MessageSquare,
+            label: "Lead records",
+            value: sourceRecordCount(data, AREA_CONNECTORS.leads),
+          },
           { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
-          { icon: Target, label: "Scoring", value: "AI" },
-          { icon: CheckCircle2, label: "Approved sends", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          {
+            icon: Target,
+            label: "Lead events",
+            value: sourceRecordCount(data, AREA_CONNECTORS.leads, ["lead-events"]),
+          },
+          {
+            icon: CheckCircle2,
+            label: "Ready sources",
+            value: readyConnectorCount(data, "leads"),
+          },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SalesFocusBoard
-          title="Lead workbench"
-          items={[
-            {
-              icon: MessageSquare,
-              label: "Needs follow-up",
-              value: sessions.length,
-              summary: "Open reply-needed conversations, overdue touches, warm reactivation, and leads the outreach skill should handle next.",
-            },
-            {
-              icon: AlertTriangle,
-              label: "Falling out",
-              value: "watch",
-              summary: "Flag leads going quiet, missed replies, cold stretches, low-intent drift, and people who need a better next touch.",
-            },
-            {
-              icon: Target,
-              label: "New lead scoring",
-              value: "rank",
-              summary: "Score new inbound leads from CRM, Messages, email, or manual intake and explain why each one matters.",
-            },
-            {
-              icon: CheckCircle2,
-              label: "Approved outreach",
-              value: "gated",
-              summary: "Draft texts, emails, and DM replies stay human-approved before the outreach-send gate touches the real world.",
-            },
-          ]}
+        <SourceDataBoard
+          data={data}
+          sourceIds={AREA_CONNECTORS.leads}
+          title="Lead source data"
+          empty="No lead source data has been imported yet."
+          note="Lead scoring and outreach should be derived from these local records. Connect or import lead/message sources in Settings."
         />
         <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
       </div>
@@ -850,52 +898,37 @@ export function RealEstateAdminPage() {
     <HubShell
       data={data}
       eyebrow="Admin Desk"
-      hero="Run the signed-listing and deal process: CMA handoff, seller updates, forms, signatures, brokerage checklists, nightly status checks, and the local listing/deal database."
+      hero="Shows local listing, deal, document, form, brokerage checklist, skill-output, session, and nightly admin job data."
       icon={BriefcaseBusiness}
-      title="Admin owns listings and deals once the real work starts."
+      title="Admin is the listings and deals data view."
     >
       <WorkflowStrip
         items={[
-          { icon: Building2, label: "Listing/deal records", value: sessions.length },
+          {
+            icon: Building2,
+            label: "Admin records",
+            value: sourceRecordCount(data, AREA_CONNECTORS.admin),
+          },
           { icon: CalendarClock, label: "Nightly checks", value: jobs.length },
           {
             icon: FileCheck2,
-            label: "Doc process",
-            value: "phases",
+            label: "Source tasks",
+            value: sourceRecordCount(data, AREA_CONNECTORS.admin, ["tasks"]),
           },
-          { icon: CheckCircle2, label: "Approvals", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          {
+            icon: CheckCircle2,
+            label: "Ready sources",
+            value: readyConnectorCount(data, "admin"),
+          },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SalesFocusBoard
-          title="Admin workbench"
-          items={[
-            {
-              icon: DatabaseIcon,
-              label: "Listing/deal database",
-              value: sessions.length,
-              summary: "Create one local record per listing or signed deal with stage, people, dates, documents, blockers, and artifact history.",
-            },
-            {
-              icon: FileCheck2,
-              label: "Document process",
-              value: "MLC",
-              summary: "Use Skyleigh tools phases for MLC, DigiSign, WebForms, forms, signatures, packets, and what documents are still needed.",
-            },
-            {
-              icon: CalendarClock,
-              label: "Nightly admin pulse",
-              value: jobs.length,
-              summary: "Cron checks where listings/deals are at, what changed, what is stale, and what needs tomorrow’s human attention.",
-            },
-            {
-              icon: CheckCircle2,
-              label: "Seller and client outputs",
-              value: "queued",
-              summary: "Seller updates, weekly reports, feedback summaries, and admin handoffs stay review-gated before sending.",
-            },
-          ]}
-          note="SkySlope, brokerage software, document storage, forms providers, and skill-output imports are configured in Settings. Admin is the operating room after those sources exist."
+        <SourceDataBoard
+          data={data}
+          sourceIds={AREA_CONNECTORS.admin}
+          title="Admin source data"
+          empty="No admin/listing/deal source data has been imported yet."
+          note="Listings, deals, documents, forms, brokerage requirements, and skill outputs belong here only after sources produce local records. Configure them in Settings."
         />
         <TimedTasks jobs={jobs} empty="No admin/document schedules yet." title="Admin automations" />
       </div>
@@ -922,48 +955,37 @@ export function RealEstateAdsPage() {
     <HubShell
       data={data}
       eyebrow="Ads Studio"
-      hero="Park paid media here for now. This lane will eventually inherit Facebook and Google Ads views, budgets, approvals, and reporting from the paid-ads stack."
+      hero="Shows ad-related source records, sessions, and schedules for now. Facebook and Google Ads views can be ported here later."
       icon={Target}
-      title="Ads is visible, but it is not the main workflow yet."
+      title="Ads is a light data lane for now."
     >
       <WorkflowStrip
         items={[
-          { icon: Target, label: "Ad sessions", value: sessions.length },
+          {
+            icon: Target,
+            label: "Ad records",
+            value: sourceRecordCount(data, AREA_CONNECTORS.ads),
+          },
           { icon: CalendarClock, label: "Campaign schedules", value: jobs.length },
-          { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
-          { icon: Megaphone, label: "Creative review", value: "drafts" },
+          {
+            icon: Activity,
+            label: "Ad sessions",
+            value: sessions.length,
+          },
+          {
+            icon: Megaphone,
+            label: "Ready sources",
+            value: readyConnectorCount(data, "ads"),
+          },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SalesFocusBoard
-          title="Ads workbench"
-          items={[
-            {
-              icon: Target,
-              label: "Campaign briefs later",
-              value: sessions.length,
-              summary: "Keep paid campaign ideas, listing ad angles, audience notes, and market positioning here until the ads workspace is ported.",
-            },
-            {
-              icon: Megaphone,
-              label: "Creative drafts",
-              value: "review",
-              summary: "Ad copy, hooks, graphics, landing-page notes, and email campaign drafts can be reviewed without publishing.",
-            },
-            {
-              icon: CalendarClock,
-              label: "Flight schedules",
-              value: jobs.length,
-              summary: "Recurring campaign checks, reporting cadences, market stat pulls, and launch reminders.",
-            },
-            {
-              icon: CheckCircle2,
-              label: "Approved launches",
-              value: "gated",
-              summary: "Ads should not publish or alter budgets until the operator approves the exact action.",
-            },
-          ]}
-          note="Ads setup is intentionally lighter for now. Facebook, Google, and Composio-style ad account setup belongs in Settings, and the richer ads console can be ported later."
+        <SourceDataBoard
+          data={data}
+          sourceIds={AREA_CONNECTORS.ads}
+          title="Ads source data"
+          empty="No ads source data exists yet."
+          note="Ads stays as a data readout for now. Facebook, Google, and paid-media account setup belongs in Settings before this lane shows real campaign data."
         />
         <TimedTasks jobs={jobs} empty="No ad schedules yet." title="Campaign schedules" />
       </div>
@@ -990,48 +1012,37 @@ export function RealEstateSocialMediaPage() {
     <HubShell
       data={data}
       eyebrow="Social Studio"
-      hero="Run a content pulse from connected platforms: best posts, weak posts, last-30-day metrics, hooks, captions, and scheduled organic follow-up."
+      hero="Shows Composio/social source records, synced metrics, message signals, content tasks, sessions, and scheduled social pulse jobs."
       icon={Megaphone}
-      title="Social Media watches content performance and turns it into next posts."
+      title="Social Media is the content data view."
     >
       <WorkflowStrip
         items={[
-          { icon: Megaphone, label: "Social sessions", value: sessions.length },
+          {
+            icon: Megaphone,
+            label: "Social records",
+            value: sourceRecordCount(data, AREA_CONNECTORS["social-media"]),
+          },
           { icon: CalendarClock, label: "Post schedules", value: jobs.length },
-          { icon: Activity, label: "30-day pulse", value: "auto" },
-          { icon: MessageSquare, label: "Content queue", value: "drafts" },
+          {
+            icon: Activity,
+            label: "Social sessions",
+            value: sessions.length,
+          },
+          {
+            icon: MessageSquare,
+            label: "Ready sources",
+            value: readyConnectorCount(data, "social-media"),
+          },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SalesFocusBoard
-          title="Social workbench"
-          items={[
-            {
-              icon: MessageSquare,
-              label: "Best-post analysis",
-              value: sessions.length,
-              summary: "Pull recent performance, identify the posts that worked, and convert the insight into the next content prompts.",
-            },
-            {
-              icon: Megaphone,
-              label: "Post drafts",
-              value: "review",
-              summary: "Generate hooks, captions, reels, listing moments, market updates, and nurture content before scheduling.",
-            },
-            {
-              icon: CalendarClock,
-              label: "Pulse cadence",
-              value: jobs.length,
-              summary: "Run daily, weekly, or last-30-day social checks so metrics keep syncing into the local content workspace.",
-            },
-            {
-              icon: CheckCircle2,
-              label: "Approved posts",
-              value: "gated",
-              summary: "Keep final captions and assets in an approval lane before anything posts externally.",
-            },
-          ]}
-          note="Social account setup, Facebook/Instagram permissions, and Composio access belong in Settings. This page stays focused on the content queue."
+        <SourceDataBoard
+          data={data}
+          sourceIds={AREA_CONNECTORS["social-media"]}
+          title="Social source data"
+          empty="No social source data has been imported yet."
+          note="Composio is the account hub for social apps. Connect accounts in Settings, then this page shows synced metrics, messages, content tasks, and lead signals."
         />
         <TimedTasks jobs={jobs} empty="No social schedules yet." title="Post schedules" />
       </div>

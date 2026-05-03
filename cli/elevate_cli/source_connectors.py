@@ -90,12 +90,12 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
     },
     {
         "id": "social",
-        "source": "Social DMs",
+        "source": "Composio Social Accounts",
         "category": "messages",
-        "informationNeeded": "Business inboxes, account type, provider/API/export path, lead definition, and reply workflow.",
-        "connectionLayer": "Official webhook, provider export, or manual import turns business DMs into conversations and lead events.",
-        "uiDestination": "Lead inbox, Outreach, nurture tasks, and approvals for drafted replies.",
-        "successSignal": "A qualified DM becomes a lead with channel, source URL, confidence, and an owner task.",
+        "informationNeeded": "Composio account/MCP URL, connected social apps, metrics scope, DM/comment scope, lead definition, and reply workflow.",
+        "connectionLayer": "Composio is the account hub. Elevate uses the local MCP/tool connection to read social posts, metrics, DMs, comments, and lead moments into normalized local records.",
+        "uiDestination": "Social Media pulse, Leads from DMs/comments, content tasks, and approvals for drafted replies.",
+        "successSignal": "A connected Composio social app can produce a local social metric, content task, lead event, or reply approval record.",
     },
     {
         "id": "email",
@@ -159,7 +159,7 @@ OWNER_BY_SOURCE = {
     "android-device": "Outreach",
     "rcs": "Outreach",
     "crm": "Outreach",
-    "social": "Outreach",
+    "social": "Social Media",
     "email": "Outreach",
     "skills": "Executive Assistant",
     "market-stats": "Social Media",
@@ -203,6 +203,14 @@ CONNECTION_CONTRACT = """Build this as an Elevate Agent connection layer, not a 
 - Add or document the repeatable connector entrypoint: webhook route, polling command, import command, or local bridge command.
 
 Start read-only. Do not send messages, submit forms, move files, change permissions, upload data, or create persistent API keys unless the operator explicitly approves that action."""
+
+COMPOSIO_SOCIAL_CONTRACT = """Use Composio as the social account hub:
+
+- The operator connects their Composio account first.
+- Social apps such as Instagram, Facebook, LinkedIn, YouTube, TikTok, X, or Threads are added inside Composio.
+- Elevate reads through the configured local MCP/tool connection and writes normalized local source records.
+- Metrics become Social Media pulse inputs; DMs/comments that look like leads become Leads records; outbound replies stay approval-gated.
+- Never ask for raw social passwords. If an app is not connected in Composio, write the exact next operator step instead."""
 
 
 def _now() -> str:
@@ -290,6 +298,28 @@ def _replace_jsonl(path: Path, records: list[JsonRecord]) -> None:
         for record in records:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     tmp_path.replace(path)
+
+
+def _configured_composio_server(config: dict[str, Any]) -> JsonRecord | None:
+    servers = _as_dict(config.get("mcp_servers"))
+    for name, raw_server in servers.items():
+        server = _as_dict(raw_server)
+        args = server.get("args")
+        haystack_parts = [
+            str(name),
+            str(server.get("url") or ""),
+            str(server.get("command") or ""),
+            " ".join(str(item) for item in args) if isinstance(args, list) else str(args or ""),
+        ]
+        if "composio" not in " ".join(haystack_parts).lower():
+            continue
+        return {
+            "name": str(name),
+            "transport": "http" if server.get("url") else "stdio",
+            "url": str(server.get("url") or ""),
+            "command": str(server.get("command") or ""),
+        }
+    return None
 
 
 def _apple_messages_chat_db_path() -> Path:
@@ -885,12 +915,13 @@ def source_prompt_for(source_id: str) -> str:
         return ""
     surfaces = ", ".join(UI_BY_SOURCE.get(source_id, ["Settings"]))
     owner = OWNER_BY_SOURCE.get(source_id, "Executive Assistant")
+    extra_contract = f"\n\n{COMPOSIO_SOCIAL_CONTRACT}" if source_id == "social" else ""
     return (
         f"You are wiring {blueprint['source']} into Elevate Agent.\n\n"
         f"Connection goal:\nCreate a read-only local source first. Use source_id={source_id}. "
         "If credentials, OAuth, exports, webhook approval, or app review are needed, mark status.json as needs_operator with the exact next step.\n\n"
         f"Information Elevate needs:\n{blueprint['informationNeeded']}\n\n"
-        f"{CONNECTION_CONTRACT}\n\n"
+        f"{CONNECTION_CONTRACT}{extra_contract}\n\n"
         f"Connector behavior:\n- owner_agent={owner}\n- target UI surfaces: {surfaces}\n"
         "- include source_id, source_record_id, source_url when available, display_name, channel, direction, timestamp, text or summary, confidence, tags, and target_ui_surfaces.\n"
         "- put outbound work in tasks.jsonl with approval_required=true unless the operator explicitly authorizes sending.\n\n"
@@ -901,6 +932,8 @@ def source_prompt_for(source_id: str) -> str:
 def _initialize_behavior(source_id: str) -> str:
     if source_id == "apple-messages":
         return "local_messages_import"
+    if source_id == "social":
+        return "composio_social_setup"
     return "agent_setup_task"
 
 
@@ -979,6 +1012,116 @@ def build_source_connectors_response(config: dict[str, Any] | None = None) -> Js
     }
 
 
+def scaffold_composio_social_source(config: dict[str, Any] | None = None) -> JsonRecord:
+    config = config or load_config()
+    blueprint = _blueprint("social")
+    if not blueprint:
+        raise RuntimeError("Composio social connector blueprint is missing")
+
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    source_dir = _source_dir(source_root, "social")
+    artifacts_dir = source_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    now = _now()
+    surfaces = UI_BY_SOURCE["social"]
+    owner = OWNER_BY_SOURCE["social"]
+    prompt = source_prompt_for("social")
+    prompt_path = artifacts_dir / "composio-social-setup-prompt.md"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    composio_server = _configured_composio_server(config)
+    has_server = composio_server is not None
+    next_step = (
+        "Add Instagram, Facebook, LinkedIn, YouTube, TikTok, or other social apps inside Composio, "
+        "then run the social sync/import agent prompt so Elevate can write local metrics, messages, lead events, and tasks."
+        if has_server
+        else (
+            "Connect Composio MCP in Settings/config first, add the social apps inside Composio, "
+            "then refresh this setup and run the social sync/import agent prompt."
+        )
+    )
+
+    _write_json(
+        source_dir / "source.json",
+        {
+            "source_id": "social",
+            "provider": "Composio Social Accounts",
+            "account_label": "Composio Social Hub",
+            "connection_type": "composio_mcp" if has_server else "composio_mcp_setup",
+            "auth_status": "composio_mcp_configured" if has_server else "needs_composio_account",
+            "sync_mode": "composio_social_setup",
+            "owner_agent": owner,
+            "enabled_ui_surfaces": surfaces,
+            "setup_status": "needs_social_accounts" if has_server else "needs_composio_mcp",
+            "last_sync_at": now,
+            "setup_notes": (
+                "Composio is the social account hub. Elevate reads through the local MCP/tool connection "
+                "and writes normalized local source records; outbound replies remain approval-gated."
+            ),
+            "agent_setup_prompt_path": str(prompt_path),
+            "composio_server": composio_server,
+        },
+    )
+    _write_json(
+        source_dir / "status.json",
+        {
+            "connected": False,
+            "import_only": False,
+            "blocked": False,
+            "last_error": None,
+            "next_operator_step": next_step,
+            "last_checked_at": now,
+        },
+    )
+
+    for file_name in JSONL_FILES:
+        _replace_jsonl(source_dir / file_name, [])
+
+    _replace_jsonl(
+        source_dir / "tasks.jsonl",
+        [
+            {
+                "source_id": "social",
+                "source_record_id": f"social-composio-setup:{now}",
+                "display_name": "Composio Social Accounts",
+                "timestamp": now,
+                "title": "Connect social accounts in Composio",
+                "status": "open",
+                "task_type": "connector_setup",
+                "approval_required": False,
+                "owner_agent": owner,
+                "summary": next_step,
+                "agent_prompt_path": str(prompt_path),
+                "agent_prompt": prompt,
+                "confidence": 0.9,
+                "tags": ["connector-setup", "composio", "social-media"],
+                "target_ui_surfaces": ["Settings", "Social Media", "Leads", "Tasks"],
+            }
+        ],
+    )
+    _write_json(
+        artifacts_dir / "setup-checklist.json",
+        {
+            "source_id": "social",
+            "owner_agent": owner,
+            "created_at": now,
+            "steps": [
+                "Connect the operator's Composio account in Elevate Settings/config.",
+                "Add approved social apps inside Composio.",
+                "Confirm read scopes for metrics, posts, comments, and DMs.",
+                "Run the social sync/import agent prompt to write local records.",
+                "Keep outbound replies and posts approval-gated.",
+            ],
+        },
+    )
+    view = connector_view(source_root, "social")
+    if view is None:
+        raise RuntimeError("Composio social scaffold was written but could not be read")
+    return view
+
+
 def scaffold_source(source_id: str, config: dict[str, Any] | None = None) -> JsonRecord:
     config = config or load_config()
     blueprint = _blueprint(source_id)
@@ -987,6 +1130,8 @@ def scaffold_source(source_id: str, config: dict[str, Any] | None = None) -> Jso
 
     if source_id == "apple-messages":
         return initialize_apple_messages_source(config)
+    if source_id == "social":
+        return scaffold_composio_social_source(config)
 
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])

@@ -171,6 +171,11 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
       ? "Re-imports synced Mac Messages into Elevate's local message index: people, conversations, messages, and conversation-days."
       : "Reads the synced Mac Messages database and builds a local Elevate message index for lead context.";
   }
+  if (connector.initializeBehavior === "composio_social_setup") {
+    return connector.sourceExists
+      ? "Refreshes the local Composio social setup record and next operator step. Add social accounts inside Composio, then run a sync/import."
+      : "Sets up Composio as the social account hub for metrics, DMs, comments, lead moments, content tasks, and approval-gated replies.";
+  }
   return connector.sourceExists
     ? "Refreshes the local agent setup task and prompt for building the real connector. It does not fabricate demo lead data."
     : "Creates a local setup task for the agent/operator to build the webhook, poller, import command, or bridge.";
@@ -178,10 +183,15 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
 
 function connectorActionLabel(connector: SourceConnectorStatus, busy: boolean): string {
   if (busy) {
-    return connector.initializeBehavior === "local_messages_import" ? "Importing" : "Creating task";
+    if (connector.initializeBehavior === "local_messages_import") return "Importing";
+    if (connector.initializeBehavior === "composio_social_setup") return "Preparing Composio";
+    return "Creating task";
   }
   if (connector.initializeBehavior === "local_messages_import") {
     return connector.sourceExists ? "Re-import messages" : "Import messages";
+  }
+  if (connector.initializeBehavior === "composio_social_setup") {
+    return connector.sourceExists ? "Refresh Composio task" : "Set up Composio";
   }
   return connector.sourceExists ? "Refresh setup task" : "Create setup task";
 }
@@ -233,7 +243,7 @@ function SourceConnectorSettingsPanel() {
               Source connectors
             </CardTitle>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Setup lives here. Apple Messages can build a real local message index; other sources create an agent setup task until a webhook, poller, import command, or bridge exists.
+              Setup lives here. Apple Messages can build a real local message index. Social apps use Composio as the account hub. Other sources create an agent setup task until a webhook, poller, import command, or bridge exists.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
