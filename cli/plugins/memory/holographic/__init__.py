@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -99,6 +100,7 @@ FACT_STORE_SCHEMA = {
                     "layered_recall",
                     "rag_query",
                     "community_reports",
+                    "relation_backfill",
                     "recall_route",
                     "document_add",
                     "document_search",
@@ -163,6 +165,11 @@ FACT_STORE_SCHEMA = {
             "path": {"type": "string", "description": "Local archive path for import_plaud_archive."},
             "metadata": {"type": "object", "description": "Optional document metadata."},
             "chunks": {"type": "array", "items": {"type": "string"}, "description": "Pre-split chunks for document_add."},
+            "modal_assets": {"type": "array", "items": {"type": "object"}, "description": "Parsed multimodal assets for document_add: image/table/equation/page artifacts."},
+            "fact_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional fact IDs for cluster/maintenance actions."},
+            "max_chars": {"type": "integer", "description": "Maximum packed RAG context characters."},
+            "token_budget": {"type": "integer", "description": "Alias for max_chars."},
+            "batch_size": {"type": "integer", "description": "Batch size for backfill actions."},
         },
         "required": ["action"],
     },
@@ -830,6 +837,13 @@ class HolographicMemoryProvider(MemoryProvider):
                 results = store.search_community_reports(query, limit=int(args.get("limit", 5)))
                 return json.dumps({"results": results, "count": len(results)})
 
+            elif action == "relation_backfill":
+                result = store.backfill_graph_relations(
+                    source_type=args.get("source_type"),
+                    limit=int(args["limit"]) if args.get("limit") is not None else None,
+                )
+                return json.dumps(result)
+
             elif action == "recall_route":
                 query = args.get("query") or args.get("content") or ""
                 result = self._recall_route(query, session_id=args.get("session_id") or self._session_id)
@@ -1163,6 +1177,7 @@ class HolographicMemoryProvider(MemoryProvider):
         citations so the active agent can answer from retrieved memory.
         """
         query = str(query or "").strip()
+        started = time.time()
         limit = max(1, int(limit or 8))
         mode = str(mode or "mix").strip().lower()
         if mode not in {"local", "global", "hybrid", "naive", "mix"}:
@@ -1261,6 +1276,34 @@ class HolographicMemoryProvider(MemoryProvider):
             })
 
         context = self._format_rag_context(query, sections, citations=citations)
+        keywords = self._extract_rag_keywords(query, sections)
+        raw_data = self._build_rag_raw_data(
+            query=query,
+            mode=mode,
+            keywords=keywords,
+            sections=sections,
+            citations=citations,
+            elapsed_ms=int((time.time() - started) * 1000),
+        )
+        if self._store:
+            try:
+                self._store.record_memory_event(
+                    "memory.rag_query.complete",
+                    session_id=session_id or self._session_id,
+                    detail={
+                        "query": query,
+                        "mode": mode,
+                        "source_type": source_type or "",
+                        "limit": limit,
+                        "max_chars": max_chars,
+                        "elapsed_ms": raw_data["telemetry"]["elapsed_ms"],
+                        "counts": raw_data["telemetry"]["counts"],
+                        "citation_count": len(citations),
+                        "context_chars": len(context),
+                    },
+                )
+            except Exception as exc:
+                logger.debug("RAG query event logging failed: %s", exc)
         if self._store:
             try:
                 self._store.post_retrieval_maintenance(
@@ -1287,7 +1330,92 @@ class HolographicMemoryProvider(MemoryProvider):
             "sections": sections,
             "citations": citations,
             "context": context,
+            "raw_data": raw_data,
+            "keywords": keywords,
             "empty": not bool(context.strip()),
+        }
+
+    def _extract_rag_keywords(self, query: str, sections: dict[str, object]) -> dict[str, list[str]]:
+        """LightRAG-style deterministic high/low keyword decomposition."""
+        query_tokens = list(self._meaningful_tokens(query))
+        entities: list[str] = []
+        for wiki in sections.get("graph", []) if isinstance(sections.get("graph"), list) else []:
+            name = str(wiki.get("entity") or "").strip() if isinstance(wiki, dict) else ""
+            if name:
+                entities.append(name)
+        for community in sections.get("communities", []) if isinstance(sections.get("communities"), list) else []:
+            raw = str(community.get("entity_names") or "" if isinstance(community, dict) else "")
+            for name in re.split(r"[,;|]", raw):
+                name = name.strip()
+                if name:
+                    entities.append(name)
+        high_level: list[str] = []
+        seen_high: set[str] = set()
+        for name in entities + re.findall(r"\b[A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*){1,5}\b", query):
+            key = name.lower()
+            if key not in seen_high:
+                seen_high.add(key)
+                high_level.append(name)
+            if len(high_level) >= 12:
+                break
+        scored_tokens: dict[str, int] = {token: 2 for token in query_tokens}
+        lane_texts: list[str] = []
+        for key in ("facts", "chunks", "communities", "recent"):
+            items = sections.get(key) if isinstance(sections.get(key), list) else []
+            for item in items[:6]:
+                if not isinstance(item, dict):
+                    continue
+                lane_texts.append(" ".join(str(item.get(field) or "") for field in ("content", "summary", "title", "tags", "source_uri", "user_content")))
+        for text in lane_texts:
+            for token in self._meaningful_tokens(text):
+                if token in scored_tokens:
+                    scored_tokens[token] += 2
+                elif len(token) >= 5:
+                    scored_tokens[token] = 1
+        low_level = [token for token, _ in sorted(scored_tokens.items(), key=lambda row: (row[1], row[0]), reverse=True)[:20]]
+        return {"high_level": high_level, "low_level": low_level}
+
+    def _build_rag_raw_data(
+        self,
+        *,
+        query: str,
+        mode: str,
+        keywords: dict[str, list[str]],
+        sections: dict[str, object],
+        citations: list[dict],
+        elapsed_ms: int,
+    ) -> dict[str, object]:
+        counts = {
+            key: len(sections.get(key, [])) if isinstance(sections.get(key), list) else 0
+            for key in ("communities", "facts", "chunks", "recent", "graph")
+        }
+        score_breakdown = {
+            "communities": [
+                {"id": item.get("community_id"), "score": item.get("score"), "name": item.get("name")}
+                for item in sections.get("communities", []) if isinstance(item, dict)
+            ],
+            "facts": [
+                {"id": item.get("fact_id"), "score": item.get("score"), "trust_score": item.get("trust_score"), "source_uri": item.get("source_uri")}
+                for item in sections.get("facts", []) if isinstance(item, dict)
+            ],
+            "chunks": [
+                {"id": item.get("chunk_id"), "document_id": item.get("document_id"), "score": item.get("score"), "fts_score": item.get("fts_score"), "semantic_score": item.get("semantic_score"), "source_uri": item.get("source_uri")}
+                for item in sections.get("chunks", []) if isinstance(item, dict)
+            ],
+        }
+        return {
+            "query": query,
+            "mode": mode,
+            "keywords": keywords,
+            "sections": sections,
+            "citations": citations,
+            "score_breakdown": score_breakdown,
+            "telemetry": {
+                "elapsed_ms": elapsed_ms,
+                "counts": counts,
+                "citation_count": len(citations),
+                "budget": sections.get("budget", {}),
+            },
         }
 
     def _pack_rag_sections(self, query: str, sections: dict[str, object], *, max_chars: int = 12000) -> dict[str, object]:

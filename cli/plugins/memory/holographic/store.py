@@ -2357,7 +2357,8 @@ class MemoryStore:
                         continue
                     add_result(row, sim, "semantic_score")
 
-        results = sorted(results_by_id.values(), key=lambda r: r.get("score", 0.0), reverse=True)[:limit]
+        ranked_results = sorted(results_by_id.values(), key=lambda r: r.get("score", 0.0), reverse=True)
+        results = self._diversify_document_results(ranked_results, limit=limit)
         for item in results:
             item.pop("fts_rank_raw", None)
             if item.get("metadata_json"):
@@ -2367,6 +2368,98 @@ class MemoryStore:
                     item["metadata"] = {}
             item.pop("metadata_json", None)
         return results
+
+    def _diversify_document_results(self, results: list[dict], *, limit: int) -> list[dict]:
+        """Prefer high scoring chunks while avoiding one transcript crowding out all context."""
+        limit = max(1, int(limit))
+        if len(results) <= limit:
+            return results[:limit]
+        per_document_cap = 1 if limit <= 5 else 2
+        selected: list[dict] = []
+        per_doc: dict[int, int] = {}
+        deferred: list[dict] = []
+        for item in results:
+            doc_id = int(item.get("document_id") or 0)
+            count = per_doc.get(doc_id, 0)
+            if doc_id and count >= per_document_cap:
+                deferred.append(item)
+                continue
+            selected.append(item)
+            if doc_id:
+                per_doc[doc_id] = count + 1
+            if len(selected) >= limit:
+                return selected
+        for item in deferred:
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+        return selected[:limit]
+
+    def backfill_graph_relations(self, *, source_type: str | None = None, limit: int | None = None) -> dict:
+        """Backfill entity links and co-occurrence relations for existing facts/chunks."""
+        started = time.time()
+        max_rows = int(limit) if limit is not None else None
+        facts_processed = 0
+        chunks_processed = 0
+        before = self._conn.execute("SELECT COUNT(*) AS count FROM memory_relations").fetchone()
+        before_count = int(before["count"] or 0) if before else 0
+        with self._lock:
+            fact_rows = []
+            if not source_type or source_type == "fact":
+                fact_sql = """
+                    SELECT fact_id, content
+                    FROM facts
+                    WHERE COALESCE(status, 'active') = 'active'
+                    ORDER BY fact_id ASC
+                """
+                if max_rows:
+                    fact_sql += " LIMIT ?"
+                    fact_rows = self._conn.execute(fact_sql, (max_rows,)).fetchall()
+                else:
+                    fact_rows = self._conn.execute(fact_sql).fetchall()
+            for row in fact_rows:
+                fact_id = int(row["fact_id"])
+                self._conn.execute("DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,))
+                self._conn.execute("DELETE FROM memory_relations WHERE source_type = 'fact' AND source_id = ?", (fact_id,))
+                self._link_fact_entities(fact_id, row["content"] or "")
+                facts_processed += 1
+
+            remaining = None if max_rows is None else max(0, max_rows - facts_processed)
+            chunk_rows = []
+            if source_type != "fact" and (remaining is None or remaining > 0):
+                params: list = []
+                type_clause = ""
+                if source_type and source_type != "chunk":
+                    type_clause = "AND d.source_type = ?"
+                    params.append(source_type)
+                chunk_sql = f"""
+                    SELECT c.chunk_id, c.content
+                    FROM memory_chunks c
+                    JOIN memory_documents d ON d.document_id = c.document_id
+                    WHERE 1=1 {type_clause}
+                    ORDER BY c.chunk_id ASC
+                """
+                if remaining:
+                    chunk_sql += " LIMIT ?"
+                    params.append(remaining)
+                chunk_rows = self._conn.execute(chunk_sql, params).fetchall()
+            for row in chunk_rows:
+                self._link_chunk_entities(int(row["chunk_id"]), row["content"] or "")
+                chunks_processed += 1
+            self._conn.commit()
+        after = self._conn.execute("SELECT COUNT(*) AS count FROM memory_relations").fetchone()
+        after_count = int(after["count"] or 0) if after else 0
+        result = {
+            "facts_processed": facts_processed,
+            "chunks_processed": chunks_processed,
+            "relations_before": before_count,
+            "relations_after": after_count,
+            "relations_added": max(0, after_count - before_count),
+            "source_type": source_type or "all",
+            "seconds": round(time.time() - started, 3),
+        }
+        self.record_memory_event("memory.relation_backfill.complete", detail=result)
+        return result
 
     def memory_hygiene_report(self, limit: int = 20) -> dict:
         """Return memory maintenance candidates: duplicates, stale, popular, source gaps, contradictions."""

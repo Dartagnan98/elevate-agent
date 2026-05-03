@@ -9,7 +9,7 @@ Goal: port the useful LightRAG and RAG-Anything architecture into Elevate's exis
 
 The licenses allow reuse, but Elevate should not vendor the full apps blindly. Elevate already has state, tools, gateway, memory, facts, documents, chunks, embeddings, journal, and entity graph. The right move is to port the RAG layers into those primitives.
 
-## Layers to port
+## Layers ported
 
 ### 1. Query engine
 
@@ -24,16 +24,16 @@ LightRAG pattern:
 - Return context, prompt, generated answer, streaming result, and raw citations depending on query params.
 
 Elevate port:
-- Expand `fact_store(action='rag_query')` into a full native query engine.
+- `fact_store(action='rag_query')` is the native query engine.
 - Modes:
   - `naive`: document/chunk search only.
   - `local`: entity/fact/neighborhood recall.
   - `global`: community/cluster summaries.
   - `hybrid`: local + global.
   - `mix`: local + global + chunks + recent turns.
-- Add high/low keyword extraction.
-- Add token-budgeted context packing.
-- Add raw_data metadata with facts/chunks/entities/relations/communities/citations.
+- Deterministic high/low keyword extraction is returned in `keywords` and `raw_data.keywords`.
+- Token-budgeted context packing is handled by `_pack_rag_sections(...)`.
+- `raw_data` includes sections, score breakdown, citations, budget metadata, result counts, and latency telemetry.
 
 ### 2. Community/global memory
 
@@ -46,9 +46,9 @@ Elevate already has:
 - cluster maintenance
 
 Elevate port:
-- Add durable community reports over clusters.
-- Store summary, top entities, top facts, top chunks, tags, source IDs, confidence, updated_at.
-- Use community reports as first-class `global` RAG context.
+- Durable community reports are stored over clusters.
+- Reports store summary, top entities, supporting fact/chunk IDs, tags, source IDs, weight, and timestamps.
+- `rag_query mode='global'` uses community reports as first-class context.
 
 ### 3. Entity/relation graph ingestion
 
@@ -59,10 +59,11 @@ LightRAG pattern:
 - merge graph evidence with chunks
 
 Elevate port:
-- Extend document ingestion to extract entities and relation candidates from every chunk.
-- Link chunks to entities.
-- Add explicit `memory_relations` if current fact co-entity links are not enough.
-- Merge fact/document/turn entities into one native graph.
+- Document ingestion extracts entity links from every chunk.
+- Chunks are linked to entities via `memory_chunk_entities`.
+- Fact/chunk co-occurrence edges are stored in `memory_relations`.
+- `relation_backfill` reprocesses existing facts/chunks so old Plaud/document imports populate the native graph.
+- Fact/document entities are merged into one native graph surfaced by `wiki`, `rag_query`, and Hub.
 
 ### 4. Rerank and context packing
 
@@ -72,9 +73,10 @@ LightRAG pattern:
 - merge chunks after graph filtering
 
 Elevate port:
-- Deterministic rerank first: keyword overlap + semantic score + trust + recency + source quality + graph proximity.
-- Optional model rerank later if configured.
-- Pack final context under token budget with citations.
+- Deterministic rerank uses query-token overlap plus existing retriever/semantic/trust scores.
+- Document search now diversifies results by document so one Plaud transcript does not crowd out the whole answer.
+- `_pack_rag_sections(...)` dedupes and packs communities, facts, chunks, recent turns, and graph pages under the requested character budget.
+- Optional model rerank can be added later if configured, but the production path does not require a second model call.
 
 ### 5. Multimodal/document ingestion
 
@@ -85,10 +87,11 @@ RAG-Anything pattern:
 - VLM-enhanced query path when vision model exists
 
 Elevate port:
-- Add generic document parse hooks for PDF/image/table/screenshot metadata.
-- Store modality type and surrounding page/chunk context in `memory_documents` / `memory_chunks` metadata.
-- For images/tables/equations: generate text captions/summaries when a vision/model tool is available, then index into chunks.
-- Keep raw files referenced by source URI/path, not copied into memory.
+- `document_add` accepts `modal_assets` / `assets` for parsed PDF/image/table/equation/page artifacts.
+- `memory_modal_assets` stores modality type, locator, summary, text content, and metadata.
+- Modal assets with text/captions are converted into searchable chunks.
+- Raw files are referenced by source URI/path, not copied into memory.
+- Full OCR/VLM parsing is intentionally tool-facing: callers can pass parsed/captioned assets from OCR/vision pipelines without adding a RAG-Anything runtime dependency.
 
 ### 6. Caching/observability
 
@@ -98,20 +101,21 @@ LightRAG/RAG-Anything pattern:
 - raw_data metadata
 
 Elevate port:
-- Use existing memory events and injection logs.
-- Add RAG query event records.
-- Add cache keys for repeated RAG queries if needed.
-- Expand benchmark to include mode coverage and duplicate/context quality metrics.
+- Existing memory events and injection logs remain the source of truth.
+- RAG queries now record `memory.rag_query.complete` with mode, counts, latency, citation count, context chars, source type, and budget.
+- `raw_data.telemetry` returns the same information to callers for Hub/debugging.
+- Benchmarks cover hit counts, duplicate rate, and smoke queries.
 
-## Implementation order
+## Implementation order/status
 
-1. Community reports/global mode.
-2. Entity/relation chunk ingestion.
-3. Query engine search/truncate/merge/context stages.
-4. Rerank and token-budget packing.
-5. Multimodal parse hooks.
-6. Tests + benchmark + gateway reload + live real-memory smoke.
-7. Hub import: expose the native RAG memory graph in the Agent Hub snapshot, not just old fact/entity links.
+1. Community reports/global mode — done.
+2. Entity/relation chunk ingestion — done.
+3. Query engine search/truncate/merge/context stages — done.
+4. Rerank and token-budget packing — done.
+5. Multimodal parse hooks — done as native `modal_assets` ingestion hooks.
+6. Tests + benchmark + gateway/live smoke — local tests/benchmarks done; live tool path verified for `rag_query`; gateway reload still required after schema changes in deployments.
+7. Hub import: expose the native RAG memory graph in the Agent Hub snapshot, not just old fact/entity links — done.
+8. Existing-data processing: run `relation_backfill` against Plaud/document chunks so old imports get graph edges.
 
 ## Hub graph status
 

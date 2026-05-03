@@ -174,6 +174,44 @@ def test_rag_query_mixes_facts_documents_recent_and_graph(tmp_path):
     assert result["citations"]
     assert "Elevate Native RAG" in result["context"]
     assert "Uppercuts" in result["context"]
+    assert result["raw_data"]["telemetry"]["counts"]["chunks"] >= 1
+    assert result["keywords"]["low_level"]
+    events = _tool(provider, {"action": "memory_events", "limit": 5})["events"]
+    assert any(event["event"] == "memory.rag_query.complete" for event in events)
+
+
+def test_relation_backfill_and_document_search_diversity(tmp_path):
+    provider = _provider(tmp_path)
+    _tool(provider, {
+        "action": "document_add",
+        "title": "Doc One",
+        "source_uri": "doc://one",
+        "source_type": "brief",
+        "chunks": [
+            "Alex Med teaches Uppercuts Barber Academy chair practice and student confidence.",
+            "Alex Med and Uppercuts Barber Academy repeat chair practice for confidence drills.",
+            "Alex Med runs Uppercuts Barber Academy curriculum checks with students.",
+        ],
+    })
+    _tool(provider, {
+        "action": "document_add",
+        "title": "Doc Two",
+        "source_uri": "doc://two",
+        "source_type": "brief",
+        "chunks": ["Uppercuts Barber Academy has pricing, curriculum, and launch planning notes."],
+    })
+
+    backfill = _tool(provider, {"action": "relation_backfill", "source_type": "brief"})
+    assert backfill["chunks_processed"] == 4
+    assert backfill["relations_after"] >= 1
+
+    search = _tool(provider, {
+        "action": "document_search",
+        "query": "Uppercuts Barber Academy curriculum confidence",
+        "source_type": "brief",
+        "limit": 2,
+    })["results"]
+    assert len({item["document_id"] for item in search}) == 2
 
 
 def test_rag_query_supports_naive_and_local_modes(tmp_path):
