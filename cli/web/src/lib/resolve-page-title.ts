@@ -28,11 +28,14 @@ export function resolvePageTitle(
   if (normalized === "/leads") {
     return "Leads";
   }
+  if (normalized === "/admin") {
+    return "Admin";
+  }
   if (normalized === "/listings") {
-    return "Listings";
+    return "Admin";
   }
   if (normalized === "/deals") {
-    return "Deals";
+    return "Admin";
   }
   if (normalized === "/ads") {
     return "Ads";
@@ -41,7 +44,7 @@ export function resolvePageTitle(
     return "Social Media";
   }
   if (normalized === "/marketing") {
-    return "Ads";
+    return "Social Media";
   }
   if (normalized === "/tasks") {
     return "Tasks";

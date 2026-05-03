@@ -258,7 +258,7 @@ const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
     status: "ready",
   },
   {
-    description: "Paperwork, scheduling, checklists, and transaction ops.",
+    description: "Listings, deals, document process, nightly checks, and transaction ops.",
     enabled: true,
     id: "admin",
     name: "Admin",
@@ -274,7 +274,7 @@ const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
     status: "ready",
   },
   {
-    description: "Paid ads, listing campaigns, email campaigns, and creative briefs.",
+    description: "Future paid ads, listing campaigns, email campaigns, and creative briefs.",
     enabled: true,
     id: "ads",
     name: "Ads",

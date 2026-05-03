@@ -90,11 +90,10 @@ import ChatPage from "@/pages/ChatPage";
 import AgentHubPage from "@/pages/AgentHubPage";
 import ProjectPage from "@/pages/ProjectPage";
 import {
+  RealEstateAdminPage,
   RealEstateAdsPage,
-  RealEstateDealsPage,
   RealEstateApprovalsPage,
   RealEstateLeadsPage,
-  RealEstateListingsPage,
   RealEstateMemoryPage,
   RealEstateSocialMediaPage,
   RealEstateTasksPage,
@@ -115,7 +114,11 @@ function RootRedirect() {
 }
 
 function MarketingRedirect() {
-  return <Navigate to="/ads" replace />;
+  return <Navigate to="/social-media" replace />;
+}
+
+function AdminRedirect() {
+  return <Navigate to="/admin" replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -130,8 +133,9 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/today": RealEstateTodayPage,
   "/leads": RealEstateLeadsPage,
-  "/listings": RealEstateListingsPage,
-  "/deals": RealEstateDealsPage,
+  "/admin": RealEstateAdminPage,
+  "/listings": AdminRedirect,
+  "/deals": AdminRedirect,
   "/ads": RealEstateAdsPage,
   "/social-media": RealEstateSocialMediaPage,
   "/marketing": MarketingRedirect,
@@ -162,13 +166,8 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: Users,
   },
   {
-    path: "/listings",
-    label: "Listings",
-    icon: Building2,
-  },
-  {
-    path: "/deals",
-    label: "Deals",
+    path: "/admin",
+    label: "Admin",
     icon: BriefcaseBusiness,
   },
   {
@@ -1029,10 +1028,9 @@ function DesktopSidebar({
           <div className="space-y-0.5">
             <SidebarAction icon={Home} label="Today" path="/today" onNavigate={go} />
             <SidebarAction icon={Users} label="Leads" path="/leads" onNavigate={go} />
-            <SidebarAction icon={Building2} label="Listings" path="/listings" onNavigate={go} />
-            <SidebarAction icon={BriefcaseBusiness} label="Deals" path="/deals" onNavigate={go} />
-            <SidebarAction icon={BarChart3} label="Ads" path="/ads" onNavigate={go} />
+            <SidebarAction icon={BriefcaseBusiness} label="Admin" path="/admin" onNavigate={go} />
             <SidebarAction icon={Megaphone} label="Social Media" path="/social-media" onNavigate={go} />
+            <SidebarAction icon={BarChart3} label="Ads" path="/ads" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
             <SidebarAction icon={ShieldCheck} label="Approvals" path="/approvals" onNavigate={go} />
             <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />

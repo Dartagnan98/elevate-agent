@@ -61,18 +61,26 @@ type HubData = {
 
 const REAL_ESTATE_SKILL_TARGETS = {
   leads: ["outreach", "outreach-send", "property-lookup", "gmail-doc-router"],
-  listings: ["cma", "seller-updates", "showing-time", "weekly-listing", "relisting"],
-  deals: ["mlc", "digisign", "webforms", "skyleigh-vault"],
-  ads: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
+  admin: [
+    "cma",
+    "seller-updates",
+    "showing-time",
+    "weekly-listing",
+    "relisting",
+    "mlc",
+    "digisign",
+    "webforms",
+    "skyleigh-vault",
+  ],
   "social-media": ["social-media", "humanizer", "graphify"],
+  ads: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
 } as const;
 
 const WORKFLOW_LABELS: Record<keyof typeof REAL_ESTATE_SKILL_TARGETS, string> = {
   leads: "Leads",
-  listings: "Listings",
-  deals: "Deals",
-  ads: "Ads",
+  admin: "Admin",
   "social-media": "Social Media",
+  ads: "Ads",
 };
 
 const AREA_CONNECTORS: Record<
@@ -80,10 +88,9 @@ const AREA_CONNECTORS: Record<
   string[]
 > = {
   leads: ["apple-messages", "sms-provider", "android-device", "rcs", "crm", "social", "email"],
-  listings: ["skills", "market-stats", "document-storage"],
-  deals: ["crm", "skills", "admin-requirements", "document-storage", "forms-signing"],
+  admin: ["crm", "skills", "admin-requirements", "document-storage", "forms-signing", "market-stats"],
+  "social-media": ["social", "skills", "market-stats", "email"],
   ads: ["market-stats", "skills", "email", "social"],
-  "social-media": ["social", "skills", "market-stats"],
 };
 
 function useRealEstateHubData(): HubData {
@@ -353,7 +360,7 @@ function ConnectorReadiness({
   });
 
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
       {items.map((item) => (
         <Card key={item.key} className="bg-card/72">
           <CardHeader className="p-4">
@@ -700,7 +707,7 @@ export function RealEstateTodayPage() {
     <HubShell
       data={data}
       eyebrow="Real Estate Command Center"
-      hero="A local-first operating view for leads, listings, deals, ads, social media, and the agent team."
+      hero="A local-first operating view for lead priority, admin/document process, social pulse, and the agent team. Ads stays visible as a later lane."
       icon={Home}
       title="Elevate Agent is ready to run from one real-estate hub."
     >
@@ -743,16 +750,16 @@ export function RealEstateLeadsPage() {
     <HubShell
       data={data}
       eyebrow="Lead Desk"
-      hero="Work active prospects, follow-ups, approved reply drafts, and lead profiles. Setup and imports stay in Settings."
+      hero="Prioritize who needs work, who is cooling off, what leads just came through, and which outreach workflow should run next. Setup and imports stay in Settings."
       icon={Users}
-      title="Leads are a sales desk, not a connector setup screen."
+      title="Leads shows the people who need attention now."
     >
       <WorkflowStrip
         items={[
           { icon: MessageSquare, label: "Lead conversations", value: sessions.length },
           { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
-          { icon: CheckCircle2, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
-          { icon: Target, label: "Profile lookup", value: "CRM" },
+          { icon: Target, label: "Scoring", value: "AI" },
+          { icon: CheckCircle2, label: "Approved sends", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
@@ -761,27 +768,27 @@ export function RealEstateLeadsPage() {
           items={[
             {
               icon: MessageSquare,
-              label: "Follow-up conversations",
+              label: "Needs follow-up",
               value: sessions.length,
-              summary: "Open inbound lead threads, reply-needed conversations, buyer/seller nurture, and warm reactivation work.",
+              summary: "Open reply-needed conversations, overdue touches, warm reactivation, and leads the outreach skill should handle next.",
             },
             {
-              icon: CheckCircle2,
-              label: "Approved message sends",
-              value: "gated",
-              summary: "Drafted texts, emails, and social replies should wait here until a human approves the exact send.",
+              icon: AlertTriangle,
+              label: "Falling out",
+              value: "watch",
+              summary: "Flag leads going quiet, missed replies, cold stretches, low-intent drift, and people who need a better next touch.",
             },
             {
               icon: Target,
-              label: "New lead lookup",
-              value: "search",
-              summary: "Find or create people profiles from CRM, Messages, email, or manual intake when the connected API allows writes.",
+              label: "New lead scoring",
+              value: "rank",
+              summary: "Score new inbound leads from CRM, Messages, email, or manual intake and explain why each one matters.",
             },
             {
-              icon: FileCheck2,
-              label: "Profiles and notes",
-              value: "local",
-              summary: "Keep source, stage, intent, tags, notes, last touch, and next action attached to each person.",
+              icon: CheckCircle2,
+              label: "Approved outreach",
+              value: "gated",
+              summary: "Draft texts, emails, and DM replies stay human-approved before the outreach-send gate touches the real world.",
             },
           ]}
         />
@@ -796,136 +803,107 @@ export function RealEstateLeadsPage() {
   );
 }
 
-export function RealEstateListingsPage() {
+export function RealEstateAdminPage() {
   const data = useRealEstateHubData();
-  useHubHeader("Listings", data);
+  useHubHeader("Admin", data);
   const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, ["listing", "cma", "seller update", "showing", "weekly", "relisting"]),
+    sessionMatches(session, [
+      "admin",
+      "listing",
+      "deal",
+      "transaction",
+      "cma",
+      "seller update",
+      "showing",
+      "weekly",
+      "relisting",
+      "mlc",
+      "digisign",
+      "webforms",
+      "contract",
+      "paperwork",
+      "document",
+      "skyslope",
+    ]),
   );
   const jobs = data.cronJobs.filter((job) =>
-    jobMatches(job, ["listing", "seller update", "showing", "weekly", "relisting"]),
+    jobMatches(job, [
+      "admin",
+      "listing",
+      "deal",
+      "transaction",
+      "seller update",
+      "showing",
+      "weekly",
+      "relisting",
+      "mlc",
+      "digisign",
+      "webforms",
+      "contract",
+      "paperwork",
+      "document",
+      "skyslope",
+    ]),
   );
 
   return (
     <HubShell
       data={data}
-      eyebrow="Listing Studio"
-      hero="Keep CMA, seller update, showing feedback, relisting, and weekly reporting skills visible from the same local workspace."
-      icon={Building2}
-      title="Listings get their own runway without leaving Elevate Agent."
+      eyebrow="Admin Desk"
+      hero="Run the signed-listing and deal process: CMA handoff, seller updates, forms, signatures, brokerage checklists, nightly status checks, and the local listing/deal database."
+      icon={BriefcaseBusiness}
+      title="Admin owns listings and deals once the real work starts."
     >
       <WorkflowStrip
         items={[
-          { icon: Home, label: "Listing sessions", value: sessions.length },
-          { icon: CalendarClock, label: "Scheduled reports", value: jobs.length },
+          { icon: Building2, label: "Listing/deal records", value: sessions.length },
+          { icon: CalendarClock, label: "Nightly checks", value: jobs.length },
           {
-            icon: Brain,
-            label: "Memory segments",
-            value: data.snapshot?.memory.journal.session_segment_count ?? 0,
+            icon: FileCheck2,
+            label: "Doc process",
+            value: "phases",
           },
-          { icon: CheckCircle2, label: "Client approvals", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          { icon: CheckCircle2, label: "Approvals", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <SalesFocusBoard
-          title="Listing workbench"
+          title="Admin workbench"
           items={[
             {
-              icon: Home,
-              label: "Listing profiles",
+              icon: DatabaseIcon,
+              label: "Listing/deal database",
               value: sessions.length,
-              summary: "Keep each property’s CMA, seller notes, showing feedback, pricing changes, and artifact history together.",
+              summary: "Create one local record per listing or signed deal with stage, people, dates, documents, blockers, and artifact history.",
             },
             {
               icon: FileCheck2,
-              label: "Seller update drafts",
-              value: "review",
-              summary: "Review weekly listing updates, PDFs, email drafts, and feedback summaries before they go out.",
+              label: "Document process",
+              value: "MLC",
+              summary: "Use Skyleigh tools phases for MLC, DigiSign, WebForms, forms, signatures, packets, and what documents are still needed.",
             },
             {
               icon: CalendarClock,
-              label: "Report cadence",
+              label: "Nightly admin pulse",
               value: jobs.length,
-              summary: "Timed seller updates, showing checks, relisting reviews, and market stat refreshes live here as work.",
+              summary: "Cron checks where listings/deals are at, what changed, what is stale, and what needs tomorrow’s human attention.",
             },
             {
               icon: CheckCircle2,
-              label: "Approved edits",
+              label: "Seller and client outputs",
               value: "queued",
-              summary: "Accepted copy, pricing notes, and seller-facing changes should move into the next send or export step.",
+              summary: "Seller updates, weekly reports, feedback summaries, and admin handoffs stay review-gated before sending.",
             },
           ]}
+          note="SkySlope, brokerage software, document storage, forms providers, and skill-output imports are configured in Settings. Admin is the operating room after those sources exist."
         />
-        <TimedTasks jobs={jobs} empty="No listing schedules yet." title="Listing automations" />
+        <TimedTasks jobs={jobs} empty="No admin/document schedules yet." title="Admin automations" />
       </div>
       <RecentSessions
-        title="Listing work"
+        title="Admin work"
         sessions={sessions}
-        empty="No listing-specific sessions found yet."
+        empty="No admin-specific sessions found yet. CMA, seller updates, MLC, DigiSign, WebForms, and listing/deal cron work will land here."
       />
-    </HubShell>
-  );
-}
-
-export function RealEstateDealsPage() {
-  const data = useRealEstateHubData();
-  useHubHeader("Deals", data);
-  const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, ["deal", "mlc", "digisign", "webforms", "contract", "paperwork", "transaction"]),
-  );
-  const jobs = data.cronJobs.filter((job) =>
-    jobMatches(job, ["deal", "mlc", "digisign", "webforms", "contract", "paperwork", "transaction"]),
-  );
-
-  return (
-    <HubShell
-      data={data}
-      eyebrow="Deal Room"
-      hero="Surface paperwork, transaction, signature, and loopback workflows while keeping approvals local."
-      icon={BriefcaseBusiness}
-      title="Deals stay organized around forms, signatures, and handoffs."
-    >
-      <WorkflowStrip
-        items={[
-          { icon: BriefcaseBusiness, label: "Deal sessions", value: sessions.length },
-          { icon: CalendarClock, label: "Deal reminders", value: jobs.length },
-          { icon: CheckCircle2, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
-          { icon: FileCheck2, label: "Packet review", value: "manual" },
-        ]}
-      />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <SalesFocusBoard
-          title="Deal workbench"
-          items={[
-            {
-              icon: BriefcaseBusiness,
-              label: "Transaction profiles",
-              value: sessions.length,
-              summary: "Track buyer/seller side, stage, brokerage checklist, contract context, dates, and current blocker.",
-            },
-            {
-              icon: FileCheck2,
-              label: "Form and signing drafts",
-              value: "review",
-              summary: "Prepared MLC, DigiSign, WebForms, and packet outputs stay review-gated before send or signature.",
-            },
-            {
-              icon: CalendarClock,
-              label: "Deadline reminders",
-              value: jobs.length,
-              summary: "Subjects, deposit, inspection, financing, document collection, and loopback reminders stay visible.",
-            },
-            {
-              icon: CheckCircle2,
-              label: "Approved next actions",
-              value: "queued",
-              summary: "Human-approved paperwork, emails, and admin handoffs move into the next task lane.",
-            },
-          ]}
-        />
-        <TimedTasks jobs={jobs} empty="No deal reminders yet." title="Deal tasks" />
-      </div>
-      <RecentSessions title="Deal work" sessions={sessions} empty="No deal-specific sessions found yet." />
     </HubShell>
   );
 }
@@ -944,9 +922,9 @@ export function RealEstateAdsPage() {
     <HubShell
       data={data}
       eyebrow="Ads Studio"
-      hero="Plan listing ads, paid campaigns, email campaigns, market-update positioning, audiences, and creative briefs from the local skill stack."
+      hero="Park paid media here for now. This lane will eventually inherit Facebook and Google Ads views, budgets, approvals, and reporting from the paid-ads stack."
       icon={Target}
-      title="Ads handles paid demand, campaign angles, and conversion copy."
+      title="Ads is visible, but it is not the main workflow yet."
     >
       <WorkflowStrip
         items={[
@@ -962,15 +940,15 @@ export function RealEstateAdsPage() {
           items={[
             {
               icon: Target,
-              label: "Campaign briefs",
+              label: "Campaign briefs later",
               value: sessions.length,
-              summary: "Listing ads, audience notes, value props, objections, and channel-specific campaign plans.",
+              summary: "Keep paid campaign ideas, listing ad angles, audience notes, and market positioning here until the ads workspace is ported.",
             },
             {
               icon: Megaphone,
               label: "Creative drafts",
               value: "review",
-              summary: "Ad copy, hooks, graphics, landing-page notes, and email campaign drafts wait for approval.",
+              summary: "Ad copy, hooks, graphics, landing-page notes, and email campaign drafts can be reviewed without publishing.",
             },
             {
               icon: CalendarClock,
@@ -985,7 +963,7 @@ export function RealEstateAdsPage() {
               summary: "Ads should not publish or alter budgets until the operator approves the exact action.",
             },
           ]}
-          note="Facebook, Google, and Composio-style ad account setup belongs in Settings. This page is for campaign work and approvals."
+          note="Ads setup is intentionally lighter for now. Facebook, Google, and Composio-style ad account setup belongs in Settings, and the richer ads console can be ported later."
         />
         <TimedTasks jobs={jobs} empty="No ad schedules yet." title="Campaign schedules" />
       </div>
@@ -1012,15 +990,15 @@ export function RealEstateSocialMediaPage() {
     <HubShell
       data={data}
       eyebrow="Social Studio"
-      hero="Turn listing moments, market updates, and campaign ideas into organic posts, hooks, captions, platform plans, and posting schedules."
+      hero="Run a content pulse from connected platforms: best posts, weak posts, last-30-day metrics, hooks, captions, and scheduled organic follow-up."
       icon={Megaphone}
-      title="Social Media handles organic content and platform adaptation."
+      title="Social Media watches content performance and turns it into next posts."
     >
       <WorkflowStrip
         items={[
           { icon: Megaphone, label: "Social sessions", value: sessions.length },
           { icon: CalendarClock, label: "Post schedules", value: jobs.length },
-          { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          { icon: Activity, label: "30-day pulse", value: "auto" },
           { icon: MessageSquare, label: "Content queue", value: "drafts" },
         ]}
       />
@@ -1030,21 +1008,21 @@ export function RealEstateSocialMediaPage() {
           items={[
             {
               icon: MessageSquare,
-              label: "Post drafts",
+              label: "Best-post analysis",
               value: sessions.length,
-              summary: "Organic captions, hooks, reels, listing moments, market updates, and nurture content.",
+              summary: "Pull recent performance, identify the posts that worked, and convert the insight into the next content prompts.",
             },
             {
               icon: Megaphone,
-              label: "Platform adaptation",
+              label: "Post drafts",
               value: "review",
-              summary: "Turn one idea into Instagram, Facebook, email, and short-form variants before scheduling.",
+              summary: "Generate hooks, captions, reels, listing moments, market updates, and nurture content before scheduling.",
             },
             {
               icon: CalendarClock,
-              label: "Publishing cadence",
+              label: "Pulse cadence",
               value: jobs.length,
-              summary: "Scheduled content checks, weekly posting plans, and recurring social prompts.",
+              summary: "Run daily, weekly, or last-30-day social checks so metrics keep syncing into the local content workspace.",
             },
             {
               icon: CheckCircle2,

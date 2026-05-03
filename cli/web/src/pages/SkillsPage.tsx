@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useState, useMemo } from "react";
 import {
   BriefcaseBusiness,
-  Building2,
   CheckCircle2,
   Package,
   Search,
@@ -98,28 +97,32 @@ const REAL_ESTATE_WORKFLOWS = [
     names: ["outreach", "outreach-send", "property-lookup", "gmail-doc-router"],
   },
   {
-    key: "listings",
-    icon: Building2,
-    label: "Listings",
-    names: ["cma", "seller-updates", "showing-time", "weekly-listing", "relisting"],
-  },
-  {
-    key: "deals",
+    key: "admin",
     icon: BriefcaseBusiness,
-    label: "Deals",
-    names: ["mlc", "digisign", "webforms", "skyleigh-vault"],
-  },
-  {
-    key: "ads",
-    icon: Megaphone,
-    label: "Ads",
-    names: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
+    label: "Admin",
+    names: [
+      "cma",
+      "seller-updates",
+      "showing-time",
+      "weekly-listing",
+      "relisting",
+      "mlc",
+      "digisign",
+      "webforms",
+      "skyleigh-vault",
+    ],
   },
   {
     key: "social-media",
     icon: Paintbrush,
     label: "Social Media",
     names: ["social-media", "humanizer", "graphify"],
+  },
+  {
+    key: "ads",
+    icon: Megaphone,
+    label: "Ads",
+    names: ["marketing", "market-stats-watcher", "graphify", "humanizer"],
   },
 ] as const;
 

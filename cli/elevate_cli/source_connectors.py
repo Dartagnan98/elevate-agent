@@ -85,8 +85,8 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "category": "leads",
         "informationNeeded": "CRM name, auth method, stage meanings, reliable fields, activity types, and owner mapping.",
         "connectionLayer": "CRM adapter maps contacts, stages, notes, activities, and exposed messages into Elevate records.",
-        "uiDestination": "Leads, Deals, Outreach context, Today pipeline, and stale-follow-up queues.",
-        "successSignal": "A CRM stage or activity change updates the lead/deal view and creates the right next action.",
+        "uiDestination": "Leads, Admin, Outreach context, Today pipeline, and stale-follow-up queues.",
+        "successSignal": "A CRM stage or activity change updates the lead/admin view and creates the right next action.",
     },
     {
         "id": "social",
@@ -112,7 +112,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "category": "operations",
         "informationNeeded": "Skill name, artifact folders, refresh cadence, record shape, and which UI lane should consume it.",
         "connectionLayer": "Artifact reader ingests JSON, JSONL, markdown, PDFs, screenshots, and exports from the tools/data root.",
-        "uiDestination": "Listings, Deals, seller updates, market stats, document routing, admin queues, and source activity.",
+        "uiDestination": "Admin, seller updates, market stats, document routing, admin queues, and source activity.",
         "successSignal": "A fresh skill artifact shows in the correct dashboard lane with timestamp, source, and actionability.",
     },
     {
@@ -121,7 +121,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "category": "operations",
         "informationNeeded": "Market regions, property types, stats source, refresh cadence, and client-facing summary needs.",
         "connectionLayer": "Board, MLS, report, CSV, spreadsheet, or manual import writes dashboard-ready stats and artifacts.",
-        "uiDestination": "Listings, Deals, Today prep, Ads/Social content, and market-report tasks.",
+        "uiDestination": "Admin, Today prep, Social content, later Ads work, and market-report tasks.",
         "successSignal": "A fresh market artifact appears with period, region, metrics, source files, and next operator step.",
     },
     {
@@ -130,7 +130,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "category": "admin",
         "informationNeeded": "Jurisdiction, brokerage rules, transaction stages, required forms, deadlines, and human-only checks.",
         "connectionLayer": "Checklist or source import writes required items and generated admin tasks.",
-        "uiDestination": "Deals, Today admin queue, Tasks, documents, and approvals.",
+        "uiDestination": "Admin, Today admin queue, Tasks, documents, and approvals.",
         "successSignal": "A deal stage exposes required docs, missing items, deadlines, and owner tasks without hardcoded brokerage rules.",
     },
     {
@@ -139,7 +139,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "category": "admin",
         "informationNeeded": "Storage provider/root, folder naming, document categories, permissions, and dry-run routing policy.",
         "connectionLayer": "Local or cloud indexer writes document-index records and routing tasks.",
-        "uiDestination": "Deals, Today admin queue, document intake, and source activity.",
+        "uiDestination": "Admin, Today admin queue, document intake, and source activity.",
         "successSignal": "A sample document record appears with category, deal/listing match, confidence, status, and next action.",
     },
     {
@@ -148,7 +148,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "category": "forms",
         "informationNeeded": "Form provider, blank forms/templates, recipient roles, field map, and approval policy.",
         "connectionLayer": "Provider-neutral form map and packet index writes dry-run packet records and approval tasks.",
-        "uiDestination": "Deals, Today admin queue, approvals, and document routing.",
+        "uiDestination": "Admin, Today admin queue, approvals, and document routing.",
         "successSignal": "A packet draft appears as a dry-run artifact and every send/signing action is gated behind approval.",
     },
 )
@@ -162,7 +162,7 @@ OWNER_BY_SOURCE = {
     "social": "Outreach",
     "email": "Outreach",
     "skills": "Executive Assistant",
-    "market-stats": "Ads",
+    "market-stats": "Social Media",
     "admin-requirements": "Admin",
     "document-storage": "Admin",
     "forms-signing": "Admin",
@@ -173,14 +173,14 @@ UI_BY_SOURCE = {
     "sms-provider": ["Outreach", "Leads", "Today", "Settings"],
     "android-device": ["Outreach", "Leads", "Today", "Approvals"],
     "rcs": ["Outreach", "Leads", "Today", "Settings"],
-    "crm": ["Leads", "Deals", "Outreach", "Today"],
+    "crm": ["Leads", "Admin", "Outreach", "Today"],
     "social": ["Leads", "Outreach", "Social Media", "Approvals"],
-    "email": ["Leads", "Outreach", "Documents", "Today"],
-    "skills": ["Listings", "Deals", "Documents", "Settings"],
-    "market-stats": ["Listings", "Deals", "Ads", "Social Media"],
-    "admin-requirements": ["Deals", "Tasks", "Approvals", "Today"],
-    "document-storage": ["Deals", "Documents", "Tasks", "Today"],
-    "forms-signing": ["Deals", "Approvals", "Documents", "Today"],
+    "email": ["Leads", "Outreach", "Admin", "Today"],
+    "skills": ["Admin", "Social Media", "Settings"],
+    "market-stats": ["Admin", "Social Media", "Ads"],
+    "admin-requirements": ["Admin", "Tasks", "Approvals", "Today"],
+    "document-storage": ["Admin", "Documents", "Tasks", "Today"],
+    "forms-signing": ["Admin", "Approvals", "Documents", "Today"],
 }
 
 SOURCE_PROMPT_CATEGORIES = (
