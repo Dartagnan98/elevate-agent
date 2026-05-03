@@ -371,3 +371,253 @@ def test_layered_recall_tool_matches_prefetch_surface(tmp_path):
 
     assert result["empty"] is False
     assert "### Durable + Semantic" in result["context"]
+
+
+def test_retrieval_updates_usage_signal_for_ranked_facts(tmp_path):
+    provider = _provider(tmp_path)
+    fact_id = provider._store.add_fact(
+        "Skyleigh Elevate recall should learn which durable facts are surfaced.",
+        category="project",
+    )
+
+    before = provider._store.list_facts(limit=1)[0]
+    assert before["retrieval_count"] == 0
+
+    result = _tool(provider, {
+        "action": "search",
+        "query": "Skyleigh Elevate recall durable facts surfaced",
+        "limit": 3,
+    })
+
+    assert result["count"] == 1
+    assert result["results"][0]["fact_id"] == fact_id
+    after = provider._store.list_facts(limit=1)[0]
+    assert after["retrieval_count"] == 1
+
+
+def test_source_aware_fact_fields_roundtrip(tmp_path):
+    provider = _provider(tmp_path)
+
+    result = _tool(provider, {
+        "action": "add",
+        "content": "Uppercuts Barber Academy CTA is form submit then representative call.",
+        "category": "project",
+        "source_type": "plaud",
+        "source_uri": "plaud:test-cta",
+        "source_excerpt": "Fill out the form. A representative will call.",
+        "observed_at": "2026-05-02 12:00:00",
+    })
+
+    facts = _facts(provider)
+    assert facts[0]["fact_id"] == result["fact_id"]
+    assert facts[0]["source_type"] == "plaud"
+    assert facts[0]["source_uri"] == "plaud:test-cta"
+    assert "representative" in facts[0]["source_excerpt"]
+
+
+def test_document_add_search_and_recall_route(tmp_path):
+    provider = _provider(tmp_path)
+
+    added = _tool(provider, {
+        "action": "document_add",
+        "source_type": "plaud",
+        "source_uri": "plaud:academy-call",
+        "title": "Academy Call",
+        "content": "Alex Med discussed Uppercuts Barber Academy classes and real-shop barber training.",
+    })
+    assert added["chunks"] == 1
+
+    search = _tool(provider, {
+        "action": "document_search",
+        "source_type": "plaud",
+        "query": "real shop barber training Alex Med",
+    })
+    assert search["count"] == 1
+    assert search["results"][0]["source_uri"] == "plaud:academy-call"
+
+    routed = _tool(provider, {
+        "action": "recall_route",
+        "query": "What did we discuss on the Plaud call about Alex Med?",
+    })
+    assert "plaud" in routed["lanes"]
+    assert routed["sections"]["plaud_chunks"][0]["source_uri"] == "plaud:academy-call"
+
+
+def test_hygiene_reports_popular_and_source_gaps(tmp_path):
+    provider = _provider(tmp_path)
+    provider._store.add_fact(
+        "Skyleigh Elevate memory hygiene should find source gaps.",
+        category="project",
+    )
+    _tool(provider, {"action": "search", "query": "memory hygiene source gaps"})
+
+    report = _tool(provider, {"action": "hygiene", "limit": 5})
+
+    assert report["popular"]
+    assert report["source_gaps"]
+
+
+def test_jcode_memory_audit_replay_profile_and_supersession(tmp_path):
+    provider = _provider(tmp_path)
+
+    old = _tool(provider, {
+        "action": "add",
+        "content": "Old CTA is tour-first for Uppercuts.",
+        "category": "project",
+        "source_type": "manual",
+        "memory_space": "uppercuts",
+    })["fact_id"]
+    new = _tool(provider, {
+        "action": "add",
+        "content": "Uppercuts CTA is form submit followed by representative call.",
+        "category": "project",
+        "source_type": "manual",
+        "memory_space": "uppercuts",
+    })["fact_id"]
+
+    result = _tool(provider, {"action": "supersede", "old_fact_id": old, "new_fact_id": new})
+    assert result["superseded"] is True
+
+    context = provider.prefetch("Uppercuts CTA", session_id="telegram-a")
+    assert "representative call" in context
+    assert "tour-first" not in context
+
+    replay = _tool(provider, {"action": "memory_replay", "session_id": "telegram-a"})
+    assert replay["count"] >= 1
+    assert replay["injections"][0]["prompt_chars"] > 0
+
+    events = _tool(provider, {"action": "memory_events", "limit": 20})
+    assert events["count"] > 0
+    assert any(event["event"] in {"memory.injected", "memory.superseded"} for event in events["events"])
+
+    profile = _tool(provider, {"action": "memory_profile", "session_id": "telegram-a"})
+    assert profile["facts"] >= 1
+    assert profile["memory_injections"] >= 1
+
+    facts = _facts(provider)
+    assert {fact["content"] for fact in facts} == {"Uppercuts CTA is form submit followed by representative call."}
+
+
+def test_topic_extraction_is_opt_in_and_promotes_on_shift(tmp_path):
+    provider = _provider(
+        tmp_path,
+        topic_extraction_enabled="true",
+        topic_extract_min_turns="1",
+        topic_change_threshold="0.9",
+        organize_batch_limit="10",
+    )
+
+    provider.sync_turn("Remember this: Uppercuts classes use real shop training.", "Saved.", session_id="topic-1")
+    provider.sync_turn("Google ads OAuth callback uses localhost auth flow.", "Got it.", session_id="topic-1")
+
+    facts = _facts(provider)
+    assert any("Uppercuts classes use real shop training" in fact["content"] for fact in facts)
+    events = _tool(provider, {"action": "memory_events", "session_id": "topic-1", "limit": 20})
+    assert any(event["event"] == "memory.topic_extract.started" for event in events["events"])
+
+
+def test_repeated_prefetch_dedupes_injected_fact_within_session(tmp_path):
+    provider = _provider(tmp_path)
+    _tool(provider, {
+        "action": "add",
+        "content": "Plaud recall should use chunk-level RAG for past meeting questions.",
+        "category": "project",
+        "tags": "plaud,rag",
+    })
+
+    first = provider.prefetch("Plaud RAG meeting recall", session_id="telegram-dedupe")
+    second = provider.prefetch("Plaud RAG meeting recall", session_id="telegram-dedupe")
+
+    assert "chunk-level RAG" in first
+    # Re-injecting the same fact every turn is what jcode avoided.
+    assert "chunk-level RAG" not in second
+    replay = _tool(provider, {"action": "memory_replay", "session_id": "telegram-dedupe"})
+    assert replay["count"] == 1
+
+def test_chunk_embedding_backfill_indexes_document_chunks_with_hash_backend(tmp_path):
+    provider = _provider(
+        tmp_path,
+        embedding_enabled="true",
+        embedding_provider="hash",
+        embedding_model="hash-test-64",
+        embedding_dimensions="64",
+    )
+    add = _tool(provider, {
+        "action": "document_add",
+        "source_uri": "plaud://test-barber-meeting",
+        "source_type": "plaud",
+        "title": "Test Barber Academy Meeting",
+        "content": "Alex Med discussed hands-on barber academy training and viewbook marketing. Students train in a real shop.",
+    })
+    assert add["chunks"] >= 1
+
+    status_before = _tool(provider, {"action": "embedding_status"})
+    assert status_before["chunks"] >= 1
+    assert status_before["indexed_chunks"] >= 1  # document_add embeds immediately when enabled
+
+    # Force a clean backfill path by deleting the chunk embeddings.
+    provider._store._conn.execute("DELETE FROM memory_embeddings WHERE target_type = 'chunk'")
+    provider._store._conn.commit()
+
+    result = _tool(provider, {
+        "action": "chunk_embedding_backfill",
+        "source_type": "plaud",
+        "batch_size": 2,
+    })
+    assert result["enabled"] is True
+    assert result["indexed"] >= 1
+
+    status_after = _tool(provider, {"action": "embedding_status"})
+    assert status_after["indexed_chunks"] == status_after["chunks"]
+    assert status_after["missing_or_stale_chunks"] == 0
+
+    rows = _tool(provider, {
+        "action": "document_search",
+        "source_type": "plaud",
+        "query": "real shop barber training marketing",
+        "limit": 3,
+    })["results"]
+    assert rows
+    assert rows[0].get("semantic_score", 0) >= 0
+
+
+def test_jcode_remaining_cluster_tag_confidence_prune_and_benchmark(tmp_path):
+    provider = _provider(tmp_path)
+    a = _tool(provider, {"action": "add", "content": "Uppercuts Academy uses live client practice with instructor coaching.", "category": "project", "tags": "uppercuts"})["fact_id"]
+    b = _tool(provider, {"action": "add", "content": "Alex Med anchors Uppercuts Academy training and student confidence.", "category": "project"})["fact_id"]
+    c = _tool(provider, {"action": "add", "content": "Old weak note that should decay out.", "category": "general"})["fact_id"]
+
+    clustered = _tool(provider, {"action": "cluster", "fact_ids": f"{a},{b}", "query": "Uppercuts Academy instructor coaching"})
+    assert clustered["clustered"] is True
+    assert clustered["members"] == 2
+    assert clustered["cluster_id"].startswith("cluster:")
+    assert clustered["name"]
+
+    tagged = _tool(provider, {"action": "auto_tag", "fact_ids": f"{a},{b}"})
+    assert tagged["updated"] >= 1
+
+    maintained = _tool(provider, {"action": "confidence_maintenance", "verified_ids": f"{a},{b}", "rejected_ids": str(c), "prune": "false"})
+    assert maintained["boosted"] == 2
+    assert maintained["decayed"] == 1
+
+    profile = _tool(provider, {"action": "memory_profile"})
+    assert profile["clusters"] >= 1
+    assert profile["cluster_members"] >= 2
+    assert "estimated_injection_tokens" in profile
+
+    bench = _tool(provider, {"action": "benchmark", "queries": "Uppercuts Academy instructor coaching", "limit": 3})
+    assert bench["ran"] if "ran" in bench else True
+    assert bench["query_count"] == 1
+    assert bench["queries"][0]["hits"] >= 1
+
+    pruned = _tool(provider, {"action": "prune_logs", "retention_days": 1})
+    assert "total_removed" in pruned
+
+
+def test_post_retrieval_maintenance_creates_cluster_and_infers_tags(tmp_path):
+    provider = _provider(tmp_path)
+    a = _tool(provider, {"action": "add", "content": "Google Ads search campaigns use open early keywords.", "category": "project"})["fact_id"]
+    b = _tool(provider, {"action": "add", "content": "Uppercuts Google Ads campaign reporting comes from Supabase.", "category": "project"})["fact_id"]
+    result = provider._store.post_retrieval_maintenance(verified_ids=[a, b], rejected_ids=[], query="Google Ads campaign reporting", session_id="s1")
+    assert result["cluster"]["clustered"] is True
+    assert result["tags"]["updated"] >= 1

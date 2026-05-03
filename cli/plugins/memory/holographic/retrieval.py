@@ -134,6 +134,7 @@ class FactRetriever:
         # Sort by score descending, return top limit
         scored.sort(key=lambda x: x["score"], reverse=True)
         results = scored[:limit]
+        self.store.record_retrieval_events([fact.get("fact_id") for fact in results])
         # Strip raw HRR bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
@@ -180,7 +181,7 @@ class FactRetriever:
                 )
 
         # Score against individual fact vectors directly
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND COALESCE(status, 'active') = 'active'"
         params: list = []
         if category:
             where += " AND category = ?"
@@ -215,7 +216,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self.store.record_retrieval_events([fact.get("fact_id") for fact in results])
+        return results
 
     def related(
         self,
@@ -240,7 +243,7 @@ class FactRetriever:
         entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
 
         # Get all facts with vectors
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND COALESCE(status, 'active') = 'active'"
         params: list = []
         if category:
             where += " AND category = ?"
@@ -283,7 +286,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self.store.record_retrieval_events([fact.get("fact_id") for fact in results])
+        return results
 
     def reason(
         self,
@@ -319,7 +324,7 @@ class FactRetriever:
             entity_residuals.append(probe_key)
 
         # Get all facts with vectors
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND COALESCE(status, 'active') = 'active'"
         params: list = []
         if category:
             where += " AND category = ?"
@@ -361,7 +366,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self.store.record_retrieval_events([fact.get("fact_id") for fact in results])
+        return results
 
     def contradict(
         self,
@@ -478,7 +485,7 @@ class FactRetriever:
         """Score facts by similarity to a target vector."""
         conn = self.store._conn
 
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND COALESCE(status, 'active') = 'active'"
         params: list = []
         if category:
             where += " AND category = ?"
@@ -504,7 +511,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self.store.record_retrieval_events([fact.get("fact_id") for fact in results])
+        return results
 
     def _fts_candidates(
         self,
@@ -523,7 +532,7 @@ class FactRetriever:
         # Build query - FTS5 rank is negative (lower = better match)
         # We need to join facts_fts with facts to get all columns
         params: list = []
-        where_clauses = ["facts_fts MATCH ?"]
+        where_clauses = ["facts_fts MATCH ?", "COALESCE(f.status, 'active') = 'active'"]
         params.append(query)
 
         if category:

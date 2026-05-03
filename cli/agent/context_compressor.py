@@ -417,6 +417,44 @@ class ContextCompressor(ContextEngine):
             return False
         return True
 
+    @staticmethod
+    def is_context_limit_error(error: str) -> bool:
+        """Return True for provider errors that mean the input exceeded context."""
+        lower = str(error or "").lower()
+        return (
+            "context length" in lower
+            or "context window" in lower
+            or "maximum context" in lower
+            or "max context" in lower
+            or "token limit" in lower
+            or "too many tokens" in lower
+            or "prompt is too long" in lower
+            or "input is too long" in lower
+            or "request too large" in lower
+            or "length limit" in lower
+            or ("exceeded" in lower and "tokens" in lower)
+        )
+
+    def compact_for_retry(self, messages: List[Dict[str, Any]], error: str) -> tuple[List[Dict[str, Any]], bool, Dict[str, Any]]:
+        """jcode-style emergency context-limit recovery hook.
+
+        If the provider rejects a turn for context size, run one hard compaction
+        immediately so the caller can retry the same turn instead of failing the
+        session. Returns (messages, applied, metadata).
+        """
+        if not self.is_context_limit_error(error):
+            return messages, False, {"reason": "not_context_limit"}
+        before_tokens = estimate_messages_tokens_rough(messages)
+        compacted = self.compress(messages, current_tokens=before_tokens, focus_topic="context-limit recovery")
+        after_tokens = estimate_messages_tokens_rough(compacted)
+        applied = len(compacted) < len(messages) or after_tokens < before_tokens
+        return compacted, applied, {
+            "reason": "context_limit_auto_compaction" if applied else "compaction_noop",
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "dropped_messages": max(0, len(messages) - len(compacted)),
+        }
+
     # ------------------------------------------------------------------
     # Tool output pruning (cheap pre-pass, no LLM call)
     # ------------------------------------------------------------------

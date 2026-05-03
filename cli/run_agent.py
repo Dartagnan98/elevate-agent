@@ -7932,7 +7932,15 @@ class AIAgent:
                 pass
 
         try:
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+            if focus_topic == "context-limit recovery" and hasattr(self.context_compressor, "compact_for_retry"):
+                compressed, _compact_applied, _compact_meta = self.context_compressor.compact_for_retry(
+                    messages,
+                    "context_length exceeded: context-limit recovery",
+                )
+                if not _compact_applied:
+                    compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+            else:
+                compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
         except TypeError:
             # Plugin context engine with strict signature that doesn't accept
             # focus_topic — fall back to calling without it.
@@ -11073,6 +11081,7 @@ class AIAgent:
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message, approx_tokens=approx_tokens,
                             task_id=effective_task_id,
+                            focus_topic="context-limit recovery",
                         )
                         # Compression created a new session — clear history
                         # so _flush_messages_to_session_db writes compressed

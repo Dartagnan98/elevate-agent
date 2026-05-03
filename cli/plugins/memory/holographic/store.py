@@ -7,7 +7,8 @@ import json
 import re
 import sqlite3
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .embeddings import (
@@ -34,7 +35,14 @@ CREATE TABLE IF NOT EXISTS facts (
     helpful_count   INTEGER DEFAULT 0,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    hrr_vector      BLOB
+    hrr_vector      BLOB,
+    source_type     TEXT DEFAULT '',
+    source_uri      TEXT DEFAULT '',
+    source_excerpt  TEXT DEFAULT '',
+    observed_at     TIMESTAMP,
+    memory_space    TEXT DEFAULT '',
+    status          TEXT DEFAULT 'active',
+    superseded_by   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -122,6 +130,130 @@ CREATE INDEX IF NOT EXISTS idx_memory_turn_journal_status
 
 CREATE INDEX IF NOT EXISTS idx_memory_turn_journal_session
     ON memory_turn_journal(session_id, session_day, status);
+
+
+CREATE TABLE IF NOT EXISTS memory_documents (
+    document_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type   TEXT NOT NULL DEFAULT '',
+    source_uri    TEXT NOT NULL UNIQUE,
+    title         TEXT DEFAULT '',
+    metadata_json TEXT DEFAULT '',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_documents_source
+    ON memory_documents(source_type, source_uri);
+
+CREATE TABLE IF NOT EXISTS memory_chunks (
+    chunk_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id    INTEGER NOT NULL REFERENCES memory_documents(document_id) ON DELETE CASCADE,
+    chunk_index    INTEGER NOT NULL,
+    content        TEXT NOT NULL,
+    char_count     INTEGER DEFAULT 0,
+    source_excerpt TEXT DEFAULT '',
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(document_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_document
+    ON memory_chunks(document_id, chunk_index);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts
+    USING fts5(content, source_excerpt, content=memory_chunks, content_rowid=chunk_id);
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_ai AFTER INSERT ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(rowid, content, source_excerpt)
+        VALUES (new.chunk_id, new.content, new.source_excerpt);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_ad AFTER DELETE ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content, source_excerpt)
+        VALUES ('delete', old.chunk_id, old.content, old.source_excerpt);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_au AFTER UPDATE ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content, source_excerpt)
+        VALUES ('delete', old.chunk_id, old.content, old.source_excerpt);
+    INSERT INTO memory_chunks_fts(rowid, content, source_excerpt)
+        VALUES (new.chunk_id, new.content, new.source_excerpt);
+END;
+
+
+CREATE TABLE IF NOT EXISTS memory_events (
+    event_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT DEFAULT '',
+    event         TEXT NOT NULL,
+    detail_json   TEXT DEFAULT '',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_memory_events_session
+    ON memory_events(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_events_event
+    ON memory_events(event, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_injections (
+    injection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT DEFAULT '',
+    query        TEXT DEFAULT '',
+    content      TEXT DEFAULT '',
+    fact_ids     TEXT DEFAULT '',
+    chunk_ids    TEXT DEFAULT '',
+    source       TEXT DEFAULT '',
+    prompt_chars INTEGER DEFAULT 0,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_memory_injections_session
+    ON memory_injections(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_gaps (
+    gap_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT DEFAULT '',
+    query        TEXT DEFAULT '',
+    candidate_count INTEGER DEFAULT 0,
+    note         TEXT DEFAULT '',
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_memory_gaps_session
+    ON memory_gaps(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS fact_links (
+    source_fact_id INTEGER NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
+    target_fact_id INTEGER NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
+    link_type      TEXT DEFAULT 'relates_to',
+    weight         REAL DEFAULT 1.0,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_fact_id, target_fact_id, link_type)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_links_source ON fact_links(source_fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_target ON fact_links(target_fact_id);
+
+
+CREATE TABLE IF NOT EXISTS memory_clusters (
+    cluster_id    TEXT PRIMARY KEY,
+    name          TEXT DEFAULT '',
+    tags          TEXT DEFAULT '',
+    fact_ids_json TEXT NOT NULL DEFAULT '[]',
+    source        TEXT DEFAULT 'auto',
+    weight        REAL DEFAULT 1.0,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_memory_clusters_updated
+    ON memory_clusters(updated_at);
+
+CREATE TABLE IF NOT EXISTS memory_cluster_members (
+    cluster_id TEXT NOT NULL REFERENCES memory_clusters(cluster_id) ON DELETE CASCADE,
+    fact_id    INTEGER NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
+    weight     REAL DEFAULT 1.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (cluster_id, fact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_cluster_members_fact
+    ON memory_cluster_members(fact_id);
 """
 
 # Trust adjustment constants
@@ -184,6 +316,18 @@ class MemoryStore:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
+        fact_column_defaults = {
+            "source_type": "TEXT DEFAULT ''",
+            "source_uri": "TEXT DEFAULT ''",
+            "source_excerpt": "TEXT DEFAULT ''",
+            "observed_at": "TIMESTAMP",
+            "memory_space": "TEXT DEFAULT ''",
+            "status": "TEXT DEFAULT 'active'",
+            "superseded_by": "INTEGER",
+        }
+        for name, definition in fact_column_defaults.items():
+            if name not in columns:
+                self._conn.execute(f"ALTER TABLE facts ADD COLUMN {name} {definition}")
         journal_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(memory_turn_journal)").fetchall()
         }
@@ -209,6 +353,11 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
+        source_type: str = "",
+        source_uri: str = "",
+        source_excerpt: str = "",
+        observed_at: str | None = None,
+        memory_space: str = "",
     ) -> int:
         """Insert a fact and return its fact_id.
 
@@ -224,10 +373,24 @@ class MemoryStore:
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO facts (
+                        content, category, tags, trust_score,
+                        source_type, source_uri, source_excerpt, observed_at,
+                        memory_space
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (
+                        content,
+                        category,
+                        tags,
+                        self.default_trust,
+                        str(source_type or ""),
+                        str(source_uri or ""),
+                        str(source_excerpt or ""),
+                        observed_at,
+                        str(memory_space or ""),
+                    ),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -279,11 +442,14 @@ class MemoryStore:
             sql = f"""
                 SELECT f.fact_id, f.content, f.category, f.tags,
                        f.trust_score, f.retrieval_count, f.helpful_count,
-                       f.created_at, f.updated_at
+                       f.created_at, f.updated_at, f.source_type, f.source_uri,
+                       f.source_excerpt, f.observed_at, f.memory_space, f.status,
+                       f.superseded_by
                 FROM facts f
                 JOIN facts_fts fts ON fts.rowid = f.fact_id
                 WHERE facts_fts MATCH ?
                   AND f.trust_score >= ?
+                  AND COALESCE(f.status, 'active') = 'active'
                   {category_clause}
                 ORDER BY fts.rank, f.trust_score DESC
                 LIMIT ?
@@ -310,6 +476,13 @@ class MemoryStore:
         trust_delta: float | None = None,
         tags: str | None = None,
         category: str | None = None,
+        source_type: str | None = None,
+        source_uri: str | None = None,
+        source_excerpt: str | None = None,
+        observed_at: str | None = None,
+        memory_space: str | None = None,
+        superseded_by: int | None = None,
+        status: str | None = None,
     ) -> bool:
         """Partially update a fact. Trust is clamped to [0, 1].
 
@@ -334,6 +507,27 @@ class MemoryStore:
             if category is not None:
                 assignments.append("category = ?")
                 params.append(category)
+            if source_type is not None:
+                assignments.append("source_type = ?")
+                params.append(source_type)
+            if source_uri is not None:
+                assignments.append("source_uri = ?")
+                params.append(source_uri)
+            if source_excerpt is not None:
+                assignments.append("source_excerpt = ?")
+                params.append(source_excerpt)
+            if observed_at is not None:
+                assignments.append("observed_at = ?")
+                params.append(observed_at)
+            if memory_space is not None:
+                assignments.append("memory_space = ?")
+                params.append(memory_space)
+            if superseded_by is not None:
+                assignments.append("superseded_by = ?")
+                params.append(int(superseded_by))
+            if status is not None:
+                assignments.append("status = ?")
+                params.append(status)
             if trust_delta is not None:
                 new_trust = _clamp_trust(row["trust_score"] + trust_delta)
                 assignments.append("trust_score = ?")
@@ -409,9 +603,12 @@ class MemoryStore:
 
             sql = f"""
                 SELECT fact_id, content, category, tags, trust_score,
-                       retrieval_count, helpful_count, created_at, updated_at
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       source_type, source_uri, source_excerpt, observed_at,
+                       memory_space, status, superseded_by
                 FROM facts
                 WHERE trust_score >= ?
+                  AND COALESCE(status, 'active') = 'active'
                   {category_clause}
                 ORDER BY trust_score DESC
                 LIMIT ?
@@ -566,6 +763,7 @@ class MemoryStore:
                 FROM facts f
                 JOIN fact_entities fe ON fe.fact_id = f.fact_id
                 WHERE fe.entity_id = ?
+                  AND COALESCE(f.status, 'active') = 'active'
                 ORDER BY f.trust_score DESC, f.updated_at DESC, f.fact_id DESC
                 LIMIT ?
                 """,
@@ -577,8 +775,10 @@ class MemoryStore:
                 FROM fact_entities mine
                 JOIN fact_entities other ON other.fact_id = mine.fact_id
                 JOIN entities e ON e.entity_id = other.entity_id
+                JOIN facts f ON f.fact_id = mine.fact_id
                 WHERE mine.entity_id = ?
                   AND other.entity_id != ?
+                  AND COALESCE(f.status, 'active') = 'active'
                 GROUP BY e.entity_id, e.name
                 ORDER BY shared_facts DESC, e.name ASC
                 LIMIT ?
@@ -604,6 +804,536 @@ class MemoryStore:
                 for r in related_rows
             ],
         }
+
+    def record_memory_event(
+        self,
+        event: str,
+        *,
+        session_id: str = "",
+        detail: dict | None = None,
+    ) -> None:
+        """Persist a durable memory pipeline event and append a JSONL audit log."""
+        detail = detail or {}
+        safe_detail = self._safe_json_detail(detail)
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id or "",
+            "event": str(event or ""),
+            "detail": safe_detail,
+        }
+        detail_json = json.dumps(safe_detail, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO memory_events (session_id, event, detail_json)
+                VALUES (?, ?, ?)
+                """,
+                (session_id or "", str(event or ""), detail_json),
+            )
+            self._conn.commit()
+        try:
+            from elevate_constants import get_elevate_home
+            log_dir = get_elevate_home() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            path = log_dir / f"memory-events-{day}.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception:
+            pass
+
+    def recent_memory_events(self, session_id: str | None = None, limit: int = 50) -> list[dict]:
+        limit = max(1, int(limit))
+        params: list = []
+        where = ""
+        if session_id:
+            where = "WHERE session_id = ?"
+            params.append(session_id)
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT event_id, session_id, event, detail_json, created_at
+                FROM memory_events
+                {where}
+                ORDER BY event_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            try:
+                item["detail"] = json.loads(item.pop("detail_json") or "{}")
+            except Exception:
+                item["detail"] = {}
+            return_item = item
+            results.append(return_item)
+        return results
+
+    def record_memory_injection(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        content: str,
+        fact_ids: list[int] | None = None,
+        chunk_ids: list[int] | None = None,
+        source: str = "prefetch",
+    ) -> dict:
+        fact_ids = [int(x) for x in (fact_ids or []) if str(x).isdigit()]
+        chunk_ids = [int(x) for x in (chunk_ids or []) if str(x).isdigit()]
+        prompt_chars = len(content or "")
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO memory_injections (
+                    session_id, query, content, fact_ids, chunk_ids, source, prompt_chars
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id or "",
+                    self._clip_text(query, 1000),
+                    self._clip_text(content, 12000),
+                    json.dumps(fact_ids),
+                    json.dumps(chunk_ids),
+                    source,
+                    prompt_chars,
+                ),
+            )
+            self._conn.commit()
+            injection_id = int(cur.lastrowid or 0)
+        self.record_memory_event(
+            "memory.injected",
+            session_id=session_id,
+            detail={"injection_id": injection_id, "fact_ids": fact_ids, "chunk_ids": chunk_ids, "prompt_chars": prompt_chars, "source": source},
+        )
+        return {"injection_id": injection_id, "fact_ids": fact_ids, "chunk_ids": chunk_ids, "prompt_chars": prompt_chars}
+
+    def injected_memory_ids(self, session_id: str, limit: int = 50) -> dict:
+        if not session_id:
+            return {"fact_ids": set(), "chunk_ids": set()}
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT fact_ids, chunk_ids FROM memory_injections
+                WHERE session_id = ?
+                ORDER BY injection_id DESC
+                LIMIT ?
+                """,
+                (session_id, max(1, int(limit))),
+            ).fetchall()
+        facts: set[int] = set()
+        chunks: set[int] = set()
+        for row in rows:
+            for key, target in (("fact_ids", facts), ("chunk_ids", chunks)):
+                try:
+                    for value in json.loads(row[key] or "[]"):
+                        target.add(int(value))
+                except Exception:
+                    pass
+        return {"fact_ids": facts, "chunk_ids": chunks}
+
+    def memory_replay(self, session_id: str | None = None, limit: int = 50) -> dict:
+        limit = max(1, int(limit))
+        params: list = []
+        where = ""
+        if session_id:
+            where = "WHERE session_id = ?"
+            params.append(session_id)
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT injection_id, session_id, query, content, fact_ids, chunk_ids,
+                       source, prompt_chars, created_at
+                FROM memory_injections
+                {where}
+                ORDER BY injection_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        injections = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            for key in ("fact_ids", "chunk_ids"):
+                try:
+                    item[key] = json.loads(item.get(key) or "[]")
+                except Exception:
+                    item[key] = []
+            injections.append(item)
+        return {"injections": injections, "count": len(injections)}
+
+    def record_memory_gap(self, *, session_id: str = "", query: str = "", candidate_count: int = 0, note: str = "") -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO memory_gaps (session_id, query, candidate_count, note)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id or "", self._clip_text(query, 1000), int(candidate_count or 0), self._clip_text(note, 1000)),
+            )
+            self._conn.commit()
+        self.record_memory_event("memory.gap", session_id=session_id, detail={"query": query, "candidate_count": candidate_count, "note": note})
+
+    def post_retrieval_maintenance(
+        self,
+        *,
+        verified_ids: list[int] | None = None,
+        rejected_ids: list[int] | None = None,
+        query: str = "",
+        session_id: str = "",
+    ) -> dict:
+        verified = sorted({int(x) for x in (verified_ids or []) if str(x).isdigit()})
+        rejected = sorted({int(x) for x in (rejected_ids or []) if str(x).isdigit()} - set(verified))
+        boosted = decayed = links = 0
+        with self._lock:
+            for fact_id in verified:
+                cur = self._conn.execute(
+                    "UPDATE facts SET trust_score = MIN(1.0, trust_score + 0.03), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    (fact_id,),
+                )
+                boosted += cur.rowcount or 0
+            for fact_id in rejected:
+                cur = self._conn.execute(
+                    "UPDATE facts SET trust_score = MAX(0.0, trust_score - 0.01), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    (fact_id,),
+                )
+                decayed += cur.rowcount or 0
+            for i, src in enumerate(verified):
+                for dst in verified[i + 1:]:
+                    self._conn.execute(
+                        """
+                        INSERT INTO fact_links (source_fact_id, target_fact_id, link_type, weight, updated_at)
+                        VALUES (?, ?, 'co_recalled', 1.0, CURRENT_TIMESTAMP)
+                        ON CONFLICT(source_fact_id, target_fact_id, link_type) DO UPDATE SET
+                            weight = fact_links.weight + 1.0,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (src, dst),
+                    )
+                    links += 1
+            self._conn.commit()
+        cluster = {"clustered": False}
+        tags = {"updated": 0}
+        confidence = {"boosted": 0, "decayed": 0, "archived": 0}
+        if len(verified) >= 2:
+            cluster = self.refine_memory_clusters(verified, query=query, session_id=session_id)
+            tags = self.infer_tags_for_facts(verified, limit=len(verified))
+        confidence = self.confidence_maintenance(verified_ids=verified, rejected_ids=rejected, prune=False)
+        if not verified and rejected:
+            self.record_memory_gap(session_id=session_id, query=query, candidate_count=len(rejected), note="retrieved candidates but verifier rejected all")
+        self.record_memory_event(
+            "memory.maintenance",
+            session_id=session_id,
+            detail={"verified": len(verified), "rejected": len(rejected), "boosted": boosted + confidence.get("boosted", 0), "decayed": decayed + confidence.get("decayed", 0), "links": links, "cluster": cluster, "tags": tags},
+        )
+        return {"verified": len(verified), "rejected": len(rejected), "boosted": boosted + confidence.get("boosted", 0), "decayed": decayed + confidence.get("decayed", 0), "links": links, "cluster": cluster, "tags": tags}
+
+    def supersede_fact(self, old_fact_id: int, new_fact_id: int) -> bool:
+        with self._lock:
+            old = self._conn.execute("SELECT fact_id FROM facts WHERE fact_id = ?", (old_fact_id,)).fetchone()
+            new = self._conn.execute("SELECT fact_id FROM facts WHERE fact_id = ?", (new_fact_id,)).fetchone()
+            if not old or not new:
+                return False
+            self._conn.execute(
+                "UPDATE facts SET status = 'superseded', superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                (new_fact_id, old_fact_id),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO fact_links (source_fact_id, target_fact_id, link_type, weight, updated_at)
+                VALUES (?, ?, 'superseded_by', 1.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(source_fact_id, target_fact_id, link_type) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                """,
+                (old_fact_id, new_fact_id),
+            )
+            self._conn.commit()
+        self.record_memory_event("memory.superseded", detail={"old_fact_id": old_fact_id, "new_fact_id": new_fact_id})
+        return True
+
+    def memory_profile(self, session_id: str | None = None) -> dict:
+        params: list = []
+        session_clause = ""
+        if session_id:
+            session_clause = "WHERE session_id = ?"
+            params.append(session_id)
+        with self._lock:
+            fact_count = self._conn.execute("SELECT COUNT(*) FROM facts WHERE COALESCE(status, 'active') = 'active'").fetchone()[0]
+            doc_count = self._conn.execute("SELECT COUNT(*) FROM memory_documents").fetchone()[0]
+            chunk_count = self._conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
+            journal = self._conn.execute(f"SELECT COUNT(*) AS c, COALESCE(SUM(length(user_content) + length(assistant_content)), 0) AS bytes FROM memory_turn_journal {session_clause}", params).fetchone()
+            injections = self._conn.execute(f"SELECT COUNT(*) AS c, COALESCE(SUM(prompt_chars), 0) AS chars FROM memory_injections {session_clause}", params).fetchone()
+            events = self._conn.execute(f"SELECT COUNT(*) AS c FROM memory_events {session_clause}", params).fetchone()
+            gaps = self._conn.execute(f"SELECT COUNT(*) AS c FROM memory_gaps {session_clause}", params).fetchone()
+            large_chunks = self._conn.execute("SELECT COUNT(*) FROM memory_chunks WHERE char_count >= 16000").fetchone()[0]
+            cluster_count = self._conn.execute("SELECT COUNT(*) FROM memory_clusters").fetchone()[0]
+            cluster_members = self._conn.execute("SELECT COUNT(*) FROM memory_cluster_members").fetchone()[0]
+        return {
+            "session_id": session_id or "",
+            "facts": int(fact_count),
+            "documents": int(doc_count),
+            "chunks": int(chunk_count),
+            "journal_turns": int(journal["c"]),
+            "journal_payload_chars": int(journal["bytes"] or 0),
+            "memory_injections": int(injections["c"]),
+            "memory_injection_chars": int(injections["chars"] or 0),
+            "memory_events": int(events["c"]),
+            "memory_gaps": int(gaps["c"]),
+            "large_chunks": int(large_chunks),
+            "clusters": int(cluster_count),
+            "cluster_members": int(cluster_members),
+            "estimated_injection_tokens": int((injections["chars"] or 0) / 4),
+            "estimated_journal_tokens": int((journal["bytes"] or 0) / 4),
+        }
+
+
+    @staticmethod
+    def _stable_id(values: list[int] | list[str], prefix: str = "cluster") -> str:
+        raw = "|".join(str(v) for v in sorted(values, key=lambda x: str(x)))
+        import hashlib
+        return f"{prefix}:{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
+
+    @staticmethod
+    def _normalise_tag(value: str) -> str:
+        tag = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+        return tag[:48]
+
+    @classmethod
+    def _candidate_tags_from_text(cls, text: str, limit: int = 5) -> list[str]:
+        stop = {
+            "the", "and", "for", "that", "this", "with", "from", "into", "about", "your", "you",
+            "are", "was", "were", "what", "when", "where", "should", "could", "would", "memory",
+            "fact", "facts", "project", "user", "assistant", "content", "using", "uses", "have", "has",
+        }
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", text or "")]
+        counts: dict[str, int] = {}
+        for t in tokens:
+            if t in stop or len(t) < 3:
+                continue
+            counts[t] = counts.get(t, 0) + 1
+        # Prefer existing hyphenated/business terms found in text before one-word fallbacks.
+        phrases = re.findall(r"\b[A-Za-z0-9]+(?:[-_ ][A-Za-z0-9]+){1,3}\b", text or "")
+        phrase_tags = []
+        for phrase in phrases:
+            tag = cls._normalise_tag(phrase)
+            if tag and tag.replace('-', '') not in stop and 4 <= len(tag) <= 48:
+                phrase_tags.append(tag)
+        ordered = []
+        for tag in phrase_tags:
+            if tag not in ordered:
+                ordered.append(tag)
+            if len(ordered) >= limit:
+                return ordered
+        for token, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            tag = cls._normalise_tag(token)
+            if tag and tag not in ordered:
+                ordered.append(tag)
+            if len(ordered) >= limit:
+                break
+        return ordered
+
+    @classmethod
+    def _cluster_name_from_rows(cls, rows: list[sqlite3.Row]) -> str:
+        text = " ".join(" ".join(str(row[k] or "") for k in ("content", "tags", "category")) for row in rows)
+        tags = cls._candidate_tags_from_text(text, limit=3)
+        if tags:
+            return " ".join(part.capitalize() for part in tags[0].split("-")[:4])
+        return "Co-recalled Memory Cluster"
+
+    def refine_memory_clusters(
+        self,
+        fact_ids: list[int] | None = None,
+        *,
+        query: str = "",
+        session_id: str = "",
+        min_members: int = 2,
+    ) -> dict:
+        """Create/update deterministic co-relevance clusters from facts retrieved together."""
+        ids = sorted({int(x) for x in (fact_ids or []) if str(x).isdigit()})
+        if len(ids) < max(2, int(min_members or 2)):
+            return {"clustered": False, "reason": "not_enough_facts", "members": len(ids)}
+        with self._lock:
+            placeholders = ",".join("?" * len(ids))
+            rows = self._conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, trust_score
+                FROM facts
+                WHERE fact_id IN ({placeholders}) AND COALESCE(status, 'active') = 'active'
+                """,
+                ids,
+            ).fetchall()
+            active_ids = sorted(int(r["fact_id"]) for r in rows)
+            if len(active_ids) < max(2, int(min_members or 2)):
+                return {"clustered": False, "reason": "not_enough_active_facts", "members": len(active_ids)}
+            cluster_id = self._stable_id(active_ids, prefix="cluster")
+            name = self._cluster_name_from_rows(rows)
+            text = " ".join([query or ""] + [str(r["content"] or "") + " " + str(r["tags"] or "") for r in rows])
+            tags = ",".join(self._candidate_tags_from_text(text, limit=8))
+            self._conn.execute(
+                """
+                INSERT INTO memory_clusters (cluster_id, name, tags, fact_ids_json, source, weight, updated_at)
+                VALUES (?, ?, ?, ?, 'co_relevance', 1.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(cluster_id) DO UPDATE SET
+                    name = excluded.name,
+                    tags = excluded.tags,
+                    fact_ids_json = excluded.fact_ids_json,
+                    weight = memory_clusters.weight + 1.0,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (cluster_id, name, tags, json.dumps(active_ids)),
+            )
+            inserted_members = 0
+            for fid in active_ids:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO memory_cluster_members (cluster_id, fact_id, weight, updated_at)
+                    VALUES (?, ?, 1.0, CURRENT_TIMESTAMP)
+                    ON CONFLICT(cluster_id, fact_id) DO UPDATE SET
+                        weight = memory_cluster_members.weight + 1.0,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (cluster_id, fid),
+                )
+                inserted_members += cur.rowcount or 0
+            self._conn.commit()
+        self.record_memory_event(
+            "memory.cluster.refined",
+            session_id=session_id,
+            detail={"cluster_id": cluster_id, "name": name, "members": len(active_ids), "tags": tags},
+        )
+        return {"clustered": True, "cluster_id": cluster_id, "name": name, "members": len(active_ids), "tags": tags, "member_updates": inserted_members}
+
+    def infer_tags_for_facts(self, fact_ids: list[int] | None = None, *, limit: int = 50) -> dict:
+        """Infer lightweight tags from content/category and merge them into facts."""
+        ids = sorted({int(x) for x in (fact_ids or []) if str(x).isdigit()})
+        params: list = []
+        where = "COALESCE(status, 'active') = 'active'"
+        if ids:
+            where += f" AND fact_id IN ({','.join('?' * len(ids))})"
+            params.extend(ids)
+        params.append(max(1, int(limit or 50)))
+        updated = 0
+        applied: dict[int, list[str]] = {}
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, source_uri, memory_space
+                FROM facts
+                WHERE {where}
+                ORDER BY updated_at DESC, fact_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            for row in rows:
+                existing = [self._normalise_tag(t) for t in re.split(r"[,\s]+", str(row["tags"] or "")) if t]
+                text = " ".join(str(row[k] or "") for k in ("content", "category", "source_uri", "memory_space"))
+                inferred = self._candidate_tags_from_text(text, limit=5)
+                merged = []
+                for tag in existing + inferred:
+                    if tag and tag not in merged:
+                        merged.append(tag)
+                if merged and merged != existing:
+                    self._conn.execute(
+                        "UPDATE facts SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                        (",".join(merged[:12]), int(row["fact_id"])),
+                    )
+                    updated += 1
+                    applied[int(row["fact_id"])] = merged[:12]
+            self._conn.commit()
+        self.record_memory_event("memory.tags.inferred", detail={"updated": updated})
+        return {"updated": updated, "facts": applied}
+
+    def confidence_maintenance(
+        self,
+        *,
+        verified_ids: list[int] | None = None,
+        rejected_ids: list[int] | None = None,
+        prune: bool = True,
+        archive_threshold: float = 0.12,
+        min_age_hours: int = 24,
+    ) -> dict:
+        """Boost useful memories, decay rejected memories, and archive stale low-confidence facts."""
+        verified = sorted({int(x) for x in (verified_ids or []) if str(x).isdigit()})
+        rejected = sorted({int(x) for x in (rejected_ids or []) if str(x).isdigit()} - set(verified))
+        boosted = decayed = archived = 0
+        with self._lock:
+            for fid in verified:
+                cur = self._conn.execute(
+                    "UPDATE facts SET trust_score = MIN(1.0, trust_score + 0.05), helpful_count = helpful_count + 1, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    (fid,),
+                )
+                boosted += cur.rowcount or 0
+            for fid in rejected:
+                cur = self._conn.execute(
+                    "UPDATE facts SET trust_score = MAX(0.0, trust_score - 0.02), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    (fid,),
+                )
+                decayed += cur.rowcount or 0
+            if prune:
+                cur = self._conn.execute(
+                    """
+                    UPDATE facts
+                    SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+                    WHERE COALESCE(status, 'active') = 'active'
+                      AND trust_score < ?
+                      AND (julianday('now') - julianday(created_at)) * 24.0 >= ?
+                      AND helpful_count = 0
+                    """,
+                    (float(archive_threshold), int(min_age_hours)),
+                )
+                archived = cur.rowcount or 0
+            self._conn.commit()
+        self.record_memory_event("memory.confidence.maintenance", detail={"boosted": boosted, "decayed": decayed, "archived": archived})
+        return {"boosted": boosted, "decayed": decayed, "archived": archived, "verified": len(verified), "rejected": len(rejected)}
+
+    def prune_memory_logs(self, *, retention_days: int = 30) -> dict:
+        """Prune old memory events/injections/gaps from SQLite while preserving facts/documents."""
+        days = max(1, int(retention_days or 30))
+        removed: dict[str, int] = {}
+        with self._lock:
+            for table, date_col in (("memory_events", "created_at"), ("memory_injections", "created_at"), ("memory_gaps", "created_at")):
+                cur = self._conn.execute(
+                    f"DELETE FROM {table} WHERE {date_col} < datetime('now', ?)",
+                    (f"-{days} days",),
+                )
+                removed[table] = cur.rowcount or 0
+            self._conn.commit()
+        self.record_memory_event("memory.logs.pruned", detail={"retention_days": days, "removed": removed})
+        return {"retention_days": days, "removed": removed, "total_removed": sum(removed.values())}
+
+    def memory_benchmark(self, queries: list[str] | None = None, *, limit: int = 5) -> dict:
+        """Small local recall benchmark: latency, hit counts, and duplicate rate across queries."""
+        queries = [str(q).strip() for q in (queries or []) if str(q).strip()]
+        if not queries:
+            queries = ["user preferences", "project decisions", "Plaud meeting Uppercuts", "Google Ads campaigns"]
+        started = time.time()
+        rows = []
+        seen_fact_ids: list[int] = []
+        for query in queries:
+            q_start = time.time()
+            facts = self.list_facts(min_trust=0.0, limit=1000)
+            # Prefer exact token overlap locally; this benchmark avoids external embedding calls.
+            q_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+            scored = []
+            for fact in facts:
+                text = " ".join(str(fact.get(k, "")) for k in ("content", "tags", "category", "source_uri"))
+                tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+                overlap = len(q_tokens & tokens)
+                score = overlap + float(fact.get("trust_score") or 0)
+                if overlap or not q_tokens:
+                    scored.append((score, fact))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            hits = [fact for _, fact in scored[: max(1, int(limit))]]
+            seen_fact_ids.extend(int(f.get("fact_id")) for f in hits if f.get("fact_id"))
+            rows.append({"query": query, "hits": len(hits), "latency_ms": round((time.time() - q_start) * 1000, 2), "top_fact_ids": [int(f.get("fact_id")) for f in hits if f.get("fact_id")]})
+        duplicate_rate = 0.0
+        if seen_fact_ids:
+            duplicate_rate = 1.0 - (len(set(seen_fact_ids)) / len(seen_fact_ids))
+        return {"queries": rows, "query_count": len(queries), "total_latency_ms": round((time.time() - started) * 1000, 2), "duplicate_rate": round(duplicate_rate, 4)}
 
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
         """Record user feedback and adjust trust asymmetrically.
@@ -645,6 +1375,64 @@ class MemoryStore:
                 "new_trust":    new_trust,
                 "helpful_count": row["helpful_count"] + helpful_increment,
             }
+
+    def record_retrieval_events(
+        self,
+        fact_ids: list[int],
+        trust_delta: float = 0.0,
+    ) -> dict:
+        """Record that facts were surfaced by recall.
+
+        This is intentionally separate from explicit user feedback. Retrievals
+        increment usage counts so frequently surfaced facts can be inspected and
+        ranked later. A tiny optional trust_delta can be used by higher-level
+        retrieval flows that have verified relevance.
+        """
+        ids: list[int] = []
+        seen: set[int] = set()
+        for raw in fact_ids or []:
+            try:
+                fid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if fid > 0 and fid not in seen:
+                seen.add(fid)
+                ids.append(fid)
+        if not ids:
+            return {"updated": 0}
+
+        with self._lock:
+            placeholders = ",".join("?" * len(ids))
+            if trust_delta:
+                rows = self._conn.execute(
+                    f"SELECT fact_id, trust_score FROM facts WHERE fact_id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                for row in rows:
+                    self._conn.execute(
+                        """
+                        UPDATE facts
+                        SET retrieval_count = retrieval_count + 1,
+                            trust_score = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE fact_id = ?
+                        """,
+                        (_clamp_trust(float(row["trust_score"]) + trust_delta), int(row["fact_id"])),
+                    )
+                updated = len(rows)
+            else:
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE facts
+                    SET retrieval_count = retrieval_count + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE fact_id IN ({placeholders})
+                    """,
+                    ids,
+                )
+                updated = int(cur.rowcount or 0)
+            self._conn.commit()
+            return {"updated": updated}
 
     def record_turn(
         self,
@@ -840,7 +1628,9 @@ class MemoryStore:
         """Return local embedding index status for facts."""
         with self._lock:
             fact_count = self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+            chunk_count = self._conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
             indexed_facts = 0
+            indexed_chunks = 0
             if self.embedding_client:
                 indexed_facts = self._conn.execute(
                     """
@@ -851,15 +1641,30 @@ class MemoryStore:
                     """,
                     (self.embedding_client.provider, self.embedding_client.model),
                 ).fetchone()[0]
+                indexed_chunks = self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM memory_embeddings
+                    WHERE target_type = 'chunk'
+                      AND provider = ?
+                      AND model = ?
+                    """,
+                    (self.embedding_client.provider, self.embedding_client.model),
+                ).fetchone()[0]
             else:
                 indexed_facts = self._conn.execute(
                     "SELECT COUNT(*) FROM memory_embeddings WHERE target_type = 'fact'"
                 ).fetchone()[0]
+                indexed_chunks = self._conn.execute(
+                    "SELECT COUNT(*) FROM memory_embeddings WHERE target_type = 'chunk'"
+                ).fetchone()[0]
             status = {
                 "enabled": self.embeddings_enabled(),
                 "facts": int(fact_count),
+                "chunks": int(chunk_count),
                 "indexed_facts": int(indexed_facts),
+                "indexed_chunks": int(indexed_chunks),
                 "missing_or_stale": 0,
+                "missing_or_stale_chunks": 0,
             }
             if self.embedding_client:
                 status.update({
@@ -875,6 +1680,14 @@ class MemoryStore:
                     if not self._embedding_current(row["fact_id"], row["content"]):
                         missing += 1
                 status["missing_or_stale"] = missing
+                chunk_missing = 0
+                chunk_rows = self._conn.execute(
+                    "SELECT chunk_id, content FROM memory_chunks"
+                ).fetchall()
+                for row in chunk_rows:
+                    if not self._target_embedding_current("chunk", row["chunk_id"], row["content"]):
+                        chunk_missing += 1
+                status["missing_or_stale_chunks"] = chunk_missing
             return status
 
     def backfill_embeddings(self, limit: int | None = None) -> dict:
@@ -903,6 +1716,80 @@ class MemoryStore:
                 "indexed": indexed,
                 "skipped": skipped,
             }
+
+    def backfill_chunk_embeddings(
+        self,
+        limit: int | None = None,
+        *,
+        source_type: str | None = None,
+        batch_size: int = 96,
+    ) -> dict:
+        """Embed document chunks that are missing or stale for the active backend."""
+        if not self.embedding_client:
+            return {"enabled": False, "indexed": 0, "skipped": 0, "target_type": "chunk"}
+
+        batch_size = max(1, min(int(batch_size or 96), 256))
+        clauses = []
+        params: list = []
+        if source_type:
+            clauses.append("d.source_type = ?")
+            params.append(source_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT c.chunk_id, c.content
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.document_id = c.document_id
+                {where}
+                ORDER BY c.updated_at DESC, c.chunk_id DESC
+                """,
+                params,
+            ).fetchall()
+
+        indexed = 0
+        skipped = 0
+        pending: list[tuple[int, str, str]] = []
+        for row in rows:
+            if limit is not None and indexed >= int(limit):
+                break
+            chunk_id = int(row["chunk_id"])
+            content = str(row["content"] or "")
+            digest = content_hash(content)
+            with self._lock:
+                current = self._target_embedding_current("chunk", chunk_id, content)
+            if current:
+                skipped += 1
+                continue
+            pending.append((chunk_id, content, digest))
+            if len(pending) >= batch_size:
+                indexed += self._embed_targets_batch("chunk", pending)
+                pending = []
+        if pending and (limit is None or indexed < int(limit)):
+            indexed += self._embed_targets_batch("chunk", pending)
+
+        self.record_memory_event(
+            "memory.chunk_embedding_backfill.complete",
+            detail={
+                "indexed": indexed,
+                "skipped": skipped,
+                "source_type": source_type or "",
+                "batch_size": batch_size,
+                "provider": self.embedding_client.provider,
+                "model": self.embedding_client.model,
+            },
+        )
+        return {
+            "enabled": True,
+            "target_type": "chunk",
+            "provider": self.embedding_client.provider,
+            "model": self.embedding_client.model,
+            "indexed": indexed,
+            "skipped": skipped,
+            "source_type": source_type or "",
+            "batch_size": batch_size,
+        }
 
     def semantic_search(
         self,
@@ -954,6 +1841,7 @@ class MemoryStore:
                   AND e.provider = ?
                   AND e.model = ?
                   AND f.trust_score >= ?
+                  AND COALESCE(f.status, 'active') = 'active'
                   {category_clause}
                 """,
                 params,
@@ -988,6 +1876,373 @@ class MemoryStore:
         except Exception:
             pass
         return results
+
+
+    def add_document(
+        self,
+        source_uri: str,
+        title: str = "",
+        source_type: str = "document",
+        metadata: dict | None = None,
+    ) -> int:
+        """Create or update a source document record and return document_id."""
+        source_uri = str(source_uri or "").strip()
+        if not source_uri:
+            raise ValueError("source_uri must not be empty")
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO memory_documents (source_type, source_uri, title, metadata_json, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(source_uri) DO UPDATE SET
+                    source_type = excluded.source_type,
+                    title = excluded.title,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (str(source_type or "document"), source_uri, str(title or ""), metadata_json),
+            )
+            row = self._conn.execute(
+                "SELECT document_id FROM memory_documents WHERE source_uri = ?",
+                (source_uri,),
+            ).fetchone()
+            self._conn.commit()
+            return int(row["document_id"])
+
+    def add_document_chunks(
+        self,
+        source_uri: str,
+        chunks: list[str],
+        title: str = "",
+        source_type: str = "document",
+        metadata: dict | None = None,
+        replace: bool = True,
+    ) -> dict:
+        """Store chunked document text for RAG-style recall."""
+        cleaned = [" ".join(str(c or "").split()) for c in chunks or []]
+        cleaned = [c for c in cleaned if c]
+        document_id = self.add_document(
+            source_uri=source_uri,
+            title=title,
+            source_type=source_type,
+            metadata=metadata,
+        )
+        with self._lock:
+            if replace:
+                old_rows = self._conn.execute(
+                    "SELECT chunk_id FROM memory_chunks WHERE document_id = ?",
+                    (document_id,),
+                ).fetchall()
+                for row in old_rows:
+                    self._conn.execute(
+                        "DELETE FROM memory_embeddings WHERE target_type = 'chunk' AND target_id = ?",
+                        (int(row["chunk_id"]),),
+                    )
+                self._conn.execute("DELETE FROM memory_chunks WHERE document_id = ?", (document_id,))
+            inserted = 0
+            for idx, chunk in enumerate(cleaned):
+                excerpt = chunk[:400]
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO memory_chunks (
+                        document_id, chunk_index, content, char_count, source_excerpt, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(document_id, chunk_index) DO UPDATE SET
+                        content = excluded.content,
+                        char_count = excluded.char_count,
+                        source_excerpt = excluded.source_excerpt,
+                        updated_at = excluded.updated_at
+                    """,
+                    (document_id, idx, chunk, len(chunk), excerpt),
+                )
+                chunk_id = int(cur.lastrowid or 0)
+                if not chunk_id:
+                    row = self._conn.execute(
+                        "SELECT chunk_id FROM memory_chunks WHERE document_id = ? AND chunk_index = ?",
+                        (document_id, idx),
+                    ).fetchone()
+                    chunk_id = int(row["chunk_id"])
+                self._embed_chunk(chunk_id, chunk)
+                inserted += 1
+            self._conn.commit()
+            return {"document_id": document_id, "chunks": inserted}
+
+    def document_search(
+        self,
+        query: str,
+        source_type: str | None = None,
+        limit: int = 8,
+    ) -> list[dict]:
+        """Search document chunks using FTS plus optional semantic embeddings."""
+        query = str(query or "").strip()
+        if not query:
+            return []
+        limit = max(1, int(limit))
+        results_by_id: dict[int, dict] = {}
+
+        def add_result(row: sqlite3.Row, score: float, score_name: str) -> None:
+            item = self._row_to_dict(row)
+            chunk_id = int(item["chunk_id"])
+            existing = results_by_id.get(chunk_id)
+            if existing:
+                existing[score_name] = max(float(existing.get(score_name, 0.0)), score)
+                existing["score"] = max(float(existing.get("score", 0.0)), score)
+            else:
+                item[score_name] = score
+                item["score"] = score
+                results_by_id[chunk_id] = item
+
+        with self._lock:
+            params: list = [query]
+            type_clause = ""
+            if source_type:
+                type_clause = "AND d.source_type = ?"
+                params.append(source_type)
+            params.append(limit * 4)
+            sql = f"""
+                SELECT c.chunk_id, c.document_id, c.chunk_index, c.content,
+                       c.char_count, c.source_excerpt, d.source_type, d.source_uri,
+                       d.title, d.metadata_json, c.updated_at, memory_chunks_fts.rank AS fts_rank_raw
+                FROM memory_chunks_fts
+                JOIN memory_chunks c ON c.chunk_id = memory_chunks_fts.rowid
+                JOIN memory_documents d ON d.document_id = c.document_id
+                WHERE memory_chunks_fts MATCH ?
+                  {type_clause}
+                ORDER BY memory_chunks_fts.rank
+                LIMIT ?
+            """
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except Exception:
+                fallback = self._fallback_fts_query(query)
+                rows = self._conn.execute(sql, [fallback, *params[1:]]).fetchall() if fallback else []
+            if not rows:
+                fallback = self._fallback_fts_query(query)
+                if fallback and fallback != query:
+                    try:
+                        rows = self._conn.execute(sql, [fallback, *params[1:]]).fetchall()
+                    except Exception:
+                        rows = []
+            if rows:
+                max_rank = max(abs(float(r["fts_rank_raw"] or 0.0)) for r in rows) or 1.0
+                for row in rows:
+                    add_result(row, abs(float(row["fts_rank_raw"] or 0.0)) / max_rank, "fts_score")
+
+            if self.embedding_client:
+                query_result = self.embedding_client.embed(query)
+                emb_params: list = ["chunk", self.embedding_client.provider, self.embedding_client.model]
+                emb_type_clause = ""
+                if source_type:
+                    emb_type_clause = "AND d.source_type = ?"
+                    emb_params.append(source_type)
+                emb_rows = self._conn.execute(
+                    f"""
+                    SELECT c.chunk_id, c.document_id, c.chunk_index, c.content,
+                           c.char_count, c.source_excerpt, d.source_type, d.source_uri,
+                           d.title, d.metadata_json, c.updated_at, e.dimensions, e.vector
+                    FROM memory_embeddings e
+                    JOIN memory_chunks c ON c.chunk_id = e.target_id
+                    JOIN memory_documents d ON d.document_id = c.document_id
+                    WHERE e.target_type = ?
+                      AND e.provider = ?
+                      AND e.model = ?
+                      {emb_type_clause}
+                    """,
+                    emb_params,
+                ).fetchall()
+                for row in emb_rows:
+                    item = self._row_to_dict(row)
+                    try:
+                        vec = blob_to_vector(item.pop("vector"), int(item.pop("dimensions")))
+                    except Exception:
+                        continue
+                    sim = max(0.0, cosine_similarity(query_result.vector, vec))
+                    if sim <= 0:
+                        continue
+                    add_result(row, sim, "semantic_score")
+
+        results = sorted(results_by_id.values(), key=lambda r: r.get("score", 0.0), reverse=True)[:limit]
+        for item in results:
+            item.pop("fts_rank_raw", None)
+            if item.get("metadata_json"):
+                try:
+                    item["metadata"] = json.loads(item["metadata_json"])
+                except Exception:
+                    item["metadata"] = {}
+            item.pop("metadata_json", None)
+        return results
+
+    def memory_hygiene_report(self, limit: int = 20) -> dict:
+        """Return memory maintenance candidates: duplicates, stale, popular, source gaps, contradictions."""
+        limit = max(1, int(limit))
+        with self._lock:
+            popular = [self._row_to_dict(r) for r in self._conn.execute(
+                """
+                SELECT fact_id, content, category, tags, trust_score, retrieval_count,
+                       helpful_count, source_type, source_uri, updated_at
+                FROM facts
+                WHERE retrieval_count > 0
+                ORDER BY retrieval_count DESC, trust_score DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+            low_trust = [self._row_to_dict(r) for r in self._conn.execute(
+                """
+                SELECT fact_id, content, category, tags, trust_score, retrieval_count,
+                       helpful_count, source_type, source_uri, updated_at
+                FROM facts
+                WHERE trust_score < 0.3
+                ORDER BY trust_score ASC, retrieval_count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+            source_gaps = [self._row_to_dict(r) for r in self._conn.execute(
+                """
+                SELECT fact_id, content, category, tags, trust_score, retrieval_count,
+                       helpful_count, source_type, source_uri, updated_at
+                FROM facts
+                WHERE COALESCE(source_type, '') = '' AND COALESCE(source_uri, '') = ''
+                ORDER BY retrieval_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+            duplicate_rows = self._conn.execute(
+                """
+                SELECT lower(substr(content, 1, 120)) AS signature,
+                       COUNT(*) AS count,
+                       GROUP_CONCAT(fact_id) AS fact_ids
+                FROM facts
+                GROUP BY signature
+                HAVING count > 1
+                ORDER BY count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            duplicates = [self._row_to_dict(r) for r in duplicate_rows]
+            superseded = [self._row_to_dict(r) for r in self._conn.execute(
+                """
+                SELECT fact_id, content, category, tags, trust_score, retrieval_count,
+                       helpful_count, source_type, source_uri, updated_at, superseded_by, status
+                FROM facts
+                WHERE COALESCE(status, 'active') != 'active'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+            gaps = [self._row_to_dict(r) for r in self._conn.execute(
+                """
+                SELECT gap_id, session_id, query, candidate_count, note, created_at
+                FROM memory_gaps
+                ORDER BY gap_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+        return {
+            "popular": popular,
+            "low_trust": low_trust,
+            "source_gaps": source_gaps,
+            "duplicates": duplicates,
+            "superseded": superseded,
+            "gaps": gaps,
+        }
+
+    @staticmethod
+    def chunk_text(text: str, max_chars: int = 1400, overlap: int = 180) -> list[str]:
+        """Simple paragraph-aware chunker for local document RAG."""
+        clean = str(text or "").strip()
+        if not clean:
+            return []
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", clean) if p.strip()]
+        chunks: list[str] = []
+        current = ""
+        for para in paragraphs or [clean]:
+            if len(para) > max_chars:
+                if current:
+                    chunks.append(current.strip())
+                    current = ""
+                start = 0
+                while start < len(para):
+                    chunks.append(para[start:start + max_chars].strip())
+                    start += max(1, max_chars - overlap)
+                continue
+            if len(current) + len(para) + 2 <= max_chars:
+                current = (current + "\n\n" + para).strip()
+            else:
+                if current:
+                    chunks.append(current.strip())
+                prefix = current[-overlap:].strip() if overlap and current else ""
+                current = (prefix + "\n\n" + para).strip() if prefix else para
+        if current:
+            chunks.append(current.strip())
+        return chunks
+
+    def _embed_chunk(self, chunk_id: int, content: str) -> None:
+        """Create or update the semantic embedding for a document chunk."""
+        if not self.embedding_client:
+            return
+        digest = content_hash(content)
+        row = self._conn.execute(
+            """
+            SELECT content_hash FROM memory_embeddings
+            WHERE target_type = 'chunk'
+              AND target_id = ?
+              AND provider = ?
+              AND model = ?
+            """,
+            (chunk_id, self.embedding_client.provider, self.embedding_client.model),
+        ).fetchone()
+        if row and row["content_hash"] == digest:
+            return
+        result = self.embedding_client.embed(content)
+        self._conn.execute(
+            """
+            INSERT INTO memory_embeddings (
+                target_type, target_id, provider, model, dimensions,
+                content_hash, vector, updated_at
+            )
+            VALUES ('chunk', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(target_type, target_id, provider, model) DO UPDATE SET
+                dimensions = excluded.dimensions,
+                content_hash = excluded.content_hash,
+                vector = excluded.vector,
+                updated_at = excluded.updated_at
+            """,
+            (
+                chunk_id,
+                result.provider,
+                result.model,
+                result.dimensions,
+                digest,
+                vector_to_blob(result.vector),
+            ),
+        )
+
+    @staticmethod
+    def _fallback_fts_query(query: str) -> str:
+        stop = {
+            "a", "an", "and", "are", "can", "did", "does", "for", "how", "i",
+            "in", "is", "it", "me", "my", "of", "on", "or", "our", "the", "to",
+            "was", "we", "what", "when", "where", "who", "why", "with", "you",
+        }
+        tokens = []
+        for raw in re.findall(r"[A-Za-z0-9_]+", str(query or "").lower()):
+            if len(raw) >= 3 and raw not in stop:
+                tokens.append(raw)
+        deduped = []
+        seen = set()
+        for token in tokens:
+            if token not in seen:
+                seen.add(token)
+                deduped.append(token)
+        return " OR ".join(deduped[:12])
 
     # ------------------------------------------------------------------
     # Entity helpers
@@ -1093,20 +2348,56 @@ class MemoryStore:
             )
             self._conn.commit()
 
-    def _embedding_current(self, fact_id: int, content: str) -> bool:
+    def _target_embedding_current(self, target_type: str, target_id: int, content: str) -> bool:
         if not self.embedding_client:
             return False
         row = self._conn.execute(
             """
             SELECT content_hash FROM memory_embeddings
-            WHERE target_type = 'fact'
+            WHERE target_type = ?
               AND target_id = ?
               AND provider = ?
               AND model = ?
             """,
-            (fact_id, self.embedding_client.provider, self.embedding_client.model),
+            (target_type, int(target_id), self.embedding_client.provider, self.embedding_client.model),
         ).fetchone()
         return bool(row and row["content_hash"] == content_hash(content))
+
+    def _embed_targets_batch(self, target_type: str, items: list[tuple[int, str, str]]) -> int:
+        if not self.embedding_client or not items:
+            return 0
+        texts = [content for _, content, _ in items]
+        results = self.embedding_client.embed_many(texts)
+        with self._lock:
+            for (target_id, _content, digest), result in zip(items, results):
+                self._conn.execute(
+                    """
+                    INSERT INTO memory_embeddings (
+                        target_type, target_id, provider, model, dimensions,
+                        content_hash, vector, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(target_type, target_id, provider, model) DO UPDATE SET
+                        dimensions = excluded.dimensions,
+                        content_hash = excluded.content_hash,
+                        vector = excluded.vector,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        target_type,
+                        int(target_id),
+                        result.provider,
+                        result.model,
+                        result.dimensions,
+                        digest,
+                        vector_to_blob(result.vector),
+                    ),
+                )
+            self._conn.commit()
+        return len(results)
+
+    def _embedding_current(self, fact_id: int, content: str) -> bool:
+        return self._target_embedding_current("fact", fact_id, content)
 
     def _embed_fact(self, fact_id: int, content: str) -> None:
         """Create or update the semantic embedding for a fact."""
@@ -1246,6 +2537,30 @@ class MemoryStore:
         if not day:
             day = datetime.now().astimezone().date().isoformat()
         return created_text, day
+
+    @staticmethod
+    def _clip_text(text: str, max_chars: int) -> str:
+        clean = str(text or "")
+        if len(clean) <= max_chars:
+            return clean
+        return clean[:max_chars].rstrip() + "..."
+
+    @classmethod
+    def _safe_json_detail(cls, value):
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                key = str(k)
+                if any(secret in key.lower() for secret in ("key", "token", "secret", "password", "authorization")):
+                    out[key] = "[REDACTED]"
+                else:
+                    out[key] = cls._safe_json_detail(v)
+            return out
+        if isinstance(value, list):
+            return [cls._safe_json_detail(v) for v in value[:50]]
+        if isinstance(value, str):
+            return cls._clip_text(value, 2000)
+        return value
 
     def close(self) -> None:
         """Close the database connection."""

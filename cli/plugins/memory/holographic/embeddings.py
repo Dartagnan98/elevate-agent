@@ -21,6 +21,34 @@ class EmbeddingError(RuntimeError):
     """Raised when an embedding provider cannot return a vector."""
 
 
+def _load_env_file_if_needed(var_name: str) -> None:
+    """Load simple KEY=VALUE entries from local env files without printing secrets."""
+    if os.getenv(var_name) or os.getenv("OPENAI_API_KEY"):
+        return
+    candidates = [
+        os.path.expanduser("~/.elevate/.env"),
+        "/Users/dartagnanpatricio/claudeclaw/.env",
+    ]
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    raw = line.strip()
+                    if not raw or raw.startswith("#") or "=" not in raw:
+                        continue
+                    key, value = raw.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip("'\"")
+                    if key and value and key not in os.environ:
+                        os.environ[key] = value
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+        if os.getenv(var_name) or os.getenv("OPENAI_API_KEY"):
+            return
+
+
 @dataclass(frozen=True)
 class EmbeddingResult:
     provider: str
@@ -91,6 +119,9 @@ class BaseEmbeddingClient:
     def embed(self, text: str) -> EmbeddingResult:
         raise NotImplementedError
 
+    def embed_many(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [self.embed(text) for text in texts]
+
 
 class OpenAIEmbeddingClient(BaseEmbeddingClient):
     provider = "openai"
@@ -103,6 +134,7 @@ class OpenAIEmbeddingClient(BaseEmbeddingClient):
         base_url: str | None = None,
     ) -> None:
         super().__init__(model=model, dimensions=dimensions)
+        _load_env_file_if_needed(api_key_env)
         api_key = os.getenv(api_key_env) or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise EmbeddingError(
@@ -119,17 +151,25 @@ class OpenAIEmbeddingClient(BaseEmbeddingClient):
         self._client = OpenAI(**kwargs)
 
     def embed(self, text: str) -> EmbeddingResult:
-        payload = {"model": self.model, "input": text, "encoding_format": "float"}
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: list[str]) -> list[EmbeddingResult]:
+        if not texts:
+            return []
+        payload = {"model": self.model, "input": texts, "encoding_format": "float"}
         if self.dimensions:
             payload["dimensions"] = self.dimensions
         response = self._client.embeddings.create(**payload)
-        vector = [float(v) for v in response.data[0].embedding]
-        return EmbeddingResult(
-            provider=self.provider,
-            model=self.model,
-            dimensions=len(vector),
-            vector=vector,
-        )
+        results: list[EmbeddingResult] = []
+        for item in sorted(response.data, key=lambda d: d.index):
+            vector = [float(v) for v in item.embedding]
+            results.append(EmbeddingResult(
+                provider=self.provider,
+                model=self.model,
+                dimensions=len(vector),
+                vector=vector,
+            ))
+        return results
 
 
 class OllamaEmbeddingClient(BaseEmbeddingClient):

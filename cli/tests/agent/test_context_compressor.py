@@ -969,3 +969,17 @@ class TestTruncateToolCallArgsJson:
         parsed = _json.loads(shrunk)
         assert parsed["path"] == "~/.elevate/skills/shopping/browser-setup-notes.md"
         assert parsed["content"].endswith("...[truncated]")
+
+def test_context_limit_auto_compact_for_retry_hook(compressor):
+    msgs = [{"role": "system", "content": "System"}] + [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": "long message " + str(i) + " " + ("x" * 1000)}
+        for i in range(12)
+    ]
+    compacted, applied, meta = compressor.compact_for_retry(msgs, "context_length exceeded: too many tokens")
+    assert applied is True
+    assert len(compacted) < len(msgs)
+    assert meta["reason"] == "context_limit_auto_compaction"
+    same, applied, meta = compressor.compact_for_retry(msgs, "network timeout")
+    assert same == msgs
+    assert applied is False
+    assert meta["reason"] == "not_context_limit"

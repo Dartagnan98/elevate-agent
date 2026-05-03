@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -56,12 +58,20 @@ FACT_STORE_SCHEMA = {
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n"
         "• embedding_status — Inspect semantic embedding index health.\n"
-        "• embedding_backfill — Build missing semantic embeddings.\n"
+        "• embedding_backfill — Build missing semantic fact embeddings.\n"
+        "• chunk_embedding_backfill — Build missing semantic document/chunk embeddings.\n"
         "• journal_status — Inspect the local turn-journal backlog.\n"
         "• organize_journal — Promote pending turn notes into durable facts.\n"
         "• recent — Recall recent session turns from the local journal.\n"
         "• wiki — Open an entity page with facts and backlinks.\n"
         "• layered_recall — Return the same routed memory lanes used by prefetch.\n"
+        "• recall_route — Route a question across durable/recent/document/graph lanes.\n"
+        "• document_add/document_search — Chunk-level local RAG over source documents.\n"
+        "• import_plaud_archive — Build chunk RAG from the local Plaud JSONL archive.\n"
+        "• hygiene — Find stale, overused, duplicate, low-trust, and source-missing facts.\n"
+        "• cluster/auto_tag/confidence_maintenance/prune_logs/benchmark — jcode-style upkeep and profiling.\n"
+        "• memory_events/memory_replay/memory_profile — Audit recall, injection, and token/byte impact.\n"
+        "• supersede — Mark an old fact as replaced by a newer fact.\n"
         "• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
@@ -79,11 +89,26 @@ FACT_STORE_SCHEMA = {
                     "contradict",
                     "embedding_status",
                     "embedding_backfill",
+                    "chunk_embedding_backfill",
                     "journal_status",
                     "organize_journal",
                     "recent",
                     "wiki",
                     "layered_recall",
+                    "recall_route",
+                    "document_add",
+                    "document_search",
+                    "import_plaud_archive",
+                    "hygiene",
+                    "memory_events",
+                    "memory_replay",
+                    "memory_profile",
+                    "cluster",
+                    "auto_tag",
+                    "confidence_maintenance",
+                    "prune_logs",
+                    "benchmark",
+                    "supersede",
                     "update",
                     "remove",
                     "list",
@@ -123,6 +148,17 @@ FACT_STORE_SCHEMA = {
             "session_id": {"type": "string", "description": "Optional session scope for journal actions."},
             "session_day": {"type": "string", "description": "Optional YYYY-MM-DD day scope for journal actions."},
             "include_assistant": {"type": "boolean", "description": "Include assistant side for recent turn recall."},
+            "source_type": {"type": "string", "description": "Source type for facts/documents/chunk searches."},
+            "memory_space": {"type": "string", "description": "Optional project/workspace memory scope."},
+            "old_fact_id": {"type": "integer", "description": "Old fact ID for supersede."},
+            "new_fact_id": {"type": "integer", "description": "New fact ID for supersede."},
+            "source_uri": {"type": "string", "description": "Source URI/path/id for facts/documents."},
+            "source_excerpt": {"type": "string", "description": "Short evidence excerpt for source-aware facts."},
+            "observed_at": {"type": "string", "description": "When this fact/source was observed."},
+            "title": {"type": "string", "description": "Document title for document_add/imports."},
+            "path": {"type": "string", "description": "Local archive path for import_plaud_archive."},
+            "metadata": {"type": "object", "description": "Optional document metadata."},
+            "chunks": {"type": "array", "items": {"type": "string"}, "description": "Pre-split chunks for document_add."},
         },
         "required": ["action"],
     },
@@ -242,6 +278,19 @@ class HolographicMemoryProvider(MemoryProvider):
             minimum=80,
         )
         self._turns_since_organize = 0
+        self._prefetch_cache: dict[str, str] = {}
+        self._prefetch_lock = threading.RLock()
+        self._last_layered_facts: list[dict] = []
+        self._last_layered_chunks: list[dict] = []
+        self._session_topic_tokens: dict[str, set[str]] = {}
+        self._session_turn_counts: dict[str, int] = {}
+        self._topic_extraction_enabled = parse_bool(
+            self._config.get("topic_extraction_enabled"),
+            default=False,
+        )
+        self._topic_change_threshold = float(self._config.get("topic_change_threshold", 0.28))
+        self._topic_extract_min_turns = _parse_int(self._config.get("topic_extract_min_turns"), 4, minimum=1)
+        self._periodic_extract_interval = _parse_int(self._config.get("periodic_extract_interval"), 12, minimum=0)
 
     @property
     def name(self) -> str:
@@ -289,6 +338,10 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "durable_recall_limit", "description": "Max durable facts in memory prefetch", "default": "4"},
             {"key": "graph_recall_limit", "description": "Max entity wiki pages in memory prefetch", "default": "2"},
             {"key": "recent_turn_max_chars", "description": "Max characters per recent turn in prefetch", "default": "240"},
+            {"key": "topic_extraction_enabled", "description": "Incrementally organize memory on topic changes/long sessions", "default": "false", "choices": ["true", "false"]},
+            {"key": "topic_change_threshold", "description": "Token/Jaccard threshold for incremental topic-change extraction", "default": "0.28"},
+            {"key": "topic_extract_min_turns", "description": "Minimum turns before topic-change journal organization", "default": "4"},
+            {"key": "periodic_extract_interval", "description": "Organize journal every N turns during long sessions (0 disables)", "default": "12"},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
             {"key": "embedding_enabled", "description": "Enable semantic embeddings", "default": "false", "choices": ["true", "false"]},
@@ -340,6 +393,10 @@ class HolographicMemoryProvider(MemoryProvider):
             hrr_dim=hrr_dim,
         )
         self._session_id = session_id
+        try:
+            self._store.record_memory_event("memory.provider.initialized", session_id=session_id, detail={"db_path": str(db_path)})
+        except Exception:
+            pass
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -378,6 +435,15 @@ class HolographicMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._retriever or not query:
             return ""
+        cache_key = self._cache_key(query, session_id=session_id)
+        with self._prefetch_lock:
+            cached = self._prefetch_cache.pop(cache_key, "")
+        if cached:
+            try:
+                self._store.record_memory_event("memory.prefetch.cache_hit", session_id=session_id, detail={"query": query, "prompt_chars": len(cached)})
+            except Exception:
+                pass
+            return cached
         memory_activity.pipeline_start(reason="prefetch")
         try:
             if self._layered_prefetch_enabled:
@@ -390,6 +456,15 @@ class HolographicMemoryProvider(MemoryProvider):
                     status="done" if context else "skipped",
                     data={"prompt_chars": len(context), "session_id": session_id},
                 )
+                if context:
+                    self._record_context_injection(
+                        query,
+                        context,
+                        session_id=session_id,
+                        facts=getattr(self, "_last_layered_facts", []),
+                        chunks=getattr(self, "_last_layered_chunks", []),
+                        source="layered_prefetch",
+                    )
                 return context
 
             results = self._retriever.search(
@@ -412,6 +487,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 trust = r.get("trust_score", r.get("trust", 0))
                 lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
             context = "## Elevate Memory Core\n" + "\n".join(lines)
+            self._record_context_injection(query, context, session_id=session_id, facts=results, source="flat_prefetch")
             memory_activity.record_event(
                 "memory.prefetch.complete",
                 message=f"injected {len(results)} durable fact(s)",
@@ -431,6 +507,27 @@ class HolographicMemoryProvider(MemoryProvider):
             )
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Build and cache recall context for a likely next turn.
+
+        This is deliberately local and bounded. If query changes, prefetch()
+        simply falls back to live retrieval.
+        """
+        if not self._retriever or not query or not self._layered_prefetch_enabled:
+            return
+        def worker() -> None:
+            try:
+                context = self._build_layered_context(query, session_id=session_id)
+                if context:
+                    with self._prefetch_lock:
+                        self._prefetch_cache[self._cache_key(query, session_id=session_id)] = context
+                        if len(self._prefetch_cache) > 16:
+                            for key in list(self._prefetch_cache.keys())[:-16]:
+                                self._prefetch_cache.pop(key, None)
+            except Exception as exc:
+                logger.debug("Holographic queue_prefetch failed: %s", exc)
+        threading.Thread(target=worker, daemon=True).start()
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if not self._store or not self._turn_journal_enabled:
@@ -462,6 +559,8 @@ class HolographicMemoryProvider(MemoryProvider):
             )
             logger.debug("Holographic turn journal write failed: %s", exc)
             return
+
+        self._maybe_incremental_topic_extract(turn_session_id, user_content)
 
         if self._organize_every_n_turns <= 0:
             return
@@ -545,6 +644,11 @@ class HolographicMemoryProvider(MemoryProvider):
                     args["content"],
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
+                    source_type=args.get("source_type", "manual"),
+                    source_uri=args.get("source_uri", ""),
+                    source_excerpt=args.get("source_excerpt", ""),
+                    observed_at=args.get("observed_at"),
+                    memory_space=args.get("memory_space", ""),
                 )
                 memory_activity.record_event(
                     "memory.tool.remembered",
@@ -633,6 +737,33 @@ class HolographicMemoryProvider(MemoryProvider):
                 )
                 return json.dumps(result)
 
+            elif action == "chunk_embedding_backfill":
+                limit = args.get("limit")
+                batch_size = int(args.get("batch_size", 96))
+                source_type = args.get("source_type")
+                memory_activity.record_event(
+                    "memory.chunk_embedding_backfill.started",
+                    message="chunk embedding backfill started",
+                    state="embedding",
+                    step="search",
+                    status="running",
+                    data={"limit": limit, "batch_size": batch_size, "source_type": source_type},
+                )
+                result = store.backfill_chunk_embeddings(
+                    limit=int(limit) if limit is not None else None,
+                    source_type=source_type,
+                    batch_size=batch_size,
+                )
+                memory_activity.record_event(
+                    "memory.chunk_embedding_backfill.complete",
+                    message=f"indexed {result.get('indexed', 0)} chunk(s)",
+                    state="idle",
+                    step="search",
+                    status="done" if result.get("enabled") else "skipped",
+                    data=result,
+                )
+                return json.dumps(result)
+
             elif action == "journal_status":
                 return json.dumps(
                     store.journal_status(
@@ -674,6 +805,114 @@ class HolographicMemoryProvider(MemoryProvider):
                 )
                 return json.dumps({"context": context, "empty": not bool(context.strip())})
 
+            elif action == "recall_route":
+                query = args.get("query") or args.get("content") or ""
+                result = self._recall_route(query, session_id=args.get("session_id") or self._session_id)
+                return json.dumps(result)
+
+            elif action == "document_add":
+                source_uri = args.get("source_uri") or args.get("path") or args.get("title") or ""
+                chunks = args.get("chunks") or []
+                if not chunks and args.get("content"):
+                    chunks = store.chunk_text(args.get("content", ""))
+                result = store.add_document_chunks(
+                    source_uri=source_uri,
+                    chunks=chunks,
+                    title=args.get("title", ""),
+                    source_type=args.get("source_type", "document"),
+                    metadata=args.get("metadata") or {},
+                )
+                return json.dumps(result)
+
+            elif action == "document_search":
+                results = store.document_search(
+                    args.get("query") or args.get("content") or "",
+                    source_type=args.get("source_type"),
+                    limit=int(args.get("limit", 8)),
+                )
+                return json.dumps({"results": results, "count": len(results)})
+
+            elif action == "import_plaud_archive":
+                result = self._import_plaud_archive(
+                    path=args.get("path"),
+                    limit=int(args["limit"]) if args.get("limit") is not None else None,
+                )
+                return json.dumps(result)
+
+            elif action == "hygiene":
+                report = store.memory_hygiene_report(limit=int(args.get("limit", 20)))
+                try:
+                    report["contradictions"] = retriever.contradict(limit=int(args.get("limit", 20)))
+                except Exception:
+                    report["contradictions"] = []
+                return json.dumps(report)
+
+            elif action == "memory_events":
+                events = store.recent_memory_events(
+                    session_id=args.get("session_id"),
+                    limit=int(args.get("limit", 50)),
+                )
+                return json.dumps({"events": events, "count": len(events)})
+
+            elif action == "memory_replay":
+                return json.dumps(store.memory_replay(
+                    session_id=args.get("session_id") or self._session_id,
+                    limit=int(args.get("limit", 50)),
+                ))
+
+            elif action == "memory_profile":
+                return json.dumps(store.memory_profile(
+                    session_id=args.get("session_id") or self._session_id,
+                ))
+
+            elif action == "cluster":
+                fact_ids = args.get("fact_ids") or args.get("entities") or []
+                if isinstance(fact_ids, str):
+                    fact_ids = [x.strip() for x in fact_ids.split(",") if x.strip()]
+                return json.dumps(store.refine_memory_clusters(
+                    fact_ids=fact_ids,
+                    query=args.get("query") or args.get("content") or "",
+                    session_id=args.get("session_id") or self._session_id,
+                ))
+
+            elif action == "auto_tag":
+                fact_ids = args.get("fact_ids") or []
+                if isinstance(fact_ids, str):
+                    fact_ids = [x.strip() for x in fact_ids.split(",") if x.strip()]
+                return json.dumps(store.infer_tags_for_facts(
+                    fact_ids=fact_ids,
+                    limit=int(args.get("limit", 50)),
+                ))
+
+            elif action == "confidence_maintenance":
+                verified_ids = args.get("verified_ids") or []
+                rejected_ids = args.get("rejected_ids") or []
+                if isinstance(verified_ids, str):
+                    verified_ids = [x.strip() for x in verified_ids.split(",") if x.strip()]
+                if isinstance(rejected_ids, str):
+                    rejected_ids = [x.strip() for x in rejected_ids.split(",") if x.strip()]
+                return json.dumps(store.confidence_maintenance(
+                    verified_ids=verified_ids,
+                    rejected_ids=rejected_ids,
+                    prune=str(args.get("prune", "true")).lower() not in ("false", "0", "no"),
+                ))
+
+            elif action == "prune_logs":
+                return json.dumps(store.prune_memory_logs(
+                    retention_days=int(args.get("retention_days", args.get("limit", 30))),
+                ))
+
+            elif action == "benchmark":
+                queries = args.get("queries") or args.get("entities") or []
+                if isinstance(queries, str):
+                    queries = [q.strip() for q in queries.split("||") if q.strip()]
+                return json.dumps(store.memory_benchmark(queries=queries, limit=int(args.get("limit", 5))))
+
+            elif action == "supersede":
+                old_id = int(args.get("old_fact_id") or args.get("fact_id"))
+                new_id = int(args.get("new_fact_id"))
+                return json.dumps({"superseded": store.supersede_fact(old_id, new_id)})
+
             elif action == "update":
                 updated = store.update_fact(
                     int(args["fact_id"]),
@@ -681,6 +920,11 @@ class HolographicMemoryProvider(MemoryProvider):
                     trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
                     tags=args.get("tags"),
                     category=args.get("category"),
+                    source_type=args.get("source_type"),
+                    source_uri=args.get("source_uri"),
+                    source_excerpt=args.get("source_excerpt"),
+                    observed_at=args.get("observed_at"),
+                    memory_space=args.get("memory_space"),
                 )
                 return json.dumps({"updated": updated})
 
@@ -715,11 +959,234 @@ class HolographicMemoryProvider(MemoryProvider):
         except Exception as exc:
             return tool_error(str(exc))
 
+
+    # -- Routed recall / document imports ------------------------------------
+
+    def _record_context_injection(
+        self,
+        query: str,
+        context: str,
+        *,
+        session_id: str = "",
+        facts: list[dict] | None = None,
+        chunks: list[dict] | None = None,
+        source: str = "prefetch",
+    ) -> None:
+        if not self._store or not context:
+            return
+        facts = facts or self._extract_fact_refs_from_context(context)
+        chunks = chunks or []
+        try:
+            self._store.record_memory_injection(
+                session_id=session_id or self._session_id,
+                query=query,
+                content=context,
+                fact_ids=[int(f.get("fact_id")) for f in facts if f.get("fact_id")],
+                chunk_ids=[int(c.get("chunk_id")) for c in chunks if c.get("chunk_id")],
+                source=source,
+            )
+        except Exception as exc:
+            logger.debug("Memory injection recording failed: %s", exc)
+
+    def _extract_fact_refs_from_context(self, context: str) -> list[dict]:
+        # Context rendering does not currently carry IDs. This intentionally returns
+        # empty until sections pass facts explicitly; replay still stores content.
+        return []
+
+    def _verify_fact_results(
+        self,
+        query: str,
+        results: list[dict],
+        *,
+        limit: int,
+        session_id: str = "",
+    ) -> tuple[list[dict], list[int]]:
+        """Cheap relevance verifier + session-level injection dedupe.
+
+        This is intentionally deterministic. It avoids another model call while
+        giving us jcode-style verified/rejected accounting.
+        """
+        if not results:
+            return [], []
+        injected = self._store.injected_memory_ids(session_id).get("fact_ids", set()) if self._store else set()
+        q_tokens = self._meaningful_tokens(query)
+        scored: list[tuple[float, dict]] = []
+        rejected: list[int] = []
+        for fact in results:
+            fid = int(fact.get("fact_id") or 0)
+            if fid and fid in injected:
+                rejected.append(fid)
+                continue
+            text = " ".join(str(fact.get(k, "")) for k in ("content", "tags", "category", "source_uri", "memory_space"))
+            tokens = self._meaningful_tokens(text)
+            overlap = len(q_tokens & tokens)
+            relevance = overlap / max(1, len(q_tokens)) if q_tokens else 0.5
+            base_score = float(fact.get("score", 0.0) or 0.0)
+            trust = float(fact.get("trust_score", 0.0) or 0.0)
+            score = (relevance * 0.65) + (base_score * 0.25) + (trust * 0.10)
+            # Keep high-trust/source-specific facts even when query is short.
+            if score >= 0.08 or (trust >= 0.65 and overlap > 0):
+                scored.append((score, fact))
+            else:
+                if fid:
+                    rejected.append(fid)
+        scored.sort(key=lambda item: item[0], reverse=True)
+        verified = [fact for _, fact in scored[: max(1, int(limit))]]
+        if not verified and results:
+            # Avoid over-pruning only when the verifier did not explicitly reject every candidate.
+            # Session dedupe is an explicit rejection and should not be bypassed by fallback.
+            candidate_ids = [int(f.get("fact_id") or 0) for f in results if f.get("fact_id")]
+            if set(candidate_ids) - set(rejected):
+                verified = [results[0]]
+                rejected = [int(f.get("fact_id")) for f in results[1:] if f.get("fact_id")]
+        return verified, rejected
+
+    def _maybe_incremental_topic_extract(self, session_id: str, user_content: str) -> None:
+        if not self._topic_extraction_enabled or not self._store or not self._turn_journal_enabled:
+            return
+        tokens = self._meaningful_tokens(user_content)
+        if not tokens:
+            return
+        count = self._session_turn_counts.get(session_id, 0) + 1
+        self._session_turn_counts[session_id] = count
+        previous = self._session_topic_tokens.get(session_id)
+        self._session_topic_tokens[session_id] = tokens
+        should_extract = False
+        reason = ""
+        if previous and count >= self._topic_extract_min_turns:
+            sim = len(previous & tokens) / max(1, len(previous | tokens))
+            if sim < self._topic_change_threshold:
+                should_extract = True
+                reason = f"topic_change:{sim:.2f}"
+        if self._periodic_extract_interval and count % self._periodic_extract_interval == 0:
+            should_extract = True
+            reason = reason or "periodic"
+        if not should_extract:
+            return
+        try:
+            self._store.record_memory_event("memory.topic_extract.started", session_id=session_id, detail={"reason": reason, "turn_count": count})
+            self._organize_journal(session_id=session_id, limit=self._organize_batch_limit)
+            self._store.record_memory_event("memory.topic_extract.complete", session_id=session_id, detail={"reason": reason, "turn_count": count})
+        except Exception as exc:
+            logger.debug("Topic-change memory extraction failed: %s", exc)
+
+    @staticmethod
+    def _meaningful_tokens(text: str) -> set[str]:
+        stop = {
+            "the", "and", "for", "that", "this", "with", "you", "your", "are", "was", "were",
+            "what", "when", "where", "why", "how", "can", "could", "should", "would", "have",
+            "has", "had", "from", "into", "about", "like", "just", "but", "not", "all", "our",
+        }
+        return {t for t in re.findall(r"[A-Za-z0-9_]+", str(text or "").lower()) if len(t) >= 3 and t not in stop}
+
+    def _recall_route(self, query: str, *, session_id: str = "") -> dict:
+        """Route a question across the best memory lanes without dumping everything."""
+        query = str(query or "").strip()
+        q = query.lower()
+        lanes: list[str] = []
+        if any(term in q for term in ("plaud", "meeting", "call", "transcript", "discuss", "talked", "conversation")):
+            lanes.append("plaud")
+        if any(term in q for term in ("ad", "ads", "campaign", "google", "meta", "facebook", "instagram")):
+            lanes.append("ads")
+        if any(term in q for term in ("repo", "code", "file", "skill", "project", "graphify")):
+            lanes.append("project")
+        if not lanes:
+            lanes.extend(["durable", "recent", "graph"])
+
+        result: dict[str, object] = {"query": query, "lanes": lanes, "sections": {}}
+        sections: dict[str, object] = {}
+        if "plaud" in lanes and self._store:
+            sections["plaud_chunks"] = self._store.document_search(query, source_type="plaud", limit=6)
+        if "durable" in lanes or "project" in lanes or "ads" in lanes:
+            if self._retriever:
+                sections["durable"] = self._retriever.search(query, min_trust=self._min_trust, limit=self._durable_recall_limit)
+        if "recent" in lanes and self._store:
+            sections["recent"] = self._store.recent_turns(
+                session_id=session_id or self._session_id,
+                query=query,
+                limit=self._recent_recall_limit,
+            )
+        if "graph" in lanes or "project" in lanes or "ads" in lanes:
+            graph = []
+            if self._store:
+                for entity in self._store.entity_candidates(query, limit=self._graph_recall_limit):
+                    wiki = self._store.entity_wiki(entity, limit=3)
+                    if wiki.get("exists"):
+                        graph.append(wiki)
+            sections["graph"] = graph
+        if "project" in lanes and self._store:
+            sections["project_chunks"] = self._store.document_search(query, source_type="project", limit=4)
+        result["sections"] = sections
+        result["context"] = self._format_route_context(sections)
+        return result
+
+    def _format_route_context(self, sections: dict[str, object]) -> str:
+        lines = ["## Elevate Routed Recall"]
+        for name, value in sections.items():
+            if not value:
+                continue
+            lines.append(f"### {name}")
+            items = value if isinstance(value, list) else []
+            for item in items[:8]:
+                if isinstance(item, dict):
+                    text = item.get("content") or item.get("user_content") or item.get("entity") or str(item)
+                    source = item.get("source_uri") or item.get("session_id") or item.get("wiki_link") or ""
+                    suffix = f" ({source})" if source else ""
+                    lines.append(f"- {self._clip(str(text), 320)}{suffix}")
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    def _import_plaud_archive(self, path: str | None = None, limit: int | None = None) -> dict:
+        """Import Plaud transcript JSONL into chunk-level local RAG."""
+        if not self._store:
+            return {"imported": 0, "chunks": 0}
+        archive_path = Path(path or "/Users/dartagnanpatricio/claudeclaw/artifacts/plaud-memory/plaud-transcripts-chronological.jsonl").expanduser()
+        if not archive_path.exists():
+            return {"imported": 0, "chunks": 0, "error": f"not found: {archive_path}"}
+        imported = 0
+        chunks_total = 0
+        with archive_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if limit is not None and imported >= limit:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                transcript = item.get("transcript") or item.get("content") or item.get("text") or ""
+                summary = item.get("summary") or ""
+                title = item.get("title") or item.get("name") or "Plaud transcript"
+                if not transcript and not summary:
+                    continue
+                source_id = item.get("id") or item.get("recording_id") or item.get("created_at") or title
+                source_uri = f"plaud:{source_id}"
+                body = f"Title: {title}\nRecorded at: {item.get('recorded_at') or item.get('created_at') or ''}\n\nSummary:\n{summary}\n\nTranscript:\n{transcript}"
+                chunks = self._store.chunk_text(body)
+                result = self._store.add_document_chunks(
+                    source_uri=source_uri,
+                    chunks=chunks,
+                    title=title,
+                    source_type="plaud",
+                    metadata={
+                        "id": source_id,
+                        "recorded_at": item.get("recorded_at"),
+                        "created_at": item.get("created_at"),
+                        "archive_path": str(archive_path),
+                    },
+                )
+                imported += 1
+                chunks_total += int(result.get("chunks", 0))
+        return {"imported": imported, "chunks": chunks_total, "path": str(archive_path)}
+
     # -- Layered recall ------------------------------------------------------
 
     def _build_layered_context(self, query: str, *, session_id: str = "") -> str:
         if not self._store or not self._retriever:
             return ""
+        self._last_layered_facts = []
+        self._last_layered_chunks = []
 
         sections: list[str] = []
 
@@ -739,12 +1206,19 @@ class HolographicMemoryProvider(MemoryProvider):
                     )
                 sections.append("### Recent Session\n" + "\n".join(lines))
 
-        durable = self._retriever.search(
+        durable_candidates = self._retriever.search(
             query,
             min_trust=self._min_trust,
+            limit=max(self._durable_recall_limit * 3, self._durable_recall_limit),
+        )
+        durable, rejected_ids = self._verify_fact_results(
+            query,
+            durable_candidates,
             limit=self._durable_recall_limit,
+            session_id=session_id or self._session_id,
         )
         if durable:
+            self._last_layered_facts = list(durable)
             lines = []
             for fact in durable:
                 trust = float(fact.get("trust_score", fact.get("trust", 0.0)) or 0.0)
@@ -753,9 +1227,17 @@ class HolographicMemoryProvider(MemoryProvider):
                     f"- [{category} trust={trust:.2f}] {self._clip(fact.get('content', ''), 320)}"
                 )
             sections.append("### Durable + Semantic\n" + "\n".join(lines))
+        if self._store:
+            self._store.post_retrieval_maintenance(
+                verified_ids=[int(f.get("fact_id")) for f in durable if f.get("fact_id")],
+                rejected_ids=rejected_ids,
+                query=query,
+                session_id=session_id or self._session_id,
+            )
 
         if self._graph_recall_enabled:
             graph_lines = []
+            injected_ids = self._store.injected_memory_ids(session_id or self._session_id).get("fact_ids", set())
             for entity in self._store.entity_candidates(query, limit=self._graph_recall_limit):
                 wiki = self._store.entity_wiki(entity, limit=3)
                 if not wiki.get("exists"):
@@ -766,7 +1248,10 @@ class HolographicMemoryProvider(MemoryProvider):
                 fact_bits = [
                     self._clip(f.get("content", ""), 180)
                     for f in wiki.get("facts", [])[:2]
+                    if int(f.get("fact_id") or 0) not in injected_ids
                 ]
+                if not fact_bits:
+                    continue
                 suffix = f" Related: {related}." if related else ""
                 graph_lines.append(
                     f"- {wiki.get('wiki_link')}: {'; '.join(fact_bits)}.{suffix}"
@@ -983,6 +1468,10 @@ class HolographicMemoryProvider(MemoryProvider):
         if len(cleaned) <= max_chars:
             return cleaned
         return cleaned[:max_chars].rstrip() + "..."
+
+    @staticmethod
+    def _cache_key(query: str, *, session_id: str = "") -> str:
+        return f"{session_id}::{' '.join(str(query or '').lower().split())[:500]}"
 
     @staticmethod
     def _clip(text: str, max_chars: int) -> str:

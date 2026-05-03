@@ -468,6 +468,17 @@ and is orchestrated by `agent/memory_manager.py`. Lifecycle hooks include
 `sync_turn(turn_messages)`, `prefetch(query)`, `shutdown()`, and optional
 `post_setup(elevate_home, config)` for setup-wizard integration.
 
+**Holographic memory is a first-class built-in provider**, not a new one-off experiment. Main files:
+
+- `plugins/memory/holographic/README.md` — architecture overview.
+- `plugins/memory/holographic/plugin.yaml` — provider metadata.
+- `plugins/memory/holographic/__init__.py` — provider/tool interface; exposes `fact_store` and `fact_feedback` actions.
+- `plugins/memory/holographic/store.py` — SQLite schema, fact/document/chunk store, memory events, profiler, hygiene, clusters, confidence maintenance.
+- `plugins/memory/holographic/retrieval.py` — FTS/semantic/entity/HRR retrieval and scoring.
+- `plugins/memory/holographic/embeddings.py` — optional embedding backends and batch embedding.
+
+Before changing memory behavior, read those files plus `agent/memory_provider.py` and `agent/memory_manager.py`. Elevate holographic memory already includes SQLite facts, FTS5, optional semantic embeddings, trust feedback, entity graph/wiki recall, HRR/compositional recall, layered recall, and turn journaling. jcode-inspired work in `docs/jcode-memory-upgrade-plan.md` is additive on top of that existing provider.
+
 **CLI commands via `plugins/memory/<name>/cli.py`:** if a memory plugin
 defines `register_cli(subparser)`, `discover_plugin_cli_commands()` finds
 it at argparse setup time and wires it into `elevate <plugin>`. The
