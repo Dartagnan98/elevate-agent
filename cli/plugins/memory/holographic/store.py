@@ -2508,6 +2508,290 @@ class MemoryStore:
                 break
         return selected[:limit]
 
+    def reprocess_memory_graph(
+        self,
+        *,
+        mode: str = "rebuild",
+        source_type: str | None = None,
+        limit: int | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Rebuild the native memory graph into cleaner business-native nodes/edges.
+
+        This is a deterministic maintenance pass, not a separate RAG system. It:
+        - canonicalizes obvious duplicate entity names into aliases,
+        - classifies generic entity nodes into stable business/realtor types,
+        - retypes generic co-occurrence relations into more useful typed edges,
+        - records before/after counts for Hub/debug visibility.
+        """
+        started = time.time()
+        mode = str(mode or "rebuild").strip().lower()
+        if mode not in {"rebuild", "classify", "relations"}:
+            mode = "rebuild"
+        before = self._graph_reprocess_snapshot()
+        report = {
+            "mode": mode,
+            "source_type": source_type or "all",
+            "dry_run": bool(dry_run),
+            "entities_retyped": 0,
+            "entities_merged": 0,
+            "aliases_added": 0,
+            "relations_retyped": 0,
+            "relations_pruned": 0,
+            "relation_types": {},
+            "entity_types": {},
+            "before": before,
+        }
+        max_rows = int(limit) if limit is not None else None
+        inferred_entity_types: dict[int, str] = {}
+        with self._lock:
+            if mode in {"rebuild", "classify"}:
+                entity_rows = self._conn.execute(
+                    "SELECT entity_id, name, entity_type, aliases FROM entities ORDER BY entity_id ASC"
+                ).fetchall()
+                canonical: dict[str, sqlite3.Row] = {}
+                for row in entity_rows:
+                    key = self._canonical_entity_key(row["name"] or "")
+                    if not key:
+                        continue
+                    keeper = canonical.get(key)
+                    if keeper is None:
+                        canonical[key] = row
+                        inferred = self._infer_entity_type(row["name"] or "", row["aliases"] or "")
+                        inferred_entity_types[int(row["entity_id"])] = inferred
+                        current = str(row["entity_type"] or "unknown")
+                        if inferred != current and (current == "unknown" or inferred != "unknown"):
+                            report["entities_retyped"] += 1
+                            if not dry_run:
+                                self._conn.execute(
+                                    "UPDATE entities SET entity_type = ? WHERE entity_id = ?",
+                                    (inferred, int(row["entity_id"])),
+                                )
+                        continue
+                    if int(row["entity_id"]) == int(keeper["entity_id"]):
+                        continue
+                    report["entities_merged"] += 1
+                    aliases_added = self._merge_entity_into_keeper(row, keeper, dry_run=dry_run)
+                    report["aliases_added"] += aliases_added
+
+            if mode in {"rebuild", "relations"}:
+                relation_sql = """
+                    SELECT r.relation_id, r.source_entity_id, r.target_entity_id, r.relation_type,
+                           r.source_type, r.source_id, r.weight, r.evidence,
+                           se.name AS source_name, se.entity_type AS source_entity_type,
+                           te.name AS target_name, te.entity_type AS target_entity_type
+                    FROM memory_relations r
+                    JOIN entities se ON se.entity_id = r.source_entity_id
+                    JOIN entities te ON te.entity_id = r.target_entity_id
+                    WHERE 1=1
+                """
+                params: list = []
+                if source_type:
+                    relation_sql += " AND r.source_type = ?"
+                    params.append(source_type)
+                relation_sql += " ORDER BY r.relation_id ASC"
+                if max_rows:
+                    relation_sql += " LIMIT ?"
+                    params.append(max_rows)
+                relation_rows = self._conn.execute(relation_sql, params).fetchall()
+                for row in relation_rows:
+                    if dry_run and inferred_entity_types:
+                        inferred_relation = self._infer_relation_type_from_values(
+                            inferred_entity_types.get(int(row["source_entity_id"]), str(row["source_entity_type"] or "unknown")),
+                            inferred_entity_types.get(int(row["target_entity_id"]), str(row["target_entity_type"] or "unknown")),
+                            str(row["evidence"] or ""),
+                        )
+                    else:
+                        inferred_relation = self._infer_relation_type(row)
+                    current_relation = str(row["relation_type"] or "co_occurs_with")
+                    weak = self._relation_is_weak(row)
+                    if weak and current_relation in {"co_occurs_with", "related_to"}:
+                        report["relations_pruned"] += 1
+                        if not dry_run:
+                            self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(row["relation_id"]),))
+                        continue
+                    if inferred_relation != current_relation:
+                        report["relations_retyped"] += 1
+                        if not dry_run:
+                            try:
+                                self._conn.execute(
+                                    """
+                                    UPDATE memory_relations
+                                    SET relation_type = ?, updated_at = CURRENT_TIMESTAMP
+                                    WHERE relation_id = ?
+                                    """,
+                                    (inferred_relation, int(row["relation_id"])),
+                                )
+                            except sqlite3.IntegrityError:
+                                self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(row["relation_id"]),))
+                                report["relations_pruned"] += 1
+                if not dry_run:
+                    self._conn.commit()
+        after = self._graph_reprocess_snapshot() if not dry_run else before
+        report["after"] = after
+        report["entity_types"] = after.get("entity_types", {}) if not dry_run else before.get("entity_types", {})
+        report["relation_types"] = after.get("relation_types", {}) if not dry_run else before.get("relation_types", {})
+        report["seconds"] = round(time.time() - started, 3)
+        if not dry_run:
+            self.record_memory_event("memory.graph_reprocess.complete", detail=report)
+        return report
+
+    def _graph_reprocess_snapshot(self) -> dict:
+        entity_types = {
+            str(row["entity_type"] or "unknown"): int(row["count"] or 0)
+            for row in self._conn.execute(
+                "SELECT COALESCE(entity_type, 'unknown') AS entity_type, COUNT(*) AS count FROM entities GROUP BY COALESCE(entity_type, 'unknown')"
+            ).fetchall()
+        }
+        relation_types = {
+            str(row["relation_type"] or "co_occurs_with"): int(row["count"] or 0)
+            for row in self._conn.execute(
+                "SELECT COALESCE(relation_type, 'co_occurs_with') AS relation_type, COUNT(*) AS count FROM memory_relations GROUP BY COALESCE(relation_type, 'co_occurs_with')"
+            ).fetchall()
+        }
+        counts = {}
+        for table in ("entities", "facts", "memory_documents", "memory_chunks", "memory_relations", "memory_modal_assets"):
+            try:
+                row = self._conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+                counts[table] = int(row["count"] or 0) if row else 0
+            except sqlite3.Error:
+                counts[table] = 0
+        return {"counts": counts, "entity_types": entity_types, "relation_types": relation_types}
+
+    @staticmethod
+    def _canonical_entity_key(name: str) -> str:
+        cleaned = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
+        if not cleaned:
+            return ""
+        replacements = {
+            "upper cuts": "uppercuts",
+            "realty ltd": "realty",
+            "incorporated": "inc",
+            "corporation": "corp",
+            "company": "co",
+        }
+        for old, new in replacements.items():
+            cleaned = cleaned.replace(old, new)
+        tokens = [t for t in cleaned.split() if t not in {"the", "a", "an"}]
+        return " ".join(tokens)
+
+    @staticmethod
+    def _split_aliases(value: str) -> list[str]:
+        aliases: list[str] = []
+        seen: set[str] = set()
+        for alias in re.split(r"[,\n]+", str(value or "")):
+            clean = alias.strip()
+            if clean and clean.lower() not in seen:
+                seen.add(clean.lower())
+                aliases.append(clean)
+        return aliases
+
+    def _merge_entity_into_keeper(self, row: sqlite3.Row, keeper: sqlite3.Row, *, dry_run: bool = False) -> int:
+        source_id = int(row["entity_id"])
+        keeper_id = int(keeper["entity_id"])
+        aliases = self._split_aliases(keeper["aliases"] or "")
+        alias_seen = {a.lower() for a in aliases}
+        aliases_added = 0
+        for candidate in [row["name"] or "", *self._split_aliases(row["aliases"] or "")]:
+            clean = str(candidate or "").strip()
+            if clean and clean.lower() not in alias_seen and clean.lower() != str(keeper["name"] or "").lower():
+                aliases.append(clean)
+                alias_seen.add(clean.lower())
+                aliases_added += 1
+        if dry_run:
+            return aliases_added
+        self._conn.execute("UPDATE entities SET aliases = ? WHERE entity_id = ?", (", ".join(aliases), keeper_id))
+        self._conn.execute("INSERT OR IGNORE INTO fact_entities (fact_id, entity_id) SELECT fact_id, ? FROM fact_entities WHERE entity_id = ?", (keeper_id, source_id))
+        self._conn.execute("DELETE FROM fact_entities WHERE entity_id = ?", (source_id,))
+        self._conn.execute("INSERT OR IGNORE INTO memory_chunk_entities (chunk_id, entity_id, weight) SELECT chunk_id, ?, weight FROM memory_chunk_entities WHERE entity_id = ?", (keeper_id, source_id))
+        self._conn.execute("DELETE FROM memory_chunk_entities WHERE entity_id = ?", (source_id,))
+        for column in ("source_entity_id", "target_entity_id"):
+            rows = self._conn.execute(f"SELECT relation_id FROM memory_relations WHERE {column} = ?", (source_id,)).fetchall()
+            for rel in rows:
+                try:
+                    self._conn.execute(f"UPDATE memory_relations SET {column} = ?, updated_at = CURRENT_TIMESTAMP WHERE relation_id = ?", (keeper_id, int(rel["relation_id"])))
+                except sqlite3.IntegrityError:
+                    self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(rel["relation_id"]),))
+        self._conn.execute("DELETE FROM memory_relations WHERE source_entity_id = target_entity_id")
+        self._conn.execute("DELETE FROM entities WHERE entity_id = ?", (source_id,))
+        return aliases_added
+
+    @staticmethod
+    def _infer_entity_type(name: str, aliases: str = "") -> str:
+        text = f"{name} {aliases}".lower()
+        compact = re.sub(r"\s+", " ", text).strip()
+        if re.search(r"\b\d{1,6}\s+[a-z0-9 .'-]+\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|way|place|pl|boulevard|blvd|trail|terrace|terr)\b", compact):
+            return "property"
+        if re.search(r"\b[a-z]\d[a-z][ -]?\d[a-z]\d\b", compact):
+            return "property"
+        if any(k in compact for k in ("academy", "real estate", "realty", "brokerage", "group", "company", "corp", " inc", " llc", "ltd", "crm", "lofty", "google ads", "meta ads", "ctrl strategies", "uppercuts")):
+            return "business"
+        if any(k in compact for k in ("contract", "agreement", "addendum", "disclosure", "title", "webforms", "form", "pdf", "cps", "mlc", "listing contract")):
+            return "document"
+        if any(k in compact for k in ("listing", "seller update", "showing", "offer", "transaction", "cma", "follow up", "appointment", "campaign", "launch", "email", "call", "task", "deadline")):
+            return "workflow"
+        if any(k in compact for k in ("kamloops", "vancouver", "kelowna", "surrey", "burnaby", "neighborhood", "market", "area")):
+            return "market_area"
+        if any(k in compact for k in ("pricing", "curriculum", "class", "classes", "course", "program", "service", "coaching", "chair practice")):
+            return "service"
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z'-]+", str(name or "")) if w]
+        if 2 <= len(words) <= 3 and all(w[:1].isupper() for w in words):
+            if not any(w.lower() in {"academy", "realty", "estate", "contract", "campaign", "update"} for w in words):
+                return "person"
+        return "unknown"
+
+    @staticmethod
+    def _infer_relation_type(row: sqlite3.Row) -> str:
+        return MemoryStore._infer_relation_type_from_values(
+            str(row["source_entity_type"] or "unknown"),
+            str(row["target_entity_type"] or "unknown"),
+            str(row["evidence"] or ""),
+        )
+
+    @staticmethod
+    def _infer_relation_type_from_values(left_type: str, right_type: str, evidence_text: str) -> str:
+        left_type = str(left_type or "unknown")
+        right_type = str(right_type or "unknown")
+        evidence = str(evidence_text or "").lower()
+        pair = {left_type, right_type}
+        if "sign" in evidence and "document" in pair:
+            return "signed"
+        if "own" in evidence and "property" in pair and ("person" in pair or "business" in pair):
+            return "owns"
+        if any(k in evidence for k in ("list", "listing", "mls")) and "property" in pair:
+            return "listed_for"
+        if any(k in evidence for k in ("showing", "showed", "tour")) and "property" in pair:
+            return "showed"
+        if any(k in evidence for k in ("offer", "bid")) and "property" in pair:
+            return "offer_on"
+        if any(k in evidence for k in ("promote", "ad", "campaign", "launch", "social")) and ("workflow" in pair or "business" in pair):
+            return "promotes"
+        if any(k in evidence for k in ("cma", "need", "todo", "task", "deadline", "follow up")) and ("workflow" in pair or "property" in pair or "person" in pair):
+            return "needs_follow_up"
+        if "document" in pair and "property" in pair:
+            return "has_document"
+        if "business" in pair and "service" in pair:
+            return "offers"
+        if "person" in pair and "business" in pair:
+            return "associated_with"
+        if "market_area" in pair and ("property" in pair or "business" in pair):
+            return "located_in"
+        if left_type != "unknown" or right_type != "unknown":
+            return "related_to"
+        return "co_occurs_with"
+
+    @staticmethod
+    def _relation_is_weak(row: sqlite3.Row) -> bool:
+        evidence = str(row["evidence"] or "")
+        if float(row["weight"] or 0.0) >= 2.0:
+            return False
+        if len(evidence.split()) <= 4:
+            return True
+        source_name = str(row["source_name"] or "").strip().lower()
+        target_name = str(row["target_name"] or "").strip().lower()
+        generic = {"speaker", "speaker 1", "speaker 2", "speaker 3", "okay", "cool", "yeah"}
+        return source_name in generic or target_name in generic
+
     def backfill_graph_relations(self, *, source_type: str | None = None, limit: int | None = None) -> dict:
         """Backfill entity links and co-occurrence relations for existing facts/chunks."""
         started = time.time()

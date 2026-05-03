@@ -67,6 +67,7 @@ Elevate port:
 - Chunks are linked to entities via `memory_chunk_entities`.
 - Fact/chunk co-occurrence edges are stored in `memory_relations`.
 - `relation_backfill` reprocesses existing facts/chunks so old Plaud/document imports populate the native graph.
+- `graph_reprocess` canonicalizes duplicate entities, classifies generic nodes into business/realtor-aware types, retypes generic co-occurrence edges into typed relations, prunes weak/noisy edges, and records a before/after report.
 - Fact/document entities are merged into one native graph surfaced by `wiki`, `rag_query`, and Hub.
 
 ### 4. Rerank and context packing
@@ -135,6 +136,7 @@ Elevate port:
 8. Tests + benchmark + gateway/live smoke — local tests/benchmarks done; live tool path verified for `rag_query`; gateway reload still required after schema changes in deployments.
 9. Hub import: expose the native RAG memory graph in the Agent Hub snapshot, not just old fact/entity links — done.
 10. Existing-data processing: run `relation_backfill` against Plaud/document chunks so old imports get graph edges — done for local store.
+11. Graph reprocessing: run `graph_reprocess` to canonicalize/merge entity nodes, classify node types, convert generic co-occurrence edges into typed business relations, and produce an auditable before/after report — done for local store.
 
 ## Hub graph status
 

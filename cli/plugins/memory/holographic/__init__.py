@@ -101,6 +101,7 @@ FACT_STORE_SCHEMA = {
                     "rag_query",
                     "community_reports",
                     "relation_backfill",
+                    "graph_reprocess",
                     "recall_route",
                     "document_add",
                     "document_search",
@@ -170,7 +171,8 @@ FACT_STORE_SCHEMA = {
             "chunks": {"type": "array", "items": {"type": "string"}, "description": "Pre-split chunks for document_add."},
             "modal_assets": {"type": "array", "items": {"type": "object"}, "description": "Parsed multimodal assets for document_add/rag_query: image/table/equation/page artifacts."},
             "multimodal_content": {"type": "array", "items": {"type": "object"}, "description": "Alias for modal_assets, matching RAG-Anything direct multimodal query inputs."},
-            "mode": {"type": "string", "enum": ["local", "global", "hybrid", "naive", "mix", "bypass"], "description": "LightRAG-compatible query mode."},
+            "mode": {"type": "string", "enum": ["local", "global", "hybrid", "naive", "mix", "bypass", "rebuild"], "description": "LightRAG-compatible query mode; graph_reprocess uses rebuild."},
+            "dry_run": {"type": "boolean", "description": "Preview graph_reprocess changes without writing them."},
             "only_need_context": {"type": "boolean", "description": "Return only packed context for rag_query."},
             "only_need_prompt": {"type": "boolean", "description": "Return an answer prompt built from the packed context for rag_query."},
             "conversation_history": {"type": "array", "items": {"type": "object"}, "description": "Optional prior messages to include in rag_query prompt output."},
@@ -855,6 +857,15 @@ class HolographicMemoryProvider(MemoryProvider):
                 result = store.backfill_graph_relations(
                     source_type=args.get("source_type"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
+                )
+                return json.dumps(result)
+
+            elif action == "graph_reprocess":
+                result = store.reprocess_memory_graph(
+                    mode=str(args.get("mode") or "rebuild"),
+                    source_type=args.get("source_type"),
+                    limit=int(args["limit"]) if args.get("limit") is not None else None,
+                    dry_run=bool(args.get("dry_run", False)),
                 )
                 return json.dumps(result)
 

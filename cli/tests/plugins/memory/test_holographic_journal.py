@@ -214,6 +214,33 @@ def test_relation_backfill_and_document_search_diversity(tmp_path):
     assert len({item["document_id"] for item in search}) == 2
 
 
+def test_graph_reprocess_types_entities_and_relations(tmp_path):
+    provider = _provider(tmp_path)
+    _tool(provider, {
+        "action": "document_add",
+        "title": "Seller workflow",
+        "source_uri": "doc://seller-workflow",
+        "source_type": "brief",
+        "chunks": [
+            "Alex Med signed the Listing Contract for 123 Main Street and needs CMA follow up.",
+            "Alex Med works with Uppercuts Barber Academy on pricing classes and launch campaign planning.",
+        ],
+    })
+    _tool(provider, {"action": "relation_backfill", "source_type": "brief"})
+
+    dry_run = _tool(provider, {"action": "graph_reprocess", "dry_run": True})
+    assert dry_run["dry_run"] is True
+    assert dry_run["entities_retyped"] >= 1
+
+    result = _tool(provider, {"action": "graph_reprocess"})
+    assert result["dry_run"] is False
+    assert result["entities_retyped"] >= 1
+    assert result["relations_retyped"] >= 1
+    assert "unknown" in result["before"]["entity_types"]
+    assert any(t in result["after"]["entity_types"] for t in ("person", "business", "property", "document", "workflow"))
+    assert any(t in result["after"]["relation_types"] for t in ("signed", "needs_follow_up", "offers", "associated_with", "related_to"))
+
+
 def test_rag_query_supports_naive_and_local_modes(tmp_path):
     provider = _provider(tmp_path)
     _seed_rag_memory(provider)
