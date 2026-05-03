@@ -25,9 +25,7 @@ import {
   MessageSquare,
   Network,
   RefreshCw,
-  Route,
   ShieldCheck,
-  Sparkles,
   Target,
   Users,
 } from "lucide-react";
@@ -315,10 +313,6 @@ function sourceMatchesArea(connector: SourceConnectorStatus, area: keyof typeof 
   return AREA_CONNECTORS[area].includes(connector.id);
 }
 
-function connectorRecordTotal(connector: SourceConnectorStatus): number {
-  return Object.values(connector.recordCounts).reduce((total, value) => total + value, 0);
-}
-
 function readyConnectorCount(data: HubData, area?: keyof typeof AREA_CONNECTORS): number {
   const connectors = data.sourceConnectors?.connectors ?? [];
   return connectors.filter((connector) => {
@@ -409,109 +403,53 @@ function ConnectorReadiness({
   );
 }
 
-function ConnectorPanel({
-  area,
-  data,
-  title = "Connectors",
+function SalesFocusBoard({
+  items,
+  note = "Connector setup, API credentials, imports, and source repair live in Settings. This page is for doing the work after the data is available.",
+  title,
 }: {
-  area: keyof typeof AREA_CONNECTORS;
-  data: HubData;
-  title?: string;
+  items: Array<{
+    icon: ComponentType<{ className?: string }>;
+    label: string;
+    summary: string;
+    value: string | number;
+  }>;
+  note?: string;
+  title: string;
 }) {
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const connectors = data.sourceConnectors?.connectors.filter((connector) =>
-    sourceMatchesArea(connector, area),
-  ) ?? [];
-
-  const initialize = async (sourceId: string) => {
-    setBusyId(sourceId);
-    try {
-      await api.scaffoldSourceConnector(sourceId);
-      await data.refresh();
-    } finally {
-      setBusyId(null);
-    }
-  };
-
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle>{title}</CardTitle>
-          <Badge variant="outline">{connectors.length}</Badge>
+          <Badge variant="outline">operations</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2">
-        {connectors.length ? (
-          connectors.slice(0, 7).map((connector) => {
-            const recordCount = connectorRecordTotal(connector);
-            return (
-              <div
-                key={connector.id}
-                className="rounded-2xl border border-border/55 bg-background/35 px-3 py-2.5"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Network className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-foreground">
-                        {connector.label}
-                      </div>
-                      <div className="mt-0.5 text-[0.72rem] text-muted-foreground">
-                        {connector.nextOperatorStep ?? connector.sourceDir}
-                      </div>
-                    </div>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          {items.map((item) => (
+            <div
+              key={item.label}
+              className="rounded-2xl border border-border/55 bg-background/35 p-3"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/20">
+                    <item.icon className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-foreground">{item.label}</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.summary}</p>
                   </div>
-                  <Badge variant={sourceStateVariant(connector.state)}>
-                    {connector.state.replace(/_/g, " ")}
-                  </Badge>
                 </div>
-                <div className="mt-2 flex flex-wrap items-center gap-1">
-                  <Badge variant="outline">{connector.ownerAgent}</Badge>
-                  <Badge variant="outline">{recordCount} records</Badge>
-                  {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
-                  <Button
-                    className="ml-auto h-7 px-2.5"
-                    size="sm"
-                    variant={connector.sourceExists ? "outline" : "default"}
-                    onClick={() => void initialize(connector.id)}
-                    disabled={busyId === connector.id}
-                  >
-                    {busyId === connector.id ? "Writing" : connector.sourceExists ? "Refresh test files" : "Initialize"}
-                  </Button>
-                </div>
+                <Badge variant="outline">{item.value}</Badge>
               </div>
-            );
-          })
-        ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
-            No connector status is available for this lane yet.
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function SkillDirectoryNotice({ area }: { area: keyof typeof REAL_ESTATE_SKILL_TARGETS }) {
-  return (
-    <Card className="bg-primary/5">
-      <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Sparkles className="h-4 w-4 text-primary" />
-            Workflow skills moved to Skills
-          </div>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            {WORKFLOW_LABELS[area]} skills stay in the skills directory so dashboards can stay focused on connectors, sessions, tasks, and approvals.
-          </p>
+            </div>
+          ))}
         </div>
-        <Link
-          to="/skills"
-          className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
-        >
-          Open Skills
-        </Link>
+        <div className="rounded-2xl border border-border/45 bg-background/25 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {note}
+        </div>
       </CardContent>
     </Card>
   );
@@ -805,23 +743,50 @@ export function RealEstateLeadsPage() {
     <HubShell
       data={data}
       eyebrow="Lead Desk"
-      hero="Track outreach readiness, follow-up automations, and client conversation activity without moving data out of the local agent."
+      hero="Work active prospects, follow-ups, approved reply drafts, and lead profiles. Setup and imports stay in Settings."
       icon={Users}
-      title="Leads live where the conversations and outreach skills live."
+      title="Leads are a sales desk, not a connector setup screen."
     >
       <WorkflowStrip
         items={[
-          { icon: Target, label: "Lead sessions", value: sessions.length },
-          { icon: Route, label: "Ready connectors", value: readyConnectorCount(data, "leads") },
+          { icon: MessageSquare, label: "Lead conversations", value: sessions.length },
           { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
           { icon: CheckCircle2, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          { icon: Target, label: "Profile lookup", value: "CRM" },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ConnectorPanel area="leads" data={data} title="Lead connectors" />
+        <SalesFocusBoard
+          title="Lead workbench"
+          items={[
+            {
+              icon: MessageSquare,
+              label: "Follow-up conversations",
+              value: sessions.length,
+              summary: "Open inbound lead threads, reply-needed conversations, buyer/seller nurture, and warm reactivation work.",
+            },
+            {
+              icon: CheckCircle2,
+              label: "Approved message sends",
+              value: "gated",
+              summary: "Drafted texts, emails, and social replies should wait here until a human approves the exact send.",
+            },
+            {
+              icon: Target,
+              label: "New lead lookup",
+              value: "search",
+              summary: "Find or create people profiles from CRM, Messages, email, or manual intake when the connected API allows writes.",
+            },
+            {
+              icon: FileCheck2,
+              label: "Profiles and notes",
+              value: "local",
+              summary: "Keep source, stage, intent, tags, notes, last touch, and next action attached to each person.",
+            },
+          ]}
+        />
         <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
       </div>
-      <SkillDirectoryNotice area="leads" />
       <RecentSessions
         title="Lead conversations"
         sessions={sessions}
@@ -852,20 +817,47 @@ export function RealEstateListingsPage() {
       <WorkflowStrip
         items={[
           { icon: Home, label: "Listing sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "listings") },
           { icon: CalendarClock, label: "Scheduled reports", value: jobs.length },
           {
             icon: Brain,
             label: "Memory segments",
             value: data.snapshot?.memory.journal.session_segment_count ?? 0,
           },
+          { icon: CheckCircle2, label: "Client approvals", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ConnectorPanel area="listings" data={data} title="Listing connectors" />
+        <SalesFocusBoard
+          title="Listing workbench"
+          items={[
+            {
+              icon: Home,
+              label: "Listing profiles",
+              value: sessions.length,
+              summary: "Keep each property’s CMA, seller notes, showing feedback, pricing changes, and artifact history together.",
+            },
+            {
+              icon: FileCheck2,
+              label: "Seller update drafts",
+              value: "review",
+              summary: "Review weekly listing updates, PDFs, email drafts, and feedback summaries before they go out.",
+            },
+            {
+              icon: CalendarClock,
+              label: "Report cadence",
+              value: jobs.length,
+              summary: "Timed seller updates, showing checks, relisting reviews, and market stat refreshes live here as work.",
+            },
+            {
+              icon: CheckCircle2,
+              label: "Approved edits",
+              value: "queued",
+              summary: "Accepted copy, pricing notes, and seller-facing changes should move into the next send or export step.",
+            },
+          ]}
+        />
         <TimedTasks jobs={jobs} empty="No listing schedules yet." title="Listing automations" />
       </div>
-      <SkillDirectoryNotice area="listings" />
       <RecentSessions
         title="Listing work"
         sessions={sessions}
@@ -896,16 +888,43 @@ export function RealEstateDealsPage() {
       <WorkflowStrip
         items={[
           { icon: BriefcaseBusiness, label: "Deal sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "deals") },
           { icon: CalendarClock, label: "Deal reminders", value: jobs.length },
           { icon: CheckCircle2, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          { icon: FileCheck2, label: "Packet review", value: "manual" },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ConnectorPanel area="deals" data={data} title="Deal connectors" />
+        <SalesFocusBoard
+          title="Deal workbench"
+          items={[
+            {
+              icon: BriefcaseBusiness,
+              label: "Transaction profiles",
+              value: sessions.length,
+              summary: "Track buyer/seller side, stage, brokerage checklist, contract context, dates, and current blocker.",
+            },
+            {
+              icon: FileCheck2,
+              label: "Form and signing drafts",
+              value: "review",
+              summary: "Prepared MLC, DigiSign, WebForms, and packet outputs stay review-gated before send or signature.",
+            },
+            {
+              icon: CalendarClock,
+              label: "Deadline reminders",
+              value: jobs.length,
+              summary: "Subjects, deposit, inspection, financing, document collection, and loopback reminders stay visible.",
+            },
+            {
+              icon: CheckCircle2,
+              label: "Approved next actions",
+              value: "queued",
+              summary: "Human-approved paperwork, emails, and admin handoffs move into the next task lane.",
+            },
+          ]}
+        />
         <TimedTasks jobs={jobs} empty="No deal reminders yet." title="Deal tasks" />
       </div>
-      <SkillDirectoryNotice area="deals" />
       <RecentSessions title="Deal work" sessions={sessions} empty="No deal-specific sessions found yet." />
     </HubShell>
   );
@@ -932,16 +951,44 @@ export function RealEstateAdsPage() {
       <WorkflowStrip
         items={[
           { icon: Target, label: "Ad sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "ads") },
           { icon: CalendarClock, label: "Campaign schedules", value: jobs.length },
           { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          { icon: Megaphone, label: "Creative review", value: "drafts" },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ConnectorPanel area="ads" data={data} title="Ads connectors" />
+        <SalesFocusBoard
+          title="Ads workbench"
+          items={[
+            {
+              icon: Target,
+              label: "Campaign briefs",
+              value: sessions.length,
+              summary: "Listing ads, audience notes, value props, objections, and channel-specific campaign plans.",
+            },
+            {
+              icon: Megaphone,
+              label: "Creative drafts",
+              value: "review",
+              summary: "Ad copy, hooks, graphics, landing-page notes, and email campaign drafts wait for approval.",
+            },
+            {
+              icon: CalendarClock,
+              label: "Flight schedules",
+              value: jobs.length,
+              summary: "Recurring campaign checks, reporting cadences, market stat pulls, and launch reminders.",
+            },
+            {
+              icon: CheckCircle2,
+              label: "Approved launches",
+              value: "gated",
+              summary: "Ads should not publish or alter budgets until the operator approves the exact action.",
+            },
+          ]}
+          note="Facebook, Google, and Composio-style ad account setup belongs in Settings. This page is for campaign work and approvals."
+        />
         <TimedTasks jobs={jobs} empty="No ad schedules yet." title="Campaign schedules" />
       </div>
-      <SkillDirectoryNotice area="ads" />
       <RecentSessions
         title="Ad work"
         sessions={sessions}
@@ -972,16 +1019,44 @@ export function RealEstateSocialMediaPage() {
       <WorkflowStrip
         items={[
           { icon: Megaphone, label: "Social sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "social-media") },
           { icon: CalendarClock, label: "Post schedules", value: jobs.length },
           { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
+          { icon: MessageSquare, label: "Content queue", value: "drafts" },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ConnectorPanel area="social-media" data={data} title="Social connectors" />
+        <SalesFocusBoard
+          title="Social workbench"
+          items={[
+            {
+              icon: MessageSquare,
+              label: "Post drafts",
+              value: sessions.length,
+              summary: "Organic captions, hooks, reels, listing moments, market updates, and nurture content.",
+            },
+            {
+              icon: Megaphone,
+              label: "Platform adaptation",
+              value: "review",
+              summary: "Turn one idea into Instagram, Facebook, email, and short-form variants before scheduling.",
+            },
+            {
+              icon: CalendarClock,
+              label: "Publishing cadence",
+              value: jobs.length,
+              summary: "Scheduled content checks, weekly posting plans, and recurring social prompts.",
+            },
+            {
+              icon: CheckCircle2,
+              label: "Approved posts",
+              value: "gated",
+              summary: "Keep final captions and assets in an approval lane before anything posts externally.",
+            },
+          ]}
+          note="Social account setup, Facebook/Instagram permissions, and Composio access belong in Settings. This page stays focused on the content queue."
+        />
         <TimedTasks jobs={jobs} empty="No social schedules yet." title="Post schedules" />
       </div>
-      <SkillDirectoryNotice area="social-media" />
       <RecentSessions
         title="Social work"
         sessions={sessions}

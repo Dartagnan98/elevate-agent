@@ -165,6 +165,27 @@ function connectorVariant(state: SourceConnectorStatus["state"]): "success" | "w
   return "outline";
 }
 
+function connectorSetupCopy(connector: SourceConnectorStatus): string {
+  if (connector.initializeBehavior === "local_messages_import") {
+    return connector.sourceExists
+      ? "Re-imports synced Mac Messages into Elevate's local message index: people, conversations, messages, and conversation-days."
+      : "Reads the synced Mac Messages database and builds a local Elevate message index for lead context.";
+  }
+  return connector.sourceExists
+    ? "Refreshes the local agent setup task and prompt for building the real connector. It does not fabricate demo lead data."
+    : "Creates a local setup task for the agent/operator to build the webhook, poller, import command, or bridge.";
+}
+
+function connectorActionLabel(connector: SourceConnectorStatus, busy: boolean): string {
+  if (busy) {
+    return connector.initializeBehavior === "local_messages_import" ? "Importing" : "Creating task";
+  }
+  if (connector.initializeBehavior === "local_messages_import") {
+    return connector.sourceExists ? "Re-import messages" : "Import messages";
+  }
+  return connector.sourceExists ? "Refresh setup task" : "Create setup task";
+}
+
 function SourceConnectorSettingsPanel() {
   const [data, setData] = useState<SourceConnectorsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -212,7 +233,7 @@ function SourceConnectorSettingsPanel() {
               Source connectors
             </CardTitle>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Local normalized records for messages, CRM, skill outputs, market stats, documents, and signing.
+              Setup lives here. Apple Messages can build a real local message index; other sources create an agent setup task until a webhook, poller, import command, or bridge exists.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -239,11 +260,16 @@ function SourceConnectorSettingsPanel() {
                     <Badge variant={connectorVariant(connector.state)}>{connector.state.replace(/_/g, " ")}</Badge>
                   </div>
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                    {connector.nextOperatorStep ?? connector.sourceDir}
+                    {connectorSetupCopy(connector)}
                   </p>
                 </div>
                 <Badge variant="outline">{connectorRecordTotal(connector)} records</Badge>
               </div>
+              {connector.nextOperatorStep && (
+                <div className="mt-3 rounded-xl bg-background/45 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+                  {connector.nextOperatorStep}
+                </div>
+              )}
               <div className="mt-3 flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline">{connector.ownerAgent}</Badge>
                 {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
@@ -254,7 +280,7 @@ function SourceConnectorSettingsPanel() {
                   onClick={() => void initialize(connector.id)}
                   disabled={busyId === connector.id}
                 >
-                  {busyId === connector.id ? "Writing" : connector.sourceExists ? "Update files" : "Initialize"}
+                  {connectorActionLabel(connector, busyId === connector.id)}
                 </Button>
                 <Button
                   variant="ghost"

@@ -317,6 +317,7 @@ export interface SourceConnectorStatus {
   connectionType: string | null;
   syncMode: string | null;
   authStatus: string | null;
+  initializeBehavior: "local_messages_import" | "agent_setup_task" | string;
   ownerAgent: string;
   enabledUiSurfaces: string[];
   connected: boolean;
