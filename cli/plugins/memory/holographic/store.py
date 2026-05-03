@@ -2720,23 +2720,52 @@ class MemoryStore:
     def _infer_entity_type(name: str, aliases: str = "") -> str:
         text = f"{name} {aliases}".lower()
         compact = re.sub(r"\s+", " ", text).strip()
+        if not compact:
+            return "unknown"
         if re.search(r"\b\d{1,6}\s+[a-z0-9 .'-]+\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|way|place|pl|boulevard|blvd|trail|terrace|terr)\b", compact):
             return "property"
         if re.search(r"\b[a-z]\d[a-z][ -]?\d[a-z]\d\b", compact):
             return "property"
+        if any(k in compact for k in ("seller", "vendor", "buyer", "lead", "client")):
+            if "seller" in compact:
+                return "seller"
+            if "buyer" in compact:
+                return "buyer"
+            if "lead" in compact or "prospect" in compact:
+                return "lead"
+            if "vendor" in compact:
+                return "vendor"
+            if "client" in compact:
+                return "client"
+        if any(k in compact for k in ("showing feedback", "showingtime feedback", "buyer feedback", "agent feedback")):
+            return "showing_feedback"
+        if any(k in compact for k in ("showing", "open house", "tour", "viewing")):
+            return "showing"
+        if any(k in compact for k in ("offer", "counter offer", "subject removal", "deposit")):
+            return "offer"
+        if any(k in compact for k in ("transaction", "completion", "possession", "closing", "conveyance")):
+            return "transaction"
+        if any(k in compact for k in ("listing contract", "mlc", "cps", "contract", "agreement", "addendum", "disclosure", "title", "webforms", "form", "pdf", "strata doc", "property disclosure")):
+            return "document"
+        if any(k in compact for k in ("listing launch", "listing presentation", "seller update", "weekly listing", "price reduction", "relisting", "listing")):
+            return "listing"
+        if any(k in compact for k in ("cma", "comparative market analysis", "market evaluation", "home evaluation")):
+            return "cma"
+        if any(k in compact for k in ("follow up", "todo", "task", "deadline", "appointment", "reminder", "call back")):
+            return "task"
+        if any(k in compact for k in ("campaign", "launch", "ad", "ads", "email blast", "mailjet", "social post", "marketing")):
+            return "campaign"
+        if any(k in compact for k in ("photographer", "inspector", "lawyer", "notary", "stager", "cleaner", "contractor", "lender", "mortgage broker", "appraiser")):
+            return "vendor"
         if any(k in compact for k in ("academy", "real estate", "realty", "brokerage", "group", "company", "corp", " inc", " llc", "ltd", "crm", "lofty", "google ads", "meta ads", "ctrl strategies", "uppercuts")):
             return "business"
-        if any(k in compact for k in ("contract", "agreement", "addendum", "disclosure", "title", "webforms", "form", "pdf", "cps", "mlc", "listing contract")):
-            return "document"
-        if any(k in compact for k in ("listing", "seller update", "showing", "offer", "transaction", "cma", "follow up", "appointment", "campaign", "launch", "email", "call", "task", "deadline")):
-            return "workflow"
-        if any(k in compact for k in ("kamloops", "vancouver", "kelowna", "surrey", "burnaby", "neighborhood", "market", "area")):
+        if any(k in compact for k in ("kamloops", "vancouver", "kelowna", "surrey", "burnaby", "neighborhood", "neighbourhood", "market", "area", "subdivision")):
             return "market_area"
         if any(k in compact for k in ("pricing", "curriculum", "class", "classes", "course", "program", "service", "coaching", "chair practice")):
             return "service"
         words = [w for w in re.findall(r"[A-Za-z][A-Za-z'-]+", str(name or "")) if w]
         if 2 <= len(words) <= 3 and all(w[:1].isupper() for w in words):
-            if not any(w.lower() in {"academy", "realty", "estate", "contract", "campaign", "update"} for w in words):
+            if not any(w.lower() in {"academy", "realty", "estate", "contract", "campaign", "update", "listing", "showing", "offer"} for w in words):
                 return "person"
         return "unknown"
 
@@ -2756,7 +2785,37 @@ class MemoryStore:
         pair = {left_type, right_type}
         if "sign" in evidence and "document" in pair:
             return "signed"
-        if "own" in evidence and "property" in pair and ("person" in pair or "business" in pair):
+        if "seller" in pair and "property" in pair:
+            if any(k in evidence for k in ("own", "seller", "property", "home")):
+                return "owns"
+            return "seller_for"
+        if "buyer" in pair and "property" in pair:
+            return "interested_in"
+        if "lead" in pair and ("property" in pair or "listing" in pair or "cma" in pair):
+            return "interested_in"
+        if "listing" in pair and "property" in pair:
+            return "listed_for"
+        if "showing" in pair and "property" in pair:
+            return "showed"
+        if "showing_feedback" in pair and ("showing" in pair or "property" in pair or "listing" in pair):
+            return "feedback_for"
+        if "offer" in pair and ("property" in pair or "listing" in pair or "transaction" in pair):
+            return "offer_on"
+        if "transaction" in pair and ("property" in pair or "listing" in pair or "document" in pair):
+            return "transaction_for"
+        if "document" in pair and ("property" in pair or "listing" in pair or "transaction" in pair):
+            return "has_document"
+        if "cma" in pair and ("property" in pair or "seller" in pair or "lead" in pair):
+            return "comp_for"
+        if "task" in pair and ("seller" in pair or "buyer" in pair or "lead" in pair or "property" in pair or "listing" in pair or "transaction" in pair):
+            return "needs_follow_up"
+        if "campaign" in pair and ("listing" in pair or "property" in pair or "business" in pair):
+            return "promotes"
+        if "vendor" in pair and ("property" in pair or "listing" in pair or "transaction" in pair):
+            return "vendor_for"
+        if "person" in pair and ("seller" in pair or "buyer" in pair or "lead" in pair or "client" in pair):
+            return "is_contact_for"
+        if "own" in evidence and "property" in pair and ("person" in pair or "business" in pair or "client" in pair):
             return "owns"
         if any(k in evidence for k in ("list", "listing", "mls")) and "property" in pair:
             return "listed_for"
@@ -2764,17 +2823,17 @@ class MemoryStore:
             return "showed"
         if any(k in evidence for k in ("offer", "bid")) and "property" in pair:
             return "offer_on"
-        if any(k in evidence for k in ("promote", "ad", "campaign", "launch", "social")) and ("workflow" in pair or "business" in pair):
+        if any(k in evidence for k in ("feedback", "objection", "showingtime")) and ("property" in pair or "listing" in pair):
+            return "feedback_for"
+        if any(k in evidence for k in ("promote", "ad", "campaign", "launch", "social")) and ("campaign" in pair or "listing" in pair or "property" in pair or "business" in pair):
             return "promotes"
-        if any(k in evidence for k in ("cma", "need", "todo", "task", "deadline", "follow up")) and ("workflow" in pair or "property" in pair or "person" in pair):
+        if any(k in evidence for k in ("cma", "need", "todo", "task", "deadline", "follow up")) and ("task" in pair or "property" in pair or "person" in pair or "seller" in pair or "lead" in pair):
             return "needs_follow_up"
-        if "document" in pair and "property" in pair:
-            return "has_document"
         if "business" in pair and "service" in pair:
             return "offers"
         if "person" in pair and "business" in pair:
             return "associated_with"
-        if "market_area" in pair and ("property" in pair or "business" in pair):
+        if "market_area" in pair and ("property" in pair or "business" in pair or "listing" in pair):
             return "located_in"
         if left_type != "unknown" or right_type != "unknown":
             return "related_to"

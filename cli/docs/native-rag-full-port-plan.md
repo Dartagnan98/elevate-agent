@@ -68,6 +68,8 @@ Elevate port:
 - Fact/chunk co-occurrence edges are stored in `memory_relations`.
 - `relation_backfill` reprocesses existing facts/chunks so old Plaud/document imports populate the native graph.
 - `graph_reprocess` canonicalizes duplicate entities, classifies generic nodes into business/realtor-aware types, retypes generic co-occurrence edges into typed relations, prunes weak/noisy edges, and records a before/after report.
+- Realtor-native node types include `seller`, `buyer`, `lead`, `client`, `property`, `listing`, `showing`, `showing_feedback`, `offer`, `transaction`, `document`, `vendor`, `campaign`, `task`, `cma`, and `market_area`.
+- Realtor-native edge types include `owns`, `seller_for`, `interested_in`, `listed_for`, `showed`, `feedback_for`, `offer_on`, `transaction_for`, `has_document`, `vendor_for`, `comp_for`, `needs_follow_up`, and `promotes`.
 - Fact/document entities are merged into one native graph surfaced by `wiki`, `rag_query`, and Hub.
 
 ### 4. Rerank and context packing
@@ -137,6 +139,7 @@ Elevate port:
 9. Hub import: expose the native RAG memory graph in the Agent Hub snapshot, not just old fact/entity links — done.
 10. Existing-data processing: run `relation_backfill` against Plaud/document chunks so old imports get graph edges — done for local store.
 11. Graph reprocessing: run `graph_reprocess` to canonicalize/merge entity nodes, classify node types, convert generic co-occurrence edges into typed business relations, and produce an auditable before/after report — done for local store.
+12. Realtor-native graph typing: extend `graph_reprocess` beyond generic `business/workflow/service` labels into real estate operating nodes and edges (`seller`, `buyer`, `listing`, `showing`, `offer`, `transaction`, `vendor`, `owns`, `interested_in`, `feedback_for`, `vendor_for`, etc.) — done.
 
 ## Hub graph status
 

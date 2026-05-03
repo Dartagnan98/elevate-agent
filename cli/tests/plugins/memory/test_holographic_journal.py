@@ -222,7 +222,9 @@ def test_graph_reprocess_types_entities_and_relations(tmp_path):
         "source_uri": "doc://seller-workflow",
         "source_type": "brief",
         "chunks": [
-            "Alex Med signed the Listing Contract for 123 Main Street and needs CMA follow up.",
+            "Seller Jane signed the Listing Contract for \"123 Main Street\" and needs CMA follow up.",
+            "Buyer Lead Robert requested a Showing for \"123 Main Street\" and the Showing Feedback mentioned price objections.",
+            "Photographer Vendor is booked for the Listing Launch Campaign at \"123 Main Street\".",
             "Alex Med works with Uppercuts Barber Academy on pricing classes and launch campaign planning.",
         ],
     })
@@ -237,8 +239,8 @@ def test_graph_reprocess_types_entities_and_relations(tmp_path):
     assert result["entities_retyped"] >= 1
     assert result["relations_retyped"] >= 1
     assert "unknown" in result["before"]["entity_types"]
-    assert any(t in result["after"]["entity_types"] for t in ("person", "business", "property", "document", "workflow"))
-    assert any(t in result["after"]["relation_types"] for t in ("signed", "needs_follow_up", "offers", "associated_with", "related_to"))
+    assert any(t in result["after"]["entity_types"] for t in ("seller", "buyer", "lead", "property", "listing", "showing", "showing_feedback", "vendor", "campaign", "cma", "task"))
+    assert any(t in result["after"]["relation_types"] for t in ("owns", "interested_in", "listed_for", "showed", "feedback_for", "vendor_for", "promotes", "needs_follow_up", "signed"))
 
 
 def test_rag_query_supports_naive_and_local_modes(tmp_path):
