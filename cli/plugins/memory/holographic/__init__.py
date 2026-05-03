@@ -104,6 +104,8 @@ FACT_STORE_SCHEMA = {
                     "recall_route",
                     "document_add",
                     "document_search",
+                    "document_status",
+                    "document_delete",
                     "import_plaud_archive",
                     "hygiene",
                     "memory_events",
@@ -159,13 +161,20 @@ FACT_STORE_SCHEMA = {
             "old_fact_id": {"type": "integer", "description": "Old fact ID for supersede."},
             "new_fact_id": {"type": "integer", "description": "New fact ID for supersede."},
             "source_uri": {"type": "string", "description": "Source URI/path/id for facts/documents."},
+            "document_id": {"type": "integer", "description": "Document ID for document status/delete actions."},
             "source_excerpt": {"type": "string", "description": "Short evidence excerpt for source-aware facts."},
             "observed_at": {"type": "string", "description": "When this fact/source was observed."},
             "title": {"type": "string", "description": "Document title for document_add/imports."},
             "path": {"type": "string", "description": "Local archive path for import_plaud_archive."},
             "metadata": {"type": "object", "description": "Optional document metadata."},
             "chunks": {"type": "array", "items": {"type": "string"}, "description": "Pre-split chunks for document_add."},
-            "modal_assets": {"type": "array", "items": {"type": "object"}, "description": "Parsed multimodal assets for document_add: image/table/equation/page artifacts."},
+            "modal_assets": {"type": "array", "items": {"type": "object"}, "description": "Parsed multimodal assets for document_add/rag_query: image/table/equation/page artifacts."},
+            "multimodal_content": {"type": "array", "items": {"type": "object"}, "description": "Alias for modal_assets, matching RAG-Anything direct multimodal query inputs."},
+            "mode": {"type": "string", "enum": ["local", "global", "hybrid", "naive", "mix", "bypass"], "description": "LightRAG-compatible query mode."},
+            "only_need_context": {"type": "boolean", "description": "Return only packed context for rag_query."},
+            "only_need_prompt": {"type": "boolean", "description": "Return an answer prompt built from the packed context for rag_query."},
+            "conversation_history": {"type": "array", "items": {"type": "object"}, "description": "Optional prior messages to include in rag_query prompt output."},
+            "response_type": {"type": "string", "description": "Optional answer style hint included in rag_query prompt output."},
             "fact_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional fact IDs for cluster/maintenance actions."},
             "max_chars": {"type": "integer", "description": "Maximum packed RAG context characters."},
             "token_budget": {"type": "integer", "description": "Alias for max_chars."},
@@ -825,6 +834,11 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_type=args.get("source_type"),
                     mode=str(args.get("mode") or "mix"),
                     max_chars=int(args.get("max_chars", args.get("token_budget", 12000))),
+                    modal_assets=args.get("modal_assets") or args.get("multimodal_content") or [],
+                    conversation_history=args.get("conversation_history") or [],
+                    response_type=args.get("response_type") or "Multiple Paragraphs",
+                    only_need_context=bool(args.get("only_need_context", False)),
+                    only_need_prompt=bool(args.get("only_need_prompt", False)),
                 )
                 return json.dumps(result)
 
@@ -871,6 +885,22 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args.get("limit", 8)),
                 )
                 return json.dumps({"results": results, "count": len(results)})
+
+            elif action == "document_status":
+                result = store.document_status(
+                    document_id=int(args["document_id"]) if args.get("document_id") is not None else None,
+                    source_uri=args.get("source_uri") or args.get("path"),
+                    source_type=args.get("source_type"),
+                    limit=int(args.get("limit", 20)),
+                )
+                return json.dumps(result)
+
+            elif action == "document_delete":
+                result = store.delete_document(
+                    document_id=int(args["document_id"]) if args.get("document_id") is not None else None,
+                    source_uri=args.get("source_uri") or args.get("path"),
+                )
+                return json.dumps(result)
 
             elif action == "import_plaud_archive":
                 result = self._import_plaud_archive(
@@ -1169,6 +1199,11 @@ class HolographicMemoryProvider(MemoryProvider):
         source_type: str | None = None,
         mode: str = "mix",
         max_chars: int = 12000,
+        modal_assets: list[dict] | None = None,
+        conversation_history: list[dict] | None = None,
+        response_type: str = "Multiple Paragraphs",
+        only_need_context: bool = False,
+        only_need_prompt: bool = False,
     ) -> dict:
         """Native Elevate RAG: retrieve answer-ready context from all memory lanes.
 
@@ -1180,30 +1215,52 @@ class HolographicMemoryProvider(MemoryProvider):
         started = time.time()
         limit = max(1, int(limit or 8))
         mode = str(mode or "mix").strip().lower()
-        if mode not in {"local", "global", "hybrid", "naive", "mix"}:
+        if mode not in {"local", "global", "hybrid", "naive", "mix", "bypass"}:
             mode = "mix"
         include_facts = mode in {"local", "hybrid", "mix"}
         include_chunks = mode in {"naive", "hybrid", "mix"}
         include_recent = mode in {"local", "hybrid", "mix"}
         include_graph = mode in {"local", "global", "hybrid", "mix"}
         include_communities = mode in {"global", "hybrid", "mix"}
+        if mode == "bypass":
+            context = self._format_rag_prompt(
+                query,
+                "",
+                conversation_history=conversation_history or [],
+                response_type=response_type,
+            ) if only_need_prompt else ""
+            return {
+                "query": query,
+                "mode": mode,
+                "sections": {},
+                "citations": [],
+                "context": context,
+                "prompt": context,
+                "raw_data": {"selected": {}, "citations": [], "telemetry": {"elapsed_ms": int((time.time() - started) * 1000), "counts": {}, "budget": {"max_chars": max_chars, "estimated_chars": 0}}},
+                "keywords": self._extract_rag_keywords(query, {}),
+                "empty": True,
+            }
         sections: dict[str, object] = {}
+        query_modal = self._rag_modal_assets(modal_assets or [])
+        retrieval_query = " ".join([query] + [item.get("content", "") for item in query_modal]).strip()
+        if query_modal:
+            sections["modal_query"] = query_modal
 
         communities: list[dict] = []
-        if self._store and query and include_communities:
-            communities = self._store.search_community_reports(query, limit=min(limit, 6))
+        if self._store and retrieval_query and include_communities:
+            communities = self._store.search_community_reports(retrieval_query, limit=min(limit, 6))
         sections["communities"] = communities
 
         facts: list[dict] = []
         rejected_ids: list[int] = []
-        if self._retriever and query and include_facts:
+        if self._retriever and retrieval_query and include_facts:
             candidates = self._retriever.search(
-                query,
+                retrieval_query,
                 min_trust=self._min_trust,
                 limit=max(limit * 3, limit),
             )
             facts, rejected_ids = self._verify_fact_results(
-                query,
+                retrieval_query,
                 candidates,
                 limit=limit,
                 session_id=session_id or self._session_id,
@@ -1211,28 +1268,28 @@ class HolographicMemoryProvider(MemoryProvider):
         sections["facts"] = facts
 
         chunks: list[dict] = []
-        if self._store and query and include_chunks:
-            chunks = self._store.document_search(query, source_type=source_type, limit=limit)
+        if self._store and retrieval_query and include_chunks:
+            chunks = self._store.document_search(retrieval_query, source_type=source_type, limit=limit)
         sections["chunks"] = chunks
 
         recent: list[dict] = []
-        if self._store and query and self._recent_recall_enabled and include_recent:
+        if self._store and retrieval_query and self._recent_recall_enabled and include_recent:
             recent = self._store.recent_turns(
                 session_id=session_id or self._session_id,
-                query=query,
+                query=retrieval_query,
                 limit=min(limit, self._recent_recall_limit),
                 include_assistant=True,
             )
         sections["recent"] = recent
 
         graph: list[dict] = []
-        if self._store and query and self._graph_recall_enabled and include_graph:
-            for entity in self._store.entity_candidates(query, limit=min(limit, self._graph_recall_limit)):
+        if self._store and retrieval_query and self._graph_recall_enabled and include_graph:
+            for entity in self._store.entity_candidates(retrieval_query, limit=min(limit, self._graph_recall_limit)):
                 wiki = self._store.entity_wiki(entity, limit=3)
                 if wiki.get("exists"):
                     graph.append(wiki)
         sections["graph"] = graph
-        sections = self._pack_rag_sections(query, sections, max_chars=max_chars)
+        sections = self._pack_rag_sections(retrieval_query or query, sections, max_chars=max_chars)
         facts = sections.get("facts") if isinstance(sections.get("facts"), list) else []
         chunks = sections.get("chunks") if isinstance(sections.get("chunks"), list) else []
         communities = sections.get("communities") if isinstance(sections.get("communities"), list) else []
@@ -1324,16 +1381,108 @@ class HolographicMemoryProvider(MemoryProvider):
             except Exception as exc:
                 logger.debug("RAG query maintenance failed: %s", exc)
 
+        prompt = self._format_rag_prompt(
+            query,
+            context,
+            conversation_history=conversation_history or [],
+            response_type=response_type,
+        )
+        if only_need_context:
+            context_value = context
+        elif only_need_prompt:
+            context_value = prompt
+        else:
+            context_value = context
+
         return {
             "query": query,
             "mode": mode,
             "sections": sections,
             "citations": citations,
-            "context": context,
+            "context": context_value,
+            "prompt": prompt,
             "raw_data": raw_data,
             "keywords": keywords,
             "empty": not bool(context.strip()),
         }
+
+    def _rag_modal_assets(self, assets: list[dict]) -> list[dict]:
+        """Normalize RAG-Anything-style multimodal query inputs into text-backed RAG items."""
+        normalized: list[dict] = []
+        for idx, asset in enumerate(assets or [], start=1):
+            if not isinstance(asset, dict):
+                continue
+            asset_type = str(asset.get("asset_type") or asset.get("type") or "asset").strip() or "asset"
+            locator = str(asset.get("locator") or asset.get("page") or asset.get("path") or asset.get("img_path") or "").strip()
+            text_bits: list[str] = []
+            for key in (
+                "summary",
+                "caption",
+                "image_caption",
+                "table_caption",
+                "equation_caption",
+                "text_content",
+                "text",
+                "content",
+                "table_body",
+                "latex",
+                "equation",
+                "footnote",
+                "image_footnote",
+                "table_footnote",
+            ):
+                value = asset.get(key)
+                if isinstance(value, list):
+                    value = " ".join(str(v) for v in value if v)
+                if value:
+                    text_bits.append(str(value))
+            content = ". ".join(bit.strip() for bit in text_bits if bit and str(bit).strip())
+            if not content:
+                continue
+            normalized.append({
+                "asset_id": f"query-modal-{idx}",
+                "asset_type": asset_type,
+                "locator": locator,
+                "content": content,
+                "source_uri": str(asset.get("source_uri") or locator or f"query-modal:{idx}"),
+                "score": 1.0,
+                "metadata": {k: v for k, v in asset.items() if k not in {"text", "content", "text_content"}},
+            })
+        return normalized
+
+    def _format_rag_prompt(
+        self,
+        query: str,
+        context: str,
+        *,
+        conversation_history: list[dict] | None = None,
+        response_type: str = "Multiple Paragraphs",
+    ) -> str:
+        """Build a LightRAG-style answer prompt without calling a model."""
+        lines = [
+            "---Role---",
+            "You answer using only the supplied Elevate native RAG context.",
+            "Do not invent details. Cite source lines when possible.",
+            f"Response type: {response_type or 'Multiple Paragraphs'}",
+        ]
+        history = conversation_history or []
+        if history:
+            lines.append("---Conversation History---")
+            for msg in history[-8:]:
+                if not isinstance(msg, dict):
+                    continue
+                role = str(msg.get("role") or "user").strip() or "user"
+                content = self._clip(str(msg.get("content") or ""), 800)
+                if content:
+                    lines.append(f"{role}: {content}")
+        lines.extend([
+            "---Context---",
+            context or "[no-context]",
+            "---Question---",
+            query,
+            "---Answer---",
+        ])
+        return "\n".join(lines)
 
     def _extract_rag_keywords(self, query: str, sections: dict[str, object]) -> dict[str, list[str]]:
         """LightRAG-style deterministic high/low keyword decomposition."""
@@ -1360,7 +1509,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 break
         scored_tokens: dict[str, int] = {token: 2 for token in query_tokens}
         lane_texts: list[str] = []
-        for key in ("facts", "chunks", "communities", "recent"):
+        for key in ("facts", "chunks", "communities", "recent", "modal_query"):
             items = sections.get(key) if isinstance(sections.get(key), list) else []
             for item in items[:6]:
                 if not isinstance(item, dict):
@@ -1387,7 +1536,7 @@ class HolographicMemoryProvider(MemoryProvider):
     ) -> dict[str, object]:
         counts = {
             key: len(sections.get(key, [])) if isinstance(sections.get(key), list) else 0
-            for key in ("communities", "facts", "chunks", "recent", "graph")
+            for key in ("modal_query", "communities", "facts", "chunks", "recent", "graph")
         }
         score_breakdown = {
             "communities": [
@@ -1457,9 +1606,11 @@ class HolographicMemoryProvider(MemoryProvider):
         communities = sections.get("communities") if isinstance(sections.get("communities"), list) else []
         facts = sections.get("facts") if isinstance(sections.get("facts"), list) else []
         chunks = sections.get("chunks") if isinstance(sections.get("chunks"), list) else []
+        modal_query = sections.get("modal_query") if isinstance(sections.get("modal_query"), list) else []
         recent = sections.get("recent") if isinstance(sections.get("recent"), list) else []
         graph = sections.get("graph") if isinstance(sections.get("graph"), list) else []
 
+        reserve(modal_query, "modal_query", "asset_id", ("content", "asset_type", "locator", "source_uri"), cap=6)
         reserve(communities, "communities", "community_id", ("name", "summary", "tags", "entity_names"), cap=6)
         reserve(facts, "facts", "fact_id", ("content", "tags", "category", "source_uri"), base_key="trust_score", cap=8)
         reserve(chunks, "chunks", "chunk_id", ("content", "source_excerpt", "title", "source_uri"), cap=8)
@@ -1482,6 +1633,14 @@ class HolographicMemoryProvider(MemoryProvider):
         lines = ["## Elevate Native RAG", f"Query: {query}"]
 
         facts = sections.get("facts") if isinstance(sections.get("facts"), list) else []
+        modal_query = sections.get("modal_query") if isinstance(sections.get("modal_query"), list) else []
+        if modal_query:
+            lines.append("### Multimodal Query Inputs")
+            for asset in modal_query[:6]:
+                source = asset.get("source_uri") or f"modal:{asset.get('asset_id')}"
+                label = asset.get("asset_type") or "asset"
+                locator = f" at {asset.get('locator')}" if asset.get("locator") else ""
+                lines.append(f"- [{source}] {label}{locator}: {self._clip(asset.get('content', ''), 420)}")
         communities = sections.get("communities") if isinstance(sections.get("communities"), list) else []
         if communities:
             lines.append("### Community Reports")

@@ -2154,6 +2154,119 @@ class MemoryStore:
             self._conn.commit()
             return int(row["document_id"])
 
+    def document_status(
+        self,
+        document_id: int | None = None,
+        source_uri: str | None = None,
+        source_type: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Return LightRAG-style document/index status for native document chunks."""
+        limit = max(1, min(200, int(limit or 20)))
+        where: list[str] = []
+        params: list[object] = []
+        if document_id is not None:
+            where.append("d.document_id = ?")
+            params.append(int(document_id))
+        if source_uri:
+            where.append("d.source_uri = ?")
+            params.append(str(source_uri))
+        if source_type:
+            where.append("d.source_type = ?")
+            params.append(str(source_type))
+        clause = "WHERE " + " AND ".join(where) if where else ""
+        with self._lock:
+            counts = self._conn.execute(
+                """
+                SELECT d.source_type, COUNT(*) AS documents, COALESCE(SUM(chunk_counts.chunks), 0) AS chunks,
+                       COALESCE(SUM(chunk_counts.indexed_chunks), 0) AS indexed_chunks,
+                       COALESCE(SUM(asset_counts.assets), 0) AS modal_assets
+                FROM memory_documents d
+                LEFT JOIN (
+                    SELECT c.document_id,
+                           COUNT(*) AS chunks,
+                           SUM(CASE WHEN e.embedding_id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_chunks
+                    FROM memory_chunks c
+                    LEFT JOIN memory_embeddings e ON e.target_type = 'chunk' AND e.target_id = c.chunk_id
+                    GROUP BY c.document_id
+                ) chunk_counts ON chunk_counts.document_id = d.document_id
+                LEFT JOIN (
+                    SELECT document_id, COUNT(*) AS assets
+                    FROM memory_modal_assets
+                    GROUP BY document_id
+                ) asset_counts ON asset_counts.document_id = d.document_id
+                GROUP BY d.source_type
+                ORDER BY documents DESC
+                """
+            ).fetchall()
+            rows = self._conn.execute(
+                f"""
+                SELECT d.document_id, d.source_type, d.source_uri, d.title, d.metadata_json,
+                       d.created_at, d.updated_at,
+                       COUNT(DISTINCT c.chunk_id) AS chunks,
+                       COUNT(DISTINCT e.embedding_id) AS indexed_chunks,
+                       COUNT(DISTINCT a.asset_id) AS modal_assets
+                FROM memory_documents d
+                LEFT JOIN memory_chunks c ON c.document_id = d.document_id
+                LEFT JOIN memory_embeddings e ON e.target_type = 'chunk' AND e.target_id = c.chunk_id
+                LEFT JOIN memory_modal_assets a ON a.document_id = d.document_id
+                {clause}
+                GROUP BY d.document_id
+                ORDER BY d.updated_at DESC
+                LIMIT ?
+                """,
+                params + [limit],
+            ).fetchall()
+        documents = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            try:
+                item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            except Exception:
+                item["metadata"] = {}
+            chunks = int(item.get("chunks") or 0)
+            indexed = int(item.get("indexed_chunks") or 0)
+            item["status"] = "indexing" if indexed and indexed < chunks else "processed"
+            documents.append(item)
+        return {
+            "counts": [self._row_to_dict(row) for row in counts],
+            "documents": documents,
+            "count": len(documents),
+        }
+
+    def delete_document(self, document_id: int | None = None, source_uri: str | None = None) -> dict:
+        """Delete a native RAG document, chunks, embeddings, modal assets, and relations."""
+        if document_id is None and not source_uri:
+            raise ValueError("document_id or source_uri is required")
+        with self._lock:
+            row = None
+            if document_id is not None:
+                row = self._conn.execute(
+                    "SELECT document_id, source_uri FROM memory_documents WHERE document_id = ?",
+                    (int(document_id),),
+                ).fetchone()
+            elif source_uri:
+                row = self._conn.execute(
+                    "SELECT document_id, source_uri FROM memory_documents WHERE source_uri = ?",
+                    (str(source_uri),),
+                ).fetchone()
+            if not row:
+                return {"status": "not_found", "deleted": 0}
+            doc_id = int(row["document_id"])
+            chunk_rows = self._conn.execute("SELECT chunk_id FROM memory_chunks WHERE document_id = ?", (doc_id,)).fetchall()
+            chunk_ids = [int(r["chunk_id"]) for r in chunk_rows]
+            for chunk_id in chunk_ids:
+                self._conn.execute("DELETE FROM memory_embeddings WHERE target_type = 'chunk' AND target_id = ?", (chunk_id,))
+                self._conn.execute(
+                    "DELETE FROM memory_relations WHERE source_type = 'chunk' AND source_id = ?",
+                    (chunk_id,),
+                )
+            self._conn.execute("DELETE FROM memory_modal_assets WHERE document_id = ?", (doc_id,))
+            self._conn.execute("DELETE FROM memory_chunks WHERE document_id = ?", (doc_id,))
+            self._conn.execute("DELETE FROM memory_documents WHERE document_id = ?", (doc_id,))
+            self._conn.commit()
+        return {"status": "success", "deleted": 1, "document_id": doc_id, "source_uri": row["source_uri"], "chunks": len(chunk_ids)}
+
     def add_document_chunks(
         self,
         source_uri: str,

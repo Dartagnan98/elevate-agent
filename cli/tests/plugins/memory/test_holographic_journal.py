@@ -241,6 +241,66 @@ def test_rag_query_supports_naive_and_local_modes(tmp_path):
     assert local["sections"]["graph"]
 
 
+def test_lightrag_prompt_bypass_and_raganything_multimodal_query(tmp_path):
+    provider = _provider(tmp_path)
+    _seed_rag_memory(provider)
+
+    multimodal = _tool(provider, {
+        "action": "rag_query",
+        "query": "What does the table say about curriculum confidence?",
+        "mode": "mix",
+        "limit": 4,
+        "only_need_prompt": True,
+        "response_type": "Bullet Points",
+        "conversation_history": [{"role": "user", "content": "We care about Uppercuts classes."}],
+        "multimodal_content": [{
+            "type": "table",
+            "table_caption": ["Uppercuts class outcomes"],
+            "table_body": "Metric | Value\nStudent confidence | High after live chair practice",
+            "page": 2,
+        }],
+    })
+    assert multimodal["sections"]["modal_query"]
+    assert multimodal["raw_data"]["telemetry"]["counts"]["modal_query"] == 1
+    assert "Multimodal Query Inputs" in multimodal["prompt"]
+    assert "Response type: Bullet Points" in multimodal["context"]
+    assert "Conversation History" in multimodal["context"]
+
+    bypass = _tool(provider, {
+        "action": "rag_query",
+        "query": "Answer without retrieval",
+        "mode": "bypass",
+        "only_need_prompt": True,
+    })
+    assert bypass["mode"] == "bypass"
+    assert bypass["sections"] == {}
+    assert bypass["context"].startswith("---Role---")
+
+
+def test_document_status_and_delete_cover_lightrag_doc_ops(tmp_path):
+    provider = _provider(tmp_path)
+    added = _tool(provider, {
+        "action": "document_add",
+        "title": "Modal Doc",
+        "source_uri": "doc://modal",
+        "source_type": "brief",
+        "chunks": ["Uppercuts Barber Academy table and image notes."],
+        "modal_assets": [{"type": "image", "caption": "Chair practice photo", "path": "image://chair"}],
+    })
+    assert added["chunks"] == 2
+    assert added["modal_assets"] == 1
+
+    status = _tool(provider, {"action": "document_status", "source_type": "brief"})
+    assert status["count"] == 1
+    assert status["documents"][0]["status"] == "processed"
+    assert status["documents"][0]["modal_assets"] == 1
+
+    deleted = _tool(provider, {"action": "document_delete", "source_uri": "doc://modal"})
+    assert deleted["status"] == "success"
+    assert deleted["chunks"] == 2
+    assert _tool(provider, {"action": "document_status", "source_type": "brief"})["count"] == 0
+
+
 def test_community_reports_power_global_rag_mode(tmp_path):
     provider = _provider(tmp_path)
     first = _tool(provider, {
