@@ -35,6 +35,30 @@ def _facts(provider, limit=200):
     return _tool(provider, {"action": "list", "limit": limit})["facts"]
 
 
+def _seed_rag_memory(provider):
+    _tool(provider, {
+        "action": "add",
+        "content": "Uppercuts Barber Academy teaches chair confidence with Alex Med inside a working barbershop.",
+        "category": "project",
+        "source_uri": "fact://uppercuts-positioning",
+    })
+    _tool(provider, {
+        "action": "document_add",
+        "title": "Uppercuts Curriculum",
+        "source_uri": "doc://uppercuts-curriculum",
+        "source_type": "brief",
+        "chunks": [
+            "Uppercuts curriculum covers clipper control, consultations, sanitation, fading, and client handling.",
+            "The Academy CTA is a form submit followed by a representative call to confirm the student's spot.",
+        ],
+    })
+    provider.sync_turn(
+        "We decided Uppercuts copy should say classes, not cohorts.",
+        "Saved.",
+        session_id="session-1",
+    )
+
+
 def _runtime_config(tmp_path, **overrides):
     plugin_config = {
         "db_path": str(tmp_path / "memory.db"),
@@ -129,6 +153,155 @@ def test_duplicate_turn_is_idempotent(tmp_path):
     assert first["promoted"] == 1
     assert second["processed"] == 0
     assert len(_facts(provider)) == 1
+
+
+def test_rag_query_mixes_facts_documents_recent_and_graph(tmp_path):
+    provider = _provider(tmp_path)
+    _seed_rag_memory(provider)
+
+    result = _tool(provider, {
+        "action": "rag_query",
+        "query": "What do we know about Uppercuts Barber Academy classes and curriculum?",
+        "limit": 5,
+    })
+
+    assert result["mode"] == "mix"
+    assert result["empty"] is False
+    assert result["sections"]["facts"]
+    assert result["sections"]["chunks"]
+    assert result["sections"]["recent"]
+    assert result["sections"]["graph"]
+    assert result["citations"]
+    assert "Elevate Native RAG" in result["context"]
+    assert "Uppercuts" in result["context"]
+
+
+def test_rag_query_supports_naive_and_local_modes(tmp_path):
+    provider = _provider(tmp_path)
+    _seed_rag_memory(provider)
+
+    naive = _tool(provider, {
+        "action": "rag_query",
+        "query": "clipper control curriculum",
+        "mode": "naive",
+        "limit": 3,
+    })
+    assert naive["mode"] == "naive"
+    assert naive["sections"]["chunks"]
+    assert naive["sections"]["facts"] == []
+    assert naive["sections"]["graph"] == []
+
+    local = _tool(provider, {
+        "action": "rag_query",
+        "query": "Uppercuts Barber Academy Alex Med",
+        "mode": "local",
+        "limit": 3,
+    })
+    assert local["mode"] == "local"
+    assert local["sections"]["facts"]
+    assert local["sections"]["chunks"] == []
+    assert local["sections"]["graph"]
+
+
+def test_community_reports_power_global_rag_mode(tmp_path):
+    provider = _provider(tmp_path)
+    first = _tool(provider, {
+        "action": "add",
+        "content": "Uppercuts Barber Academy teaches hands-on barber classes with Alex Med inside a working shop.",
+        "category": "project",
+        "tags": "uppercuts,barber",
+    })
+    second = _tool(provider, {
+        "action": "add",
+        "content": "Uppercuts Academy CTA is form submit followed by a representative call to confirm spot details.",
+        "category": "project",
+        "tags": "uppercuts,cta",
+    })
+    third = _tool(provider, {
+        "action": "add",
+        "content": "Alex Med has trained 1000 plus barber students and has a 100K plus YouTube audience.",
+        "category": "project",
+        "tags": "uppercuts,alex-med",
+    })
+
+    cluster = _tool(provider, {
+        "action": "cluster",
+        "fact_ids": [first["fact_id"], second["fact_id"], third["fact_id"]],
+        "query": "Uppercuts Academy Alex Med barber classes",
+    })
+    assert cluster["community_report"]["built"] is True
+
+    reports = _tool(provider, {
+        "action": "community_reports",
+        "query": "Uppercuts Academy barber classes",
+        "limit": 3,
+    })
+    assert reports["count"] >= 1
+    assert "Uppercuts" in reports["results"][0]["summary"]
+
+    global_rag = _tool(provider, {
+        "action": "rag_query",
+        "query": "Uppercuts Academy barber classes",
+        "mode": "global",
+        "limit": 3,
+        "max_chars": 2400,
+    })
+    assert global_rag["sections"]["communities"]
+    assert global_rag["sections"]["facts"] == []
+    assert "Community Reports" in global_rag["context"]
+    assert any(c["type"] == "community" for c in global_rag["citations"])
+
+
+def test_document_chunks_create_entity_links_and_relations(tmp_path):
+    provider = _provider(tmp_path)
+    _tool(provider, {
+        "action": "document_add",
+        "title": "Uppercuts RAG Brief",
+        "source_uri": "doc://uppercuts-rag-brief",
+        "source_type": "brief",
+        "chunks": [
+            "Alex Med teaches Uppercuts Barber Academy students in Kamloops with real chair practice.",
+        ],
+    })
+
+    wiki = _tool(provider, {"action": "wiki", "entity": "Alex Med", "limit": 5})
+    assert wiki["exists"] is True
+    related = {item["entity"] for item in wiki["related_entities"]}
+    assert "Uppercuts Barber Academy" in related
+
+
+def test_document_add_accepts_multimodal_assets_as_rag_chunks(tmp_path):
+    provider = _provider(tmp_path)
+    result = _tool(provider, {
+        "action": "document_add",
+        "title": "Listing PDF With Table",
+        "source_uri": "doc://listing-pdf-table",
+        "source_type": "pdf",
+        "chunks": ["Listing package overview for Sagebrush Drive."],
+        "modal_assets": [
+            {
+                "asset_type": "table",
+                "locator": "page 4",
+                "summary": "Showing activity table lists 12 showings and 3 repeat buyers.",
+                "text_content": "Showings: 12. Repeat buyers: 3. Feedback: price sensitive.",
+            },
+            {
+                "asset_type": "image",
+                "locator": "page 2",
+                "summary": "Exterior listing photo shows strong curb appeal and clean landscaping.",
+            },
+        ],
+    })
+
+    assert result["modal_assets"] == 2
+    search = _tool(provider, {
+        "action": "document_search",
+        "query": "repeat buyers showing activity table",
+        "source_type": "pdf",
+        "limit": 5,
+    })
+    assert search["count"] >= 1
+    assert any("Multimodal table" in item["content"] for item in search["results"])
 
 
 def test_journal_status_segments_sessions_by_day(tmp_path):

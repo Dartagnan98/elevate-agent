@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_elevate_home() / "state.db"
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -86,6 +86,42 @@ CREATE TABLE IF NOT EXISTS messages (
     codex_reasoning_items TEXT
 );
 
+CREATE TABLE IF NOT EXISTS turn_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL,
+    session_id TEXT REFERENCES sessions(id),
+    session_key TEXT,
+    message_id TEXT,
+    source TEXT,
+    provider TEXT,
+    model TEXT,
+    gateway_tool_profile TEXT,
+    gateway_tool_profile_reason TEXT,
+    selected_toolsets TEXT,
+    requested_toolsets TEXT,
+    configured_toolsets TEXT,
+    loaded_tool_count INTEGER DEFAULT 0,
+    selected_tool_schema_tokens INTEGER DEFAULT 0,
+    configured_tool_schema_tokens INTEGER DEFAULT 0,
+    estimated_tool_schema_savings_tokens INTEGER DEFAULT 0,
+    estimated_tool_schema_savings_pct REAL,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    api_calls INTEGER DEFAULT 0,
+    estimated_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    latency_ms INTEGER DEFAULT 0,
+    tool_calls TEXT,
+    status TEXT DEFAULT 'ok',
+    error_type TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -95,6 +131,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_timestamp ON turn_usage(timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_source ON turn_usage(source, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_profile ON turn_usage(gateway_tool_profile, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_usage_event_unique
+ON turn_usage(source, session_key, message_id)
+WHERE message_id IS NOT NULL AND message_id != '';
 """
 
 FTS_SQL = """
@@ -356,6 +399,71 @@ class SessionDB:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 8")
+            if current_version < 9:
+                # v9: add per-turn usage table linked to sessions. Sessions keep
+                # aggregate totals; turn_usage records model/profile/latency/tool
+                # attribution for each gateway turn.
+                cursor.executescript("""
+CREATE TABLE IF NOT EXISTS turn_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL,
+    session_id TEXT REFERENCES sessions(id),
+    session_key TEXT,
+    message_id TEXT,
+    source TEXT,
+    provider TEXT,
+    model TEXT,
+    gateway_tool_profile TEXT,
+    gateway_tool_profile_reason TEXT,
+    selected_toolsets TEXT,
+    requested_toolsets TEXT,
+    configured_toolsets TEXT,
+    loaded_tool_count INTEGER DEFAULT 0,
+    selected_tool_schema_tokens INTEGER DEFAULT 0,
+    configured_tool_schema_tokens INTEGER DEFAULT 0,
+    estimated_tool_schema_savings_tokens INTEGER DEFAULT 0,
+    estimated_tool_schema_savings_pct REAL,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    api_calls INTEGER DEFAULT 0,
+    estimated_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    latency_ms INTEGER DEFAULT 0,
+    tool_calls TEXT,
+    status TEXT DEFAULT 'ok',
+    error_type TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_timestamp ON turn_usage(timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_source ON turn_usage(source, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_profile ON turn_usage(gateway_tool_profile, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_usage_event_unique
+ON turn_usage(source, session_key, message_id)
+WHERE message_id IS NOT NULL AND message_id != '';
+""")
+                cursor.execute("UPDATE schema_version SET version = 9")
+            if current_version < 10:
+                # v10: mark turn ledger rows as ok/failed and capture the
+                # sanitized exception class for failed turns. This lets insights
+                # include failed gateway turns without storing message text.
+                for col_name, col_type in [
+                    ("status", "TEXT DEFAULT 'ok'"),
+                    ("error_type", "TEXT"),
+                ]:
+                    try:
+                        safe = col_name.replace('"', '""')
+                        cursor.execute(
+                            f'ALTER TABLE turn_usage ADD COLUMN "{safe}" {col_type}'
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                cursor.execute("UPDATE schema_version SET version = 10")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -538,6 +646,67 @@ class SessionDB:
         def _do(conn):
             conn.execute(sql, params)
         self._execute_write(_do)
+
+    def record_turn_usage(self, row: Dict[str, Any]) -> int:
+        """Record one per-turn usage row.
+
+        The caller provides only usage/profile/tool metadata. Do not store user
+        message content, assistant response content, tool arguments, or secret
+        payloads in this table.
+        """
+        columns = [
+            "timestamp",
+            "session_id",
+            "session_key",
+            "message_id",
+            "source",
+            "provider",
+            "model",
+            "gateway_tool_profile",
+            "gateway_tool_profile_reason",
+            "selected_toolsets",
+            "requested_toolsets",
+            "configured_toolsets",
+            "loaded_tool_count",
+            "selected_tool_schema_tokens",
+            "configured_tool_schema_tokens",
+            "estimated_tool_schema_savings_tokens",
+            "estimated_tool_schema_savings_pct",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+            "api_calls",
+            "estimated_cost_usd",
+            "cost_status",
+            "cost_source",
+            "latency_ms",
+            "tool_calls",
+            "status",
+            "error_type",
+        ]
+        placeholders = ", ".join("?" for _ in columns)
+        column_sql = ", ".join(columns)
+
+        def _do(conn):
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO turn_usage ({column_sql}) VALUES ({placeholders})",
+                [row.get(column) for column in columns],
+            )
+            return int(cur.lastrowid)
+
+        return self._execute_write(_do)
+
+    def recent_turn_usage(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return newest per-turn usage rows."""
+        safe_limit = max(1, min(int(limit), 500))
+        cursor = self._conn.execute(
+            "SELECT * FROM turn_usage ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (safe_limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def ensure_session(
         self,

@@ -264,6 +264,18 @@ export const api = {
   // Real-estate source connectors and integrations
   getSourceConnectors: () =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors"),
+  getSourceRecords: (sourceId: string, limit = 12) =>
+    fetchJSON<SourceRecordsResponse>(
+      `/api/source-connectors/${encodeURIComponent(sourceId)}/records?limit=${limit}`,
+    ),
+  getSourceInbox: (limit = 16) =>
+    fetchJSON<SourceInboxResponse>(`/api/source-inbox?limit=${limit}`),
+  updateSourceInboxThread: (sourceId: string, threadId: string, action: "done" | "archive" | "restore" | "open") =>
+    fetchJSON<SourceInboxResponse>("/api/source-inbox/thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceId, threadId, action }),
+    }),
   scaffoldSourceConnector: (sourceId: string) =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {
       method: "POST",
@@ -338,6 +350,86 @@ export interface SourceConnectorsResponse {
   blueprints: SourceConnectionBlueprint[];
   promptCategories: Array<{ id: string; label: string }>;
   connectors: SourceConnectorStatus[];
+}
+
+export interface SourceRecord {
+  source_id?: string;
+  source_record_id?: string;
+  source_url?: string | null;
+  display_name?: string;
+  channel?: string;
+  direction?: "inbound" | "outbound" | string;
+  timestamp?: string;
+  day?: string;
+  text?: string;
+  summary?: string;
+  title?: string;
+  status?: string;
+  confidence?: number;
+  tags?: string[];
+  target_ui_surfaces?: string[];
+  conversation_id?: string;
+  contact_id?: string | null;
+  message_count?: number;
+  inbound_count?: number;
+  outbound_count?: number;
+  total_messages?: number;
+  last_text?: string;
+  last_message_at?: string;
+  last_seen_at?: string;
+  [key: string]: unknown;
+}
+
+export interface SourceRecordsResponse {
+  toolsRoot: string;
+  toolsRootSource: string;
+  toolsRootIo: "local" | string;
+  sourceRoot: string;
+  sourceId: string;
+  source: SourceConnectorStatus;
+  limit: number;
+  records: {
+    contacts: SourceRecord[];
+    conversations: SourceRecord[];
+    messages: SourceRecord[];
+    messageDays: SourceRecord[];
+    leadEvents: SourceRecord[];
+    tasks: SourceRecord[];
+  };
+}
+
+export interface SourceInboxThread {
+  id: string;
+  sourceId: string;
+  sourceLabel: string;
+  sourceState: SourceConnectorState | string | null;
+  threadId: string;
+  conversationId: string | null;
+  contactId: string | null;
+  personName: string;
+  channel: string;
+  latestText: string;
+  latestAt: string;
+  direction: "inbound" | "outbound" | string | null;
+  messageCount: number;
+  inboundCount: number;
+  outboundCount: number;
+  heatScore: number;
+  heatLabel: "hot" | "warm" | "watch" | "normal" | string;
+  status: "open" | "done" | "archived" | string;
+  record: SourceRecord;
+}
+
+export interface SourceInboxResponse {
+  toolsRoot: string;
+  toolsRootSource: string;
+  toolsRootIo: "local" | string;
+  sourceRoot: string;
+  limit: number;
+  recordCounts: Record<string, number>;
+  hiddenCounts: Record<string, number>;
+  sources: SourceConnectorStatus[];
+  threads: SourceInboxThread[];
 }
 
 export interface CrmIntegrationForm {
@@ -528,6 +620,12 @@ export interface AgentHubSnapshot {
     entities: number;
     embeddings: number;
     indexed_facts: number;
+    documents: number;
+    chunks: number;
+    indexed_chunks: number;
+    community_reports: number;
+    relations: number;
+    modal_assets: number;
     journal: {
       total: number;
       pending: number;

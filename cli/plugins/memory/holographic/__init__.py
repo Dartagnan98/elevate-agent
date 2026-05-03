@@ -65,6 +65,8 @@ FACT_STORE_SCHEMA = {
         "• recent — Recall recent session turns from the local journal.\n"
         "• wiki — Open an entity page with facts and backlinks.\n"
         "• layered_recall — Return the same routed memory lanes used by prefetch.\n"
+        "• rag_query — Native Elevate RAG over facts, community reports, recent turns, document chunks, and graph wiki.\n"
+        "• community_reports — Build/search durable global summaries over memory clusters.\n"
         "• recall_route — Route a question across durable/recent/document/graph lanes.\n"
         "• document_add/document_search — Chunk-level local RAG over source documents.\n"
         "• import_plaud_archive — Build chunk RAG from the local Plaud JSONL archive.\n"
@@ -95,6 +97,8 @@ FACT_STORE_SCHEMA = {
                     "recent",
                     "wiki",
                     "layered_recall",
+                    "rag_query",
+                    "community_reports",
                     "recall_route",
                     "document_add",
                     "document_search",
@@ -805,6 +809,27 @@ class HolographicMemoryProvider(MemoryProvider):
                 )
                 return json.dumps({"context": context, "empty": not bool(context.strip())})
 
+            elif action == "rag_query":
+                query = args.get("query") or args.get("content") or ""
+                result = self._rag_query(
+                    query,
+                    session_id=args.get("session_id") or self._session_id,
+                    limit=int(args.get("limit", 8)),
+                    source_type=args.get("source_type"),
+                    mode=str(args.get("mode") or "mix"),
+                    max_chars=int(args.get("max_chars", args.get("token_budget", 12000))),
+                )
+                return json.dumps(result)
+
+            elif action == "community_reports":
+                cluster_id = args.get("cluster_id") or args.get("entity") or ""
+                query = args.get("query") or args.get("content") or ""
+                if cluster_id:
+                    result = store.build_community_report(cluster_id, session_id=args.get("session_id") or self._session_id)
+                    return json.dumps(result)
+                results = store.search_community_reports(query, limit=int(args.get("limit", 5)))
+                return json.dumps({"results": results, "count": len(results)})
+
             elif action == "recall_route":
                 query = args.get("query") or args.get("content") or ""
                 result = self._recall_route(query, session_id=args.get("session_id") or self._session_id)
@@ -821,6 +846,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     title=args.get("title", ""),
                     source_type=args.get("source_type", "document"),
                     metadata=args.get("metadata") or {},
+                    modal_assets=args.get("modal_assets") or args.get("assets") or [],
                 )
                 return json.dumps(result)
 
@@ -1120,6 +1146,266 @@ class HolographicMemoryProvider(MemoryProvider):
         result["context"] = self._format_route_context(sections)
         return result
 
+    def _rag_query(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        limit: int = 8,
+        source_type: str | None = None,
+        mode: str = "mix",
+        max_chars: int = 12000,
+    ) -> dict:
+        """Native Elevate RAG: retrieve answer-ready context from all memory lanes.
+
+        This is intentionally local and deterministic. It does not call another
+        model to synthesize the final answer; it returns grounded context and
+        citations so the active agent can answer from retrieved memory.
+        """
+        query = str(query or "").strip()
+        limit = max(1, int(limit or 8))
+        mode = str(mode or "mix").strip().lower()
+        if mode not in {"local", "global", "hybrid", "naive", "mix"}:
+            mode = "mix"
+        include_facts = mode in {"local", "hybrid", "mix"}
+        include_chunks = mode in {"naive", "hybrid", "mix"}
+        include_recent = mode in {"local", "hybrid", "mix"}
+        include_graph = mode in {"local", "global", "hybrid", "mix"}
+        include_communities = mode in {"global", "hybrid", "mix"}
+        sections: dict[str, object] = {}
+
+        communities: list[dict] = []
+        if self._store and query and include_communities:
+            communities = self._store.search_community_reports(query, limit=min(limit, 6))
+        sections["communities"] = communities
+
+        facts: list[dict] = []
+        rejected_ids: list[int] = []
+        if self._retriever and query and include_facts:
+            candidates = self._retriever.search(
+                query,
+                min_trust=self._min_trust,
+                limit=max(limit * 3, limit),
+            )
+            facts, rejected_ids = self._verify_fact_results(
+                query,
+                candidates,
+                limit=limit,
+                session_id=session_id or self._session_id,
+            )
+        sections["facts"] = facts
+
+        chunks: list[dict] = []
+        if self._store and query and include_chunks:
+            chunks = self._store.document_search(query, source_type=source_type, limit=limit)
+        sections["chunks"] = chunks
+
+        recent: list[dict] = []
+        if self._store and query and self._recent_recall_enabled and include_recent:
+            recent = self._store.recent_turns(
+                session_id=session_id or self._session_id,
+                query=query,
+                limit=min(limit, self._recent_recall_limit),
+                include_assistant=True,
+            )
+        sections["recent"] = recent
+
+        graph: list[dict] = []
+        if self._store and query and self._graph_recall_enabled and include_graph:
+            for entity in self._store.entity_candidates(query, limit=min(limit, self._graph_recall_limit)):
+                wiki = self._store.entity_wiki(entity, limit=3)
+                if wiki.get("exists"):
+                    graph.append(wiki)
+        sections["graph"] = graph
+        sections = self._pack_rag_sections(query, sections, max_chars=max_chars)
+        facts = sections.get("facts") if isinstance(sections.get("facts"), list) else []
+        chunks = sections.get("chunks") if isinstance(sections.get("chunks"), list) else []
+        communities = sections.get("communities") if isinstance(sections.get("communities"), list) else []
+
+        citations: list[dict] = []
+        seen_citations: set[tuple[str, str]] = set()
+        for fact in facts:
+            key = ("fact", str(fact.get("fact_id", "")))
+            if key in seen_citations:
+                continue
+            seen_citations.add(key)
+            citations.append({
+                "type": "fact",
+                "id": fact.get("fact_id"),
+                "source_uri": fact.get("source_uri") or "",
+                "excerpt": self._clip(fact.get("source_excerpt") or fact.get("content") or "", 220),
+            })
+        for chunk in chunks:
+            key = ("chunk", str(chunk.get("chunk_id", "")))
+            if key in seen_citations:
+                continue
+            seen_citations.add(key)
+            citations.append({
+                "type": "chunk",
+                "id": chunk.get("chunk_id"),
+                "source_uri": chunk.get("source_uri") or "",
+                "title": chunk.get("title") or "",
+                "excerpt": self._clip(chunk.get("source_excerpt") or chunk.get("content") or "", 220),
+            })
+        for community in communities:
+            key = ("community", str(community.get("community_id", "")))
+            if key in seen_citations:
+                continue
+            seen_citations.add(key)
+            citations.append({
+                "type": "community",
+                "id": community.get("community_id"),
+                "source_uri": f"community:{community.get('community_id')}",
+                "title": community.get("name") or "Community report",
+                "excerpt": self._clip(community.get("summary") or "", 220),
+            })
+
+        context = self._format_rag_context(query, sections, citations=citations)
+        if self._store:
+            try:
+                self._store.post_retrieval_maintenance(
+                    verified_ids=[int(f.get("fact_id")) for f in facts if f.get("fact_id")],
+                    rejected_ids=rejected_ids,
+                    query=query,
+                    session_id=session_id or self._session_id,
+                )
+                if context:
+                    self._record_context_injection(
+                        query,
+                        context,
+                        session_id=session_id or self._session_id,
+                        facts=facts,
+                        chunks=chunks,
+                        source="rag_query",
+                    )
+            except Exception as exc:
+                logger.debug("RAG query maintenance failed: %s", exc)
+
+        return {
+            "query": query,
+            "mode": mode,
+            "sections": sections,
+            "citations": citations,
+            "context": context,
+            "empty": not bool(context.strip()),
+        }
+
+    def _pack_rag_sections(self, query: str, sections: dict[str, object], *, max_chars: int = 12000) -> dict[str, object]:
+        """Rerank, dedupe, and fit RAG evidence into a deterministic context budget."""
+        budget = max(2000, int(max_chars or 12000))
+        q_tokens = self._meaningful_tokens(query)
+
+        def text_score(text: str, base: float = 0.0) -> float:
+            tokens = self._meaningful_tokens(text)
+            overlap = len(q_tokens & tokens) / max(1, len(q_tokens)) if q_tokens else 0.0
+            return float(base or 0.0) + overlap
+
+        packed: dict[str, object] = {}
+        used = 0
+
+        def reserve(items: list[dict], key: str, id_key: str, text_keys: tuple[str, ...], base_key: str = "score", cap: int = 8) -> None:
+            nonlocal used
+            seen: set[str] = set()
+            ranked = []
+            for item in items or []:
+                item_id = str(item.get(id_key) or item.get("source_uri") or item.get("name") or item.get("entity") or len(ranked))
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                text = " ".join(str(item.get(k) or "") for k in text_keys)
+                ranked.append((text_score(text, float(item.get(base_key) or item.get("trust_score") or 0.0)), len(text), item))
+            ranked.sort(key=lambda row: row[0], reverse=True)
+            selected = []
+            for _score, text_len, item in ranked[:cap * 2]:
+                cost = max(80, min(1800, text_len))
+                if selected and used + cost > budget:
+                    continue
+                selected.append(item)
+                used += cost
+                if len(selected) >= cap or used >= budget:
+                    break
+            packed[key] = selected
+
+        communities = sections.get("communities") if isinstance(sections.get("communities"), list) else []
+        facts = sections.get("facts") if isinstance(sections.get("facts"), list) else []
+        chunks = sections.get("chunks") if isinstance(sections.get("chunks"), list) else []
+        recent = sections.get("recent") if isinstance(sections.get("recent"), list) else []
+        graph = sections.get("graph") if isinstance(sections.get("graph"), list) else []
+
+        reserve(communities, "communities", "community_id", ("name", "summary", "tags", "entity_names"), cap=6)
+        reserve(facts, "facts", "fact_id", ("content", "tags", "category", "source_uri"), base_key="trust_score", cap=8)
+        reserve(chunks, "chunks", "chunk_id", ("content", "source_excerpt", "title", "source_uri"), cap=8)
+        reserve(recent, "recent", "turn_id", ("user_content", "assistant_content", "session_id"), cap=5)
+
+        # Graph pages are already entity-neighborhood summaries; keep them after text lanes.
+        selected_graph = []
+        for wiki in graph[:6]:
+            fact_text = " ".join(str(f.get("content") or "") for f in wiki.get("facts", [])[:3])
+            cost = max(120, min(1200, len(fact_text)))
+            if selected_graph and used + cost > budget:
+                continue
+            selected_graph.append(wiki)
+            used += cost
+        packed["graph"] = selected_graph
+        packed["budget"] = {"max_chars": budget, "estimated_chars": used}
+        return packed
+
+    def _format_rag_context(self, query: str, sections: dict[str, object], *, citations: list[dict]) -> str:
+        lines = ["## Elevate Native RAG", f"Query: {query}"]
+
+        facts = sections.get("facts") if isinstance(sections.get("facts"), list) else []
+        communities = sections.get("communities") if isinstance(sections.get("communities"), list) else []
+        if communities:
+            lines.append("### Community Reports")
+            for community in communities[:6]:
+                source = f"community:{community.get('community_id')}"
+                score = float(community.get("score", 0.0) or 0.0)
+                entities = community.get("entity_names") or ""
+                suffix = f" Entities: {self._clip(entities, 160)}" if entities else ""
+                lines.append(f"- [{source} score={score:.3f}] {community.get('name')}: {self._clip(community.get('summary', ''), 420)}{suffix}")
+
+        if facts:
+            lines.append("### Facts")
+            for fact in facts[:8]:
+                trust = float(fact.get("trust_score", 0.0) or 0.0)
+                source = fact.get("source_uri") or f"fact:{fact.get('fact_id')}"
+                lines.append(f"- [{source} trust={trust:.2f}] {self._clip(fact.get('content', ''), 320)}")
+
+        chunks = sections.get("chunks") if isinstance(sections.get("chunks"), list) else []
+        if chunks:
+            lines.append("### Document Chunks")
+            for chunk in chunks[:8]:
+                source = chunk.get("source_uri") or f"chunk:{chunk.get('chunk_id')}"
+                score = float(chunk.get("score", 0.0) or 0.0)
+                lines.append(f"- [{source} score={score:.3f}] {self._clip(chunk.get('content', ''), 420)}")
+
+        recent = sections.get("recent") if isinstance(sections.get("recent"), list) else []
+        if recent:
+            lines.append("### Recent Turns")
+            for turn in recent[:5]:
+                label = f"{turn.get('session_day')}, {turn.get('session_id')}"
+                text = turn.get("user_content") or ""
+                if turn.get("assistant_content"):
+                    text = f"User: {text} / Assistant: {turn.get('assistant_content')}"
+                lines.append(f"- [{label}] {self._clip(text, 360)}")
+
+        graph = sections.get("graph") if isinstance(sections.get("graph"), list) else []
+        if graph:
+            lines.append("### Entity Graph")
+            for wiki in graph[:6]:
+                fact_bits = "; ".join(self._clip(f.get("content", ""), 160) for f in wiki.get("facts", [])[:2])
+                related = ", ".join(rel.get("wiki_link", "") for rel in wiki.get("related_entities", [])[:4])
+                suffix = f" Related: {related}." if related else ""
+                lines.append(f"- {wiki.get('wiki_link') or wiki.get('entity')}: {fact_bits}{suffix}")
+
+        if citations:
+            lines.append("### Citations")
+            for citation in citations[:12]:
+                source = citation.get("source_uri") or citation.get("title") or f"{citation.get('type')}:{citation.get('id')}"
+                lines.append(f"- {source}: {citation.get('excerpt', '')}")
+
+        return "\n".join(lines) if len(lines) > 2 else ""
+
     def _format_route_context(self, sections: dict[str, object]) -> str:
         lines = ["## Elevate Routed Recall"]
         for name, value in sections.items():
@@ -1234,6 +1520,18 @@ class HolographicMemoryProvider(MemoryProvider):
                 query=query,
                 session_id=session_id or self._session_id,
             )
+
+        document_chunks = self._store.document_search(query, limit=self._durable_recall_limit)
+        if document_chunks:
+            self._last_layered_chunks = list(document_chunks)
+            lines = []
+            for chunk in document_chunks[: self._durable_recall_limit]:
+                source = chunk.get("source_uri") or f"chunk:{chunk.get('chunk_id')}"
+                score = float(chunk.get("score", 0.0) or 0.0)
+                lines.append(
+                    f"- [{source} score={score:.3f}] {self._clip(chunk.get('content', ''), 360)}"
+                )
+            sections.append("### Document RAG\n" + "\n".join(lines))
 
         if self._graph_recall_enabled:
             graph_lines = []

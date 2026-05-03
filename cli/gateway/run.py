@@ -5125,6 +5125,7 @@ class GatewayRunner:
             await self.hooks.emit("agent:start", hook_ctx)
 
             # Run the agent
+            _turn_started_at = time.monotonic()
             agent_result = await self._run_agent(
                 message=message_text,
                 context_prompt=context_prompt,
@@ -5136,6 +5137,7 @@ class GatewayRunner:
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
             )
+            _turn_latency_ms = int(max(0.0, time.monotonic() - _turn_started_at) * 1000)
 
             # Stop persistent typing indicator now that the agent is done
             try:
@@ -5160,6 +5162,21 @@ class GatewayRunner:
                 elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
+
+            try:
+                from gateway.usage_ledger import record_gateway_turn
+
+                record_gateway_turn(
+                    agent_result=agent_result,
+                    session_id=session_entry.session_id,
+                    session_key=session_key,
+                    message_id=event.message_id,
+                    source=source.platform.value if source.platform else "",
+                    latency_ms=_turn_latency_ms,
+                    session_db=self._session_db,
+                )
+            except Exception as exc:
+                logger.debug("Usage ledger write skipped: %s", exc)
 
             response = agent_result.get("final_response") or ""
 
@@ -5439,6 +5456,30 @@ class GatewayRunner:
                 pass
             logger.exception("Agent error in session %s", session_key)
             error_type = type(e).__name__
+            try:
+                from gateway.usage_ledger import record_gateway_turn
+
+                _failed_latency_ms = 0
+                if '_turn_started_at' in locals():
+                    _failed_latency_ms = int(max(0.0, time.monotonic() - _turn_started_at) * 1000)
+                record_gateway_turn(
+                    agent_result={
+                        "session_id": getattr(session_entry, "session_id", None),
+                        "provider": _resolve_gateway_provider() if '_resolve_gateway_provider' in globals() else "",
+                        "model": _resolve_gateway_model(),
+                        "status": "failed",
+                        "failed": True,
+                        "error_type": error_type,
+                    },
+                    session_id=getattr(session_entry, "session_id", None),
+                    session_key=session_key,
+                    message_id=getattr(event, "message_id", None),
+                    source=source.platform.value if source.platform else "",
+                    latency_ms=_failed_latency_ms,
+                    session_db=self._session_db,
+                )
+            except Exception as ledger_exc:
+                logger.debug("Failed usage ledger write skipped: %s", ledger_exc)
             error_detail = str(e)[:300] if str(e) else "no details available"
             status_hint = ""
             status_code = getattr(e, "status_code", None)
@@ -10001,9 +10042,12 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        turn_tool_calls: list[str] = []  # Per-turn usage ledger, independent of progress display
         
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
+            if event_type == "tool.started" and tool_name:
+                turn_tool_calls.append(str(tool_name))
             if not progress_queue or not _run_still_current():
                 return
 
@@ -10783,6 +10827,19 @@ class GatewayRunner:
                         + message
                     )
 
+            _usage_before = {
+                "input_tokens": getattr(agent, "session_input_tokens", 0),
+                "output_tokens": getattr(agent, "session_output_tokens", 0),
+                "prompt_tokens": getattr(agent, "session_prompt_tokens", 0),
+                "completion_tokens": getattr(agent, "session_completion_tokens", 0),
+                "total_tokens": getattr(agent, "session_total_tokens", 0),
+                "cache_read_tokens": getattr(agent, "session_cache_read_tokens", 0),
+                "cache_write_tokens": getattr(agent, "session_cache_write_tokens", 0),
+                "reasoning_tokens": getattr(agent, "session_reasoning_tokens", 0),
+                "api_calls": getattr(agent, "session_api_calls", 0),
+                "estimated_cost_usd": getattr(agent, "session_estimated_cost_usd", 0.0),
+            }
+
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
@@ -10800,16 +10857,40 @@ class GatewayRunner:
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
 
-            # Extract actual token counts from the agent instance used for this run
+            # Extract actual token counts from the agent instance used for this run.
+            # Session counters are cumulative on cached agents, so ledger fields
+            # use before/after deltas to stay per-turn instead of per-session.
             _last_prompt_toks = 0
             _input_toks = 0
             _output_toks = 0
+            _total_toks = 0
+            _cache_read_toks = 0
+            _cache_write_toks = 0
+            _reasoning_toks = 0
+            _turn_api_calls = 0
+            _turn_cost = None
+            _cost_status = ""
+            _cost_source = ""
             _agent = agent_holder[0]
             if _agent and hasattr(_agent, "context_compressor"):
                 _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
-                _input_toks = getattr(_agent, "session_prompt_tokens", 0)
-                _output_toks = getattr(_agent, "session_completion_tokens", 0)
+                _input_toks = max(0, getattr(_agent, "session_input_tokens", 0) - _usage_before.get("input_tokens", 0))
+                _output_toks = max(0, getattr(_agent, "session_output_tokens", 0) - _usage_before.get("output_tokens", 0))
+                _total_toks = max(0, getattr(_agent, "session_total_tokens", 0) - _usage_before.get("total_tokens", 0))
+                _cache_read_toks = max(0, getattr(_agent, "session_cache_read_tokens", 0) - _usage_before.get("cache_read_tokens", 0))
+                _cache_write_toks = max(0, getattr(_agent, "session_cache_write_tokens", 0) - _usage_before.get("cache_write_tokens", 0))
+                _reasoning_toks = max(0, getattr(_agent, "session_reasoning_tokens", 0) - _usage_before.get("reasoning_tokens", 0))
+                _turn_api_calls = max(0, getattr(_agent, "session_api_calls", 0) - _usage_before.get("api_calls", 0))
+                _after_cost = getattr(_agent, "session_estimated_cost_usd", 0.0)
+                _before_cost = _usage_before.get("estimated_cost_usd", 0.0) or 0.0
+                try:
+                    _turn_cost = max(0.0, float(_after_cost) - float(_before_cost))
+                except Exception:
+                    _turn_cost = None
+                _cost_status = getattr(_agent, "session_cost_status", "") or ""
+                _cost_source = getattr(_agent, "session_cost_source", "") or ""
             _resolved_model = getattr(_agent, "model", None) if _agent else None
+            _resolved_provider = getattr(_agent, "provider", None) if _agent else None
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
@@ -10824,7 +10905,21 @@ class GatewayRunner:
                     "last_prompt_tokens": _last_prompt_toks,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
+                    "total_tokens": _total_toks,
+                    "cache_read_tokens": _cache_read_toks,
+                    "cache_write_tokens": _cache_write_toks,
+                    "reasoning_tokens": _reasoning_toks,
+                    "estimated_cost_usd": _turn_cost,
+                    "cost_status": _cost_status,
+                    "cost_source": _cost_source,
+                    "provider": _resolved_provider,
                     "model": _resolved_model,
+                    "gateway_tool_profile": tool_profile_decision.get("selected_profile"),
+                    "gateway_tool_profile_reason": tool_profile_decision.get("reason"),
+                    "selected_toolsets": enabled_toolsets,
+                    "requested_toolsets": tool_profile_decision.get("requested_toolsets") or [],
+                    "configured_toolsets": tool_profile_decision.get("configured_toolsets") or [],
+                    "tool_calls": turn_tool_calls,
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -10913,7 +11008,21 @@ class GatewayRunner:
                 "last_prompt_tokens": _last_prompt_toks,
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
+                "total_tokens": _total_toks,
+                "cache_read_tokens": _cache_read_toks,
+                "cache_write_tokens": _cache_write_toks,
+                "reasoning_tokens": _reasoning_toks,
+                "estimated_cost_usd": _turn_cost,
+                "cost_status": _cost_status,
+                "cost_source": _cost_source,
+                "provider": _resolved_provider,
                 "model": _resolved_model,
+                "gateway_tool_profile": tool_profile_decision.get("selected_profile"),
+                "gateway_tool_profile_reason": tool_profile_decision.get("reason"),
+                "selected_toolsets": enabled_toolsets,
+                "requested_toolsets": tool_profile_decision.get("requested_toolsets") or [],
+                "configured_toolsets": tool_profile_decision.get("configured_toolsets") or [],
+                "tool_calls": turn_tool_calls,
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
             }

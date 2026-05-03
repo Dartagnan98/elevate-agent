@@ -139,17 +139,44 @@ def _run_async(coro):
 
 discover_builtin_tools()
 
-# MCP tool discovery (external MCP servers from config)
-if str(os.getenv("ELEVATE_SKIP_MCP_DISCOVERY", "")).strip().lower() in {"1", "true", "yes", "on"}:
-    logger.debug("MCP tool discovery skipped by ELEVATE_SKIP_MCP_DISCOVERY")
-else:
-    try:
-        from tools.mcp_tool import discover_mcp_tools
-        discover_mcp_tools()
-    except Exception as e:
-        logger.debug("MCP tool discovery failed: %s", e)
+# MCP tool discovery is intentionally lazy. Import-time discovery can spawn
+# external processes or block scripts that only need built-in tools. We discover
+# MCP tools on the first get_tool_definitions() call that could actually expose
+# MCP tools: full profile, disabled-toolset profile without mcp disabled, or an
+# explicit mcp/mcp-* toolset request.
+_mcp_discovery_lock = threading.Lock()
+_mcp_discovery_attempted = False
 
-# Plugin tool discovery (user/project/pip plugins)
+
+def _mcp_discovery_disabled() -> bool:
+    return str(os.getenv("ELEVATE_SKIP_MCP_DISCOVERY", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_discover_mcp(enabled_toolsets: List[str] | None, disabled_toolsets: List[str] | None) -> bool:
+    if _mcp_discovery_disabled():
+        return False
+    if enabled_toolsets is not None:
+        names = {str(name) for name in enabled_toolsets}
+        return "mcp" in names or any(name.startswith("mcp-") for name in names)
+    disabled = {str(name) for name in (disabled_toolsets or [])}
+    return "mcp" not in disabled
+
+
+def _ensure_mcp_tools_discovered(enabled_toolsets: List[str] | None = None, disabled_toolsets: List[str] | None = None) -> None:
+    global _mcp_discovery_attempted
+    if _mcp_discovery_attempted or not _should_discover_mcp(enabled_toolsets, disabled_toolsets):
+        return
+    with _mcp_discovery_lock:
+        if _mcp_discovery_attempted:
+            return
+        _mcp_discovery_attempted = True
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+            discover_mcp_tools()
+        except Exception as e:
+            logger.debug("MCP tool discovery failed: %s", e)
+
+# Plugin tool discovery
 try:
     from elevate_cli.plugins import discover_plugins
     discover_plugins()
@@ -222,6 +249,8 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    _ensure_mcp_tools_discovered(enabled_toolsets, disabled_toolsets)
+
     # Determine which tool names the caller wants
     tools_to_include: set = set()
 

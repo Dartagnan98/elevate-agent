@@ -9,6 +9,7 @@ holographic memory store. It never returns raw secrets.
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 import time
 from datetime import datetime
@@ -375,6 +376,58 @@ def _sqlite_connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return bool(row)
+
+
+def _safe_count_table(conn: sqlite3.Connection, table: str, where: str = "") -> int:
+    if not _table_exists(conn, table):
+        return 0
+    sql = f"SELECT COUNT(*) FROM {table}"
+    if where:
+        sql += f" WHERE {where}"
+    return int(conn.execute(sql).fetchone()[0] or 0)
+
+
+def _json_list(value: Any) -> list[Any]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _add_node(nodes: list[dict[str, Any]], seen: set[str], node: dict[str, Any]) -> None:
+    node_id = str(node.get("id") or "")
+    if not node_id or node_id in seen:
+        return
+    seen.add(node_id)
+    nodes.append(node)
+
+
+def _add_edge(edges: list[dict[str, Any]], seen: set[tuple[str, str, str]], source: str, target: str, edge_type: str) -> None:
+    if not source or not target or source == target:
+        return
+    key = (source, target, edge_type)
+    if key in seen:
+        return
+    seen.add(key)
+    edges.append({"source": source, "target": target, "type": edge_type})
+
+
+def _clip_label(value: Any, limit: int = 80) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
     memory_cfg = config.get("memory") if isinstance(config.get("memory"), dict) else {}
     provider = str(memory_cfg.get("provider") or "builtin").strip()
@@ -390,6 +443,12 @@ def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
         "entities": 0,
         "embeddings": 0,
         "indexed_facts": 0,
+        "documents": 0,
+        "chunks": 0,
+        "indexed_chunks": 0,
+        "community_reports": 0,
+        "relations": 0,
+        "modal_assets": 0,
         "journal": {
             "total": 0,
             "pending": 0,
@@ -425,16 +484,16 @@ def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
         return summary
 
     try:
-        summary["facts"] = int(conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
-        summary["entities"] = int(conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0])
-        summary["embeddings"] = int(
-            conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0]
-        )
-        summary["indexed_facts"] = int(
-            conn.execute(
-                "SELECT COUNT(DISTINCT target_id) FROM memory_embeddings WHERE target_type = 'fact'"
-            ).fetchone()[0]
-        )
+        summary["facts"] = _safe_count_table(conn, "facts")
+        summary["entities"] = _safe_count_table(conn, "entities")
+        summary["embeddings"] = _safe_count_table(conn, "memory_embeddings")
+        summary["indexed_facts"] = _safe_count_table(conn, "memory_embeddings", "target_type = 'fact'")
+        summary["documents"] = _safe_count_table(conn, "memory_documents")
+        summary["chunks"] = _safe_count_table(conn, "memory_chunks")
+        summary["indexed_chunks"] = _safe_count_table(conn, "memory_embeddings", "target_type = 'chunk'")
+        summary["community_reports"] = _safe_count_table(conn, "memory_community_reports")
+        summary["relations"] = _safe_count_table(conn, "memory_relations")
+        summary["modal_assets"] = _safe_count_table(conn, "memory_modal_assets")
         journal_rows = conn.execute(
             """
             SELECT status, COUNT(*) AS count
@@ -488,49 +547,161 @@ def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return the Hub graph view over the native RAG/memory graph.
+
+    The dashboard should reflect the same primitives used by native RAG: facts,
+    entities, document chunks, clusters/community reports, explicit relations,
+    and multimodal asset placeholders. Keep it read-only and bounded.
+    """
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    seen_nodes: set[str] = set()
+    seen_edges: set[tuple[str, str, str]] = set()
+
     entity_rows = conn.execute(
         """
-        SELECT e.entity_id, e.name, COUNT(fe.fact_id) AS fact_count
+        SELECT e.entity_id,
+               e.name,
+               COUNT(DISTINCT fe.fact_id) AS fact_count,
+               COUNT(DISTINCT ce.chunk_id) AS chunk_count
         FROM entities e
         LEFT JOIN fact_entities fe ON fe.entity_id = e.entity_id
+        LEFT JOIN memory_chunk_entities ce ON ce.entity_id = e.entity_id
         GROUP BY e.entity_id, e.name
-        ORDER BY fact_count DESC, e.name ASC
-        LIMIT 12
+        ORDER BY (COUNT(DISTINCT fe.fact_id) + COUNT(DISTINCT ce.chunk_id)) DESC, e.name ASC
+        LIMIT 24
         """
     ).fetchall()
     fact_rows = conn.execute(
         """
         SELECT fact_id, content, category, trust_score
         FROM facts
+        WHERE COALESCE(status, 'active') = 'active'
         ORDER BY updated_at DESC, fact_id DESC
+        LIMIT 18
+        """
+    ).fetchall()
+    chunk_rows = conn.execute(
+        """
+        SELECT c.chunk_id, c.document_id, c.content, c.source_excerpt, d.title, d.source_type, d.source_uri
+        FROM memory_chunks c
+        JOIN memory_documents d ON d.document_id = c.document_id
+        ORDER BY c.updated_at DESC, c.chunk_id DESC
+        LIMIT 16
+        """
+    ).fetchall()
+    doc_rows = conn.execute(
+        """
+        SELECT d.document_id, d.title, d.source_type, d.source_uri, COUNT(c.chunk_id) AS chunk_count
+        FROM memory_documents d
+        LEFT JOIN memory_chunks c ON c.document_id = d.document_id
+        GROUP BY d.document_id, d.title, d.source_type, d.source_uri
+        ORDER BY d.updated_at DESC, d.document_id DESC
         LIMIT 10
         """
     ).fetchall()
+    community_rows = conn.execute(
+        """
+        SELECT community_id, name, summary, tags, entity_names, fact_ids_json, chunk_ids_json, weight
+        FROM memory_community_reports
+        ORDER BY updated_at DESC, weight DESC
+        LIMIT 10
+        """
+    ).fetchall()
+
     entity_ids = {int(row["entity_id"]) for row in entity_rows}
     fact_ids = {int(row["fact_id"]) for row in fact_rows}
+    chunk_ids = {int(row["chunk_id"]) for row in chunk_rows}
+    document_ids = {int(row["document_id"]) for row in doc_rows}
 
     for row in entity_rows:
-        nodes.append(
+        fact_count = int(row["fact_count"] or 0)
+        chunk_count = int(row["chunk_count"] or 0)
+        _add_node(
+            nodes,
+            seen_nodes,
             {
                 "id": f"entity:{row['entity_id']}",
                 "label": row["name"],
                 "type": "entity",
-                "weight": int(row["fact_count"] or 0),
-            }
+                "weight": fact_count + chunk_count,
+                "category": "entity",
+            },
         )
     for row in fact_rows:
-        label = str(row["content"] or "").strip()
-        nodes.append(
+        _add_node(
+            nodes,
+            seen_nodes,
             {
                 "id": f"fact:{row['fact_id']}",
-                "label": label[:80],
+                "label": _clip_label(row["content"]),
                 "type": "fact",
-                "weight": float(row["trust_score"] or 0),
-                "category": row["category"] or "general",
-            }
+                "weight": max(float(row["trust_score"] or 0), 0.2) * 6,
+                "category": row["category"] or "fact",
+            },
         )
+    for row in doc_rows:
+        _add_node(
+            nodes,
+            seen_nodes,
+            {
+                "id": f"document:{row['document_id']}",
+                "label": _clip_label(row["title"] or row["source_uri"], 72),
+                "type": "document",
+                "weight": max(int(row["chunk_count"] or 0), 1),
+                "category": row["source_type"] or "document",
+            },
+        )
+    for row in chunk_rows:
+        label = row["source_excerpt"] or row["content"] or row["title"]
+        _add_node(
+            nodes,
+            seen_nodes,
+            {
+                "id": f"chunk:{row['chunk_id']}",
+                "label": _clip_label(label, 72),
+                "type": "chunk",
+                "weight": 2,
+                "category": row["source_type"] or "chunk",
+            },
+        )
+        _add_edge(edges, seen_edges, f"document:{row['document_id']}", f"chunk:{row['chunk_id']}", "contains")
+    for row in community_rows:
+        _add_node(
+            nodes,
+            seen_nodes,
+            {
+                "id": f"community:{row['community_id']}",
+                "label": _clip_label(row["name"] or row["summary"] or row["community_id"], 72),
+                "type": "community",
+                "weight": max(float(row["weight"] or 1.0), 1.0) * 3,
+                "category": "community",
+            },
+        )
+
+    if _table_exists(conn, "memory_modal_assets"):
+        asset_rows = conn.execute(
+            """
+            SELECT a.asset_id, a.document_id, a.asset_type, a.locator, a.summary
+            FROM memory_modal_assets a
+            ORDER BY a.updated_at DESC, a.asset_id DESC
+            LIMIT 12
+            """
+        ).fetchall()
+        for row in asset_rows:
+            _add_node(
+                nodes,
+                seen_nodes,
+                {
+                    "id": f"asset:{row['asset_id']}",
+                    "label": _clip_label(row["summary"] or row["locator"] or row["asset_type"], 64),
+                    "type": "asset",
+                    "weight": 1.6,
+                    "category": row["asset_type"] or "asset",
+                },
+            )
+            _add_edge(edges, seen_edges, f"document:{row['document_id']}", f"asset:{row['asset_id']}", "has_asset")
+            document_ids.add(int(row["document_id"]))
 
     if entity_ids and fact_ids:
         placeholders_entities = ",".join("?" for _ in entity_ids)
@@ -541,19 +712,71 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
             FROM fact_entities
             WHERE entity_id IN ({placeholders_entities})
               AND fact_id IN ({placeholders_facts})
-            LIMIT 40
+            LIMIT 80
             """,
             [*entity_ids, *fact_ids],
         ).fetchall()
         for row in rows:
-            edges.append(
-                {
-                    "source": f"entity:{row['entity_id']}",
-                    "target": f"fact:{row['fact_id']}",
-                    "type": "mentions",
-                }
-            )
-    return {"nodes": nodes, "edges": edges}
+            _add_edge(edges, seen_edges, f"entity:{row['entity_id']}", f"fact:{row['fact_id']}", "mentions")
+
+    if entity_ids and chunk_ids:
+        placeholders_entities = ",".join("?" for _ in entity_ids)
+        placeholders_chunks = ",".join("?" for _ in chunk_ids)
+        rows = conn.execute(
+            f"""
+            SELECT entity_id, chunk_id
+            FROM memory_chunk_entities
+            WHERE entity_id IN ({placeholders_entities})
+              AND chunk_id IN ({placeholders_chunks})
+            LIMIT 80
+            """,
+            [*entity_ids, *chunk_ids],
+        ).fetchall()
+        for row in rows:
+            _add_edge(edges, seen_edges, f"entity:{row['entity_id']}", f"chunk:{row['chunk_id']}", "chunk_mentions")
+
+    if entity_ids and _table_exists(conn, "memory_relations"):
+        placeholders_entities = ",".join("?" for _ in entity_ids)
+        rows = conn.execute(
+            f"""
+            SELECT source_entity_id, target_entity_id, relation_type
+            FROM memory_relations
+            WHERE source_entity_id IN ({placeholders_entities})
+               OR target_entity_id IN ({placeholders_entities})
+            ORDER BY weight DESC, updated_at DESC
+            LIMIT 80
+            """,
+            [*entity_ids, *entity_ids],
+        ).fetchall()
+        for row in rows:
+            source = f"entity:{row['source_entity_id']}"
+            target = f"entity:{row['target_entity_id']}"
+            if source in seen_nodes and target in seen_nodes:
+                _add_edge(edges, seen_edges, source, target, row["relation_type"] or "related")
+
+    for row in community_rows:
+        community_id = f"community:{row['community_id']}"
+        for fact_id in _json_list(row["fact_ids_json"])[:8]:
+            target = f"fact:{fact_id}"
+            if target in seen_nodes:
+                _add_edge(edges, seen_edges, community_id, target, "summarizes_fact")
+        for chunk_id in _json_list(row["chunk_ids_json"])[:8]:
+            target = f"chunk:{chunk_id}"
+            if target in seen_nodes:
+                _add_edge(edges, seen_edges, community_id, target, "summarizes_chunk")
+        entity_names = [name.strip() for name in str(row["entity_names"] or "").split(",") if name.strip()]
+        if entity_names:
+            placeholders = ",".join("?" for _ in entity_names[:8])
+            entity_matches = conn.execute(
+                f"SELECT entity_id FROM entities WHERE name IN ({placeholders}) LIMIT 8",
+                entity_names[:8],
+            ).fetchall()
+            for entity in entity_matches:
+                target = f"entity:{entity['entity_id']}"
+                if target in seen_nodes:
+                    _add_edge(edges, seen_edges, community_id, target, "summarizes_entity")
+
+    return {"nodes": nodes[:90], "edges": edges[:180]}
 
 
 def _agent_summaries(

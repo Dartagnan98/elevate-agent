@@ -134,13 +134,27 @@ CREATE INDEX IF NOT EXISTS idx_memory_turn_journal_session
 
 CREATE TABLE IF NOT EXISTS memory_documents (
     document_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_type   TEXT NOT NULL DEFAULT '',
-    source_uri    TEXT NOT NULL UNIQUE,
+    source_type   TEXT DEFAULT 'document',
+    source_uri    TEXT UNIQUE NOT NULL,
     title         TEXT DEFAULT '',
-    metadata_json TEXT DEFAULT '',
+    metadata_json TEXT DEFAULT '{}',
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS memory_modal_assets (
+    asset_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id   INTEGER NOT NULL REFERENCES memory_documents(document_id) ON DELETE CASCADE,
+    asset_type    TEXT DEFAULT 'text',
+    locator       TEXT DEFAULT '',
+    summary       TEXT DEFAULT '',
+    text_content  TEXT DEFAULT '',
+    metadata_json TEXT DEFAULT '{}',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_memory_modal_assets_document
+    ON memory_modal_assets(document_id, asset_type);
 
 CREATE INDEX IF NOT EXISTS idx_memory_documents_source
     ON memory_documents(source_type, source_uri);
@@ -254,6 +268,50 @@ CREATE TABLE IF NOT EXISTS memory_cluster_members (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_cluster_members_fact
     ON memory_cluster_members(fact_id);
+
+CREATE TABLE IF NOT EXISTS memory_chunk_entities (
+    chunk_id  INTEGER NOT NULL REFERENCES memory_chunks(chunk_id) ON DELETE CASCADE,
+    entity_id INTEGER NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+    weight    REAL DEFAULT 1.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chunk_id, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_chunk_entities_entity
+    ON memory_chunk_entities(entity_id);
+
+CREATE TABLE IF NOT EXISTS memory_relations (
+    relation_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_entity_id INTEGER NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+    target_entity_id INTEGER NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+    relation_type    TEXT DEFAULT 'co_occurs_with',
+    source_type      TEXT DEFAULT '',
+    source_id        INTEGER DEFAULT 0,
+    weight           REAL DEFAULT 1.0,
+    evidence         TEXT DEFAULT '',
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_entity_id, target_entity_id, relation_type, source_type, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_relations_source
+    ON memory_relations(source_entity_id, relation_type);
+CREATE INDEX IF NOT EXISTS idx_memory_relations_target
+    ON memory_relations(target_entity_id, relation_type);
+
+CREATE TABLE IF NOT EXISTS memory_community_reports (
+    community_id  TEXT PRIMARY KEY REFERENCES memory_clusters(cluster_id) ON DELETE CASCADE,
+    name          TEXT DEFAULT '',
+    summary       TEXT DEFAULT '',
+    tags          TEXT DEFAULT '',
+    entity_names  TEXT DEFAULT '',
+    fact_ids_json TEXT DEFAULT '[]',
+    chunk_ids_json TEXT DEFAULT '[]',
+    source        TEXT DEFAULT 'cluster',
+    weight        REAL DEFAULT 1.0,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_community_reports_fts
+    USING fts5(community_id UNINDEXED, name, summary, tags, entity_names);
 """
 
 # Trust adjustment constants
@@ -403,10 +461,8 @@ class MemoryStore:
                 self._embed_fact(fact_id, content)
                 return fact_id
 
-            # Entity extraction and linking
-            for name in self._extract_entities(content):
-                entity_id = self._resolve_entity(name)
-                self._link_fact_entity(fact_id, entity_id)
+            # Entity extraction, linking, and lightweight relation upsert
+            self._link_fact_entities(fact_id, content)
 
             # Compute HRR vector after entity linking
             self._compute_hrr_vector(fact_id, content)
@@ -540,14 +596,15 @@ class MemoryStore:
             )
             self._conn.commit()
 
-            # If content changed, re-extract entities
+            # If content changed, re-extract entities and relations
             if content is not None:
                 self._conn.execute(
                     "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
                 )
-                for name in self._extract_entities(content):
-                    entity_id = self._resolve_entity(name)
-                    self._link_fact_entity(fact_id, entity_id)
+                self._conn.execute(
+                    "DELETE FROM memory_relations WHERE source_type = 'fact' AND source_id = ?", (fact_id,)
+                )
+                self._link_fact_entities(fact_id, content)
                 self._conn.commit()
 
             # Recompute HRR vector if content changed
@@ -785,8 +842,43 @@ class MemoryStore:
                 """,
                 (entity_id, entity_id, max(1, int(limit))),
             ).fetchall()
+            relation_rows = self._conn.execute(
+                """
+                SELECT e.name, SUM(r.weight) AS relation_weight, COUNT(*) AS relation_count
+                FROM memory_relations r
+                JOIN entities e ON e.entity_id = CASE
+                    WHEN r.source_entity_id = ? THEN r.target_entity_id
+                    ELSE r.source_entity_id
+                END
+                WHERE r.source_entity_id = ? OR r.target_entity_id = ?
+                GROUP BY e.entity_id, e.name
+                ORDER BY relation_weight DESC, relation_count DESC, e.name ASC
+                LIMIT ?
+                """,
+                (entity_id, entity_id, entity_id, max(1, int(limit))),
+            ).fetchall()
 
         name = row["name"]
+        related: dict[str, dict] = {}
+        for r in related_rows:
+            related[str(r["name"])] = {
+                "entity": r["name"],
+                "wiki_link": f"[[{r['name']}]]",
+                "shared_facts": int(r["shared_facts"] or 0),
+            }
+        for r in relation_rows:
+            item = related.setdefault(str(r["name"]), {
+                "entity": r["name"],
+                "wiki_link": f"[[{r['name']}]]",
+                "shared_facts": 0,
+            })
+            item["relation_weight"] = float(r["relation_weight"] or 0.0)
+            item["relation_count"] = int(r["relation_count"] or 0)
+        related_entities = sorted(
+            related.values(),
+            key=lambda item: (float(item.get("relation_weight") or 0.0), int(item.get("shared_facts") or 0), item.get("entity", "")),
+            reverse=True,
+        )[: max(1, int(limit))]
         return {
             "entity_id": entity_id,
             "entity": name,
@@ -795,14 +887,7 @@ class MemoryStore:
             "exists": True,
             "wiki_link": f"[[{name}]]",
             "facts": [self._row_to_dict(r) for r in fact_rows],
-            "related_entities": [
-                {
-                    "entity": r["name"],
-                    "wiki_link": f"[[{r['name']}]]",
-                    "shared_facts": int(r["shared_facts"] or 0),
-                }
-                for r in related_rows
-            ],
+            "related_entities": related_entities,
         }
 
     def record_memory_event(
@@ -1204,7 +1289,166 @@ class MemoryStore:
             session_id=session_id,
             detail={"cluster_id": cluster_id, "name": name, "members": len(active_ids), "tags": tags},
         )
-        return {"clustered": True, "cluster_id": cluster_id, "name": name, "members": len(active_ids), "tags": tags, "member_updates": inserted_members}
+        report = self.build_community_report(cluster_id, session_id=session_id)
+        return {
+            "clustered": True,
+            "cluster_id": cluster_id,
+            "name": name,
+            "members": len(active_ids),
+            "tags": tags,
+            "member_updates": inserted_members,
+            "community_report": report,
+        }
+
+    def build_community_report(self, cluster_id: str, *, session_id: str = "") -> dict:
+        """Build a durable global RAG community report from a memory cluster."""
+        cluster_id = str(cluster_id or "").strip()
+        if not cluster_id:
+            return {"built": False, "reason": "missing_cluster_id"}
+        with self._lock:
+            cluster = self._conn.execute(
+                "SELECT cluster_id, name, tags, fact_ids_json, weight FROM memory_clusters WHERE cluster_id = ?",
+                (cluster_id,),
+            ).fetchone()
+            if cluster is None:
+                return {"built": False, "reason": "cluster_not_found", "community_id": cluster_id}
+            fact_ids = []
+            try:
+                fact_ids = [int(x) for x in json.loads(cluster["fact_ids_json"] or "[]") if str(x).isdigit()]
+            except Exception:
+                fact_ids = []
+            if not fact_ids:
+                rows = self._conn.execute(
+                    "SELECT fact_id FROM memory_cluster_members WHERE cluster_id = ? ORDER BY weight DESC",
+                    (cluster_id,),
+                ).fetchall()
+                fact_ids = [int(r["fact_id"]) for r in rows]
+            if not fact_ids:
+                return {"built": False, "reason": "empty_cluster", "community_id": cluster_id}
+            placeholders = ",".join("?" * len(fact_ids))
+            facts = self._conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, trust_score, source_uri, source_excerpt
+                FROM facts
+                WHERE fact_id IN ({placeholders}) AND COALESCE(status, 'active') = 'active'
+                ORDER BY trust_score DESC, updated_at DESC
+                """,
+                fact_ids,
+            ).fetchall()
+            entity_rows = self._conn.execute(
+                f"""
+                SELECT e.name, COUNT(*) AS hits
+                FROM fact_entities fe
+                JOIN entities e ON e.entity_id = fe.entity_id
+                WHERE fe.fact_id IN ({placeholders})
+                GROUP BY e.entity_id, e.name
+                ORDER BY hits DESC, e.name ASC
+                LIMIT 12
+                """,
+                fact_ids,
+            ).fetchall()
+            entity_names = [str(r["name"]) for r in entity_rows]
+            fact_text = " ".join(str(r["content"] or "") for r in facts)
+            tags = cluster["tags"] or ",".join(self._candidate_tags_from_text(fact_text, limit=8))
+            name = cluster["name"] or self._cluster_name_from_rows(facts)
+            top_facts = [str(r["content"] or "") for r in facts[:5]]
+            summary_bits = top_facts[:3]
+            if entity_names:
+                summary_bits.insert(0, "Key entities: " + ", ".join(entity_names[:6]))
+            summary = " ".join(summary_bits)[:1800]
+            chunk_rows = []
+            if entity_names:
+                like_terms = [f"%{name.lower()}%" for name in entity_names[:6]]
+                clauses = " OR ".join(["lower(c.content) LIKE ?"] * len(like_terms))
+                chunk_rows = self._conn.execute(
+                    f"""
+                    SELECT c.chunk_id
+                    FROM memory_chunks c
+                    WHERE {clauses}
+                    ORDER BY c.updated_at DESC
+                    LIMIT 12
+                    """,
+                    like_terms,
+                ).fetchall()
+            chunk_ids = [int(r["chunk_id"]) for r in chunk_rows]
+            self._conn.execute("DELETE FROM memory_community_reports_fts WHERE community_id = ?", (cluster_id,))
+            self._conn.execute(
+                """
+                INSERT INTO memory_community_reports (
+                    community_id, name, summary, tags, entity_names, fact_ids_json, chunk_ids_json, source, weight, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'cluster', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(community_id) DO UPDATE SET
+                    name = excluded.name,
+                    summary = excluded.summary,
+                    tags = excluded.tags,
+                    entity_names = excluded.entity_names,
+                    fact_ids_json = excluded.fact_ids_json,
+                    chunk_ids_json = excluded.chunk_ids_json,
+                    weight = excluded.weight,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    cluster_id,
+                    name,
+                    summary,
+                    tags,
+                    ",".join(entity_names),
+                    json.dumps([int(r["fact_id"]) for r in facts]),
+                    json.dumps(chunk_ids),
+                    float(cluster["weight"] or 1.0),
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO memory_community_reports_fts (community_id, name, summary, tags, entity_names) VALUES (?, ?, ?, ?, ?)",
+                (cluster_id, name, summary, tags, ",".join(entity_names)),
+            )
+            self._conn.commit()
+        self.record_memory_event("memory.community.built", session_id=session_id, detail={"community_id": cluster_id, "facts": len(facts), "entities": len(entity_names)})
+        return {"built": True, "community_id": cluster_id, "name": name, "summary": summary, "tags": tags, "entity_names": entity_names, "fact_ids": [int(r["fact_id"]) for r in facts], "chunk_ids": chunk_ids}
+
+    def search_community_reports(self, query: str, *, limit: int = 5) -> list[dict]:
+        """Search global community reports for LightRAG-style global recall."""
+        query = str(query or "").strip()
+        if not query:
+            return []
+        limit = max(1, int(limit or 5))
+        with self._lock:
+            params = [query, limit]
+            sql = """
+                SELECT r.community_id, r.name, r.summary, r.tags, r.entity_names,
+                       r.fact_ids_json, r.chunk_ids_json, r.weight, r.updated_at,
+                       memory_community_reports_fts.rank AS fts_rank_raw
+                FROM memory_community_reports_fts
+                JOIN memory_community_reports r ON r.community_id = memory_community_reports_fts.community_id
+                WHERE memory_community_reports_fts MATCH ?
+                ORDER BY memory_community_reports_fts.rank
+                LIMIT ?
+            """
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except Exception:
+                fallback = self._fallback_fts_query(query)
+                rows = self._conn.execute(sql, [fallback, limit]).fetchall() if fallback else []
+            if not rows:
+                for cluster in self._conn.execute("SELECT cluster_id FROM memory_clusters ORDER BY updated_at DESC LIMIT 20").fetchall():
+                    self.build_community_report(str(cluster["cluster_id"]))
+                try:
+                    rows = self._conn.execute(sql, params).fetchall()
+                except Exception:
+                    rows = []
+        max_rank = max((abs(float(r["fts_rank_raw"] or 0.0)) for r in rows), default=1.0) or 1.0
+        results = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            item["score"] = abs(float(item.pop("fts_rank_raw") or 0.0)) / max_rank
+            for key in ("fact_ids_json", "chunk_ids_json"):
+                try:
+                    item[key.replace("_json", "")] = json.loads(item.get(key) or "[]")
+                except Exception:
+                    item[key.replace("_json", "")] = []
+                item.pop(key, None)
+            results.append(item)
+        return results
 
     def infer_tags_for_facts(self, fact_ids: list[int] | None = None, *, limit: int = 50) -> dict:
         """Infer lightweight tags from content/category and merge them into facts."""
@@ -1918,9 +2162,12 @@ class MemoryStore:
         source_type: str = "document",
         metadata: dict | None = None,
         replace: bool = True,
+        modal_assets: list[dict] | None = None,
     ) -> dict:
-        """Store chunked document text for RAG-style recall."""
-        cleaned = [" ".join(str(c or "").split()) for c in chunks or []]
+        """Store chunked document text and optional multimodal summaries for RAG recall."""
+        modal_assets = modal_assets or []
+        modal_chunks = self._modal_assets_to_chunks(modal_assets)
+        cleaned = [" ".join(str(c or "").split()) for c in list(chunks or []) + modal_chunks]
         cleaned = [c for c in cleaned if c]
         document_id = self.add_document(
             source_uri=source_uri,
@@ -1940,6 +2187,8 @@ class MemoryStore:
                         (int(row["chunk_id"]),),
                     )
                 self._conn.execute("DELETE FROM memory_chunks WHERE document_id = ?", (document_id,))
+                self._conn.execute("DELETE FROM memory_modal_assets WHERE document_id = ?", (document_id,))
+            self._store_modal_assets(document_id, modal_assets)
             inserted = 0
             for idx, chunk in enumerate(cleaned):
                 excerpt = chunk[:400]
@@ -1965,9 +2214,54 @@ class MemoryStore:
                     ).fetchone()
                     chunk_id = int(row["chunk_id"])
                 self._embed_chunk(chunk_id, chunk)
+                self._link_chunk_entities(chunk_id, chunk)
                 inserted += 1
             self._conn.commit()
-            return {"document_id": document_id, "chunks": inserted}
+            return {"document_id": document_id, "chunks": inserted, "modal_assets": len(modal_assets)}
+
+    def _modal_assets_to_chunks(self, assets: list[dict]) -> list[str]:
+        """Convert multimodal parse artifacts into searchable text chunks."""
+        chunks: list[str] = []
+        for asset in assets or []:
+            if not isinstance(asset, dict):
+                continue
+            asset_type = str(asset.get("asset_type") or asset.get("type") or "asset").strip() or "asset"
+            locator = str(asset.get("locator") or asset.get("page") or asset.get("path") or "").strip()
+            summary = str(asset.get("summary") or asset.get("caption") or "").strip()
+            text = str(asset.get("text_content") or asset.get("text") or asset.get("content") or "").strip()
+            parts = [f"Multimodal {asset_type}"]
+            if locator:
+                parts.append(f"at {locator}")
+            if summary:
+                parts.append(f"summary: {summary}")
+            if text:
+                parts.append(f"text: {text}")
+            chunk = ". ".join(parts)
+            if summary or text:
+                chunks.append(chunk)
+        return chunks
+
+    def _store_modal_assets(self, document_id: int, assets: list[dict]) -> None:
+        """Persist parsed image/table/equation/page artifacts for future multimodal RAG."""
+        for asset in assets or []:
+            if not isinstance(asset, dict):
+                continue
+            metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+            self._conn.execute(
+                """
+                INSERT INTO memory_modal_assets (
+                    document_id, asset_type, locator, summary, text_content, metadata_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    int(document_id),
+                    str(asset.get("asset_type") or asset.get("type") or "asset"),
+                    str(asset.get("locator") or asset.get("page") or asset.get("path") or ""),
+                    str(asset.get("summary") or asset.get("caption") or ""),
+                    str(asset.get("text_content") or asset.get("text") or asset.get("content") or ""),
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                ),
+            )
 
     def document_search(
         self,
@@ -2323,6 +2617,62 @@ class MemoryStore:
             (fact_id, entity_id),
         )
         self._conn.commit()
+
+    def _link_fact_entities(self, fact_id: int, content: str) -> list[int]:
+        """Link extracted entities to a fact and upsert co-occurrence relations."""
+        entity_ids: list[int] = []
+        for name in self._extract_entities(content):
+            entity_id = self._resolve_entity(name)
+            self._link_fact_entity(fact_id, entity_id)
+            if entity_id not in entity_ids:
+                entity_ids.append(entity_id)
+        self._upsert_cooccurrence_relations(entity_ids, source_type="fact", source_id=int(fact_id), evidence=content)
+        return entity_ids
+
+    def _link_chunk_entities(self, chunk_id: int, content: str) -> list[int]:
+        """Link extracted entities to a document chunk and upsert co-occurrence relations."""
+        entity_ids: list[int] = []
+        self._conn.execute("DELETE FROM memory_chunk_entities WHERE chunk_id = ?", (int(chunk_id),))
+        self._conn.execute(
+            "DELETE FROM memory_relations WHERE source_type = 'chunk' AND source_id = ?",
+            (int(chunk_id),),
+        )
+        for name in self._extract_entities(content):
+            entity_id = self._resolve_entity(name)
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_chunk_entities (chunk_id, entity_id, weight)
+                VALUES (?, ?, 1.0)
+                """,
+                (int(chunk_id), entity_id),
+            )
+            if entity_id not in entity_ids:
+                entity_ids.append(entity_id)
+        self._upsert_cooccurrence_relations(entity_ids, source_type="chunk", source_id=int(chunk_id), evidence=content)
+        return entity_ids
+
+    def _upsert_cooccurrence_relations(self, entity_ids: list[int], *, source_type: str, source_id: int, evidence: str) -> None:
+        """Create deterministic relation edges between entities found in the same source."""
+        unique_ids = sorted({int(eid) for eid in entity_ids if int(eid) > 0})[:12]
+        if len(unique_ids) < 2:
+            return
+        excerpt = " ".join(str(evidence or "").split())[:500]
+        for idx, source_entity_id in enumerate(unique_ids):
+            for target_entity_id in unique_ids[idx + 1:]:
+                self._conn.execute(
+                    """
+                    INSERT INTO memory_relations (
+                        source_entity_id, target_entity_id, relation_type,
+                        source_type, source_id, weight, evidence, updated_at
+                    ) VALUES (?, ?, 'co_occurs_with', ?, ?, 1.0, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(source_entity_id, target_entity_id, relation_type, source_type, source_id)
+                    DO UPDATE SET
+                        weight = memory_relations.weight + 1.0,
+                        evidence = excluded.evidence,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (source_entity_id, target_entity_id, str(source_type or ""), int(source_id), excerpt),
+                )
 
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
         """Compute and store HRR vector for a fact. No-op if numpy unavailable."""

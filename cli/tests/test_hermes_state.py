@@ -1169,11 +1169,12 @@ class TestSchemaInit:
         assert "sessions" in tables
         assert "messages" in tables
         assert "schema_version" in tables
+        assert "turn_usage" in tables
 
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 8
+        assert version == 10
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1229,12 +1230,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v8
+        # Open with SessionDB — should migrate to v10
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 10
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -1246,6 +1247,12 @@ class TestSchemaInit:
             "SELECT api_call_count FROM sessions WHERE id = 'existing'"
         )
         assert cursor.fetchone()[0] == 0
+
+        # Verify turn_usage table was added for per-turn analytics
+        cursor = migrated_db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='turn_usage'"
+        )
+        assert cursor.fetchone() is not None
 
         # Verify we can set title on migrated session
         assert migrated_db.set_session_title("existing", "Migrated Title") is True

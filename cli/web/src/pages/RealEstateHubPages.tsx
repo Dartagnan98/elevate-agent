@@ -17,6 +17,8 @@ import {
   Clock,
   Database as DatabaseIcon,
   FileCheck2,
+  FileText,
+  GitBranch,
   Home,
   Loader2,
   Megaphone,
@@ -35,6 +37,8 @@ import type {
   CronJob,
   PaginatedSessions,
   SessionInfo,
+  SourceInboxResponse,
+  SourceInboxThread,
   StatusResponse,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +53,7 @@ type HubData = {
   error: string | null;
   loading: boolean;
   refresh: () => Promise<void>;
+  sourceInbox: SourceInboxResponse | null;
   sessions: SessionInfo[];
   snapshot: AgentHubSnapshot | null;
   status: StatusResponse | null;
@@ -57,6 +62,7 @@ type HubData = {
 function useRealEstateHubData(): HubData {
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [sourceInbox, setSourceInbox] = useState<SourceInboxResponse | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,12 +70,13 @@ function useRealEstateHubData(): HubData {
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [hubResult, statusResult, sessionsResult, cronResult] =
+    const [hubResult, statusResult, sessionsResult, cronResult, sourceInboxResult] =
       await Promise.allSettled([
         api.getAgentHub(),
         api.getStatus(),
         api.getSessions(36),
         api.getCronJobs(),
+        api.getSourceInbox(16),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -78,6 +85,11 @@ function useRealEstateHubData(): HubData {
       setSessions((sessionsResult.value as PaginatedSessions).sessions);
     }
     if (cronResult.status === "fulfilled") setCronJobs(cronResult.value);
+    if (sourceInboxResult.status === "fulfilled") {
+      setSourceInbox(sourceInboxResult.value);
+    } else {
+      setSourceInbox(null);
+    }
 
     const failed = [
       hubResult,
@@ -106,7 +118,7 @@ function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
-  return { cronJobs, error, loading, refresh, sessions, snapshot, status };
+  return { cronJobs, error, loading, refresh, sourceInbox, sessions, snapshot, status };
 }
 
 function useHubHeader(title: string, data: HubData) {
@@ -465,6 +477,136 @@ function ActionBoard({
   );
 }
 
+function sourceRecordCount(data: HubData, key: string): number {
+  return Number(data.sourceInbox?.recordCounts?.[key] ?? 0);
+}
+
+function threadWhen(thread: SourceInboxThread): string {
+  return thread.latestAt ? isoTimeAgo(thread.latestAt) : "unsynced";
+}
+
+function heatVariant(thread: SourceInboxThread): "default" | "success" | "warning" | "outline" {
+  if (thread.heatLabel === "hot") return "warning";
+  if (thread.heatLabel === "warm") return "success";
+  return "outline";
+}
+
+function ClientInboxPreview({
+  data,
+  title = "Lead inbox",
+}: {
+  data: HubData;
+  title?: string;
+}) {
+  const threads = data.sourceInbox?.threads ?? [];
+  const sources = data.sourceInbox?.sources ?? [];
+  const connected = sources.filter((source) => source.connected || source.importOnly);
+  const blocked = sources.filter((source) => source.blocked);
+  const messageCount = sourceRecordCount(data, "messages");
+  const conversationCount = sourceRecordCount(data, "conversations");
+  const hotCount = sourceRecordCount(data, "hotThreads");
+
+  const updateThread = async (thread: SourceInboxThread, action: "done" | "archive") => {
+    await api.updateSourceInboxThread(thread.sourceId, thread.threadId, action);
+    await data.refresh();
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle>{title}</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Source-aware conversations from Messages, Lofty CRM, email, SMS, and future lead channels.
+            </p>
+          </div>
+          <Badge variant={threads.length ? "success" : blocked.length ? "warning" : "outline"}>
+            {threads.length ? "actionable" : blocked.length ? "needs access" : "empty"}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-3 gap-2">
+          <HubMetric icon={MessageSquare} label="Messages" value={messageCount} />
+          <HubMetric icon={Users} label="Threads" value={conversationCount} />
+          <HubMetric icon={Target} label="Hot" value={hotCount} />
+        </div>
+        {threads.length ? (
+          <div className="space-y-2">
+            {threads.slice(0, 7).map((thread, index) => {
+              const inbound = thread.direction !== "outbound";
+              return (
+                <div
+                  key={thread.id || `${thread.sourceId}-${thread.threadId}-${index}`}
+                  className="rounded-2xl border border-border/55 bg-background/35 px-3 py-3"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={cn(
+                        "h-2 w-2 shrink-0 rounded-full",
+                        inbound ? "bg-success" : "bg-primary",
+                      )}
+                    />
+                    <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                      {thread.personName}
+                    </div>
+                    <span className="shrink-0 text-[0.72rem] text-muted-foreground">
+                      {threadWhen(thread)}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                    {thread.latestText}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <Badge variant={heatVariant(thread)}>{thread.heatLabel} {thread.heatScore}</Badge>
+                    <Badge variant="outline">{thread.sourceLabel}</Badge>
+                    <Badge variant="outline">{thread.channel}</Badge>
+                    <Badge variant="outline">{inbound ? "inbound" : "outbound"}</Badge>
+                    <div className="ml-auto flex gap-1.5">
+                      <Button size="sm" variant="outline" onClick={() => void updateThread(thread, "done")}>
+                        Done
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => void updateThread(thread, "archive")}>
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : blocked.length ? (
+          <div className="rounded-2xl border border-warning/35 bg-warning/10 px-4 py-4 text-sm text-muted-foreground">
+            <div className="font-semibold text-foreground">A lead source needs access before it can show client rows.</div>
+            <div className="mt-2 space-y-2">
+              {blocked.slice(0, 3).map((source) => (
+                <div key={source.id}>
+                  <span className="font-medium text-foreground">{source.label}: </span>
+                  {source.nextOperatorStep || source.lastError || "Open Settings and reconnect this source."}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm text-muted-foreground">
+            No client-source rows are visible yet. Import Messages or sync Lofty CRM, then refresh this board.
+          </div>
+        )}
+        {connected.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+            {connected.slice(0, 4).map((source) => (
+              <Badge key={source.id} variant="outline">
+                {source.label} {source.importOnly ? "snapshot" : "live"}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function MemoryGraphView({
   nodes,
   edges,
@@ -624,7 +766,7 @@ export function RealEstateTodayPage() {
       <WorkflowStrip
         items={[
           { icon: Bot, label: "Agent team", value: enabledAgents.length },
-          { icon: MessageSquare, label: "Live sessions", value: liveSessions.length },
+          { icon: MessageSquare, label: "Messages", value: sourceRecordCount(data, "messages") },
           { icon: Clock, label: "Running tasks", value: enabledJobs.length },
           {
             icon: ShieldCheck,
@@ -633,11 +775,14 @@ export function RealEstateTodayPage() {
           },
         ]}
       />
-      <ActionBoard
-        actions={todayActions}
-        empty="Nothing urgent is waiting. Start a chat, schedule a pulse, or continue a recent session when work comes in."
-        title="Today's action board"
-      />
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <ActionBoard
+          actions={todayActions}
+          empty="Nothing urgent is waiting. Start a chat, schedule a pulse, or continue a recent session when work comes in."
+          title="Today's action board"
+        />
+        <ClientInboxPreview data={data} title="Today's lead inbox" />
+      </div>
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <RecentSessions
           title="Recent operator activity"
@@ -684,8 +829,8 @@ export function RealEstateLeadsPage() {
         items={[
           {
             icon: MessageSquare,
-            label: "Lead chats",
-            value: sessions.length,
+            label: "Messages",
+            value: sourceRecordCount(data, "messages"),
           },
           { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
           {
@@ -706,8 +851,9 @@ export function RealEstateLeadsPage() {
           title="Lead action board"
           empty="No lead actions are waiting yet. When outreach sessions, follow-up schedules, or approvals exist, they will show up here."
         />
-        <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
+        <ClientInboxPreview data={data} />
       </div>
+      <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
       <RecentSessions
         title="Lead conversations"
         sessions={sessions}
@@ -1003,8 +1149,10 @@ export function RealEstateMemoryPage() {
         items={[
           { icon: Brain, label: "Facts", value: memory?.facts ?? 0 },
           { icon: Network, label: "Entities", value: memory?.entities ?? 0 },
-          { icon: DatabaseIcon, label: "Embeddings", value: memory?.embeddings ?? 0 },
-          { icon: CalendarClock, label: "Session segments", value: memory?.journal.session_segment_count ?? 0 },
+          { icon: DatabaseIcon, label: "Documents", value: memory?.documents ?? 0 },
+          { icon: FileText, label: "Chunks", value: memory?.chunks ?? 0 },
+          { icon: GitBranch, label: "Communities", value: memory?.community_reports ?? 0 },
+          { icon: Network, label: "Relations", value: memory?.relations ?? 0 },
         ]}
       />
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_24rem]">
