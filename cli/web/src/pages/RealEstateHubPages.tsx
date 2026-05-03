@@ -35,11 +35,12 @@ import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
   AgentHubMemoryNode,
-  AgentHubPlatform,
   AgentHubSnapshot,
   CronJob,
   PaginatedSessions,
   SessionInfo,
+  SourceConnectorsResponse,
+  SourceConnectorStatus,
   StatusResponse,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -55,6 +56,7 @@ type HubData = {
   loading: boolean;
   refresh: () => Promise<void>;
   sessions: SessionInfo[];
+  sourceConnectors: SourceConnectorsResponse | null;
   snapshot: AgentHubSnapshot | null;
   status: StatusResponse | null;
 };
@@ -79,16 +81,17 @@ const AREA_CONNECTORS: Record<
   keyof typeof REAL_ESTATE_SKILL_TARGETS,
   string[]
 > = {
-  leads: ["telegram", "gmail", "google", "slack", "discord", "webhook"],
-  listings: ["telegram", "gmail", "google", "webhook"],
-  deals: ["gmail", "google", "telegram", "webhook"],
-  ads: ["gmail", "google", "slack", "telegram", "webhook"],
-  "social-media": ["slack", "telegram", "instagram", "facebook", "buffer", "webhook"],
+  leads: ["apple-messages", "sms-provider", "android-device", "rcs", "crm", "social", "email"],
+  listings: ["skills", "market-stats", "document-storage"],
+  deals: ["crm", "skills", "admin-requirements", "document-storage", "forms-signing"],
+  ads: ["market-stats", "skills", "email", "social"],
+  "social-media": ["social", "skills", "market-stats"],
 };
 
 function useRealEstateHubData(): HubData {
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [sourceConnectors, setSourceConnectors] = useState<SourceConnectorsResponse | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -96,12 +99,13 @@ function useRealEstateHubData(): HubData {
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [hubResult, statusResult, sessionsResult, cronResult] =
+    const [hubResult, statusResult, sessionsResult, cronResult, sourceResult] =
       await Promise.allSettled([
         api.getAgentHub(),
         api.getStatus(),
         api.getSessions(36),
         api.getCronJobs(),
+        api.getSourceConnectors(),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -110,12 +114,14 @@ function useRealEstateHubData(): HubData {
       setSessions((sessionsResult.value as PaginatedSessions).sessions);
     }
     if (cronResult.status === "fulfilled") setCronJobs(cronResult.value);
+    if (sourceResult.status === "fulfilled") setSourceConnectors(sourceResult.value);
 
     const failed = [
       hubResult,
       statusResult,
       sessionsResult,
       cronResult,
+      sourceResult,
     ].find((result) => result.status === "rejected");
 
     if (failed?.status === "rejected") {
@@ -138,7 +144,7 @@ function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
-  return { cronJobs, error, loading, refresh, sessions, snapshot, status };
+  return { cronJobs, error, loading, refresh, sessions, sourceConnectors, snapshot, status };
 }
 
 function useHubHeader(title: string, data: HubData) {
@@ -301,22 +307,35 @@ function HubMetric({
   );
 }
 
-function platformStatus(platform: AgentHubPlatform): "ready" | "pending" | "blank" {
-  if (platform.configured && platform.enabled) return "ready";
-  if (platform.pending_pairings.length || platform.token_configured || platform.api_key_configured) {
-    return "pending";
-  }
-  return "blank";
+function sourceReady(connector: SourceConnectorStatus): boolean {
+  return connector.state === "connected" || connector.state === "import_only";
 }
 
-function platformMatchesArea(platform: AgentHubPlatform, area: keyof typeof AREA_CONNECTORS): boolean {
-  const name = platform.name.toLowerCase();
-  return AREA_CONNECTORS[area].some((key) => name.includes(key));
+function sourceMatchesArea(connector: SourceConnectorStatus, area: keyof typeof AREA_CONNECTORS): boolean {
+  return AREA_CONNECTORS[area].includes(connector.id);
 }
 
-function connectorLabel(platform: AgentHubPlatform): string {
-  const name = platform.name.replace(/[-_]/g, " ");
-  return name.charAt(0).toUpperCase() + name.slice(1);
+function connectorRecordTotal(connector: SourceConnectorStatus): number {
+  return Object.values(connector.recordCounts).reduce((total, value) => total + value, 0);
+}
+
+function readyConnectorCount(data: HubData, area?: keyof typeof AREA_CONNECTORS): number {
+  const connectors = data.sourceConnectors?.connectors ?? [];
+  return connectors.filter((connector) => {
+    if (area && !sourceMatchesArea(connector, area)) return false;
+    return sourceReady(connector);
+  }).length;
+}
+
+function platformDisplayName(name: string): string {
+  const cleaned = name.replace(/[-_]/g, " ");
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+function sourceStateVariant(state: SourceConnectorStatus["state"]): "success" | "warning" | "outline" {
+  if (state === "connected" || state === "import_only") return "success";
+  if (state === "needs_operator" || state === "error" || state === "blocked") return "warning";
+  return "outline";
 }
 
 function ConnectorReadiness({
@@ -325,19 +344,16 @@ function ConnectorReadiness({
   data: HubData;
 }) {
   const items = (Object.keys(AREA_CONNECTORS) as Array<keyof typeof AREA_CONNECTORS>).map((key) => {
-    const platforms = data.snapshot?.platforms.filter((platform) =>
-      platformMatchesArea(platform, key),
+    const connectors = data.sourceConnectors?.connectors.filter((connector) =>
+      sourceMatchesArea(connector, key),
     ) ?? [];
-    const ready = platforms.filter((platform) => platformStatus(platform) === "ready").length;
-    const pending = platforms.reduce(
-      (total, platform) => total + platform.pending_pairings.length,
-      0,
-    );
+    const ready = connectors.filter(sourceReady).length;
+    const pending = connectors.filter((connector) => connector.state === "needs_operator" || connector.state === "not_configured").length;
     return {
+      connectors,
       key,
       label: WORKFLOW_LABELS[key],
       pending,
-      platforms,
       ready,
     };
   });
@@ -350,31 +366,24 @@ function ConnectorReadiness({
             <div className="flex items-center justify-between gap-3">
               <CardTitle>{item.label}</CardTitle>
               <Badge variant={item.ready ? "success" : "outline"}>
-                {item.ready}/{item.platforms.length}
+                {item.ready}/{item.connectors.length}
               </Badge>
             </div>
           </CardHeader>
           <CardContent className="space-y-3 p-4 pt-0">
             <div className="grid gap-1.5">
-              {item.platforms.slice(0, 4).map((platform) => {
-                const state = platformStatus(platform);
+              {item.connectors.slice(0, 4).map((connector) => {
                 return (
                   <div
-                    key={platform.name}
+                    key={connector.id}
                     className="flex items-center justify-between gap-2 rounded-xl bg-background/35 px-2.5 py-1.5 text-xs"
                   >
-                    <span className="truncate text-foreground">{connectorLabel(platform)}</span>
-                    <Badge
-                      variant={
-                        state === "ready" ? "success" : state === "pending" ? "warning" : "outline"
-                      }
-                    >
-                      {state}
-                    </Badge>
+                    <span className="truncate text-foreground">{connector.label}</span>
+                    <Badge variant={sourceStateVariant(connector.state)}>{connector.state.replace(/_/g, " ")}</Badge>
                   </div>
                 );
               })}
-              {!item.platforms.length && (
+              {!item.connectors.length && (
                 <div className="rounded-xl border border-dashed border-border bg-background/25 px-3 py-3 text-xs text-muted-foreground">
                   No connector surface is configured for this lane yet.
                 </div>
@@ -383,14 +392,14 @@ function ConnectorReadiness({
             <div className="flex items-center justify-between gap-2 text-xs leading-5 text-muted-foreground">
               <span>
                 {item.pending
-                  ? `${item.pending} pairing approval${item.pending === 1 ? "" : "s"} waiting`
-                  : "Connector status, pairings, and bot access live here."}
+                  ? `${item.pending} connector setup item${item.pending === 1 ? "" : "s"} waiting`
+                  : "Connector status, records, and setup prompts live here."}
               </span>
               <Link
-                to="/approvals"
+                to="/config"
                 className="shrink-0 text-primary hover:underline"
               >
-                Approvals
+                Settings
               </Link>
             </div>
           </CardContent>
@@ -409,25 +418,36 @@ function ConnectorPanel({
   data: HubData;
   title?: string;
 }) {
-  const platforms = data.snapshot?.platforms.filter((platform) =>
-    platformMatchesArea(platform, area),
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const connectors = data.sourceConnectors?.connectors.filter((connector) =>
+    sourceMatchesArea(connector, area),
   ) ?? [];
+
+  const initialize = async (sourceId: string) => {
+    setBusyId(sourceId);
+    try {
+      await api.scaffoldSourceConnector(sourceId);
+      await data.refresh();
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-3">
           <CardTitle>{title}</CardTitle>
-          <Badge variant="outline">{platforms.length}</Badge>
+          <Badge variant="outline">{connectors.length}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-2">
-        {platforms.length ? (
-          platforms.slice(0, 7).map((platform) => {
-            const state = platformStatus(platform);
+        {connectors.length ? (
+          connectors.slice(0, 7).map((connector) => {
+            const recordCount = connectorRecordTotal(connector);
             return (
               <div
-                key={platform.name}
+                key={connector.id}
                 className="rounded-2xl border border-border/55 bg-background/35 px-3 py-2.5"
               >
                 <div className="flex items-center justify-between gap-3">
@@ -435,28 +455,30 @@ function ConnectorPanel({
                     <Network className="h-4 w-4 shrink-0 text-muted-foreground" />
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium text-foreground">
-                        {connectorLabel(platform)}
+                        {connector.label}
                       </div>
                       <div className="mt-0.5 text-[0.72rem] text-muted-foreground">
-                        {platform.runtime?.state ?? (platform.configured ? "configured" : "blank")}
+                        {connector.nextOperatorStep ?? connector.sourceDir}
                       </div>
                     </div>
                   </div>
-                  <Badge
-                    variant={
-                      state === "ready" ? "success" : state === "pending" ? "warning" : "outline"
-                    }
-                  >
-                    {state}
+                  <Badge variant={sourceStateVariant(connector.state)}>
+                    {connector.state.replace(/_/g, " ")}
                   </Badge>
                 </div>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {platform.token_configured && <Badge variant="success">Token</Badge>}
-                  {platform.api_key_configured && <Badge variant="success">Key</Badge>}
-                  <Badge variant="outline">{platform.approved_users} paired</Badge>
-                  <Badge variant={platform.pending_pairings.length ? "warning" : "outline"}>
-                    {platform.pending_pairings.length} pending
-                  </Badge>
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                  <Badge variant="outline">{connector.ownerAgent}</Badge>
+                  <Badge variant="outline">{recordCount} records</Badge>
+                  {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
+                  <Button
+                    className="ml-auto h-7 px-2.5"
+                    size="sm"
+                    variant={connector.sourceExists ? "outline" : "default"}
+                    onClick={() => void initialize(connector.id)}
+                    disabled={busyId === connector.id}
+                  >
+                    {busyId === connector.id ? "Writing" : connector.sourceExists ? "Refresh test files" : "Initialize"}
+                  </Button>
                 </div>
               </div>
             );
@@ -546,7 +568,7 @@ function ApprovalInbox({ data }: { data: HubData }) {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-foreground">
-                    {connectorLabel(platform)} pairing
+                    {platformDisplayName(platform.name)} pairing
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     {pairing.user_name || pairing.user_id} / {pairing.age_minutes}m old
@@ -752,7 +774,7 @@ export function RealEstateTodayPage() {
           {
             icon: Link2,
             label: "Connectors ready",
-            value: data.snapshot?.platforms.filter((platform) => platform.configured).length ?? 0,
+            value: readyConnectorCount(data),
           },
         ]}
       />
@@ -790,7 +812,7 @@ export function RealEstateLeadsPage() {
       <WorkflowStrip
         items={[
           { icon: Target, label: "Lead sessions", value: sessions.length },
-          { icon: Route, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "leads") && platform.configured).length ?? 0 },
+          { icon: Route, label: "Ready connectors", value: readyConnectorCount(data, "leads") },
           { icon: CalendarClock, label: "Follow-up tasks", value: jobs.length },
           { icon: CheckCircle2, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
@@ -830,7 +852,7 @@ export function RealEstateListingsPage() {
       <WorkflowStrip
         items={[
           { icon: Home, label: "Listing sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "listings") && platform.configured).length ?? 0 },
+          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "listings") },
           { icon: CalendarClock, label: "Scheduled reports", value: jobs.length },
           {
             icon: Brain,
@@ -874,7 +896,7 @@ export function RealEstateDealsPage() {
       <WorkflowStrip
         items={[
           { icon: BriefcaseBusiness, label: "Deal sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "deals") && platform.configured).length ?? 0 },
+          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "deals") },
           { icon: CalendarClock, label: "Deal reminders", value: jobs.length },
           { icon: CheckCircle2, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
@@ -910,7 +932,7 @@ export function RealEstateAdsPage() {
       <WorkflowStrip
         items={[
           { icon: Target, label: "Ad sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "ads") && platform.configured).length ?? 0 },
+          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "ads") },
           { icon: CalendarClock, label: "Campaign schedules", value: jobs.length },
           { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}
@@ -950,7 +972,7 @@ export function RealEstateSocialMediaPage() {
       <WorkflowStrip
         items={[
           { icon: Megaphone, label: "Social sessions", value: sessions.length },
-          { icon: Link2, label: "Ready connectors", value: data.snapshot?.platforms.filter((platform) => platformMatchesArea(platform, "social-media") && platform.configured).length ?? 0 },
+          { icon: Link2, label: "Ready connectors", value: readyConnectorCount(data, "social-media") },
           { icon: CalendarClock, label: "Post schedules", value: jobs.length },
           { icon: Activity, label: "Approval queue", value: data.snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ?? 0 },
         ]}

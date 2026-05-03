@@ -55,7 +55,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 except ImportError:
     raise SystemExit(
         "Web UI requires fastapi and uvicorn.\n"
@@ -281,6 +281,28 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Web dashboard visual theme",
         "options": ["default", "midnight", "ember", "mono", "cyberpunk", "rose"],
     },
+    "sources.tools_root": {
+        "type": "string",
+        "description": "Customer tools root containing data/sources/<source-id>",
+        "category": "sources",
+    },
+    "integrations.tools_root": {
+        "type": "string",
+        "description": "Legacy alias for customer tools root; sources.tools_root takes precedence",
+        "category": "integrations",
+    },
+    "integrations.crm.provider": {
+        "type": "select",
+        "description": "CRM provider preset",
+        "options": ["custom", "lofty", "follow_up_boss", "kvcore", "chime", "wise_agent", "real_geeks"],
+        "category": "integrations",
+    },
+    "integrations.crm.auth_type": {
+        "type": "select",
+        "description": "CRM API authentication placement",
+        "options": ["header", "query"],
+        "category": "integrations",
+    },
     "agent_hub.default_agent": {
         "type": "string",
         "description": "Default Agent Hub persona for new local chat sessions",
@@ -491,7 +513,7 @@ _CATEGORY_MERGE: Dict[str, str] = {
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
 _CATEGORY_ORDER = [
-    "general", "agent", "agent_hub", "platforms", "terminal", "display",
+    "general", "agent", "agent_hub", "sources", "integrations", "platforms", "terminal", "display",
     "delegation", "memory", "access", "plugins", "compression", "security",
     "browser", "voice", "tts", "stt", "logging", "discord", "auxiliary",
 ]
@@ -2395,6 +2417,26 @@ class CronJobUpdate(BaseModel):
     updates: dict
 
 
+class SourceConnectorAction(BaseModel):
+    action: str
+    sourceId: str
+
+
+class IntegrationSettingsUpdate(BaseModel):
+    provider: str = "custom"
+    label: str = "CRM"
+    apiKeyEnv: str = "CRM_API_KEY"
+    apiKey: str = ""
+    baseUrl: str = ""
+    authType: str = "header"
+    authHeader: str = "Authorization"
+    authPrefix: str = "Bearer "
+    authQueryParam: str = "api_key"
+    dbColumns: dict = Field(default_factory=dict)
+    endpoints: dict = Field(default_factory=dict)
+    action: str = ""
+
+
 @app.get("/api/cron/jobs")
 async def list_cron_jobs():
     from cron.jobs import list_jobs
@@ -2464,6 +2506,71 @@ async def delete_cron_job(job_id: str):
     if not remove_job(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Real-estate source connectors and integration settings
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/source-connectors")
+async def get_source_connectors():
+    try:
+        from elevate_cli.source_connectors import build_source_connectors_response
+
+        return build_source_connectors_response()
+    except Exception as exc:
+        _log.exception("GET /api/source-connectors failed")
+        raise HTTPException(status_code=500, detail=f"Source connectors failed: {exc}")
+
+
+@app.post("/api/source-connectors")
+async def update_source_connector(body: SourceConnectorAction):
+    if body.action != "scaffold":
+        raise HTTPException(status_code=400, detail="Unsupported source connector action")
+    try:
+        from elevate_cli.source_connectors import build_source_connectors_response, scaffold_source
+
+        scaffold_source(body.sourceId)
+        return {"ok": True, **build_source_connectors_response()}
+    except Exception as exc:
+        _log.exception("POST /api/source-connectors failed")
+        raise HTTPException(status_code=500, detail=f"Source connector update failed: {exc}")
+
+
+@app.get("/api/integrations")
+async def get_integrations():
+    try:
+        from elevate_cli.source_connectors import get_integration_settings
+
+        return get_integration_settings()
+    except Exception as exc:
+        _log.exception("GET /api/integrations failed")
+        raise HTTPException(status_code=500, detail=f"Integration settings failed: {exc}")
+
+
+@app.put("/api/integrations")
+async def update_integrations(body: IntegrationSettingsUpdate):
+    try:
+        from elevate_cli.source_connectors import save_integration_settings
+
+        return save_integration_settings(body.dict())
+    except Exception as exc:
+        _log.exception("PUT /api/integrations failed")
+        raise HTTPException(status_code=500, detail=f"Integration settings save failed: {exc}")
+
+
+@app.post("/api/integrations")
+async def test_integrations(body: IntegrationSettingsUpdate):
+    if body.action != "test":
+        raise HTTPException(status_code=400, detail="Unsupported integration action")
+    try:
+        from elevate_cli.source_connectors import test_crm_connection
+
+        return test_crm_connection(body.dict())
+    except Exception as exc:
+        _log.exception("POST /api/integrations failed")
+        raise HTTPException(status_code=500, detail=f"Integration test failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

@@ -260,7 +260,122 @@ export const api = {
   // Agent Hub
   getAgentHub: () => fetchJSON<AgentHubSnapshot>("/api/agent-hub"),
   getHarness: () => fetchJSON<HarnessSnapshot>("/api/harness"),
+
+  // Real-estate source connectors and integrations
+  getSourceConnectors: () =>
+    fetchJSON<SourceConnectorsResponse>("/api/source-connectors"),
+  scaffoldSourceConnector: (sourceId: string) =>
+    fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "scaffold", sourceId }),
+    }),
+  getIntegrations: () => fetchJSON<IntegrationSettingsResponse>("/api/integrations"),
+  saveIntegrations: (crm: CrmIntegrationForm) =>
+    fetchJSON<IntegrationSettingsResponse>("/api/integrations", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(crm),
+    }),
+  testIntegration: (crm: CrmIntegrationForm) =>
+    fetchJSON<IntegrationTestResponse>("/api/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...crm, action: "test" }),
+    }),
 };
+
+export type SourceConnectorState =
+  | "not_configured"
+  | "connected"
+  | "import_only"
+  | "needs_operator"
+  | "blocked"
+  | "error";
+
+export interface SourceConnectionBlueprint {
+  id: string;
+  source: string;
+  category: "messages" | "leads" | "operations" | "admin" | "forms" | string;
+  informationNeeded: string;
+  connectionLayer: string;
+  uiDestination: string;
+  successSignal: string;
+  prompt: string;
+}
+
+export interface SourceConnectorStatus {
+  id: string;
+  label: string;
+  category: string;
+  state: SourceConnectorState;
+  sourceExists: boolean;
+  sourceDir: string;
+  sourcePath: string;
+  statusPath: string;
+  artifactsDir: string;
+  connectionType: string | null;
+  syncMode: string | null;
+  authStatus: string | null;
+  ownerAgent: string;
+  enabledUiSurfaces: string[];
+  connected: boolean;
+  importOnly: boolean;
+  blocked: boolean;
+  lastError: string | null;
+  nextOperatorStep: string | null;
+  lastCheckedAt: string | null;
+  recordCounts: Record<string, number>;
+  prompt: string;
+}
+
+export interface SourceConnectorsResponse {
+  toolsRoot: string;
+  toolsRootSource: string;
+  toolsRootIo: "local" | string;
+  sourceRoot: string;
+  blueprints: SourceConnectionBlueprint[];
+  promptCategories: Array<{ id: string; label: string }>;
+  connectors: SourceConnectorStatus[];
+}
+
+export interface CrmIntegrationForm {
+  provider: string;
+  label: string;
+  apiKeyEnv: string;
+  apiKey?: string;
+  hasApiKey: boolean;
+  apiKeyPreview: string | null;
+  baseUrl: string;
+  authType: "header" | "query" | string;
+  authHeader: string;
+  authPrefix: string;
+  authQueryParam: string;
+  dbColumns: {
+    leadId: string;
+    stage: string;
+    tags: string;
+  };
+  endpoints: {
+    leads: string;
+    lead: string;
+    notes: string;
+  };
+}
+
+export interface IntegrationSettingsResponse {
+  configPath: string;
+  secretsPath: string;
+  sourceRoot: string;
+  crm: CrmIntegrationForm;
+}
+
+export interface IntegrationTestResponse {
+  success: boolean;
+  status?: number;
+  message?: string;
+  error?: string;
+}
 
 export interface ActionResponse {
   name: string;

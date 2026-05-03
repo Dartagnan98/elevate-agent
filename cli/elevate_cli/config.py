@@ -658,6 +658,40 @@ DEFAULT_CONFIG = {
         "theme": "dark",  # Dashboard visual theme: "dark" or "light"
     },
 
+    # Real-estate source connector roots. Source connectors write normalized
+    # local records under <tools_root>/data/sources/<source-id>/ so the Hub can
+    # show Leads, Deals, Listings, Tasks, and Artifacts without a cloud backend.
+    "sources": {
+        "tools_root": "",  # empty = ELEVATE_TOOLS_ROOT, ~/.elevate/tmp/skyleigh-tools, then ~/.elevate/tools
+    },
+
+    # Provider-neutral integration settings. Specific CRMs such as Lofty or
+    # Follow Up Boss should be presets over this shape, not separate hardcoded
+    # dashboard backends.
+    "integrations": {
+        "tools_root": "",
+        "crm": {
+            "provider": "custom",
+            "label": "CRM",
+            "api_key_env": "CRM_API_KEY",
+            "base_url": "",
+            "auth_type": "header",
+            "auth_header": "Authorization",
+            "auth_prefix": "Bearer ",
+            "auth_query_param": "api_key",
+            "db_columns": {
+                "lead_id": "crm_lead_id",
+                "stage": "crm_stage",
+                "tags": "crm_tags",
+            },
+            "endpoints": {
+                "leads": "/v1/leads",
+                "lead": "/v1/leads/:id",
+                "notes": "/v1/leads/:id/notes",
+            },
+        },
+    },
+
     # Agent Hub definitions shown in the local dashboard.  The runtime uses
     # these as orchestration/persona metadata; empty skills/toolsets means the
     # agent inherits the normal Elevate defaults.
@@ -2393,6 +2427,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation", "access",
     "agent_hub", "auxiliary", "custom_providers", "context", "memory",
+    "sources", "integrations",
     "plugins", "gateway", "sessions", "dashboard", "privacy", "tts", "stt",
     "voice", "human_delay", "prefill_messages_file", "honcho", "timezone",
     "discord", "whatsapp", "telegram", "slack", "mattermost", "platforms",
