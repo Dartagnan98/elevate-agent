@@ -8943,6 +8943,14 @@ Examples:
     insights_parser.add_argument(
         "--source", help="Filter by platform (cli, telegram, discord, etc.)"
     )
+    insights_parser.add_argument(
+        "--turns",
+        action="store_true",
+        help="Show lightweight per-turn gateway usage from state.db turn_usage",
+    )
+    insights_parser.add_argument(
+        "--limit", type=int, default=25, help="Recent turn row limit for --turns (default: 25)"
+    )
 
     def cmd_insights(args):
         try:
@@ -8951,8 +8959,12 @@ Examples:
 
             db = SessionDB()
             engine = InsightsEngine(db)
-            report = engine.generate(days=args.days, source=args.source)
-            print(engine.format_terminal(report))
+            if getattr(args, "turns", False):
+                report = engine.generate_turn_usage(days=args.days, source=args.source, limit=args.limit)
+                print(engine.format_turn_usage_terminal(report))
+            else:
+                report = engine.generate(days=args.days, source=args.source)
+                print(engine.format_terminal(report))
             db.close()
         except Exception as e:
             print(f"Error generating insights: {e}")

@@ -26,6 +26,8 @@ import {
   Brain,
   BriefcaseBusiness,
   Building2,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Code,
   Copy,
@@ -68,7 +70,7 @@ import {
 } from "lucide-react";
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
-import { api, type SessionInfo } from "@/lib/api";
+import { api, type CronJob, type SessionInfo } from "@/lib/api";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
@@ -594,6 +596,38 @@ function sessionTitle(session: SessionInfo): string {
   return session.preview?.trim() || "Untitled chat";
 }
 
+function cronJobIdFromSession(session: SessionInfo): string | null {
+  if ((session.source ?? "") !== "cron") return null;
+  if (!session.id?.startsWith("cron_")) return null;
+  return session.id.replace(/^cron_/, "").split("_", 1)[0] ?? null;
+}
+
+function isCronSession(session: SessionInfo): boolean {
+  return cronJobIdFromSession(session) !== null;
+}
+
+function cronSessionLabel(
+  session: SessionInfo,
+  jobsById: Map<string, CronJob>,
+): string {
+  const jobId = cronJobIdFromSession(session);
+  if (jobId) {
+    const job = jobsById.get(jobId);
+    const fromJob = job?.name?.trim() || job?.prompt?.trim();
+    if (fromJob) {
+      return fromJob.length > 48 ? `${fromJob.slice(0, 47)}…` : fromJob;
+    }
+    if (job) return jobId;
+  }
+  const raw = sessionTitle(session);
+  const stripped = raw
+    .replace(/^\[SYSTEM:\s*/i, "")
+    .replace(/\]$/, "")
+    .replace(/^You are\s+/i, "")
+    .trim();
+  return stripped || raw;
+}
+
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
   if (!embeddedChat) return "/sessions";
   return `/chat?resume=${encodeURIComponent(session.id)}`;
@@ -645,6 +679,14 @@ function DesktopSidebar({
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionError, setSessionError] = useState(false);
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
+  const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("elevate.sidebar.automations") !== "0";
+    } catch {
+      return true;
+    }
+  });
   const [query, setQuery] = useState("");
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => readPinnedSessionIds());
   const [unreadIds, setUnreadIds] = useState<string[]>(() => readUnreadSessionIds());
@@ -671,6 +713,43 @@ function DesktopSidebar({
     const id = window.setInterval(loadSessions, 5000);
     return () => window.clearInterval(id);
   }, [loadSessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadJobs = () => {
+      api
+        .getCronJobs()
+        .then((jobs) => {
+          if (!cancelled) setCronJobs(jobs ?? []);
+        })
+        .catch(() => {
+          /* sidebar can render without job names */
+        });
+    };
+    loadJobs();
+    const id = window.setInterval(loadJobs, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "elevate.sidebar.automations",
+        automationsOpen ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [automationsOpen]);
+
+  const cronJobsById = useMemo(() => {
+    const map = new Map<string, CronJob>();
+    for (const job of cronJobs) map.set(job.id, job);
+    return map;
+  }, [cronJobs]);
 
   useEffect(() => {
     writePinnedSessionIds(pinnedIds);
@@ -726,11 +805,15 @@ function DesktopSidebar({
   );
   const liveSessions = filteredSessions.filter((session) => session.is_active);
   const spotlightSessions = (pinnedSessions.length ? pinnedSessions : liveSessions)
+    .filter((session) => !isCronSession(session))
     .slice(0, 4);
   const spotlightIds = new Set(spotlightSessions.map((session) => session.id));
-  const recentSessions = filteredSessions
-    .filter((session) => !spotlightIds.has(session.id))
+  const chatSessions = filteredSessions
+    .filter((session) => !spotlightIds.has(session.id) && !isCronSession(session))
     .slice(0, 18);
+  const automationSessions = filteredSessions
+    .filter((session) => isCronSession(session))
+    .slice(0, 24);
 
   const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
   const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
@@ -747,10 +830,6 @@ function DesktopSidebar({
     }
     navigate(`/chat?new=${Date.now()}`);
     onNavigate();
-  };
-
-  const focusSearch = () => {
-    searchRef.current?.focus();
   };
 
   const togglePinned = (sessionId: string) => {
@@ -1008,17 +1087,34 @@ function DesktopSidebar({
             <Plus className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
             <span className="truncate">New chat</span>
           </button>
-          <button
-            type="button"
-            onClick={focusSearch}
-            className={sidebarActionClass(false)}
-          >
-            <Search className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
-            <span className="truncate">Search</span>
-            <span className="ml-auto rounded-md bg-card/70 px-1.5 py-0.5 text-[0.7rem] leading-none text-[var(--sidebar-text-muted)]">
-              /
-            </span>
-          </button>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search"
+              className={cn(
+                "h-9 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)]",
+                "pl-9 pr-9 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)]",
+                "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
+              )}
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label={t.common.clear}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            ) : (
+              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-card/70 px-1.5 py-0.5 text-[0.7rem] leading-none text-[var(--sidebar-text-muted)]">
+                /
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="mt-3">
@@ -1044,31 +1140,6 @@ function DesktopSidebar({
           </div>
         </div>
 
-        <div className="relative mt-2.5">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />
-          <input
-            ref={searchRef}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search chats"
-            className={cn(
-              "h-9 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)]",
-              "pl-9 pr-8 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)]",
-              "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
-            )}
-          />
-          {query && (
-            <button
-              type="button"
-              onClick={() => setQuery("")}
-              aria-label={t.common.clear}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)]"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-
         {spotlightSessions.length > 0 && (
           <SessionSection
             embeddedChat={embeddedChat}
@@ -1090,16 +1161,31 @@ function DesktopSidebar({
           onOpenSession={openSession}
           onTogglePinned={togglePinned}
           pinnedIds={pinnedIds}
-          sessions={recentSessions}
+          sessions={chatSessions}
           unreadIds={unreadIds}
           statusText={
             sessionError
               ? "Sessions unavailable"
-              : !sessionsLoading && recentSessions.length === 0
+              : !sessionsLoading && chatSessions.length === 0
                 ? "No chats yet"
                 : undefined
           }
         />
+
+        {automationSessions.length > 0 && (
+          <AutomationsSection
+            embeddedChat={embeddedChat}
+            open={automationsOpen}
+            onToggle={() => setAutomationsOpen((prev) => !prev)}
+            onOpenContextMenu={openSessionMenu}
+            onOpenSession={openSession}
+            onTogglePinned={togglePinned}
+            pinnedIds={pinnedIds}
+            sessions={automationSessions}
+            unreadIds={unreadIds}
+            cronJobsById={cronJobsById}
+          />
+        )}
 
         {toolNavItems.length > 0 && (
           <div className="mt-4">
@@ -1255,6 +1341,8 @@ function SessionListItem({
   pinned,
   session,
   unread,
+  displayTitle,
+  hideSourceTag,
 }: {
   embeddedChat: boolean;
   onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
@@ -1263,6 +1351,8 @@ function SessionListItem({
   pinned: boolean;
   session: SessionInfo;
   unread: boolean;
+  displayTitle?: string;
+  hideSourceTag?: boolean;
 }) {
   const route = sessionRoute(session, embeddedChat);
   const location = useLocation();
@@ -1286,21 +1376,24 @@ function SessionListItem({
           : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
       )}
     >
-      <span
-        className={cn(
-          "h-2 w-2 shrink-0 rounded-full",
-          unread
-            ? "bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-primary)_14%,transparent)]"
-            : session.is_active
-              ? "bg-success"
-              : "bg-current/30",
-        )}
-      />
+      {session.is_active ? (
+        <Loader2
+          aria-label="Running"
+          className="h-3.5 w-3.5 shrink-0 animate-spin text-primary"
+        />
+      ) : unread ? (
+        <span
+          aria-label="Unread"
+          className="h-2 w-2 shrink-0 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-primary)_14%,transparent)]"
+        />
+      ) : (
+        <span className="h-3.5 w-3.5 shrink-0" />
+      )}
       <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5">
-        {sessionTitle(session)}
+        {displayTitle ?? sessionTitle(session)}
       </span>
       <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.72rem] leading-none text-[var(--sidebar-text-muted)]">
-        {session.source && session.source !== "local" && (
+        {!hideSourceTag && session.source && session.source !== "local" && (
           <span className="max-w-[3.25rem] truncate">{session.source}</span>
         )}
         <span className="tabular-nums">{compactSessionAge(session.last_active)}</span>
@@ -1343,9 +1436,81 @@ function SessionListItem({
         <MoreHorizontal className="h-3.5 w-3.5" />
       </button>
       <span className="sr-only">
+        {displayTitle ?? sessionTitle(session)} ·{" "}
+        {session.is_active ? "running, " : ""}
         {session.source ?? "local"} {timeAgo(session.last_active)}
       </span>
     </NavLink>
+  );
+}
+
+function AutomationsSection({
+  embeddedChat,
+  open,
+  onToggle,
+  onOpenContextMenu,
+  onOpenSession,
+  onTogglePinned,
+  pinnedIds,
+  sessions,
+  unreadIds,
+  cronJobsById,
+}: {
+  embeddedChat: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
+  onOpenSession: (session: SessionInfo) => void;
+  onTogglePinned: (sessionId: string) => void;
+  pinnedIds: string[];
+  sessions: SessionInfo[];
+  unreadIds: string[];
+  cronJobsById: Map<string, CronJob>;
+}) {
+  const liveCount = sessions.filter((session) => session.is_active).length;
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-2 py-0.5 text-left text-[0.72rem] font-semibold text-[var(--sidebar-text-muted)] hover:text-[var(--sidebar-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40 rounded"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0" />
+        )}
+        <span>Automations</span>
+        <span className="ml-1 text-[0.7rem] font-normal text-[var(--sidebar-text-muted)] tabular-nums">
+          {sessions.length}
+        </span>
+        {liveCount > 0 && (
+          <span className="ml-auto flex items-center gap-1 text-[0.7rem] font-medium text-primary">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {liveCount} live
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-1 space-y-0.5">
+          {sessions.map((session) => (
+            <SessionListItem
+              key={session.id}
+              embeddedChat={embeddedChat}
+              onOpenContextMenu={onOpenContextMenu}
+              onOpenSession={onOpenSession}
+              onTogglePinned={onTogglePinned}
+              pinned={pinnedIds.includes(session.id)}
+              session={session}
+              unread={unreadIds.includes(session.id)}
+              displayTitle={cronSessionLabel(session, cronJobsById)}
+              hideSourceTag
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -91,6 +91,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("tasks",)),
     CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",
                aliases=("q",), args_hint="<prompt>"),
+    CommandDef("goal", "Set or manage a persistent cross-turn goal", "Session",
+               args_hint="[status|pause|resume|clear|<goal>]",
+               subcommands=("status", "pause", "resume", "clear", "stop", "done")),
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
                args_hint="<prompt>"),
     CommandDef("status", "Show session info", "Session"),
@@ -372,6 +375,11 @@ def _is_gateway_available(cmd: CommandDef, config_overrides: set[str] | None = N
     return False
 
 
+def _requires_argument(args_hint: str) -> bool:
+    """Return True when selecting a command without text would be incomplete."""
+    return args_hint.strip().startswith("<")
+
+
 def gateway_help_lines() -> list[str]:
     """Generate gateway help text lines from the registry."""
     overrides = _resolve_config_gates()
@@ -428,7 +436,9 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
 
     Telegram command names cannot contain hyphens, so they are replaced with
     underscores.  Aliases are skipped -- Telegram shows one menu entry per
-    canonical command.
+    canonical command. Commands that require arguments are skipped because
+    selecting a Telegram BotCommand sends only ``/command`` and would execute
+    an incomplete command.
 
     Plugin-registered slash commands are included so plugins get native
     autocomplete in Telegram without touching core code.
@@ -438,10 +448,14 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
+        if _requires_argument(cmd.args_hint):
+            continue
         tg_name = _sanitize_telegram_name(cmd.name)
         if tg_name:
             result.append((tg_name, cmd.description))
-    for name, description, _args_hint in _iter_plugin_command_entries():
+    for name, description, args_hint in _iter_plugin_command_entries():
+        if _requires_argument(args_hint):
+            continue
         tg_name = _sanitize_telegram_name(name)
         if tg_name:
             result.append((tg_name, description))

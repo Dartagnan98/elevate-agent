@@ -8,8 +8,10 @@ requiring a cloud backend.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import hashlib
 import sqlite3
 import urllib.parse
@@ -440,7 +442,96 @@ def _latest_text(record: JsonRecord) -> str:
     return "No preview text yet."
 
 
+_AUTOMATED_LOCALPARTS = {
+    "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "do_not_reply",
+    "mailer-daemon", "mailerdaemon", "postmaster", "bounce", "bounces", "notification",
+    "notifications", "alerts", "alert", "info", "infoalerts", "newsletter", "news",
+    "marketing", "promotions", "promo", "promos", "deals", "offers", "updates",
+    "update", "system", "auto", "automated", "noreplies", "support", "help",
+    "hello", "team", "service", "services", "billing", "receipts", "orders", "order",
+    "shipping", "ship", "tracking", "account", "accounts", "security", "feedback",
+    "reply", "replies", "customersupport", "customer-support", "customerservice",
+    "customer-service", "care", "reminders", "reminder", "verify", "verification",
+    "confirm", "confirmation", "receipt", "invoice", "invoices", "members",
+    "membership", "subscriptions", "subscribe", "unsubscribe", "list", "lists",
+    "broadcast", "campaign", "campaigns", "digest", "weekly", "daily", "drop",
+    "drops",
+}
+
+_AUTOMATED_DOMAIN_HINTS = (
+    "accounts.google.com", "google.com", "googlemail.com", "mail-noreply",
+    "scotiabank.com", "scotiabank.ca", "rbc.com", "td.com", "amazon.com",
+    "amazonses.com", "shopify.com", "mailchimp.com", "sendgrid.net", "klaviyomail.com",
+    "klaviyo.com", "mailerlite.com", "constantcontact.com", "hubspot.com",
+    "intercom-mail.com", "linkedin.com", "facebookmail.com", "instagram-mail.com",
+    "twittermail.com", "stripe.com", "squareup.com", "uber.com", "doordash.com",
+    "shipstation.com", "ups.com", "fedex.com", "usps.com", "canadapost.ca",
+    "ticketmaster.com", "eventbrite.com", "zoom.us", "calendly.com", "github.com",
+    "githubmail.com", "atlassian.net", "notion.so", "figma.com", "slack.com",
+    "spotify.com", "netflix.com", "apple.com", "appleid.apple.com", "youtube.com",
+    "discord.com", "patreon.com", "medium.com", "substack.com", "wix.com",
+    "squarespace.com", "wordpress.com", "godaddy.com", "namecheap.com",
+)
+
+
+def _extract_email(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", str(text))
+    return match.group(0).lower() if match else ""
+
+
+def _is_automated_email(email: str) -> bool:
+    """Heuristic: is this sender a noreply / newsletter / transactional source?"""
+    if not email or "@" not in email:
+        return False
+    local, _, domain = email.partition("@")
+    local = local.lower().strip()
+    domain = domain.lower().strip()
+    if not local or not domain:
+        return False
+    # Strong patterns in the localpart
+    if "noreply" in local or "no-reply" in local or "donotreply" in local or "do-not-reply" in local:
+        return True
+    if local in _AUTOMATED_LOCALPARTS:
+        return True
+    # Common bulk-mail subdomain hints
+    for hint in _AUTOMATED_DOMAIN_HINTS:
+        if domain == hint or domain.endswith("." + hint):
+            return True
+    if domain.startswith(("mail.", "email.", "newsletter.", "news.", "alerts.", "notify.", "notifications.", "updates.", "promo.", "send.", "sender.", "delivery.")):
+        return True
+    # Domain ends with -mail.com / -email.com / -mailer.* (transactional ESP patterns)
+    if re.search(r"-(mail|email|mailer|notify|sender)\.[a-z]{2,}$", domain):
+        return True
+    return False
+
+
+def _is_automated_sender_record(record: JsonRecord) -> bool:
+    """Inspect a normalized message/contact record and decide if the sender is automated."""
+    candidates: list[str] = []
+    for key in ("from", "sender", "display_name", "personName", "handle", "email"):
+        val = record.get(key)
+        if isinstance(val, dict):
+            for sub in ("email", "address", "value", "id"):
+                if val.get(sub):
+                    candidates.append(str(val[sub]))
+        elif isinstance(val, (list, tuple)):
+            for item in val:
+                if isinstance(item, str):
+                    candidates.append(item)
+        elif val:
+            candidates.append(str(val))
+    for raw in candidates:
+        email = _extract_email(raw)
+        if email and _is_automated_email(email):
+            return True
+    return False
+
+
 def _heat_score_for_record(record: JsonRecord) -> tuple[int, str]:
+    if _is_automated_sender_record(record):
+        return 0, "normal"
     explicit = record.get("heat_score") or record.get("lead_score") or record.get("score")
     score = _safe_int(explicit, 35 if explicit is None else 0)
     haystack = " ".join(
@@ -1610,6 +1701,65 @@ def _candidate_records_for_source(source_dir: Path, source: JsonRecord, safe_lim
     return records
 
 
+def _composio_connector_view(source_root: Path, source_id: str) -> JsonRecord | None:
+    """Synthesize a connector_view-shaped record for a composio-<toolkit> dir.
+
+    The composio inbound puller writes per-toolkit dirs (composio-gmail,
+    composio-slack, etc.) that aren't in SOURCE_CONNECTION_BLUEPRINTS. The
+    inbox builder iterates the static blueprints, so without this synthetic
+    view those messages never reach /leads.
+    """
+    source_dir = _source_dir(source_root, source_id)
+    if not source_dir.exists():
+        return None
+    record_counts = {
+        file_name.removesuffix(".jsonl"): _count_jsonl(source_dir / file_name)
+        for file_name in JSONL_FILES
+    }
+    if not any(record_counts.values()):
+        return None
+    toolkit = source_id.removeprefix("composio-") or source_id
+    return {
+        "id": source_id,
+        "label": f"Composio — {toolkit}",
+        "category": "messages",
+        "state": "connected",
+        "sourceExists": True,
+        "sourceDir": str(source_dir),
+        "sourcePath": str(source_dir / "source.json"),
+        "statusPath": str(source_dir / "status.json"),
+        "artifactsDir": str(source_dir / "artifacts"),
+        "connectionType": "composio",
+        "syncMode": "poll",
+        "authStatus": None,
+        "initializeBehavior": "composio_social_setup",
+        "ownerAgent": OWNER_BY_SOURCE.get("social", "Executive Assistant"),
+        "enabledUiSurfaces": UI_BY_SOURCE.get("social", []),
+        "connected": True,
+        "importOnly": False,
+        "blocked": False,
+        "lastError": None,
+        "nextOperatorStep": None,
+        "lastCheckedAt": None,
+        "recordCounts": record_counts,
+        "prompt": "",
+    }
+
+
+def _discover_composio_views(source_root: Path) -> list[JsonRecord]:
+    """List synthetic views for every composio-<toolkit> dir on disk."""
+    if not source_root.exists():
+        return []
+    views: list[JsonRecord] = []
+    for child in sorted(source_root.iterdir()):
+        if not child.is_dir() or not child.name.startswith("composio-"):
+            continue
+        view = _composio_connector_view(source_root, child.name)
+        if view is not None:
+            views.append(view)
+    return views
+
+
 def build_source_inbox_response(
     config: dict[str, Any] | None = None,
     *,
@@ -1618,15 +1768,24 @@ def build_source_inbox_response(
     config = config or load_config()
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
-    safe_limit = max(1, min(int(limit or 16), 100))
+    safe_limit = max(1, min(int(limit or 16), 500))
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
         if (view := connector_view(source_root, str(item["id"]))) is not None
     ]
+    # Fold in the composio per-toolkit dirs so messages pulled by the
+    # inbound puller surface in /leads alongside Apple Messages and CRM.
+    existing_ids = {str(view.get("id") or "") for view in connectors}
+    for extra in _discover_composio_views(source_root):
+        if str(extra.get("id") or "") in existing_ids:
+            continue
+        connectors.append(extra)
 
     threads: list[JsonRecord] = []
     drafts: list[JsonRecord] = []
+    skipped_drafts: list[JsonRecord] = []
+    skipped_cutoff = datetime.now(timezone.utc) - timedelta(days=3)
     hidden_counts = {"done": 0, "archived": 0}
     totals = {
         "sources": 0,
@@ -1640,6 +1799,19 @@ def build_source_inbox_response(
     seen: set[str] = set()
     seen_drafts: set[str] = set()
     task_state_by_source: dict[str, JsonRecord] = {}
+
+    # Phase 6: enrich each thread with lead-scorer meta (score / label / reason)
+    # so lane skills + dashboard see scorer state alongside heatLabel. Bulk-load
+    # BEFORE we walk records — we need the dead label to short-circuit
+    # enumeration so dead threads don't pollute the hotThreads counter or the
+    # default leads view. Dashboard still shows them via /api/threads/meta?label=dead.
+    try:
+        from elevate_cli import outreach_db as _odb
+        _meta_by_key: dict[tuple[str, str], dict[str, Any]] = {
+            (m["sourceId"], m["threadId"]): m for m in _odb.list_thread_meta(limit=1000)
+        }
+    except Exception:
+        _meta_by_key = {}
 
     for source in connectors:
         counts = _source_record_counts(source)
@@ -1664,6 +1836,24 @@ def build_source_inbox_response(
             thread = _thread_from_record(source, record, status=status)
             if thread["id"] in seen:
                 continue
+
+            # Attach scorer meta and short-circuit dead threads BEFORE the
+            # hotThreads counter so the dashboard total reflects actionable leads.
+            _meta = _meta_by_key.get((str(thread.get("sourceId") or ""), str(thread.get("threadId") or "")))
+            if _meta:
+                thread["score"] = _meta.get("score")
+                thread["leadLabel"] = _meta.get("label")
+                thread["scoreReason"] = _meta.get("reason")
+                thread["scoredAt"] = _meta.get("scoredAt")
+            else:
+                thread["score"] = None
+                thread["leadLabel"] = None
+                thread["scoreReason"] = None
+                thread["scoredAt"] = None
+
+            if thread.get("leadLabel") == "dead":
+                continue
+
             seen.add(thread["id"])
             if thread["heatLabel"] == "hot":
                 totals["hotThreads"] += 1
@@ -1675,9 +1865,25 @@ def build_source_inbox_response(
             task_id = _task_key(record)
             state = _as_dict(task_states.get(task_id))
             status = str(state.get("status") or record.get("status") or "pending").lower()
-            if status in {"approved", "skipped", "done", "archived"}:
+            thread_meta = _meta_by_key.get((source_id, _thread_key(record)))
+            if status == "skipped":
+                updated_dt = _parse_record_dt(state.get("updated_at"))
+                if updated_dt and updated_dt >= skipped_cutoff:
+                    draft = _draft_from_task(source, record, state)
+                    draft["skippedAt"] = state.get("updated_at")
+                    if thread_meta:
+                        draft["score"] = thread_meta.get("score")
+                        draft["leadLabel"] = thread_meta.get("label")
+                        draft["scoreReason"] = thread_meta.get("reason")
+                    skipped_drafts.append(draft)
+                continue
+            if status in {"approved", "done", "archived", "cancelled"}:
                 continue
             draft = _draft_from_task(source, record, state)
+            if thread_meta:
+                draft["score"] = thread_meta.get("score")
+                draft["leadLabel"] = thread_meta.get("label")
+                draft["scoreReason"] = thread_meta.get("reason")
             if draft["id"] in seen_drafts:
                 continue
             seen_drafts.add(draft["id"])
@@ -1701,11 +1907,13 @@ def build_source_inbox_response(
             thread,
         ):
             continue
+        if _is_automated_sender_record(_as_dict(thread.get("record")) or thread):
+            continue
         source_id = str(thread.get("sourceId") or "")
         task_id = f"thread-draft:{thread.get('threadId')}"
         state = _as_dict(task_state_by_source.get(source_id, {}).get(task_id))
         status = str(state.get("status") or "").lower()
-        if status in {"approved", "skipped", "done", "archived"}:
+        if status in {"approved", "skipped", "done", "archived", "cancelled"}:
             continue
         generated_id = f"{source_id}:{task_id}"
         if generated_id in seen_drafts:
@@ -1714,6 +1922,9 @@ def build_source_inbox_response(
         generated_draft = _draft_from_thread(source_by_id.get(source_id, {}), thread)
         if state.get("draft_text"):
             generated_draft["draftText"] = str(state.get("draft_text"))
+        generated_draft["score"] = thread.get("score")
+        generated_draft["leadLabel"] = thread.get("leadLabel")
+        generated_draft["scoreReason"] = thread.get("scoreReason")
         drafts.append(generated_draft)
 
     drafts.sort(
@@ -1731,6 +1942,10 @@ def build_source_inbox_response(
     totals["crmPeople"] = sum(1 for profile in profiles if profile.get("hasCrm"))
     totals["conversationPeople"] = sum(1 for profile in profiles if profile.get("hasConversation"))
     totals["potentialLeads"] = sum(1 for profile in profiles if profile.get("isPotentialLead") and not profile.get("hasCrm"))
+    skipped_drafts.sort(
+        key=lambda item: _parse_record_dt(item.get("skippedAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        reverse=True,
+    )
     return {
         **info,
         "limit": safe_limit,
@@ -1740,6 +1955,208 @@ def build_source_inbox_response(
         "profiles": profiles[:safe_limit],
         "threads": visible_threads,
         "drafts": drafts[:safe_limit],
+        "skippedDrafts": skipped_drafts[: max(safe_limit, 50)],
+    }
+
+
+def _resolve_source_view(source_root: Path, source_id: str) -> JsonRecord | None:
+    view = connector_view(source_root, source_id)
+    if view is not None:
+        return view
+    if source_id.startswith("composio-"):
+        return _composio_connector_view(source_root, source_id)
+    return None
+
+
+def _message_for_thread(record: JsonRecord) -> JsonRecord | None:
+    text = ""
+    for key in ("text", "body", "message", "summary", "title"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            break
+    sender = ""
+    sender_payload = record.get("from") or record.get("sender") or {}
+    if isinstance(sender_payload, dict):
+        sender = str(sender_payload.get("name") or sender_payload.get("id") or "").strip()
+    elif isinstance(sender_payload, str):
+        sender = sender_payload.strip()
+    direction = str(record.get("direction") or "").strip().lower() or None
+    timestamp = _record_timestamp(record)
+    if not text and not sender and not timestamp:
+        return None
+    return {
+        "id": str(record.get("id") or record.get("source_record_id") or ""),
+        "direction": direction or ("inbound" if sender else "outbound"),
+        "sender": sender or None,
+        "text": text,
+        "timestamp": timestamp,
+    }
+
+
+def build_thread_context_response(
+    source_id: str,
+    thread_id: str,
+    *,
+    config: dict[str, Any] | None = None,
+    limit: int = 200,
+) -> JsonRecord:
+    """Aggregate everything we know about a single thread for the drawer view.
+
+    Pulls messages (filtered to this thread), the latest pending draft, prior
+    sends from the queue, lead-scorer meta, and stub buckets for notes/activity
+    so the UI can render placeholders until those endpoints land.
+    """
+    config = config or load_config()
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    source = _resolve_source_view(source_root, source_id)
+    if source is None:
+        raise ValueError(f"Unknown source connector: {source_id}")
+
+    safe_limit = max(20, min(int(limit or 200), 500))
+    source_dir = _source_dir(source_root, source_id)
+
+    raw_messages = _read_jsonl_records(source_dir / "messages.jsonl", limit=2000, tail=True)
+    messages: list[JsonRecord] = []
+    person_name = ""
+    for record in raw_messages:
+        rec_thread = str(record.get("thread_id") or record.get("conversation_id") or "").strip()
+        if rec_thread != thread_id:
+            continue
+        normalized = _message_for_thread(record)
+        if normalized is None:
+            continue
+        if not person_name and normalized["direction"] == "inbound" and normalized.get("sender"):
+            person_name = str(normalized["sender"])
+        messages.append(normalized)
+    messages.sort(key=lambda m: _parse_record_dt(m.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc))
+    messages = messages[-safe_limit:]
+
+    lead_record: JsonRecord | None = None
+    for record in _read_jsonl_records(source_dir / "contacts.jsonl", limit=2000):
+        if str(record.get("contact_id") or record.get("id") or "").strip() == thread_id:
+            lead_record = record
+            if not person_name:
+                person_name = _record_person_name(record)
+            break
+
+    activity_records: list[JsonRecord] = []
+    for record in _read_jsonl_records(source_dir / "lead-events.jsonl", limit=2000):
+        if str(record.get("contact_id") or record.get("conversation_id") or "").strip() != thread_id:
+            continue
+        activity_records.append(
+            {
+                "id": str(record.get("source_record_id") or record.get("id") or ""),
+                "type": record.get("type") or record.get("event_type") or "event",
+                "title": record.get("title") or record.get("summary") or record.get("text"),
+                "summary": record.get("summary") or record.get("text"),
+                "timestamp": record.get("timestamp") or record.get("created_at") or record.get("last_seen_at"),
+            }
+        )
+    activity_records.sort(
+        key=lambda a: _parse_record_dt(a.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        reverse=True,
+    )
+    activity_records = activity_records[:20]
+
+    lead: JsonRecord | None = None
+    if lead_record is not None:
+        emails_raw = lead_record.get("emails") or lead_record.get("email")
+        phones_raw = lead_record.get("phones") or lead_record.get("phone")
+        if isinstance(emails_raw, (list, tuple)):
+            emails = [str(e) for e in emails_raw if e]
+        elif emails_raw:
+            emails = [str(emails_raw)]
+        else:
+            emails = []
+        if isinstance(phones_raw, (list, tuple)):
+            phones = [str(p) for p in phones_raw if p]
+        elif phones_raw:
+            phones = [str(phones_raw)]
+        else:
+            phones = []
+        tags_raw = lead_record.get("tags") or []
+        if isinstance(tags_raw, (list, tuple)):
+            tags_clean = [str(t) for t in tags_raw if t]
+        else:
+            tags_clean = [str(tags_raw)] if tags_raw else []
+        score_val = lead_record.get("score")
+        score_int: int | None
+        try:
+            score_int = int(score_val) if score_val is not None else None
+        except (TypeError, ValueError):
+            score_int = None
+        lead = {
+            "leadId": lead_record.get("lead_id") or lead_record.get("contact_id"),
+            "displayName": lead_record.get("display_name") or person_name,
+            "stage": lead_record.get("stage"),
+            "leadSource": lead_record.get("lead_source") or lead_record.get("source"),
+            "assignedUser": lead_record.get("assigned_user"),
+            "score": score_int,
+            "tags": tags_clean,
+            "summary": lead_record.get("summary") or lead_record.get("text"),
+            "emails": emails,
+            "phones": phones,
+            "channel": lead_record.get("channel"),
+            "timestamp": lead_record.get("timestamp") or lead_record.get("last_seen_at"),
+            "lastSeenAt": lead_record.get("last_seen_at"),
+        }
+
+    pending_draft: JsonRecord | None = None
+    ui_state = _read_source_ui_state(source_dir)
+    task_states = _as_dict(ui_state.get("tasks"))
+    for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=200):
+        if not _is_message_draft_task(record):
+            continue
+        if _thread_key(record) != thread_id:
+            continue
+        task_id = _task_key(record)
+        state = _as_dict(task_states.get(task_id))
+        status = str(state.get("status") or record.get("status") or "pending").lower()
+        if status in {"approved", "done", "archived", "cancelled", "skipped"}:
+            continue
+        pending_draft = _draft_from_task(source, record, state)
+        break
+
+    sends: list[JsonRecord] = []
+    meta: JsonRecord | None = None
+    try:
+        from elevate_cli import outreach_db as _odb
+        sends = _odb.list_sends_by_thread(source_id, thread_id, limit=50)
+        meta = _odb.get_thread_meta(source_id, thread_id)
+    except Exception:
+        sends = []
+        meta = None
+
+    last_inbound = next((m for m in reversed(messages) if m.get("direction") == "inbound"), None)
+    last_outbound = next((m for m in reversed(messages) if m.get("direction") == "outbound"), None)
+
+    return {
+        "sourceId": source_id,
+        "threadId": thread_id,
+        "source": {
+            "id": source.get("id"),
+            "label": source.get("label"),
+            "category": source.get("category"),
+            "ownerAgent": source.get("ownerAgent"),
+            "connected": source.get("connected"),
+        },
+        "personName": person_name or "Client",
+        "messageCount": len(messages),
+        "messages": messages,
+        "lastInboundAt": (last_inbound or {}).get("timestamp"),
+        "lastOutboundAt": (last_outbound or {}).get("timestamp"),
+        "pendingDraft": pending_draft,
+        "sends": sends,
+        "meta": meta,
+        "lead": lead,
+        "notes": [],
+        "activity": activity_records,
+        "stubs": {
+            "notes": "Notes endpoint not yet wired (planned: GET /api/contacts/{id}/notes).",
+            "activity": "Property activity endpoint not yet wired (planned: GET /api/contacts/{id}/activity).",
+        },
     }
 
 
@@ -1772,6 +2189,24 @@ def update_source_thread_state(
     return build_source_inbox_response(config)
 
 
+_SOURCE_TO_CHANNEL = {
+    "apple-messages": "sms",
+    "sms-provider": "sms",
+    "android-device": "sms",
+    "rcs": "sms",
+    "email": "email",
+    "social": "social_dm",
+    "crm": "crm_note",
+}
+
+
+def _channel_for_source(source_id: str) -> str | None:
+    """Return the outbound channel for a source_id, or None if the source has
+    no outbound (skills/market-stats/etc are read-only inputs, not channels).
+    """
+    return _SOURCE_TO_CHANNEL.get(source_id)
+
+
 def update_source_task_state(
     source_id: str,
     task_id: str,
@@ -1791,23 +2226,87 @@ def update_source_task_state(
     source_dir = _source_dir(Path(info["sourceRoot"]), source_id)
     state = _read_source_ui_state(source_dir)
     tasks = _as_dict(state.get("tasks"))
+
     if normalized in {"restore", "open"}:
         tasks.pop(task_id, None)
-    else:
-        status = "approved" if normalized == "approve" else "skipped" if normalized == "skip" else "pending"
-        existing = _as_dict(tasks.get(task_id))
-        existing.update(
-            {
-                "status": status,
-                "updated_at": _now(),
-            }
-        )
-        if draft_text is not None:
-            existing["draft_text"] = str(draft_text)
-        tasks[task_id] = existing
+        state["tasks"] = tasks
+        _write_source_ui_state(source_dir, state)
+        return build_source_inbox_response(config)
+
+    status = "approved" if normalized == "approve" else "skipped" if normalized == "skip" else "pending"
+    existing = _as_dict(tasks.get(task_id))
+    existing.update({"status": status, "updated_at": _now()})
+    if draft_text is not None:
+        existing["draft_text"] = str(draft_text)
+    tasks[task_id] = existing
     state["tasks"] = tasks
-    _write_source_ui_state(source_dir, state)
+
+    if normalized == "approve":
+        _approve_atomic(source_id, task_id, existing, source_dir, state)
+    else:
+        _write_source_ui_state(source_dir, state)
+
     return build_source_inbox_response(config)
+
+
+def _approve_atomic(
+    source_id: str,
+    task_id: str,
+    task_record: dict[str, Any],
+    source_dir: Path,
+    state: dict[str, Any],
+) -> None:
+    """Atomically pair: insert send_queue row + flip task status to approved.
+
+    Order: open SQLite IMMEDIATE txn, insert queue row, write UI JSON,
+    commit SQLite. If the JSON write fails, the SQLite insert is rolled back.
+    Idempotent on (source_id, thread_id, task_id) so repeat clicks don't
+    create duplicate sends.
+
+    Sources with no outbound channel (skills, market-stats, etc.) just write
+    the JSON state — they can't be sent, only acknowledged.
+    """
+    from elevate_cli import outreach_db
+
+    channel = _channel_for_source(source_id)
+    if not channel:
+        _write_source_ui_state(source_dir, state)
+        return
+
+    thread_id = str(task_record.get("thread_id") or task_record.get("threadId") or task_id)
+    draft_text = str(task_record.get("draft_text") or "").strip()
+    payload = {
+        "draft_text": draft_text,
+        "recipient": {
+            "person_name": task_record.get("person_name") or task_record.get("personName"),
+            "contact_id": task_record.get("contact_id"),
+            "conversation_id": task_record.get("conversation_id") or task_record.get("source_record_id"),
+            "phone": task_record.get("phone") or task_record.get("recipient_phone"),
+            "email": task_record.get("email") or task_record.get("recipient_email"),
+            "social_handle": task_record.get("social_handle") or task_record.get("recipient_handle"),
+        },
+        "channel_meta": {
+            "toolkit": task_record.get("toolkit"),
+            "account_id": task_record.get("composio_account_id"),
+        },
+        "source_id": source_id,
+        "thread_id": thread_id,
+        "task_id": task_id,
+    }
+    attempt_id = task_record.get("attempt_id") or task_record.get("attemptId")
+
+    with outreach_db.connect() as conn:
+        with outreach_db.transaction(conn):
+            outreach_db.enqueue_send(
+                conn,
+                source_id=source_id,
+                thread_id=thread_id,
+                task_id=task_id,
+                channel=channel,
+                payload=payload,
+                attempt_id=attempt_id,
+            )
+            _write_source_ui_state(source_dir, state)
 
 
 def _lofty_lead_name(lead: JsonRecord) -> str:
@@ -1853,11 +2352,291 @@ def _extract_lead_records(payload: Any) -> list[JsonRecord]:
         return [item for item in payload if isinstance(item, dict)]
     if not isinstance(payload, dict):
         return []
-    for key in ("workingLeads", "leads", "data", "items", "results", "records", "list"):
+    for key in ("workingLeads", "leads", "people", "contacts", "data", "items", "results", "records", "list"):
         value = payload.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _basic_auth_header(api_key: str) -> str:
+    encoded = base64.b64encode(f"{api_key}:".encode("utf-8")).decode("ascii")
+    return f"Basic {encoded}"
+
+
+def _build_crm_auth(crm: JsonRecord, api_key: str) -> tuple[dict[str, str], str | None]:
+    """Return (headers, query_param_override). headers always include Accept/Content-Type."""
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    auth_type = str(crm.get("auth_type") or "header").lower()
+    if auth_type == "query":
+        return headers, str(crm.get("auth_query_param") or "api_key")
+    if auth_type == "basic":
+        headers["Authorization"] = _basic_auth_header(api_key)
+        return headers, None
+    header_name = str(crm.get("auth_header") or "Authorization")
+    prefix = str(crm.get("auth_prefix") or "")
+    headers[header_name] = f"{prefix}{api_key}"
+    return headers, None
+
+
+def _generic_crm_get(
+    crm: JsonRecord,
+    api_key: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    base = str(crm.get("base_url") or "").rstrip("/")
+    if not base:
+        raise RuntimeError("CRM base URL is not set")
+    headers, query_param = _build_crm_auth(crm, api_key)
+    url = f"{base}/{path.lstrip('/')}"
+    merged_params = dict(params or {})
+    if query_param:
+        merged_params[query_param] = api_key
+    if merged_params:
+        query = urllib.parse.urlencode(
+            {key: value for key, value in merged_params.items() if value is not None}
+        )
+        url = f"{url}?{query}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=18) as response:
+        raw = response.read(1024 * 1024 * 4)
+    return json.loads(raw.decode("utf-8") or "{}")
+
+
+def _provider_label(provider: str) -> str:
+    return {
+        "followupboss": "Follow Up Boss",
+        "sierra": "Sierra Interactive",
+        "boldtrail": "BoldTrail",
+        "brivity": "Brivity",
+    }.get(provider.lower(), provider.title() if provider else "CRM")
+
+
+def sync_generic_crm_source(
+    config: dict[str, Any] | None = None, *, limit: int = 50
+) -> JsonRecord:
+    config = config or load_config()
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    source_dir = _source_dir(source_root, "crm")
+    artifacts_dir = source_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    now = _now()
+    surfaces = UI_BY_SOURCE["crm"]
+    owner = OWNER_BY_SOURCE["crm"]
+    env_values = _combined_env(config)
+    integrations = _as_dict(config.get("integrations"))
+    crm = _merge_crm(integrations.get("crm"))
+    provider = str(crm.get("provider") or "custom")
+    label = str(crm.get("label") or _provider_label(provider))
+    env_key = str(crm.get("api_key_env") or "CRM_API_KEY")
+    api_key = str(env_values.get(env_key) or "").strip()
+    leads_path = str(_as_dict(crm.get("endpoints")).get("leads") or "/v1/leads")
+
+    if not api_key or not str(crm.get("base_url") or "").strip():
+        _write_json(
+            source_dir / "source.json",
+            {
+                "source_id": "crm",
+                "provider": label,
+                "account_label": label,
+                "connection_type": f"{provider}_api",
+                "auth_status": "missing_secret",
+                "sync_mode": "crm_lead_snapshot",
+                "owner_agent": owner,
+                "enabled_ui_surfaces": surfaces,
+                "setup_status": "needs_operator",
+                "last_sync_at": None,
+                "setup_notes": f"Add {env_key} to ~/.elevate/.env and confirm the {label} base URL.",
+            },
+        )
+        _write_json(
+            source_dir / "status.json",
+            {
+                "connected": False,
+                "import_only": False,
+                "blocked": False,
+                "last_error": None,
+                "next_operator_step": f"Add the {label} API key, then sync CRM again.",
+                "last_checked_at": now,
+            },
+        )
+        for file_name in JSONL_FILES:
+            _replace_jsonl(source_dir / file_name, [])
+        view = connector_view(source_root, "crm")
+        if view is None:
+            raise RuntimeError(f"{label} source could not be read")
+        return view
+
+    leads: list[JsonRecord] = []
+    attempted: list[str] = [leads_path]
+    errors: list[str] = []
+    pagination_params: dict[str, Any] = {"limit": min(limit, 100)}
+    if provider == "followupboss":
+        pagination_params = {"limit": min(limit, 100), "sort": "-updated"}
+    elif provider == "sierra":
+        pagination_params = {"page": 1, "pageSize": min(limit, 100)}
+    elif provider == "boldtrail":
+        pagination_params = {"limit": min(limit, 100), "sort": "-updated_at"}
+    elif provider == "brivity":
+        pagination_params = {"page": 1, "per_page": min(limit, 100)}
+    try:
+        payload = _generic_crm_get(crm, api_key, leads_path, pagination_params)
+        leads = _extract_lead_records(payload)
+    except Exception as exc:
+        errors.append(f"{leads_path}: {exc}")
+
+    deduped: list[JsonRecord] = []
+    seen_ids: set[str] = set()
+    for lead in leads:
+        lead_id = str(lead.get("id") or lead.get("leadId") or lead.get("lead_id") or "").strip()
+        if not lead_id:
+            lead_id = f"unknown-{len(seen_ids) + 1}"
+        if lead_id in seen_ids:
+            continue
+        seen_ids.add(lead_id)
+        deduped.append(lead)
+
+    contact_records: list[JsonRecord] = []
+    conversation_records: list[JsonRecord] = []
+    lead_events: list[JsonRecord] = []
+    task_records: list[JsonRecord] = []
+    for lead in deduped:
+        lead_id = str(lead.get("id") or lead.get("leadId") or lead.get("lead_id") or "").strip()
+        record_id = f"{provider}-lead:{lead_id or len(contact_records) + 1}"
+        name = _lofty_lead_name(lead)
+        timestamp = _lofty_timestamp(lead)
+        stage = str(
+            lead.get("stage") or lead.get("status") or lead.get("leadType") or lead.get("aiStage") or ""
+        ).strip()
+        source = str(
+            lead.get("source") or lead.get("leadSource") or lead.get("origin") or ""
+        ).strip()
+        tags = _tag_names(lead.get("tags"))
+        score = _safe_int(lead.get("score") or lead.get("leadScore"), 45)
+        summary = (
+            f"{name} from {label}"
+            + (f" is in {stage}" if stage else "")
+            + (f" via {source}" if source else "")
+            + "."
+        )
+        base_record = {
+            "source_id": "crm",
+            "source_record_id": record_id,
+            "conversation_id": record_id,
+            "contact_id": record_id,
+            "display_name": name,
+            "channel": label,
+            "timestamp": timestamp,
+            "last_seen_at": timestamp,
+            "last_message_at": timestamp,
+            "text": summary,
+            "summary": summary,
+            "lead_id": lead_id or None,
+            "stage": stage or None,
+            "lead_source": source or None,
+            "assigned_user": lead.get("assignedUser") or lead.get("assignedAgent") or lead.get("assigned_to"),
+            "emails": lead.get("emails") or lead.get("email"),
+            "phones": lead.get("phones") or lead.get("phone"),
+            "score": score,
+            "tags": [*tags, f"{provider}-crm", "crm-lead"],
+            "confidence": 0.82,
+            "target_ui_surfaces": surfaces,
+        }
+        contact_records.append(base_record)
+        conversation_records.append(
+            {
+                **base_record,
+                "total_messages": _safe_int(lead.get("activityCount") or lead.get("taskCount"), 1),
+                "inbound_count": 0,
+                "outbound_count": 0,
+                "last_text": summary,
+            }
+        )
+        lead_events.append(
+            {
+                **base_record,
+                "type": "crm_lead_synced",
+                "title": f"{label} lead synced",
+            }
+        )
+        heat_score, heat_label = _heat_score_for_record(base_record)
+        if heat_label in {"hot", "warm"}:
+            task_records.append(
+                {
+                    **base_record,
+                    "source_record_id": f"{record_id}:follow-up",
+                    "title": f"Review {name}",
+                    "status": "open",
+                    "task_type": "lead_follow_up",
+                    "approval_required": False,
+                    "owner_agent": owner,
+                    "summary": f"{name} looks {heat_label} in {label}. Review source, stage, notes, and next outreach step.",
+                    "heat_score": heat_score,
+                    "target_ui_surfaces": ["Leads", "Today", "Outreach"],
+                }
+            )
+
+    _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
+    _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
+    _replace_jsonl(source_dir / "messages.jsonl", [])
+    _replace_jsonl(source_dir / "message-days.jsonl", [])
+    _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
+    preserved_tasks = [
+        r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
+        if str(r.get("task_type") or "").lower() != "lead_follow_up"
+    ]
+    _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks + task_records)
+    _write_json(
+        source_dir / "source.json",
+        {
+            "source_id": "crm",
+            "provider": label,
+            "account_label": label,
+            "connection_type": f"{provider}_api",
+            "auth_status": f"{str(crm.get('auth_type') or 'header')}_configured",
+            "sync_mode": "crm_lead_snapshot",
+            "owner_agent": owner,
+            "enabled_ui_surfaces": surfaces,
+            "setup_status": "connected" if deduped else "needs_operator",
+            "last_sync_at": now,
+            "setup_notes": f"Read-only {label} lead snapshot normalized into the local Elevate source inbox.",
+            "attempted_endpoints": attempted,
+            "record_counts": {
+                "contacts": len(contact_records),
+                "conversations": len(conversation_records),
+                "lead_events": len(lead_events),
+                "tasks": len(task_records),
+            },
+        },
+    )
+    _write_json(
+        source_dir / "status.json",
+        {
+            "connected": bool(deduped),
+            "import_only": True,
+            "blocked": False,
+            "last_error": "; ".join(errors) if errors and not deduped else None,
+            "next_operator_step": (
+                "Review the hot/warm lead cards and decide which conversations should become outreach tasks."
+                if deduped
+                else f"{label} auth was found, but no lead rows were returned. Check the API key scope, then sync again."
+            ),
+            "last_checked_at": now,
+            "last_imported_at": now if deduped else None,
+            "counts": {
+                "contacts": len(contact_records),
+                "conversations": len(conversation_records),
+                "lead_events": len(lead_events),
+                "tasks": len(task_records),
+            },
+        },
+    )
+    view = connector_view(source_root, "crm")
+    if view is None:
+        raise RuntimeError(f"{label} source could not be read")
+    return view
 
 
 def _lofty_headers(env_values: dict[str, str]) -> tuple[dict[str, str], str]:
@@ -2049,7 +2828,11 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
     _replace_jsonl(source_dir / "messages.jsonl", [])
     _replace_jsonl(source_dir / "message-days.jsonl", [])
     _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
-    _replace_jsonl(source_dir / "tasks.jsonl", task_records)
+    preserved_tasks = [
+        r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
+        if str(r.get("task_type") or "").lower() != "lead_follow_up"
+    ]
+    _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks + task_records)
     _write_json(
         source_dir / "source.json",
         {
@@ -2224,6 +3007,14 @@ def scaffold_source(source_id: str, config: dict[str, Any] | None = None) -> Jso
     if source_id == "social":
         return scaffold_composio_social_source(config)
     if source_id == "crm":
+        integrations = _as_dict(config.get("integrations"))
+        crm = _merge_crm(integrations.get("crm"))
+        provider = str(crm.get("provider") or "").lower()
+        env_values = _combined_env(config)
+        if provider == "lofty" or (not provider and env_values.get("LOFTY_API_KEY")):
+            return sync_lofty_crm_source(config)
+        if provider in {"followupboss", "sierra", "boldtrail", "brivity", "custom"}:
+            return sync_generic_crm_source(config)
         return sync_lofty_crm_source(config)
 
     info = get_source_root_info(config)
@@ -2466,11 +3257,14 @@ def test_crm_connection(form: JsonRecord) -> JsonRecord:
 
     url = f"{base_url}/{leads_path.lstrip('/')}"
     headers = {"Accept": "application/json"}
-    if crm.get("auth_type") == "query":
+    auth_type = str(crm.get("auth_type") or "header").lower()
+    if auth_type == "query":
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
         query[str(crm.get("auth_query_param") or "api_key")] = [api_key]
         url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query, doseq=True)))
+    elif auth_type == "basic":
+        headers["Authorization"] = _basic_auth_header(api_key)
     else:
         headers[str(crm.get("auth_header") or "Authorization")] = f"{crm.get('auth_prefix') or ''}{api_key}"
 

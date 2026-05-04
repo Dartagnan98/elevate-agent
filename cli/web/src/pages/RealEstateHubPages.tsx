@@ -1,55 +1,103 @@
 import {
+  createContext,
+  lazy,
+  Suspense,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
+  useRef,
   useState,
   type ComponentType,
+  type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Activity,
   AlertTriangle,
+  BookText,
   Bot,
   Brain,
   BriefcaseBusiness,
   Building2,
   CalendarClock,
+  Check,
   CheckCircle2,
+  CheckSquare,
+  ChevronDown,
   Clock,
   Database as DatabaseIcon,
+  ExternalLink,
   FileCheck2,
   FileText,
+  Flame,
+  Filter,
   GitBranch,
   Home,
+  Inbox,
   Loader2,
+  HelpCircle,
+  Mail,
   Megaphone,
   MessageSquare,
+  Phone,
+  Square as SquareIcon,
+  Timer,
+  Share2,
+  Smartphone,
   Network,
+  Pause,
   PencilLine,
+  Play,
+  Plug,
+  Plus,
+  Radar,
   RefreshCw,
+  Repeat,
   Send,
   ShieldCheck,
+  Sparkles,
   Target,
+  Trash2,
+  TrendingDown,
+  Award,
+  ThumbsUp,
+  ThumbsDown,
   Users,
   XCircle,
+  Zap,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
   AgentHubMemoryNode,
   AgentHubSnapshot,
+  ComposioConnectedAccount,
+  ComposioStatus,
   CronJob,
+  OutreachLane,
+  OutreachLaneOverview,
+  OutreachOverview,
+  OutreachTemplate,
   PaginatedSessions,
   SessionInfo,
+  SourceConnectorStatus,
   SourceInboxDraft,
   SourceInboxProfile,
   SourceInboxResponse,
   SourceInboxThread,
   StatusResponse,
+  ThreadContextMessage,
+  ThreadContextResponse,
 } from "@/lib/api";
+import { X as CloseIcon, StickyNote } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { MemoryConstellation } from "@/components/MemoryConstellation";
+const MemoryConstellation = lazy(() =>
+  import("@/components/MemoryConstellation").then((m) => ({ default: m.MemoryConstellation })),
+);
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 
@@ -81,7 +129,7 @@ function useRealEstateHubData(): HubData {
         api.getStatus(),
         api.getSessions(36),
         api.getCronJobs(),
-        api.getSourceInbox(64),
+        api.getSourceInbox(200),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -182,10 +230,6 @@ function sessionTitle(session: SessionInfo): string {
   return session.preview?.trim() || "Untitled chat";
 }
 
-function compactNumber(value: number): string {
-  return new Intl.NumberFormat(undefined, { notation: "compact" }).format(value);
-}
-
 function LoadingState() {
   return (
     <div className="flex min-h-[42vh] items-center justify-center">
@@ -198,67 +242,64 @@ function HubShell({
   children,
   data,
   eyebrow,
-  hero,
   icon: Icon,
   title,
 }: {
   children: React.ReactNode;
   data: HubData;
   eyebrow: string;
-  hero: string;
+  hero?: string;
   icon: ComponentType<{ className?: string }>;
   title: string;
 }) {
   if (data.loading && !data.snapshot && !data.status) return <LoadingState />;
 
+  const gatewayOnline = !!(data.snapshot?.gateway.running || data.status?.gateway_running);
+  const activeJobs = data.cronJobs.filter((job) => job.enabled).length;
+
   return (
-    <div className="real-estate-hub flex flex-col gap-5 pb-6">
-      <section className="relative overflow-hidden rounded-[1.6rem] border border-border bg-card/78 p-5 shadow-[0_28px_90px_color-mix(in_srgb,var(--background-base)_58%,transparent)] sm:p-6">
-        <div className="pointer-events-none absolute inset-0 opacity-80 [background:radial-gradient(circle_at_18%_0%,color-mix(in_srgb,var(--color-primary)_18%,transparent),transparent_31%),radial-gradient(circle_at_85%_18%,color-mix(in_srgb,var(--color-success)_10%,transparent),transparent_28%)]" />
-        <div className="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+    <div className="real-estate-hub flex flex-col gap-4 pb-6">
+      <section className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-4">
+        <div className="min-w-0 flex items-center gap-3">
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
+            <Icon className="h-4 w-4" />
+          </span>
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
-                <Icon className="h-4 w-4" />
-              </span>
+            <div
+              className="text-[0.68rem] uppercase tracking-[0.14em] text-foreground/65 font-semibold"
+              style={MONO_STYLE}
+            >
               {eyebrow}
             </div>
-            <h1 className="mt-4 max-w-3xl text-3xl font-semibold leading-tight text-foreground sm:text-4xl">
+            <h1 className="text-xl font-semibold leading-tight text-foreground sm:text-[1.6rem]">
               {title}
             </h1>
-            <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground">
-              {hero}
-            </p>
-            {data.error && (
-              <div className="mt-4 rounded-xl border border-warning/25 bg-warning/10 px-3 py-2 text-xs text-warning">
-                {data.error}
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 self-start">
-            <HubMetric
-              icon={Activity}
-              label="Gateway"
-              value={data.snapshot?.gateway.running || data.status?.gateway_running ? "Online" : "Offline"}
-            />
-            <HubMetric
-              icon={Users}
-              label="Sessions"
-              value={data.snapshot?.sessions.total ?? data.sessions.length}
-            />
-            <HubMetric
-              icon={Brain}
-              label="Memory facts"
-              value={data.snapshot ? compactNumber(data.snapshot.memory.facts) : "0"}
-            />
-            <HubMetric
-              icon={CalendarClock}
-              label="Timed tasks"
-              value={data.cronJobs.filter((job) => job.enabled).length}
-            />
           </div>
         </div>
+        <div className="flex items-center gap-2 text-[0.72rem] text-foreground/70" style={MONO_STYLE}>
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1",
+              gatewayOnline
+                ? "border-success/45 bg-success/10 text-success"
+                : "border-destructive/45 bg-destructive/10 text-destructive",
+            )}
+          >
+            <span
+              className={cn("h-1.5 w-1.5 rounded-full", gatewayOnline ? "bg-success" : "bg-destructive")}
+            />
+            Agent {gatewayOnline ? "online" : "offline"}
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1">
+            <Timer className="h-3 w-3" />
+            {activeJobs} job{activeJobs === 1 ? "" : "s"}
+          </span>
+        </div>
+        {data.error && (
+          <div className="basis-full rounded-xl border border-warning/25 bg-warning/10 px-3 py-2 text-xs text-warning">
+            {data.error}
+          </div>
+        )}
       </section>
 
       {children}
@@ -476,11 +517,133 @@ function threadWhen(thread: SourceInboxThread): string {
   return thread.latestAt ? isoTimeAgo(thread.latestAt) : "unsynced";
 }
 
-function heatVariant(item: { heatLabel: string }): "default" | "success" | "warning" | "outline" {
-  if (item.heatLabel === "hot") return "warning";
-  if (item.heatLabel === "warm") return "success";
+function heatVariant(item: { heatLabel: string }): "default" | "success" | "warning" | "destructive" | "outline" {
+  if (item.heatLabel === "hot") return "destructive";
+  if (item.heatLabel === "warm") return "warning";
+  if (item.heatLabel === "watch") return "success";
   return "outline";
 }
+
+type HeatTone = {
+  dot: string;
+  pill: string;
+  text: string;
+  ring: string;
+  label: string;
+};
+
+function heatStyles(label: string): HeatTone {
+  switch (label) {
+    case "hot":
+      return {
+        dot: "bg-destructive",
+        pill: "bg-destructive/12 text-destructive border-destructive/45",
+        text: "text-destructive",
+        ring: "ring-destructive/30",
+        label: "Hot lead",
+      };
+    case "warm":
+      return {
+        dot: "bg-warning",
+        pill: "bg-warning/12 text-warning border-warning/45",
+        text: "text-warning",
+        ring: "ring-warning/30",
+        label: "Warm lead",
+      };
+    case "watch":
+      return {
+        dot: "bg-success",
+        pill: "bg-success/12 text-success border-success/40",
+        text: "text-success",
+        ring: "ring-success/30",
+        label: "Lead to watch",
+      };
+    case "dead":
+      return {
+        dot: "bg-foreground/30",
+        pill: "bg-card text-foreground/55 border-border line-through",
+        text: "text-foreground/55",
+        ring: "ring-border",
+        label: "Dead lead",
+      };
+    default:
+      return {
+        dot: "bg-foreground/40",
+        pill: "bg-card text-foreground/70 border-border",
+        text: "text-foreground/70",
+        ring: "ring-border",
+        label: "Cold lead",
+      };
+  }
+}
+
+function inboundWaitMinutes(thread: SourceInboxThread): number | null {
+  if (!thread.latestAt) return null;
+  if (thread.direction !== "inbound") return null;
+  const ts = Date.parse(thread.latestAt);
+  if (Number.isNaN(ts)) return null;
+  return Math.max(0, (Date.now() - ts) / 60000);
+}
+
+type ResponsePulse = {
+  unanswered: number;
+  median: number | null;
+  longest: number | null;
+  longestThread: SourceInboxThread | null;
+  breached5: number;
+  breached30: number;
+  breached60: number;
+};
+
+function computeResponsePulse(threads: SourceInboxThread[]): ResponsePulse {
+  const waits: Array<{ minutes: number; thread: SourceInboxThread }> = [];
+  for (const thread of threads) {
+    const minutes = inboundWaitMinutes(thread);
+    if (minutes === null) continue;
+    waits.push({ minutes, thread });
+  }
+  if (waits.length === 0) {
+    return {
+      unanswered: 0,
+      median: null,
+      longest: null,
+      longestThread: null,
+      breached5: 0,
+      breached30: 0,
+      breached60: 0,
+    };
+  }
+  const sorted = waits.slice().sort((a, b) => a.minutes - b.minutes);
+  const mid = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 === 1
+      ? sorted[mid].minutes
+      : (sorted[mid - 1].minutes + sorted[mid].minutes) / 2;
+  const longest = sorted[sorted.length - 1];
+  return {
+    unanswered: waits.length,
+    median,
+    longest: longest.minutes,
+    longestThread: longest.thread,
+    breached5: waits.filter((w) => w.minutes >= 5).length,
+    breached30: waits.filter((w) => w.minutes >= 30).length,
+    breached60: waits.filter((w) => w.minutes >= 60).length,
+  };
+}
+
+function formatMinutes(minutes: number | null): string {
+  if (minutes == null) return "—";
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  if (minutes < 1440) {
+    const h = Math.floor(minutes / 60);
+    const m = Math.round(minutes - h * 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+  return `${Math.floor(minutes / 1440)}d`;
+}
+
+const MONO_STYLE = { fontFamily: "var(--theme-font-mono)" } as const;
 
 function ClientInboxPreview({
   data,
@@ -603,22 +766,43 @@ function leadThreadBuckets(threads: SourceInboxThread[]) {
   const followUp = threads
     .filter((thread) => thread.heatLabel !== "hot" && (thread.direction === "inbound" || thread.heatLabel === "warm"))
     .slice(0, 10);
-  const watch = threads
-    .filter((thread) => !hot.includes(thread) && !followUp.includes(thread))
-    .slice(0, 10);
+  const placed = new Set<string>([...hot, ...followUp].map((t) => t.id));
+  const remaining = threads.filter((thread) => !placed.has(thread.id));
+  const watch: SourceInboxThread[] = [];
+  const seenSources = new Set<string>(
+    [...hot, ...followUp].map((t) => String(t.sourceId ?? "")),
+  );
+  for (const thread of remaining) {
+    const sid = String(thread.sourceId ?? "");
+    if (!seenSources.has(sid) && watch.length < 10) {
+      watch.push(thread);
+      seenSources.add(sid);
+    }
+  }
+  for (const thread of remaining) {
+    if (watch.length >= 10) break;
+    if (!watch.includes(thread)) watch.push(thread);
+  }
   return { followUp, hot, watch };
 }
 
 function sourceSummary(data: HubData): Array<{ label: string; count: number; state: string }> {
   const sources = data.sourceInbox?.sources ?? [];
+  const sourceCount = (source: typeof sources[number]): number =>
+    Number(
+      source.recordCounts?.conversations
+        ?? source.recordCounts?.contacts
+        ?? source.recordCounts?.messages
+        ?? 0,
+    );
   return sources
-    .filter((source) => Number(source.recordCounts?.conversations ?? source.recordCounts?.contacts ?? 0) > 0)
+    .filter((source) => sourceCount(source) > 0)
     .map((source) => ({
       label: source.label,
-      count: Number(source.recordCounts?.conversations ?? source.recordCounts?.contacts ?? 0),
+      count: sourceCount(source),
       state: source.importOnly ? "snapshot" : source.connected ? "live" : source.state,
     }))
-    .slice(0, 5);
+    .slice(0, 8);
 }
 
 function contactBuckets(profiles: SourceInboxProfile[]) {
@@ -748,49 +932,132 @@ function ContactOverviewBoard({ data }: { data: HubData }) {
 function LeadBoardRow({
   data,
   thread,
+  showOpenThread = true,
 }: {
   data: HubData;
   thread: SourceInboxThread;
+  showOpenThread?: boolean;
 }) {
+  const drawer = useThreadDrawer();
+  const navigate = useNavigate();
+
   const mark = async (action: "done" | "archive") => {
     await api.updateSourceInboxThread(thread.sourceId, thread.threadId, action);
     await data.refresh();
   };
 
+  const openInChat = async () => {
+    try {
+      await api.updateSourceInboxThread(thread.sourceId, thread.threadId, "open");
+    } catch {
+      // best-effort
+    }
+    if (drawer) {
+      drawer.openThread(thread.sourceId, thread.threadId);
+      return;
+    }
+    const params = new URLSearchParams({
+      thread: thread.threadId,
+      source: thread.sourceId,
+    });
+    navigate(`/chat?${params.toString()}`);
+  };
+
+  const inbound = thread.direction !== "outbound";
+  const heat = heatStyles(thread.heatLabel);
+  const wait = inboundWaitMinutes(thread);
+
   return (
-    <div className="group rounded-2xl border border-border/55 bg-background/35 px-3 py-3 transition-colors hover:bg-background/55">
+    <div className="group rounded-2xl border border-border bg-card px-3 py-3 transition-colors hover:bg-card/80">
       <div className="flex items-start gap-3">
         <span
-          className={cn(
-            "mt-1 h-2.5 w-2.5 shrink-0 rounded-full",
-            thread.heatLabel === "hot" ? "bg-warning" : thread.heatLabel === "warm" ? "bg-success" : "bg-muted-foreground/45",
-          )}
+          aria-label={heat.label}
+          role="img"
+          className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", heat.dot)}
         />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
               {thread.personName}
             </div>
-            <Badge variant={heatVariant(thread)}>{thread.heatScore}</Badge>
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full border px-2 py-0.5 text-[0.7rem] font-semibold",
+                heat.pill,
+              )}
+              style={MONO_STYLE}
+            >
+              {thread.heatScore}
+            </span>
           </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-foreground/75">
             {thread.latestText}
           </p>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            <Badge variant="outline">{thread.sourceLabel}</Badge>
-            <Badge variant="outline">{thread.channel}</Badge>
-            <Badge variant="outline">{threadWhen(thread)}</Badge>
-            {thread.messageCount > 1 && <Badge variant="outline">{thread.messageCount} msgs</Badge>}
+          <div
+            className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-foreground/65"
+            style={MONO_STYLE}
+          >
+            <span>{thread.sourceLabel}</span>
+            <span aria-hidden>·</span>
+            <span>{thread.channel}</span>
+            <span aria-hidden>·</span>
+            <span>{inbound ? "in" : "out"}</span>
+            <span aria-hidden>·</span>
+            <span>{threadWhen(thread)}</span>
+            {thread.messageCount > 1 && (
+              <>
+                <span aria-hidden>·</span>
+                <span>{thread.messageCount} msgs</span>
+              </>
+            )}
+            {inbound && wait != null && wait >= 5 && (
+              <span
+                className={cn(
+                  "rounded-full border px-1.5 py-0.5",
+                  wait >= 60
+                    ? "border-destructive/45 bg-destructive/10 text-destructive"
+                    : wait >= 30
+                      ? "border-warning/45 bg-warning/10 text-warning"
+                      : "border-border bg-card text-foreground/70",
+                )}
+              >
+                waited {formatMinutes(wait)}
+              </span>
+            )}
           </div>
         </div>
       </div>
-      <div className="mt-3 flex justify-end gap-1.5">
-        <Button size="sm" variant="outline" onClick={() => void mark("done")}>
-          Done
-        </Button>
-        <Button size="sm" variant="ghost" onClick={() => void mark("archive")}>
+      <div className="mt-3 flex flex-wrap justify-end gap-1.5">
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-9 px-3"
+          onClick={() => void mark("archive")}
+          aria-label={`Remove ${thread.personName} from list`}
+        >
           Remove
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9 px-3"
+          onClick={() => void mark("done")}
+          aria-label={`Mark ${thread.personName} done`}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Done
+        </Button>
+        {showOpenThread && (
+          <Button
+            size="sm"
+            className="h-9 px-3"
+            onClick={() => void openInChat()}
+            aria-label={`Open thread with ${thread.personName}`}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open thread
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -801,11 +1068,13 @@ function LeadBoardColumn({
   empty,
   threads,
   title,
+  showOpenThread = true,
 }: {
   data: HubData;
   empty: string;
   threads: SourceInboxThread[];
   title: string;
+  showOpenThread?: boolean;
 }) {
   return (
     <div className="min-w-0">
@@ -815,7 +1084,14 @@ function LeadBoardColumn({
       </div>
       <div className="space-y-2">
         {threads.length ? (
-          threads.map((thread) => <LeadBoardRow key={thread.id} data={data} thread={thread} />)
+          threads.map((thread) => (
+            <LeadBoardRow
+              key={thread.id}
+              data={data}
+              thread={thread}
+              showOpenThread={showOpenThread}
+            />
+          ))
         ) : (
           <div className="rounded-2xl border border-dashed border-border bg-background/25 px-3 py-6 text-xs leading-5 text-muted-foreground">
             {empty}
@@ -828,12 +1104,24 @@ function LeadBoardColumn({
 
 function LeadWorkBoard({
   data,
+  threads: threadsOverride,
+  layout = "kanban",
+  showSources = true,
 }: {
   data: HubData;
+  threads?: SourceInboxThread[];
+  layout?: "kanban" | "stack";
+  showSources?: boolean;
 }) {
-  const threads = data.sourceInbox?.threads ?? [];
+  const threads = threadsOverride ?? data.sourceInbox?.threads ?? [];
   const buckets = leadThreadBuckets(threads);
   const sources = sourceSummary(data);
+
+  const columns = [
+    { title: "Hot now", threads: buckets.hot, empty: "No hot leads yet." },
+    { title: "Needs follow-up", threads: buckets.followUp, empty: "No reply-needed leads." },
+    { title: "Watch list", threads: buckets.watch, empty: "Nothing on the watch list." },
+  ];
 
   return (
     <Card>
@@ -842,19 +1130,19 @@ function LeadWorkBoard({
           <div>
             <CardTitle>Lead workboard</CardTitle>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Prioritized people from CRM, Messages, and other lead sources. Checking a row off hides it from this board without deleting source data.
+              Prioritized people from CRM, Messages, and other lead sources. Marking a row hides it without touching source data.
             </p>
           </div>
           <Badge variant={threads.length ? "warning" : "outline"}>{threads.length} open</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {sources.length > 0 && (
+      <CardContent className={cn(layout === "kanban" ? "space-y-4" : "space-y-5")}>
+        {showSources && sources.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {sources.map((source) => (
               <div
                 key={source.label}
-                className="flex items-center gap-2 rounded-full border border-border/60 bg-background/35 px-3 py-1.5 text-xs text-muted-foreground"
+                className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-foreground/70"
               >
                 <span className="font-semibold text-foreground">{source.label}</span>
                 <span>{source.count}</span>
@@ -863,26 +1151,43 @@ function LeadWorkBoard({
             ))}
           </div>
         )}
-        <div className="grid gap-4 xl:grid-cols-3">
-          <LeadBoardColumn
-            data={data}
-            title="Hot now"
-            threads={buckets.hot}
-            empty="No hot leads yet. Lofty, Messages, and future CRM imports will promote high-priority people here."
-          />
-          <LeadBoardColumn
-            data={data}
-            title="Needs follow-up"
-            threads={buckets.followUp}
-            empty="No reply-needed or warm leads waiting."
-          />
-          <LeadBoardColumn
-            data={data}
-            title="Watch list"
-            threads={buckets.watch}
-            empty="No lower-priority leads to watch."
-          />
-        </div>
+        {layout === "kanban" ? (
+          <div className="grid gap-4 xl:grid-cols-3">
+            {columns.map((column) => (
+              <LeadBoardColumn
+                key={column.title}
+                data={data}
+                title={column.title}
+                threads={column.threads}
+                empty={column.empty}
+              />
+            ))}
+          </div>
+        ) : (
+          columns.map((column) => (
+            <section key={column.title} className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {column.title}
+                </h3>
+                <Badge variant={column.threads.length ? "outline" : "secondary"}>
+                  {column.threads.length}
+                </Badge>
+              </div>
+              {column.threads.length ? (
+                <div className="space-y-2">
+                  {column.threads.map((thread) => (
+                    <LeadBoardRow key={thread.id} data={data} thread={thread} />
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-border bg-background/20 px-3 py-4 text-xs text-muted-foreground">
+                  {column.empty}
+                </div>
+              )}
+            </section>
+          ))
+        )}
       </CardContent>
     </Card>
   );
@@ -894,137 +1199,1306 @@ function draftWhen(draft: SourceInboxDraft): string {
 
 function DraftMessagesBoard({
   data,
+  drafts: draftsOverride,
+  emptyMessage,
+  keyboard = false,
+  pageSize = 8,
+  showOpenThread = true,
   title = "Draft follow-ups",
 }: {
   data: HubData;
+  drafts?: SourceInboxDraft[];
+  emptyMessage?: string;
+  keyboard?: boolean;
+  pageSize?: number;
+  showOpenThread?: boolean;
   title?: string;
 }) {
-  const drafts = data.sourceInbox?.drafts ?? [];
+  const drawer = useThreadDrawer();
+  const navigate = useNavigate();
+  const allDrafts = draftsOverride ?? data.sourceInbox?.drafts ?? [];
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [density, setDensity] = useState<"compact" | "expanded">("compact");
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  const updateDraft = async (
-    draft: SourceInboxDraft,
-    action: "approve" | "edit" | "skip",
-    text = draft.draftText,
-  ) => {
-    await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
-    setEditingId(null);
-    setDraftEdits((current) => {
-      const next = { ...current };
-      delete next[draft.id];
+  const drafts = allDrafts.filter((d) => !dismissedIds.has(d.id));
+  const visibleDrafts = drafts.slice(0, pageSize);
+  const selectedVisible = visibleDrafts.filter((d) => selectedIds.has(d.id));
+  const allVisibleSelected = visibleDrafts.length > 0 && selectedVisible.length === visibleDrafts.length;
+
+  useEffect(() => {
+    const liveIds = new Set(allDrafts.map((d) => d.id));
+    setDismissedIds((current) => {
+      if (current.size === 0) return current;
+      let changed = false;
+      const next = new Set<string>();
+      current.forEach((id) => {
+        if (liveIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+    setSelectedIds((current) => {
+      if (current.size === 0) return current;
+      let changed = false;
+      const next = new Set<string>();
+      current.forEach((id) => {
+        if (liveIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, [allDrafts]);
+
+  useEffect(() => {
+    if (!visibleDrafts.length) {
+      setFocusedId(null);
+      return;
+    }
+    if (!focusedId || !visibleDrafts.some((draft) => draft.id === focusedId)) {
+      setFocusedId(visibleDrafts[0]?.id ?? null);
+    }
+  }, [focusedId, visibleDrafts]);
+
+  const updateDraft = useCallback(
+    async (
+      draft: SourceInboxDraft,
+      action: "approve" | "edit" | "skip",
+      text = draft.draftText,
+    ) => {
+      const isDismiss = action === "approve" || action === "skip";
+      if (isDismiss) {
+        setDismissedIds((current) => {
+          const next = new Set(current);
+          next.add(draft.id);
+          return next;
+        });
+        setEditingId((current) => (current === draft.id ? null : current));
+        setExpandedId((current) => (current === draft.id ? null : current));
+        setDraftEdits((current) => {
+          if (!(draft.id in current)) return current;
+          const next = { ...current };
+          delete next[draft.id];
+          return next;
+        });
+      }
+      try {
+        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
+        if (!isDismiss) {
+          setEditingId(null);
+          setDraftEdits((current) => {
+            const next = { ...current };
+            delete next[draft.id];
+            return next;
+          });
+        }
+        void data.refresh();
+      } catch (error) {
+        if (isDismiss) {
+          setDismissedIds((current) => {
+            const next = new Set(current);
+            next.delete(draft.id);
+            return next;
+          });
+        }
+        console.error("Failed to update draft", error);
+        window.alert(`Failed to ${action} draft: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    [data],
+  );
+
+  const openInChat = useCallback(
+    async (draft: SourceInboxDraft) => {
+      try {
+        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "open", draft.draftText);
+      } catch {
+        // best-effort
+      }
+      if (drawer) {
+        drawer.openThread(draft.sourceId, draft.threadId);
+        return;
+      }
+      const params = new URLSearchParams({
+        thread: draft.threadId,
+        source: draft.sourceId,
+        draft: draft.taskId,
+      });
+      navigate(`/chat?${params.toString()}`);
+    },
+    [drawer, navigate],
+  );
+
+  useEffect(() => {
+    if (!keyboard) return;
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (!visibleDrafts.length) return;
+      const currentIndex = Math.max(
+        0,
+        visibleDrafts.findIndex((draft) => draft.id === focusedId),
+      );
+      const focused = visibleDrafts[currentIndex];
+
+      const move = (delta: number) => {
+        const next = visibleDrafts[(currentIndex + delta + visibleDrafts.length) % visibleDrafts.length];
+        if (next) {
+          setFocusedId(next.id);
+          requestAnimationFrame(() => {
+            rowRefs.current[next.id]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          });
+        }
+      };
+
+      switch (event.key) {
+        case "ArrowDown":
+        case "j":
+          event.preventDefault();
+          move(1);
+          break;
+        case "ArrowUp":
+        case "k":
+          event.preventDefault();
+          move(-1);
+          break;
+        case "a":
+        case "A":
+          if (focused) {
+            event.preventDefault();
+            void updateDraft(focused, "approve");
+          }
+          break;
+        case "s":
+        case "S":
+          if (focused) {
+            event.preventDefault();
+            void updateDraft(focused, "skip");
+          }
+          break;
+        case "e":
+        case "E":
+          if (focused) {
+            event.preventDefault();
+            setEditingId(focused.id);
+            setDraftEdits((current) => ({ ...current, [focused.id]: focused.draftText }));
+          }
+          break;
+        case "o":
+        case "O":
+          if (focused && showOpenThread) {
+            event.preventDefault();
+            void openInChat(focused);
+          }
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focusedId, keyboard, openInChat, showOpenThread, updateDraft, visibleDrafts]);
+
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
-    await data.refresh();
-  };
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds((current) => {
+      if (visibleDrafts.length > 0 && visibleDrafts.every((d) => current.has(d.id))) {
+        const next = new Set(current);
+        visibleDrafts.forEach((d) => next.delete(d.id));
+        return next;
+      }
+      const next = new Set(current);
+      visibleDrafts.forEach((d) => next.add(d.id));
+      return next;
+    });
+  }, [visibleDrafts]);
+
+  const runBulk = useCallback(
+    async (action: "approve" | "skip") => {
+      if (selectedVisible.length === 0 || bulkBusy) return;
+      setBulkBusy(true);
+      try {
+        for (const draft of selectedVisible) {
+          await updateDraft(draft, action);
+        }
+        setSelectedIds(new Set());
+      } finally {
+        setBulkBusy(false);
+      }
+    },
+    [bulkBusy, selectedVisible, updateDraft],
+  );
+
+  const fallbackEmpty =
+    emptyMessage ??
+    "No draft replies are waiting. Composio social imports, CRM follow-ups, and outreach tasks can feed approval-gated messages here.";
 
   return (
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <CardTitle>{title}</CardTitle>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Approval-gated replies for follow-ups, texts, DMs, and comments. Approving only marks the draft ready; it does not send automatically.
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <CardTitle>{title}</CardTitle>
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-full border px-2 py-0.5 text-[0.68rem] font-semibold",
+                  drafts.length
+                    ? "border-warning/45 bg-warning/10 text-warning"
+                    : "border-border bg-card text-foreground/70",
+                )}
+                style={MONO_STYLE}
+              >
+                {drafts.length} waiting
+              </span>
+            </div>
+            <p className="mt-1 text-xs leading-5 text-foreground/70">
+              Approval-gated. Nothing sends until you click Approve.
             </p>
           </div>
-          <Badge variant={drafts.length ? "warning" : "outline"}>{drafts.length} waiting</Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            {keyboard && drafts.length > 0 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setHelpOpen((v) => !v)}
+                  aria-expanded={helpOpen}
+                  aria-haspopup="dialog"
+                  aria-label="Keyboard shortcuts"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-[0.72rem] text-foreground/80 transition hover:bg-card/70"
+                  style={MONO_STYLE}
+                >
+                  <HelpCircle className="h-3.5 w-3.5" />
+                  Shortcuts
+                </button>
+                {helpOpen && (
+                  <div
+                    role="dialog"
+                    className="absolute right-0 top-[calc(100%+6px)] z-30 w-64 rounded-xl border border-border bg-card p-3 shadow-lg"
+                  >
+                    <div
+                      className="mb-2 text-[0.66rem] font-semibold uppercase tracking-[0.14em] text-foreground/65"
+                      style={MONO_STYLE}
+                    >
+                      Keyboard
+                    </div>
+                    <ul className="space-y-1.5 text-xs text-foreground/85">
+                      {[
+                        ["↑ ↓ / J K", "navigate"],
+                        ["A", "approve"],
+                        ["E", "edit"],
+                        ["S", "skip"],
+                        ...(showOpenThread ? [["O", "open thread"] as const] : []),
+                      ].map(([key, label]) => (
+                        <li key={key} className="flex items-center justify-between gap-2">
+                          <kbd
+                            aria-keyshortcuts={key}
+                            className="rounded border border-border bg-background/40 px-1.5 py-0.5 text-[0.7rem]"
+                            style={MONO_STYLE}
+                          >
+                            {key}
+                          </kbd>
+                          <span className="text-foreground/70">{label}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            <div
+              className="inline-flex h-9 overflow-hidden rounded-full border border-border text-[0.7rem]"
+              role="group"
+              aria-label="Layout density"
+              style={MONO_STYLE}
+            >
+              <button
+                type="button"
+                onClick={() => setDensity("compact")}
+                aria-pressed={density === "compact"}
+                className={cn(
+                  "px-3 transition",
+                  density === "compact"
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground/70 hover:bg-card/70",
+                )}
+              >
+                Compact
+              </button>
+              <button
+                type="button"
+                onClick={() => setDensity("expanded")}
+                aria-pressed={density === "expanded"}
+                className={cn(
+                  "px-3 transition",
+                  density === "expanded"
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground/70 hover:bg-card/70",
+                )}
+              >
+                Expanded
+              </button>
+            </div>
+          </div>
         </div>
+        {visibleDrafts.length > 0 && (
+          <div
+            className="mt-3 flex flex-wrap items-center gap-3 border-t border-border/60 pt-3 text-xs text-foreground/75"
+            style={MONO_STYLE}
+          >
+            <button
+              type="button"
+              onClick={toggleSelectAll}
+              aria-pressed={allVisibleSelected}
+              className="inline-flex h-9 items-center gap-2 rounded-full border border-border bg-card px-3 hover:bg-card/70"
+            >
+              {allVisibleSelected ? (
+                <CheckSquare className="h-3.5 w-3.5 text-primary" />
+              ) : (
+                <SquareIcon className="h-3.5 w-3.5 text-foreground/55" />
+              )}
+              {allVisibleSelected ? "Clear" : "Select all"}
+            </button>
+            <span className="text-foreground/65">
+              {selectedVisible.length} selected · {visibleDrafts.length} shown
+              {drafts.length > visibleDrafts.length ? ` of ${drafts.length}` : ""}
+            </span>
+          </div>
+        )}
       </CardHeader>
-      <CardContent className="space-y-3">
-        {drafts.length ? (
-          drafts.slice(0, 8).map((draft) => {
+      <CardContent
+        className={cn(
+          "relative",
+          density === "compact"
+            ? "grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3"
+            : "space-y-3",
+        )}
+      >
+        {visibleDrafts.length ? (
+          visibleDrafts.map((draft) => {
             const isEditing = editingId === draft.id;
             const draftText = draftEdits[draft.id] ?? draft.draftText;
+            const isFocused = keyboard && focusedId === draft.id;
+            const isExpanded = density === "expanded" || expandedId === draft.id || isEditing;
+            const isSelected = selectedIds.has(draft.id);
+            const heat = heatStyles(String(draft.leadLabel ?? ""));
             return (
               <div
                 key={draft.id}
-                className="rounded-2xl border border-border/60 bg-background/35 px-3 py-3 transition-colors hover:bg-background/55"
+                ref={(node) => {
+                  rowRefs.current[draft.id] = node;
+                }}
+                onMouseEnter={() => keyboard && setFocusedId(draft.id)}
+                className={cn(
+                  "group rounded-2xl border bg-card px-3 py-2.5 transition-colors hover:bg-card/80",
+                  isFocused ? "border-primary/40 ring-2 ring-primary/30" : "border-border",
+                  isSelected && "border-primary/50 bg-primary/5",
+                )}
               >
-                <div className="flex min-w-0 items-start gap-3">
-                  <span className="mt-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-warning/12 text-warning">
-                    <MessageSquare className="h-3.5 w-3.5" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-                        {draft.personName}
+                <div className="flex w-full min-w-0 items-start gap-2">
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleSelected(draft.id);
+                    }}
+                    aria-pressed={isSelected}
+                    aria-label={isSelected ? `Deselect draft for ${draft.personName}` : `Select draft for ${draft.personName}`}
+                    className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border bg-card text-foreground/65 transition hover:border-primary/45 hover:text-primary"
+                  >
+                    {isSelected ? (
+                      <CheckSquare className="h-3.5 w-3.5 text-primary" />
+                    ) : (
+                      <SquareIcon className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isEditing) return;
+                      setExpandedId((current) => (current === draft.id ? null : draft.id));
+                    }}
+                    className="flex min-w-0 flex-1 items-start gap-2.5 text-left"
+                    aria-expanded={isExpanded}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                          {draft.personName}
+                        </div>
+                        <span
+                          className="shrink-0 text-[0.7rem] text-foreground/70"
+                          style={MONO_STYLE}
+                        >
+                          {draftWhen(draft)}
+                        </span>
                       </div>
-                      <Badge variant={draft.generated ? "outline" : "warning"}>
-                        {draft.generated ? "suggested" : "draft"}
-                      </Badge>
+                      <div
+                        className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[0.7rem] text-foreground/65"
+                        style={MONO_STYLE}
+                      >
+                        <span className="truncate">{draft.sourceLabel}</span>
+                        <span aria-hidden className="opacity-50">·</span>
+                        <span className="truncate">{draft.channel}</span>
+                        {draft.leadLabel && (
+                          <>
+                            <span aria-hidden className="opacity-50">·</span>
+                            <span
+                              className={cn(
+                                "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[0.66rem] font-semibold",
+                                heat.pill,
+                              )}
+                              title={draft.scoreReason ?? undefined}
+                            >
+                              {String(draft.leadLabel)}
+                              {typeof draft.score === "number" ? ` ${draft.score}` : ""}
+                            </span>
+                          </>
+                        )}
+                        {draft.generated && (
+                          <>
+                            <span aria-hidden className="opacity-50">·</span>
+                            <span className="text-warning">suggested</span>
+                          </>
+                        )}
+                      </div>
+                      <p
+                        className={cn(
+                          "mt-1.5 text-xs leading-5 text-foreground/85",
+                          !isExpanded && "line-clamp-2",
+                        )}
+                      >
+                        {draft.draftText}
+                      </p>
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                      <Badge variant="outline">{draft.sourceLabel}</Badge>
-                      <Badge variant="outline">{draft.channel}</Badge>
-                      <Badge variant="outline">{draftWhen(draft)}</Badge>
+                  </button>
+                  {!isEditing && (
+                    <div className="flex shrink-0 items-center gap-1 opacity-80 transition group-hover:opacity-100">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void updateDraft(draft, "skip");
+                        }}
+                        title="Skip"
+                        aria-label={`Skip draft for ${draft.personName}`}
+                        className="flex h-9 w-9 items-center justify-center rounded-full text-foreground/65 transition hover:bg-destructive/12 hover:text-destructive"
+                      >
+                        <XCircle className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void updateDraft(draft, "approve", draft.draftText);
+                        }}
+                        title="Approve"
+                        aria-label={`Approve draft for ${draft.personName}`}
+                        className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/15 text-primary transition hover:bg-primary/25"
+                      >
+                        <Send className="h-4 w-4" />
+                      </button>
                     </div>
-                    {draft.context && (
-                      <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                  )}
+                </div>
+                {isExpanded && (
+                  <div className="mt-2 space-y-2 border-t border-border/55 pt-2">
+                    {draft.context && !isEditing && (
+                      <p className="text-[0.72rem] leading-5 text-foreground/70">
                         {draft.context}
                       </p>
                     )}
-                  </div>
-                </div>
-                {isEditing ? (
-                  <div className="mt-3 space-y-2">
-                    <textarea
-                      value={draftText}
-                      onChange={(event) =>
-                        setDraftEdits((current) => ({ ...current, [draft.id]: event.target.value }))
-                      }
-                      className="min-h-24 w-full resize-y rounded-2xl border border-border/70 bg-background/60 px-3 py-2 text-sm leading-6 text-foreground outline-none transition focus:border-primary/45 focus:ring-2 focus:ring-primary/10"
-                    />
-                    <div className="flex justify-end gap-1.5">
-                      <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>
-                        Cancel
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => void updateDraft(draft, "edit", draftText)}>
-                        Save edit
-                      </Button>
-                      <Button size="sm" onClick={() => void updateDraft(draft, "approve", draftText)}>
-                        Approve
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <p className="mt-3 rounded-2xl bg-card/45 px-3 py-3 text-sm leading-6 text-foreground">
-                      {draft.draftText}
-                    </p>
-                    <div className="mt-3 flex flex-wrap justify-end gap-1.5">
-                      <Button size="sm" variant="ghost" onClick={() => void updateDraft(draft, "skip")}>
-                        <XCircle className="h-3.5 w-3.5" />
-                        Skip
-                      </Button>
+                    {isEditing && (
+                      <textarea
+                        value={draftText}
+                        onChange={(event) =>
+                          setDraftEdits((current) => ({ ...current, [draft.id]: event.target.value }))
+                        }
+                        className="min-h-24 w-full resize-y rounded-xl border border-border bg-background/60 px-2.5 py-2 text-sm leading-6 text-foreground outline-none transition focus:border-primary/45 focus:ring-2 focus:ring-primary/15"
+                      />
+                    )}
+                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                      {!isEditing && showOpenThread && (
+                        <Button size="sm" variant="ghost" className="h-9 px-3" onClick={() => void openInChat(draft)}>
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          Thread
+                        </Button>
+                      )}
+                      {!isEditing && (
+                        <Button size="sm" variant="ghost" className="h-9 px-3" onClick={() => void updateDraft(draft, "skip")}>
+                          <XCircle className="h-3.5 w-3.5" />
+                          Skip
+                        </Button>
+                      )}
+                      {isEditing ? (
+                        <>
+                          <Button size="sm" variant="ghost" className="h-9 px-3" onClick={() => setEditingId(null)}>
+                            Cancel
+                          </Button>
+                          <Button size="sm" variant="outline" className="h-9 px-3" onClick={() => void updateDraft(draft, "edit", draftText)}>
+                            Save
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-9 px-3"
+                          onClick={() => {
+                            setEditingId(draft.id);
+                            setDraftEdits((current) => ({ ...current, [draft.id]: draft.draftText }));
+                          }}
+                        >
+                          <PencilLine className="h-3.5 w-3.5" />
+                          Edit
+                        </Button>
+                      )}
                       <Button
                         size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          setEditingId(draft.id);
-                          setDraftEdits((current) => ({ ...current, [draft.id]: draft.draftText }));
-                        }}
+                        className="h-9 px-3"
+                        onClick={() => void updateDraft(draft, "approve", isEditing ? draftText : draft.draftText)}
                       >
-                        <PencilLine className="h-3.5 w-3.5" />
-                        Edit
-                      </Button>
-                      <Button size="sm" onClick={() => void updateDraft(draft, "approve")}>
                         <Send className="h-3.5 w-3.5" />
                         Approve
                       </Button>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             );
           })
         ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm leading-6 text-muted-foreground">
-            No draft replies are waiting. Composio social imports, CRM follow-ups, and outreach tasks can feed approval-gated messages here.
+          <div className="col-span-full rounded-2xl border border-border bg-card px-4 py-10 text-center">
+            <div
+              className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55"
+              style={MONO_STYLE}
+            >
+              Inbox empty
+            </div>
+            <p className="mt-2 text-sm leading-6 text-foreground/75">{fallbackEmpty}</p>
+          </div>
+        )}
+        {selectedVisible.length > 0 && (
+          <div
+            className="sticky bottom-3 left-0 right-0 z-20 col-span-full mx-auto flex w-fit max-w-full items-center gap-2 rounded-full border border-border bg-card px-3 py-2 shadow-[0_18px_48px_color-mix(in_srgb,var(--background-base)_55%,transparent)]"
+            role="region"
+            aria-label="Bulk actions"
+          >
+            <span
+              className="text-[0.72rem] text-foreground/75"
+              style={MONO_STYLE}
+            >
+              {selectedVisible.length} selected
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-9 px-3"
+              disabled={bulkBusy}
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 px-3"
+              disabled={bulkBusy}
+              onClick={() => void runBulk("skip")}
+            >
+              <XCircle className="h-3.5 w-3.5" />
+              Skip {selectedVisible.length}
+            </Button>
+            <Button
+              size="sm"
+              className="h-9 px-3"
+              disabled={bulkBusy}
+              onClick={() => void runBulk("approve")}
+            >
+              {bulkBusy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Send className="h-3.5 w-3.5" />
+              )}
+              Approve {selectedVisible.length}
+            </Button>
           </div>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+type ThreadDrawerTarget = { sourceId: string; threadId: string } | null;
+
+const ThreadDrawerContext = createContext<{
+  openThread: (sourceId: string, threadId: string) => void;
+} | null>(null);
+
+function useThreadDrawer() {
+  return useContext(ThreadDrawerContext);
+}
+
+export function ThreadDrawerProvider({
+  children,
+  data,
+}: {
+  children: ReactNode;
+  data: HubData;
+}) {
+  const [target, setTarget] = useState<ThreadDrawerTarget>(null);
+  const openThread = useCallback((sourceId: string, threadId: string) => {
+    setTarget({ sourceId, threadId });
+  }, []);
+  const close = useCallback(() => setTarget(null), []);
+  const ctx = useMemo(() => ({ openThread }), [openThread]);
+  return (
+    <ThreadDrawerContext.Provider value={ctx}>
+      {children}
+      {target && <ThreadDrawer data={data} target={target} onClose={close} />}
+    </ThreadDrawerContext.Provider>
+  );
+}
+
+function fmtMessageTimestamp(value: string | null | undefined): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function ThreadMessageBubble({ message }: { message: ThreadContextMessage }) {
+  const inbound = message.direction !== "outbound";
+  return (
+    <div className={cn("flex flex-col gap-1.5", inbound ? "items-start" : "items-end")}>
+      <div
+        className={cn(
+          "max-w-[82%] rounded-2xl px-3.5 py-2.5 text-[0.875rem] leading-[1.45] whitespace-pre-wrap break-words text-foreground",
+          inbound
+            ? "bg-card border border-border"
+            : "bg-primary/15 border border-primary/45",
+        )}
+      >
+        {message.text || <span className="text-foreground/55 italic">(no text)</span>}
+      </div>
+      <div
+        className="flex items-center gap-1.5 text-[0.68rem] uppercase tracking-[0.08em] text-foreground/55"
+        style={{ fontFamily: "var(--theme-font-mono)" }}
+      >
+        {message.sender && <span className="font-medium">{message.sender}</span>}
+        {message.sender && message.timestamp && <span>·</span>}
+        {message.timestamp && <span>{fmtMessageTimestamp(message.timestamp)}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ThreadDrawer({
+  data,
+  target,
+  onClose,
+}: {
+  data: HubData;
+  target: { sourceId: string; threadId: string };
+  onClose: () => void;
+}) {
+  const [context, setContext] = useState<ThreadContextResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.getThreadContext(target.sourceId, target.threadId);
+      setContext(result);
+      setReply(result.pendingDraft?.draftText ?? "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [target.sourceId, target.threadId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+
+  useLayoutEffect(() => {
+    if (!loading && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [loading, context?.messages.length]);
+
+  const sendDraft = useCallback(
+    async (action: "approve" | "skip") => {
+      if (!context?.pendingDraft) return;
+      setSubmitting(true);
+      try {
+        await api.updateSourceInboxDraft(
+          context.pendingDraft.sourceId,
+          context.pendingDraft.taskId,
+          action,
+          reply,
+        );
+        await data.refresh();
+        onClose();
+      } catch (err) {
+        window.alert(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [context?.pendingDraft, data, onClose, reply],
+  );
+
+  const meta = context?.meta;
+  const sends = context?.sends ?? [];
+  const messages = context?.messages ?? [];
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex justify-end bg-black/55 backdrop-blur-sm animate-[fade-in_120ms_ease-out]"
+    >
+      <div
+        className="flex h-full w-full max-w-[1100px] flex-col border-l border-border bg-background shadow-[0_24px_90px_rgba(0,0,0,0.32)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <div className="truncate text-[1.05rem] font-semibold leading-tight text-foreground">
+              {context?.personName ?? "Loading thread..."}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {context?.source?.label && (
+                <Badge
+                  variant="outline"
+                  className="border-border text-foreground/85 text-[0.7rem] font-medium"
+                  style={{ fontFamily: "var(--theme-font-mono)" }}
+                >
+                  {context.source.label}
+                </Badge>
+              )}
+              {context?.source?.ownerAgent && (
+                <Badge
+                  variant="outline"
+                  className="border-border text-foreground/85 text-[0.7rem] font-medium"
+                  style={{ fontFamily: "var(--theme-font-mono)" }}
+                >
+                  {context.source.ownerAgent}
+                </Badge>
+              )}
+              {meta?.label && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "text-[0.7rem] font-semibold",
+                    meta.label === "hot" && "border-destructive/60 bg-destructive/10 text-destructive",
+                    meta.label === "warm" && "border-warning/60 bg-warning/10 text-warning",
+                    meta.label === "cold" && "border-border text-foreground/75",
+                    meta.label === "dead" && "border-border/60 text-foreground/55",
+                  )}
+                  style={{ fontFamily: "var(--theme-font-mono)" }}
+                >
+                  {meta.label} {typeof meta.score === "number" ? meta.score : ""}
+                </Badge>
+              )}
+              {context && (
+                <span
+                  className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-foreground/65"
+                  style={{ fontFamily: "var(--theme-font-mono)" }}
+                >
+                  {context.messageCount} {context.messageCount === 1 ? "message" : "messages"}
+                </span>
+              )}
+            </div>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
+            <CloseIcon className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+          <div className="flex min-h-0 flex-col border-r border-border">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
+              {loading && (
+                <div className="flex items-center justify-center py-12 text-xs font-medium text-foreground/65">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading thread...
+                </div>
+              )}
+              {error && (
+                <div className="rounded-xl border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+                  {error}
+                </div>
+              )}
+              {!loading && !error && messages.length === 0 && (
+                <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-border bg-card/60 px-6 py-12 text-center">
+                  <div
+                    className="text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-foreground/55"
+                    style={{ fontFamily: "var(--theme-font-mono)" }}
+                  >
+                    Empty thread
+                  </div>
+                  <div className="text-sm text-foreground/75">
+                    No messages on file yet.
+                  </div>
+                </div>
+              )}
+              {!loading && messages.length > 0 && (
+                <div className="space-y-4">
+                  {messages.map((message) => (
+                    <ThreadMessageBubble key={message.id || `${message.timestamp}-${message.text.slice(0, 12)}`} message={message} />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {context?.pendingDraft && (
+              <div className="border-t border-border bg-card/70 px-5 py-4">
+                <div
+                  className="mb-2 flex items-center justify-between text-[0.68rem] font-semibold uppercase tracking-[0.1em]"
+                  style={{ fontFamily: "var(--theme-font-mono)" }}
+                >
+                  <span className="flex items-center gap-1.5 text-primary">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary" />
+                    Draft reply · awaiting approval
+                  </span>
+                  <span className="text-foreground/65">{context.pendingDraft.channel}</span>
+                </div>
+                <textarea
+                  value={reply}
+                  onChange={(e) => setReply(e.target.value)}
+                  rows={4}
+                  className="w-full resize-none rounded-xl border border-border bg-background px-3 py-2.5 text-sm leading-5 text-foreground placeholder:text-foreground/45 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+                <div className="mt-2.5 flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void sendDraft("skip")}
+                    disabled={submitting}
+                    className="text-foreground/75 hover:text-foreground"
+                  >
+                    Skip
+                  </Button>
+                  <Button size="sm" onClick={() => void sendDraft("approve")} disabled={submitting || !reply.trim()}>
+                    {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    Send
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="min-h-0 overflow-y-auto bg-card/30 px-5 py-5">
+            <ThreadContextSidebar context={context} loading={loading} sends={sends} />
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ThreadContextSidebar({
+  context,
+  loading,
+  sends,
+}: {
+  context: ThreadContextResponse | null;
+  loading: boolean;
+  sends: ThreadContextResponse["sends"];
+}) {
+  if (loading || !context) {
+    return (
+      <div
+        className="text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-foreground/55"
+        style={{ fontFamily: "var(--theme-font-mono)" }}
+      >
+        Loading context...
+      </div>
+    );
+  }
+  const meta = context.meta;
+  const lead = context.lead;
+  const activity = context.activity ?? [];
+  const monoStyle = { fontFamily: "var(--theme-font-mono)" } as const;
+  const sectionLabel =
+    "flex items-center gap-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-foreground/70";
+  const sectionShell =
+    "rounded-2xl border border-border bg-background px-3.5 py-3.5";
+  const displayScore = meta?.score ?? lead?.score ?? null;
+  const scoreLabel = meta?.label ?? (lead?.stage || lead?.leadSource || null);
+  return (
+    <div className="space-y-3.5">
+      <section className={sectionShell}>
+        <div className={sectionLabel} style={monoStyle}>
+          Lead score
+        </div>
+        {displayScore !== null ? (
+          <>
+            <div className="mt-2 flex items-baseline gap-2.5">
+              <span className="text-[2.25rem] font-semibold leading-none tracking-tight text-primary">
+                {displayScore}
+              </span>
+              {scoreLabel && (
+                <span
+                  className="text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-foreground/70"
+                  style={monoStyle}
+                >
+                  {scoreLabel}
+                </span>
+              )}
+            </div>
+            {meta?.reason && (
+              <p className="mt-2.5 text-[0.8rem] leading-[1.5] text-foreground/80">{meta.reason}</p>
+            )}
+            {!meta && lead?.summary && (
+              <p className="mt-2.5 text-[0.8rem] leading-[1.5] text-foreground/80">{lead.summary}</p>
+            )}
+            {lead && (lead.leadSource || lead.assignedUser || lead.tags.length > 0) && (
+              <div className="mt-2.5 space-y-1.5">
+                {lead.leadSource && (
+                  <div className="flex items-center gap-1.5 text-[0.72rem] text-foreground/75">
+                    <span
+                      className="text-[0.62rem] uppercase tracking-[0.1em] text-foreground/55"
+                      style={monoStyle}
+                    >
+                      source
+                    </span>
+                    <span>{lead.leadSource}</span>
+                  </div>
+                )}
+                {lead.assignedUser && (
+                  <div className="flex items-center gap-1.5 text-[0.72rem] text-foreground/75">
+                    <span
+                      className="text-[0.62rem] uppercase tracking-[0.1em] text-foreground/55"
+                      style={monoStyle}
+                    >
+                      owner
+                    </span>
+                    <span>{lead.assignedUser}</span>
+                  </div>
+                )}
+                {lead.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {lead.tags
+                      .filter((t) => t !== "crm-lead" && !t.endsWith("-crm"))
+                      .slice(0, 6)
+                      .map((tag) => (
+                        <span
+                          key={tag}
+                          className="inline-flex items-center rounded-full border border-border/60 bg-card px-2 py-0.5 text-[0.65rem] font-medium text-foreground/75"
+                          style={monoStyle}
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {(meta?.scoredBy || meta?.scoredAt) && (
+              <div
+                className="mt-2.5 text-[0.66rem] uppercase tracking-[0.08em] text-foreground/55"
+                style={monoStyle}
+              >
+                {meta.scoredBy ? `by ${meta.scoredBy}` : null}
+                {meta.scoredBy && meta.scoredAt ? " · " : ""}
+                {meta.scoredAt ? fmtMessageTimestamp(meta.scoredAt) : ""}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="mt-2 text-[0.8rem] text-foreground/65">Not yet scored.</p>
+        )}
+      </section>
+
+      {lead && (lead.emails.length > 0 || lead.phones.length > 0) && (
+        <section className={sectionShell}>
+          <div className={sectionLabel} style={monoStyle}>
+            Contact
+          </div>
+          <div className="mt-2 space-y-1">
+            {lead.phones.slice(0, 3).map((phone) => (
+              <div key={phone} className="text-[0.8rem] text-foreground/85">
+                {phone}
+              </div>
+            ))}
+            {lead.emails.slice(0, 3).map((email) => (
+              <div key={email} className="truncate text-[0.8rem] text-foreground/85">
+                {email}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <section className={sectionShell}>
+        <div className={sectionLabel} style={monoStyle}>
+          <StickyNote className="h-3 w-3" />
+          Notes
+        </div>
+        <p className="mt-2 text-[0.8rem] leading-[1.5] text-foreground/65">
+          {lead?.summary || "No notes yet."}
+        </p>
+      </section>
+
+      <section className={sectionShell}>
+        <div className={sectionLabel} style={monoStyle}>
+          <Activity className="h-3 w-3" />
+          Property activity
+        </div>
+        {activity.length === 0 ? (
+          <p className="mt-2 text-[0.8rem] leading-[1.5] text-foreground/65">
+            No activity logged yet.
+          </p>
+        ) : (
+          <ul className="mt-2.5 space-y-2">
+            {activity.slice(0, 6).map((event) => (
+              <li key={event.id} className="rounded-xl border border-border bg-card px-3 py-2">
+                <div
+                  className="flex items-center justify-between text-[0.66rem] font-semibold uppercase tracking-[0.08em] text-foreground/65"
+                  style={monoStyle}
+                >
+                  <span>{event.type.replace(/_/g, " ")}</span>
+                  {event.timestamp && (
+                    <span className="text-foreground/55">{fmtMessageTimestamp(event.timestamp)}</span>
+                  )}
+                </div>
+                {(event.title || event.summary) && (
+                  <p className="mt-1.5 line-clamp-2 text-[0.8rem] leading-[1.45] text-foreground/85">
+                    {event.title || event.summary}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className={sectionShell}>
+        <div className={sectionLabel} style={monoStyle}>
+          Send history
+        </div>
+        {sends.length === 0 ? (
+          <p className="mt-2 text-[0.8rem] text-foreground/65">No prior sends.</p>
+        ) : (
+          <ul className="mt-2.5 space-y-2">
+            {sends.slice(0, 8).map((send) => (
+              <li key={send.id} className="rounded-xl border border-border bg-card px-3 py-2.5">
+                <div
+                  className="flex items-center justify-between text-[0.66rem] font-semibold uppercase tracking-[0.08em]"
+                  style={monoStyle}
+                >
+                  <span className="text-foreground/75">{send.channel ?? "send"}</span>
+                  <span
+                    className={cn(
+                      send.status === "sent" || send.status === "delivered"
+                        ? "text-success"
+                        : send.status === "failed"
+                          ? "text-destructive"
+                          : "text-foreground/65",
+                    )}
+                  >
+                    {send.status ?? "unknown"}
+                  </span>
+                </div>
+                {send.payload?.text && (
+                  <p className="mt-1.5 line-clamp-3 text-[0.8rem] leading-[1.45] text-foreground/85">
+                    {String(send.payload.text)}
+                  </p>
+                )}
+                {send.createdAt && (
+                  <div
+                    className="mt-1.5 text-[0.65rem] uppercase tracking-[0.08em] text-foreground/55"
+                    style={monoStyle}
+                  >
+                    {fmtMessageTimestamp(send.createdAt)}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function HotLeadsList({
+  data,
+  threads,
+}: {
+  data: HubData;
+  threads: SourceInboxThread[];
+}) {
+  const hot = leadThreadBuckets(threads).hot.slice(0, 8);
+  if (!hot.length) {
+    return (
+      <div className="rounded-2xl border border-border bg-card px-4 py-8 text-center">
+        <div
+          className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55"
+          style={MONO_STYLE}
+        >
+          No hot leads
+        </div>
+        <p className="mt-2 text-sm leading-6 text-foreground/75">
+          Recent replies, viewing requests, and repeat opens push leads here automatically.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {hot.map((thread) => (
+        <LeadBoardRow key={thread.id} data={data} thread={thread} showOpenThread />
+      ))}
+    </div>
+  );
+}
+
+function SkippedDraftsList({ data }: { data: HubData }) {
+  const skipped = data.sourceInbox?.skippedDrafts ?? [];
+  const [restoredIds, setRestoredIds] = useState<Set<string>>(() => new Set());
+
+  const visible = skipped.filter((d) => !restoredIds.has(d.id));
+
+  useEffect(() => {
+    setRestoredIds((current) => {
+      if (current.size === 0) return current;
+      const liveIds = new Set(skipped.map((d) => d.id));
+      let changed = false;
+      const next = new Set<string>();
+      current.forEach((id) => {
+        if (liveIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : current;
+    });
+  }, [skipped]);
+
+  const restore = useCallback(
+    async (draft: SourceInboxDraft) => {
+      setRestoredIds((current) => {
+        const next = new Set(current);
+        next.add(draft.id);
+        return next;
+      });
+      try {
+        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "restore", draft.draftText);
+        void data.refresh();
+      } catch (error) {
+        setRestoredIds((current) => {
+          const next = new Set(current);
+          next.delete(draft.id);
+          return next;
+        });
+        window.alert(`Failed to restore: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    [data],
+  );
+
+  if (!visible.length) {
+    return (
+      <div className="rounded-2xl border border-border bg-card px-4 py-8 text-center">
+        <div
+          className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55"
+          style={MONO_STYLE}
+        >
+          Nothing skipped
+        </div>
+        <p className="mt-2 text-sm leading-6 text-foreground/75">
+          Skipped drafts auto-clear after 3 days.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {visible.map((draft) => (
+        <div
+          key={draft.id}
+          className="group flex items-start gap-2 rounded-xl border border-border bg-card px-2.5 py-2 transition-colors hover:bg-card/70"
+        >
+          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-foreground/8 text-foreground/65">
+            <XCircle className="h-3.5 w-3.5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+                {draft.personName}
+              </div>
+              <span
+                className="shrink-0 text-[0.66rem] text-foreground/65"
+                style={MONO_STYLE}
+              >
+                {draft.skippedAt ? isoTimeAgo(draft.skippedAt) : "—"}
+              </span>
+            </div>
+            <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-foreground/70">
+              {draft.draftText}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void restore(draft)}
+            title="Restore to queue"
+            aria-label={`Restore draft for ${draft.personName}`}
+            className="inline-flex h-9 shrink-0 items-center rounded-full px-3 text-[0.7rem] font-semibold text-foreground/70 transition hover:bg-primary/12 hover:text-primary"
+            style={MONO_STYLE}
+          >
+            Restore
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1036,11 +2510,22 @@ function MemoryGraphView({
   edges: { source: string; target: string; type: string }[];
 }) {
   return (
-    <MemoryConstellation
-      className="min-h-[38rem]"
-      edges={edges}
-      nodes={nodes}
-    />
+    <Suspense
+      fallback={
+        <div
+          className="flex min-h-[38rem] items-center justify-center text-[0.72rem] text-foreground/55"
+          style={MONO_STYLE}
+        >
+          Loading graph…
+        </div>
+      }
+    >
+      <MemoryConstellation
+        className="min-h-[38rem]"
+        edges={edges}
+        nodes={nodes}
+      />
+    </Suspense>
   );
 }
 
@@ -1179,12 +2664,12 @@ export function RealEstateTodayPage() {
   ];
 
   return (
+    <ThreadDrawerProvider data={data}>
     <HubShell
       data={data}
       eyebrow="Real Estate Command Center"
-      hero="A local-first operating board for lead priority, admin/document work, social pulse, approvals, and the agent team. Ads stays visible as a later lane."
       icon={Home}
-      title="Elevate Agent is ready to run from one real-estate hub."
+      title="Elevate Agent · Today"
     >
       <WorkflowStrip
         items={[
@@ -1230,83 +2715,1661 @@ export function RealEstateTodayPage() {
         />
       </div>
     </HubShell>
+    </ThreadDrawerProvider>
+  );
+}
+
+type LeadSourceOption = {
+  id: string;
+  label: string;
+  drafts: number;
+  threads: number;
+};
+
+function LeadFilterBar({
+  active,
+  drafts,
+  followUps,
+  hot,
+  onSelect,
+  options,
+  pulse,
+  threads,
+}: {
+  active: string | null;
+  drafts: number;
+  followUps: number;
+  hot: number;
+  onSelect: (id: string | null) => void;
+  options: LeadSourceOption[];
+  pulse?: ResponsePulse;
+  threads: number;
+}) {
+  const stats: Array<{ label: string; value: number | string; tone: "warning" | "default" | "muted" | "destructive" }> = [
+    { label: "Drafts to approve", value: drafts, tone: drafts > 0 ? "warning" : "muted" },
+    { label: "Hot leads", value: hot, tone: hot > 0 ? "default" : "muted" },
+    { label: "Open threads", value: threads, tone: "default" },
+    { label: "Follow-ups scheduled", value: followUps, tone: "muted" },
+  ];
+  if (pulse) {
+    stats.push({
+      label: "Unanswered",
+      value: pulse.unanswered,
+      tone: pulse.breached30 > 0 ? "destructive" : pulse.unanswered > 0 ? "warning" : "muted",
+    });
+    stats.push({
+      label: "Median wait",
+      value: formatMinutes(pulse.median),
+      tone: (pulse.median ?? 0) >= 30 ? "destructive" : (pulse.median ?? 0) >= 5 ? "warning" : "muted",
+    });
+    stats.push({
+      label: "Longest wait",
+      value: formatMinutes(pulse.longest),
+      tone: (pulse.longest ?? 0) >= 60 ? "destructive" : (pulse.longest ?? 0) >= 30 ? "warning" : "muted",
+    });
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-2xl border border-border bg-card px-3.5 py-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
+        {stats.map((stat) => (
+          <div key={stat.label} className="flex items-baseline gap-1.5">
+            <span
+              className={cn(
+                "text-base font-semibold tabular-nums leading-none",
+                stat.tone === "warning" && "text-warning",
+                stat.tone === "destructive" && "text-destructive",
+                stat.tone === "default" && "text-foreground",
+                stat.tone === "muted" && "text-foreground/65",
+              )}
+            >
+              {stat.value}
+            </span>
+            <span
+              className="text-[0.68rem] uppercase tracking-[0.12em] text-foreground/65"
+              style={MONO_STYLE}
+            >
+              {stat.label}
+            </span>
+          </div>
+        ))}
+      </div>
+      {options.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 border-t border-border/55 pt-2">
+          <span
+            className="mr-0.5 inline-flex items-center gap-1 text-[0.66rem] uppercase tracking-[0.14em] text-foreground/65"
+            style={MONO_STYLE}
+          >
+            <Filter className="h-3 w-3" />
+            Filter
+          </span>
+          <FilterChip
+            active={active === null}
+            label="All"
+            onClick={() => onSelect(null)}
+          />
+          {options.map((option) => (
+            <FilterChip
+              key={option.id}
+              active={active === option.id}
+              label={option.label}
+              meta={`${option.drafts ? `${option.drafts} drafts · ` : ""}${option.threads}`}
+              onClick={() => onSelect(option.id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterChip({
+  active,
+  label,
+  meta,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  meta?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors",
+        active
+          ? "border-primary/45 bg-primary/12 text-foreground"
+          : "border-border bg-card text-foreground/75 hover:bg-card/70 hover:text-foreground",
+      )}
+    >
+      <span>{label}</span>
+      {meta && (
+        <span
+          className={cn(
+            "rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
+            active ? "bg-primary/18 text-foreground" : "bg-foreground/8 text-foreground/65",
+          )}
+          style={MONO_STYLE}
+        >
+          {meta}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function CollapsibleSection({
+  children,
+  count,
+  defaultOpen = false,
+  description,
+  title,
+}: {
+  children: React.ReactNode;
+  count?: number;
+  defaultOpen?: boolean;
+  description?: string;
+  title: string;
+}) {
+  return (
+    <details
+      className="group rounded-2xl border border-border bg-card [&_summary]:list-none"
+      open={defaultOpen}
+    >
+      <summary className="flex min-h-[3rem] cursor-pointer items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-foreground hover:bg-card/70">
+        <span className="flex min-w-0 items-center gap-2">
+          <span>{title}</span>
+          {typeof count === "number" && (
+            <span
+              className="inline-flex items-center rounded-full border border-border bg-background/40 px-2 py-0.5 text-[0.66rem] font-semibold text-foreground/75"
+              style={MONO_STYLE}
+            >
+              {count}
+            </span>
+          )}
+          {description && (
+            <span className="hidden truncate text-xs font-normal text-foreground/70 sm:inline">
+              {description}
+            </span>
+          )}
+        </span>
+        <ChevronDown
+          aria-hidden
+          className="h-4 w-4 shrink-0 text-foreground/65 transition-transform group-open:rotate-180"
+        />
+      </summary>
+      <div className="border-t border-border/55 px-4 py-4">{children}</div>
+    </details>
+  );
+}
+
+type AgentLaneId = "new-outreach" | "hot-leads-watcher" | "follow-ups";
+
+type AgentLaneDef = {
+  id: AgentLaneId;
+  name: string;
+  tagline: string;
+  icon: ComponentType<{ className?: string }>;
+  schedule: string;
+  scheduleLabel: string;
+  matchKeywords: string[];
+  prompt: string;
+  cronName: string;
+};
+
+const AGENT_LANES: AgentLaneDef[] = [
+  {
+    id: "new-outreach",
+    name: "New Outreach",
+    tagline: "Daily first-touch on fresh leads from every connected source.",
+    icon: Sparkles,
+    schedule: "0 8 * * *",
+    scheduleLabel: "Daily · 8:00am",
+    matchKeywords: ["new outreach", "outreach", "first touch", "first-touch"],
+    cronName: "New Outreach",
+    prompt:
+      "Run the outreach skill. Pull fresh leads from every connected source (CRM, SMS, email, social via Composio) that have not yet received a first-touch in the last 14 days. For each one: enrich from CRM + property-lookup, draft a personalized first message on the channel they came in from, and write the draft to the source inbox for approval. Do not send. Mark each lead as touched only after the human approves.",
+  },
+  {
+    id: "hot-leads-watcher",
+    name: "Hot Leads Watcher",
+    tagline: "Daily scan for the hottest leads across channels.",
+    icon: Radar,
+    schedule: "0 8 * * *",
+    scheduleLabel: "Daily · 8:00am",
+    matchKeywords: ["hot lead", "hot leads", "watcher", "heat"],
+    cronName: "Hot Leads Watcher",
+    prompt:
+      "Run the outreach skill in monitor mode. Scan every connected source (Lofty CRM, Apple Messages, Gmail, SMS, social via Composio) for hot signals since the last run: inbound replies, viewing requests, repeat opens, CRM stage moves, listing alerts. Re-score heat across the inbox and surface the top 10 hottest leads. For any lead with a brand-new inbound message that needs a reply, draft a same-channel response and queue it for approval. Do not send.",
+  },
+  {
+    id: "follow-ups",
+    name: "Follow-ups",
+    tagline: "Re-touches scheduled threads that went cold.",
+    icon: Repeat,
+    schedule: "0 10,15 * * *",
+    scheduleLabel: "Twice daily · 10a + 3p",
+    matchKeywords: ["follow-up", "follow up", "followup", "nurture"],
+    cronName: "Follow-ups",
+    prompt:
+      "Run the outreach skill in nurture mode. For every lead with an open thread whose last outbound was 3+ days ago without a reply (or whose CRM stage is in nurture), draft a context-aware follow-up on the same channel they were last contacted. Use the relationship history, last touch, and CRM stage to pick the angle. Queue every draft for approval. Do not send.",
+  },
+];
+
+function laneCronJob(lane: AgentLaneDef, jobs: CronJob[]): CronJob | undefined {
+  const target = lane.cronName.toLowerCase();
+  return (
+    jobs.find((job) => (job.name ?? "").toLowerCase() === target) ??
+    jobs.find((job) => jobMatches(job, lane.matchKeywords))
+  );
+}
+
+function laneStatus(job: CronJob | undefined): {
+  label: string;
+  tone: "success" | "warning" | "muted" | "destructive";
+} {
+  if (!job) return { label: "Not started", tone: "muted" };
+  if (job.last_error) return { label: "Error", tone: "destructive" };
+  if (!job.enabled || job.state === "paused") return { label: "Paused", tone: "warning" };
+  const nextMs = job.next_run_at ? Date.parse(job.next_run_at) : NaN;
+  const lastMs = job.last_run_at ? Date.parse(job.last_run_at) : NaN;
+  const now = Date.now();
+  if (Number.isFinite(nextMs) && nextMs <= now && (!Number.isFinite(lastMs) || lastMs < nextMs)) {
+    return { label: "Running", tone: "success" };
+  }
+  if (Number.isFinite(lastMs) && now - lastMs < 5 * 60 * 1000) {
+    return { label: "Just ran", tone: "success" };
+  }
+  return { label: "Scheduled", tone: "muted" };
+}
+
+function OutreachLanesGrid({
+  cronJobs,
+  onChanged,
+}: {
+  cronJobs: CronJob[];
+  onChanged: () => Promise<void>;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {AGENT_LANES.map((lane) => (
+        <AgentLaneStripRow
+          key={lane.id}
+          lane={lane}
+          job={laneCronJob(lane, cronJobs)}
+          onChanged={onChanged}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AgentLaneStripRow({
+  lane,
+  job,
+  onChanged,
+}: {
+  lane: AgentLaneDef;
+  job: CronJob | undefined;
+  onChanged: () => Promise<void>;
+}) {
+  const Icon = lane.icon;
+  const status = laneStatus(job);
+  const [busy, setBusy] = useState<"start" | "trigger" | "toggle" | null>(null);
+
+  const start = async () => {
+    setBusy("start");
+    try {
+      await api.createCronJob({
+        name: lane.cronName,
+        schedule: lane.schedule,
+        prompt: lane.prompt,
+        deliver: "local",
+      });
+      await onChanged();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const trigger = async () => {
+    if (!job) return;
+    setBusy("trigger");
+    try {
+      await api.triggerCronJob(job.id);
+      await onChanged();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggle = async () => {
+    if (!job) return;
+    setBusy("toggle");
+    try {
+      if (job.state === "paused" || !job.enabled) {
+        await api.resumeCronJob(job.id);
+      } else {
+        await api.pauseCronJob(job.id);
+      }
+      await onChanged();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 items-center gap-3 rounded-2xl border border-border bg-card px-3 py-2.5 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1.4fr)_auto]">
+      <div className="flex items-center gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
+          <Icon className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-semibold text-foreground">{lane.name}</span>
+            <span
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em]",
+                status.tone === "success" && "bg-success/12 text-success ring-1 ring-success/25",
+                status.tone === "warning" && "bg-warning/12 text-warning ring-1 ring-warning/25",
+                status.tone === "destructive" && "bg-destructive/12 text-destructive ring-1 ring-destructive/25",
+                status.tone === "muted" && "bg-card text-foreground/60 ring-1 ring-border",
+              )}
+              style={MONO_STYLE}
+            >
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 rounded-full",
+                  status.tone === "success" && "bg-success",
+                  status.tone === "warning" && "bg-warning",
+                  status.tone === "destructive" && "bg-destructive",
+                  status.tone === "muted" && "bg-foreground/40",
+                )}
+              />
+              {status.label}
+            </span>
+          </div>
+          <p className="mt-0.5 line-clamp-1 text-[0.72rem] text-foreground/65">{lane.tagline}</p>
+        </div>
+      </div>
+
+      <div
+        className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.7rem] tabular-nums text-foreground/70"
+        style={MONO_STYLE}
+      >
+        <span>
+          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-foreground/55">sched</span>{" "}
+          <span className="text-foreground">{job?.schedule_display || lane.scheduleLabel}</span>
+        </span>
+        <span className="text-foreground/35">·</span>
+        <span>
+          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-foreground/55">last</span>{" "}
+          <span className="text-foreground">{job?.last_run_at ? isoTimeAgo(job.last_run_at) : "—"}</span>
+        </span>
+        <span className="text-foreground/35">·</span>
+        <span>
+          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-foreground/55">next</span>{" "}
+          <span className="text-foreground">
+            {job?.next_run_at ? isoTimeAgo(job.next_run_at) : job ? "queued" : "—"}
+          </span>
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        {job ? (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void trigger()}
+              disabled={busy !== null}
+              className="h-9 px-3 text-xs"
+              aria-label={`Run ${lane.name} now`}
+            >
+              <Zap className="h-3.5 w-3.5" />
+              Run
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void toggle()}
+              disabled={busy !== null}
+              className="h-9 px-3 text-xs"
+              aria-label={
+                job.state === "paused" || !job.enabled
+                  ? `Resume ${lane.name}`
+                  : `Pause ${lane.name}`
+              }
+            >
+              {job.state === "paused" || !job.enabled ? (
+                <>
+                  <Play className="h-3.5 w-3.5" />
+                  Resume
+                </>
+              ) : (
+                <>
+                  <Pause className="h-3.5 w-3.5" />
+                  Pause
+                </>
+              )}
+            </Button>
+            <Link
+              to={`/cron?edit=${job.id}`}
+              aria-label={`Edit ${lane.name} schedule`}
+              className={cn(
+                buttonVariants({ variant: "ghost", size: "sm" }),
+                "h-9 px-3 text-xs text-foreground/70 hover:text-foreground",
+              )}
+            >
+              <PencilLine className="h-3.5 w-3.5" />
+              Edit
+            </Link>
+          </>
+        ) : (
+          <Button
+            size="sm"
+            onClick={() => void start()}
+            disabled={busy !== null}
+            className="h-9 px-3 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {busy === "start" ? "Starting…" : `Start ${lane.name}`}
+          </Button>
+        )}
+      </div>
+      {job?.last_error && (
+        <div className="col-span-full rounded-xl border border-destructive/25 bg-destructive/8 px-3 py-2 text-[0.72rem] leading-5 text-destructive">
+          {job.last_error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SOURCE_ICON_BY_ID: Record<string, ComponentType<{ className?: string }>> = {
+  "apple-messages": MessageSquare,
+  "sms-provider": Phone,
+  "android-device": Smartphone,
+  rcs: Phone,
+  crm: DatabaseIcon,
+  social: Share2,
+  email: Mail,
+  skills: Network,
+  "market-stats": Activity,
+  "admin-requirements": BriefcaseBusiness,
+  "document-storage": FileText,
+  "forms-signing": FileCheck2,
+};
+
+const OUTREACH_CATEGORIES = new Set(["messages", "leads"]);
+
+function sourceIcon(source: SourceConnectorStatus): ComponentType<{ className?: string }> {
+  return SOURCE_ICON_BY_ID[source.id] ?? Inbox;
+}
+
+function compactCount(value: number): string {
+  if (value >= 10000) {
+    return new Intl.NumberFormat(undefined, { notation: "compact" }).format(value);
+  }
+  return new Intl.NumberFormat().format(value);
+}
+
+type ContactState = {
+  uncontacted: number;
+  contacted: number;
+};
+
+function contactStateFromThreads(threads: SourceInboxThread[]): ContactState {
+  let contacted = 0;
+  let uncontacted = 0;
+  for (const thread of threads) {
+    if (thread.outboundCount > 0) contacted += 1;
+    else uncontacted += 1;
+  }
+  return { contacted, uncontacted };
+}
+
+function contactStateFromProfiles(
+  profiles: SourceInboxProfile[],
+  threadsById: Map<string, SourceInboxThread>,
+): ContactState {
+  let contacted = 0;
+  let uncontacted = 0;
+  for (const profile of profiles) {
+    const touched = profile.threadIds.some((id) => {
+      const thread = threadsById.get(id);
+      return thread ? thread.outboundCount > 0 : false;
+    });
+    if (touched) contacted += 1;
+    else uncontacted += 1;
+  }
+  return { contacted, uncontacted };
+}
+
+function ComposioChannelStrip() {
+  const [status, setStatus] = useState<ComposioStatus | null>(null);
+  const [connections, setConnections] = useState<ComposioConnectedAccount[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const s = await api.getComposioStatus();
+        if (cancelled) return;
+        setStatus(s);
+        if (!s.valid) {
+          setConnections([]);
+          return;
+        }
+        const conns = await api.getComposioConnections();
+        if (cancelled) return;
+        const data = (conns.data as { items?: ComposioConnectedAccount[] } | ComposioConnectedAccount[]) ?? [];
+        setConnections(Array.isArray(data) ? data : data.items ?? []);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading || !status) return null;
+  if (!status.hasKey) return null;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div
+          className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55"
+          style={MONO_STYLE}
+        >
+          Composio {status.valid ? `· ${connections.length} connected` : "· key invalid"}
+        </div>
+        <Link
+          to="/config#composio"
+          className="text-xs text-foreground/65 transition-colors hover:text-foreground"
+        >
+          Manage
+        </Link>
+      </div>
+      {!status.valid ? (
+        <div className="rounded-2xl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+          Composio rejected the saved key. Update it in Config to import these channels.
+        </div>
+      ) : connections.length === 0 ? (
+        <div className="rounded-2xl border border-border bg-card px-3 py-2 text-xs text-foreground/70">
+          No Composio accounts linked yet. Connect Instagram, Gmail, Twilio, or any other app from the Config page.
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {connections.map((conn, idx) => (
+            <span
+              key={String(conn.id ?? idx)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground"
+            >
+              {conn.toolkit?.logo && (
+                <img
+                  src={conn.toolkit.logo}
+                  alt=""
+                  width={14}
+                  height={14}
+                  loading="lazy"
+                  decoding="async"
+                  className="h-3.5 w-3.5 rounded-sm"
+                />
+              )}
+              <span>{conn.toolkit?.name ?? conn.toolkit?.slug ?? "app"}</span>
+              {conn.status === "ACTIVE" && (
+                <span aria-label="active" className="h-1.5 w-1.5 rounded-full bg-success" />
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChannelsPanel({
+  profiles,
+  sources,
+  threads,
+}: {
+  profiles: SourceInboxProfile[];
+  sources: SourceConnectorStatus[];
+  threads: SourceInboxThread[];
+}) {
+  const threadsById = useMemo(() => {
+    const map = new Map<string, SourceInboxThread>();
+    for (const thread of threads) map.set(thread.id, thread);
+    return map;
+  }, [threads]);
+
+  const threadsBySource = useMemo(() => {
+    const grouped = new Map<string, SourceInboxThread[]>();
+    for (const thread of threads) {
+      const list = grouped.get(thread.sourceId) ?? [];
+      list.push(thread);
+      grouped.set(thread.sourceId, list);
+    }
+    return grouped;
+  }, [threads]);
+
+  const { live, available } = useMemo(() => {
+    const liveList: SourceConnectorStatus[] = [];
+    const availableList: SourceConnectorStatus[] = [];
+    for (const source of sources) {
+      if (!OUTREACH_CATEGORIES.has(source.category)) continue;
+      if (source.connected || source.importOnly || source.blocked || source.state === "needs_operator" || source.state === "error") {
+        liveList.push(source);
+      } else {
+        availableList.push(source);
+      }
+    }
+    return { live: liveList, available: availableList };
+  }, [sources]);
+
+  const cross = contactStateFromProfiles(profiles, threadsById);
+  const totalContacts = cross.contacted + cross.uncontacted;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Plug className="h-4 w-4 text-foreground/65" />
+              Channels
+            </CardTitle>
+            <p
+              className="mt-1.5 text-[0.72rem] tabular-nums text-foreground/70"
+              style={MONO_STYLE}
+            >
+              {compactCount(cross.contacted)} contacted · {compactCount(cross.uncontacted)} uncontacted ·{" "}
+              {compactCount(totalContacts)} people · {live.length} live{available.length ? ` · ${available.length} available` : ""}
+            </p>
+          </div>
+          <Link
+            to="/config#composio"
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3 text-xs")}
+            aria-label="Connect a new channel from Config"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Connect channel
+          </Link>
+        </div>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {live.length > 0 && (
+          <div className="space-y-2">
+            <div
+              className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55"
+              style={MONO_STYLE}
+            >
+              Live
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {live.map((source) => (
+                <LiveChannelCard
+                  key={source.id}
+                  source={source}
+                  threads={threadsBySource.get(source.id) ?? []}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        <ComposioChannelStrip />
+
+        {available.length > 0 && (
+          <div className="space-y-2">
+            <div
+              className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55"
+              style={MONO_STYLE}
+            >
+              Available — connect to expand the inbox
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {available.map((source) => (
+                <AvailableChannelChip key={source.id} source={source} />
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function LiveChannelCard({
+  source,
+  threads,
+}: {
+  source: SourceConnectorStatus;
+  threads: SourceInboxThread[];
+}) {
+  const Icon = sourceIcon(source);
+  const state = contactStateFromThreads(threads);
+  const totalRecords = Object.values(source.recordCounts ?? {}).reduce(
+    (sum, value) => sum + (Number(value) || 0),
+    0,
+  );
+  const tone = source.blocked
+    ? "destructive"
+    : source.connected
+      ? "success"
+      : source.importOnly
+        ? "default"
+        : "warning";
+  const stateLabel = source.connected
+    ? "live"
+    : source.importOnly
+      ? "import only"
+      : source.blocked
+        ? "blocked"
+        : source.state === "needs_operator"
+          ? "needs setup"
+          : "error";
+
+  return (
+    <Link
+      to="/config#composio"
+      aria-label={`Configure ${source.label} channel — ${stateLabel}, ${compactCount(state.uncontacted)} uncontacted, ${compactCount(state.contacted)} contacted, ${compactCount(totalRecords)} records`}
+      className="group block rounded-2xl border border-border/55 bg-card p-3 transition-colors hover:border-border hover:bg-card/80"
+    >
+      <div className="flex items-center gap-2">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+          {source.label}
+        </div>
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em]",
+            tone === "success" && "bg-success/12 text-success ring-1 ring-success/25",
+            tone === "warning" && "bg-warning/12 text-warning ring-1 ring-warning/25",
+            tone === "destructive" && "bg-destructive/12 text-destructive ring-1 ring-destructive/25",
+            tone === "default" && "bg-primary/12 text-primary ring-1 ring-primary/25",
+          )}
+          style={MONO_STYLE}
+        >
+          {stateLabel}
+        </span>
+      </div>
+      <div
+        className="mt-2.5 text-[0.72rem] tabular-nums text-foreground/70"
+        style={MONO_STYLE}
+      >
+        <span className="text-warning">{compactCount(state.uncontacted)}</span> uncontacted ·{" "}
+        <span className="text-success">{compactCount(state.contacted)}</span> contacted ·{" "}
+        <span className="text-foreground">{compactCount(totalRecords)}</span> records
+      </div>
+      {source.nextOperatorStep && !source.connected && (
+        <p className="mt-2 line-clamp-2 text-[0.72rem] leading-4 text-foreground/65">
+          {source.nextOperatorStep}
+        </p>
+      )}
+    </Link>
+  );
+}
+
+function AvailableChannelChip({ source }: { source: SourceConnectorStatus }) {
+  const Icon = sourceIcon(source);
+  return (
+    <Link
+      to="/config#composio"
+      aria-label={`Connect ${source.label} channel`}
+      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground/75 transition-colors hover:border-primary/55 hover:bg-card/80 hover:text-foreground"
+    >
+      <Icon className="h-3 w-3" />
+      <span>{source.label}</span>
+      <Plus className="h-3 w-3" />
+    </Link>
+  );
+}
+
+const LANE_META: Record<OutreachLane, { label: string; icon: typeof Sparkles; tone: string }> = {
+  "new-outreach": { label: "New Outreach", icon: Sparkles, tone: "text-primary" },
+  "hot-leads-watcher": { label: "Hot Leads Watcher", icon: Flame, tone: "text-warning" },
+  "follow-ups": { label: "Follow-ups", icon: Repeat, tone: "text-success" },
+};
+
+const LEAD_TABS = [
+  { id: "inbox" as const, label: "Inbox", icon: Inbox },
+  { id: "templates" as const, label: "Templates", icon: BookText },
+];
+
+type LeadTab = (typeof LEAD_TABS)[number]["id"];
+
+function LeadsTabBar({ active, onChange }: { active: LeadTab; onChange: (tab: LeadTab) => void }) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Leads view"
+      className="inline-flex items-center gap-1 rounded-full border border-border bg-card p-1 text-xs"
+    >
+      {LEAD_TABS.map((tab) => {
+        const Icon = tab.icon;
+        const selected = tab.id === active;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            id={`leads-tab-${tab.id}`}
+            aria-selected={selected}
+            aria-controls={`leads-panel-${tab.id}`}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(tab.id)}
+            className={cn(
+              "inline-flex h-9 items-center gap-1.5 rounded-full px-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/55",
+              selected
+                ? "bg-foreground text-background"
+                : "text-foreground/70 hover:bg-foreground/5 hover:text-foreground",
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function LaneOverviewCard({
+  laneOv,
+  onSuggest,
+  suggesting,
+}: {
+  laneOv: OutreachLaneOverview;
+  onSuggest: (lane: OutreachLane) => void;
+  suggesting: boolean;
+}) {
+  const meta = LANE_META[laneOv.lane];
+  const Icon = meta.icon;
+  return (
+    <div className="rounded-2xl border border-border bg-card p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Icon className={cn("h-4 w-4", meta.tone)} />
+          <span className="text-sm font-semibold text-foreground">{meta.label}</span>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onSuggest(laneOv.lane)}
+          disabled={suggesting}
+          className="h-9 px-3 text-xs"
+          aria-label={`Suggest a new ${meta.label} variant`}
+        >
+          {suggesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+          Suggest variant
+        </Button>
+      </div>
+
+      <div
+        className="mt-3 flex items-baseline gap-3 text-[0.78rem] tabular-nums text-foreground/75"
+        style={MONO_STYLE}
+      >
+        <span>
+          <span className="text-base font-semibold text-foreground">{laneOv.activeTemplates}</span>{" "}
+          <span className="text-[0.66rem] uppercase tracking-[0.16em] text-foreground/55">active</span>
+        </span>
+        <span className="text-foreground/35">·</span>
+        <span>
+          <span className="text-base font-semibold text-foreground">{laneOv.totalAttempts}</span>{" "}
+          <span className="text-[0.66rem] uppercase tracking-[0.16em] text-foreground/55">sent</span>
+        </span>
+        <span className="text-foreground/35">·</span>
+        <span>
+          <span className="text-base font-semibold text-foreground">
+            {(laneOv.laneReplyRate * 100).toFixed(0)}%
+          </span>{" "}
+          <span className="text-[0.66rem] uppercase tracking-[0.16em] text-foreground/55">reply</span>
+        </span>
+      </div>
+
+      <div className="mt-3 space-y-1.5">
+        {laneOv.best ? (
+          <div className="flex items-start gap-2 text-xs">
+            <Award className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
+            <div className="min-w-0">
+              <span className="text-foreground/65">Best: </span>
+              <span className="text-foreground">{laneOv.best.name}</span>
+              <span className="text-foreground/65">
+                {" "}· {(laneOv.best.replyRate * 100).toFixed(0)}% / {laneOv.best.uses} sends
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-foreground/65">
+            Need {Math.max(5 - laneOv.totalAttempts, 5)}+ more sends to rank.
+          </div>
+        )}
+        {laneOv.worst && (
+          <div className="flex items-start gap-2 text-xs">
+            <TrendingDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+            <div className="min-w-0">
+              <span className="text-foreground/65">Weakest: </span>
+              <span className="text-foreground">{laneOv.worst.name}</span>
+              <span className="text-foreground/65">
+                {" "}· {(laneOv.worst.replyRate * 100).toFixed(0)}% / {laneOv.worst.uses} sends
+              </span>
+            </div>
+          </div>
+        )}
+        {laneOv.drift.length > 0 && (
+          <div className="flex items-start gap-2 text-xs">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+            <div className="text-foreground/70">
+              <span className="text-foreground">{laneOv.drift[0].template.name}</span> dropped{" "}
+              <span className="text-warning">{laneOv.drift[0].deltaPct}%</span> in last 30d.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PendingApprovalRow({
+  template,
+  onApprove,
+  onReject,
+  busy,
+}: {
+  template: OutreachTemplate;
+  onApprove: (id: string) => void;
+  onReject: (id: string) => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-warning/40 bg-warning/8 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-warning" />
+          <span className="text-sm font-medium text-foreground">{template.name}</span>
+          <Badge variant="warning" className="text-[10px]">
+            pending approval
+          </Badge>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onReject(template.id)}
+            disabled={busy}
+            className="h-9 px-3 text-xs"
+            aria-label={`Reject template ${template.name}`}
+          >
+            <ThumbsDown className="h-3.5 w-3.5" />
+            Reject
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => onApprove(template.id)}
+            disabled={busy}
+            className="h-9 px-3 text-xs"
+            aria-label={`Approve template ${template.name}`}
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ThumbsUp className="h-3.5 w-3.5" />}
+            Approve
+          </Button>
+        </div>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+        {template.body}
+      </p>
+      {template.rationale && (
+        <p className="mt-2 text-xs italic text-muted-foreground">
+          Why: {template.rationale}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TemplatesPanel() {
+  const [templates, setTemplates] = useState<OutreachTemplate[]>([]);
+  const [overview, setOverview] = useState<OutreachOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Record<string, { name: string; body: string }>>({});
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [suggestingLane, setSuggestingLane] = useState<OutreachLane | null>(null);
+  const [showNew, setShowNew] = useState<OutreachLane | null>(null);
+  const [draft, setDraft] = useState<{ lane: OutreachLane; name: string; body: string }>({
+    lane: "new-outreach",
+    name: "",
+    body: "",
+  });
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [tplRes, ovRes] = await Promise.all([
+        api.getOutreachTemplates(),
+        api.getOutreachOverview(),
+      ]);
+      setTemplates(tplRes.templates);
+      setOverview(ovRes);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const suggest = async (lane: OutreachLane) => {
+    setSuggestingLane(lane);
+    try {
+      await api.suggestOutreachTemplate({ lane });
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSuggestingLane(null);
+    }
+  };
+
+  const approve = async (id: string) => {
+    setSavingId(id);
+    try {
+      await api.approveOutreachTemplate(id);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const reject = async (id: string) => {
+    setSavingId(id);
+    try {
+      await api.rejectOutreachTemplate(id);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const grouped = useMemo(() => {
+    const map: Record<OutreachLane, OutreachTemplate[]> = {
+      "new-outreach": [],
+      "hot-leads-watcher": [],
+      "follow-ups": [],
+    };
+    for (const t of templates) {
+      if (t.status !== "active" && t.status !== undefined && t.status !== null) continue;
+      if (map[t.lane]) map[t.lane].push(t);
+    }
+    return map;
+  }, [templates]);
+
+  const pendingByLane = useMemo(() => {
+    const map: Record<OutreachLane, OutreachTemplate[]> = {
+      "new-outreach": [],
+      "hot-leads-watcher": [],
+      "follow-ups": [],
+    };
+    for (const t of templates) {
+      if (t.status === "pending_approval" && map[t.lane]) map[t.lane].push(t);
+    }
+    return map;
+  }, [templates]);
+
+  const startEdit = (t: OutreachTemplate) => {
+    setEditing((prev) => ({ ...prev, [t.id]: { name: t.name, body: t.body } }));
+  };
+  const cancelEdit = (id: string) => {
+    setEditing((prev) => {
+      const { [id]: _drop, ...rest } = prev;
+      return rest;
+    });
+  };
+  const saveEdit = async (t: OutreachTemplate) => {
+    const draftEdit = editing[t.id];
+    if (!draftEdit) return;
+    setSavingId(t.id);
+    try {
+      await api.updateOutreachTemplate(t.id, { name: draftEdit.name, body: draftEdit.body });
+      cancelEdit(t.id);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+  const toggleActive = async (t: OutreachTemplate) => {
+    setSavingId(t.id);
+    try {
+      await api.updateOutreachTemplate(t.id, { active: !t.active });
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+  const remove = async (t: OutreachTemplate) => {
+    if (!confirm(`Delete template "${t.name}"? Past attempts stay logged.`)) return;
+    setSavingId(t.id);
+    try {
+      await api.deleteOutreachTemplate(t.id);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+  const createNew = async () => {
+    if (!draft.name.trim() || !draft.body.trim()) return;
+    setSavingId("__new__");
+    try {
+      await api.createOutreachTemplate({
+        lane: draft.lane,
+        name: draft.name.trim(),
+        body: draft.body.trim(),
+      });
+      setDraft({ lane: draft.lane, name: "", body: "" });
+      setShowNew(null);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  if (loading && templates.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-2xl border border-border/40 bg-card/40 p-6 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading templates…
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="rounded-2xl border border-border/45 bg-card/40 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-foreground">Templates overview</div>
+            <p className="mt-1 max-w-prose text-xs text-muted-foreground">
+              What's working, what's not, and fresh variants for approval. Best/worst rank after{" "}
+              {overview?.thresholds.minUsesForRanking ?? 5}+ sends. Drift flags templates whose 30-day
+              reply rate dropped {overview?.thresholds.driftDropPct ?? 30}%+ vs all-time.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{templates.length} total · {templates.filter((t) => t.active).length} active</span>
+            {(overview?.pendingTotal ?? 0) > 0 && (
+              <Badge variant="warning" className="text-[10px]">
+                {overview!.pendingTotal} pending
+              </Badge>
+            )}
+          </div>
+        </div>
+        {error && (
+          <div className="mt-3 rounded-lg border border-destructive/35 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+      </div>
+
+      {overview && (
+        <div className="grid gap-3 lg:grid-cols-3">
+          {overview.lanes.map((laneOv) => (
+            <LaneOverviewCard
+              key={laneOv.lane}
+              laneOv={laneOv}
+              onSuggest={suggest}
+              suggesting={suggestingLane === laneOv.lane}
+            />
+          ))}
+        </div>
+      )}
+
+      {(Object.keys(LANE_META) as OutreachLane[]).map((lane) => {
+        const meta = LANE_META[lane];
+        const Icon = meta.icon;
+        const list = grouped[lane];
+        return (
+          <Card key={lane} className="border-border/45 bg-card/40">
+            <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0 pb-3">
+              <div className="flex items-center gap-2">
+                <Icon className={cn("h-4 w-4", meta.tone)} />
+                <CardTitle className="text-sm font-semibold text-foreground">
+                  {meta.label}
+                </CardTitle>
+                <Badge variant="outline" className="text-[10px]">
+                  {list.length} template{list.length === 1 ? "" : "s"}
+                </Badge>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setShowNew(lane);
+                  setDraft({ lane, name: "", body: "" });
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New template
+              </Button>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 pt-0">
+              {pendingByLane[lane].length > 0 && (
+                <div className="space-y-2">
+                  <div
+                    className="flex items-center gap-2 text-[0.7rem] uppercase tracking-[0.12em] text-warning"
+                    style={MONO_STYLE}
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    {pendingByLane[lane].length} variant{pendingByLane[lane].length === 1 ? "" : "s"} awaiting approval
+                  </div>
+                  {pendingByLane[lane].map((p) => (
+                    <PendingApprovalRow
+                      key={p.id}
+                      template={p}
+                      onApprove={approve}
+                      onReject={reject}
+                      busy={savingId === p.id}
+                    />
+                  ))}
+                </div>
+              )}
+              {showNew === lane && (
+                <div className="rounded-xl border border-primary/35 bg-primary/5 p-3">
+                  <input
+                    type="text"
+                    placeholder="Template name (e.g. 'Quick warm intro')"
+                    value={draft.name}
+                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    className="w-full rounded-md border border-border/60 bg-background/60 px-3 py-1.5 text-sm text-foreground outline-none focus:border-primary/60"
+                  />
+                  <textarea
+                    placeholder="Message body. Use {first_name}, {city}, {topic}, {source}, {area}, {signal}."
+                    rows={4}
+                    value={draft.body}
+                    onChange={(e) => setDraft({ ...draft, body: e.target.value })}
+                    className="mt-2 w-full resize-y rounded-md border border-border/60 bg-background/60 px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60"
+                  />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setShowNew(null);
+                        setDraft({ lane, name: "", body: "" });
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={createNew}
+                      disabled={!draft.name.trim() || !draft.body.trim() || savingId === "__new__"}
+                    >
+                      {savingId === "__new__" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" />
+                      )}
+                      Save template
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {list.length === 0 && showNew !== lane && (
+                <div className="rounded-xl border border-dashed border-border/45 bg-background/20 px-4 py-6 text-center text-xs text-muted-foreground">
+                  No templates yet. The agent on this lane will skip drafting until at least one exists.
+                </div>
+              )}
+
+              {list.map((t) => {
+                const editingDraft = editing[t.id];
+                const isEditing = Boolean(editingDraft);
+                return (
+                  <div
+                    key={t.id}
+                    className={cn(
+                      "rounded-xl border bg-background/30 p-3 transition-colors",
+                      t.active ? "border-border/55" : "border-border/30 opacity-65",
+                    )}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      {isEditing ? (
+                        <input
+                          type="text"
+                          value={editingDraft.name}
+                          onChange={(e) =>
+                            setEditing((prev) => ({
+                              ...prev,
+                              [t.id]: { ...editingDraft, name: e.target.value },
+                            }))
+                          }
+                          className="flex-1 min-w-0 rounded-md border border-border/60 bg-background/60 px-2 py-1 text-sm font-medium text-foreground outline-none focus:border-primary/60"
+                        />
+                      ) : (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium text-foreground">{t.name}</span>
+                          {!t.active && (
+                            <Badge variant="outline" className="text-[10px]">
+                              paused
+                            </Badge>
+                          )}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1">
+                        {isEditing ? (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => cancelEdit(t.id)}
+                              disabled={savingId === t.id}
+                            >
+                              <XCircle className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button size="sm" onClick={() => saveEdit(t)} disabled={savingId === t.id}>
+                              {savingId === t.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Check className="h-3.5 w-3.5" />
+                              )}
+                              Save
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => toggleActive(t)}
+                              disabled={savingId === t.id}
+                              title={t.active ? "Pause this template" : "Activate this template"}
+                            >
+                              {t.active ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => startEdit(t)}>
+                              <PencilLine className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => remove(t)}
+                              disabled={savingId === t.id}
+                              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {isEditing ? (
+                      <textarea
+                        rows={4}
+                        value={editingDraft.body}
+                        onChange={(e) =>
+                          setEditing((prev) => ({
+                            ...prev,
+                            [t.id]: { ...editingDraft, body: e.target.value },
+                          }))
+                        }
+                        className="mt-2 w-full resize-y rounded-md border border-border/60 bg-background/60 px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60"
+                      />
+                    ) : (
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+                        {t.body}
+                      </p>
+                    )}
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+                      <span>Used {t.uses}×</span>
+                      <span>· {t.replies} repl{t.replies === 1 ? "y" : "ies"}</span>
+                      {t.uses > 0 && (
+                        <span>· {(t.replyRate * 100).toFixed(0)}% reply rate</span>
+                      )}
+                      {t.wins > 0 && <span>· {t.wins} won</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
   );
 }
 
 export function RealEstateLeadsPage() {
   const data = useRealEstateHubData();
   useHubHeader("Leads", data);
-  const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, ["lead", "outreach", "buyer", "seller", "follow-up", "follow up"]),
+  const [sourceFilter, setSourceFilter] = useState<string | null>(null);
+  const [tab, setTab] = useState<LeadTab>("inbox");
+
+  const allThreads = data.sourceInbox?.threads ?? [];
+  const allDrafts = data.sourceInbox?.drafts ?? [];
+  const allSources = data.sourceInbox?.sources ?? [];
+
+  const filterOptions = useMemo<LeadSourceOption[]>(() => {
+    const seen = new Map<string, LeadSourceOption>();
+    for (const source of allSources) {
+      if (!source.connected && !source.importOnly) continue;
+      seen.set(source.id, {
+        id: source.id,
+        label: source.label,
+        drafts: 0,
+        threads: 0,
+      });
+    }
+    for (const thread of allThreads) {
+      const entry = seen.get(thread.sourceId);
+      if (entry) entry.threads += 1;
+    }
+    for (const draft of allDrafts) {
+      const entry = seen.get(draft.sourceId);
+      if (entry) entry.drafts += 1;
+    }
+    return Array.from(seen.values()).filter((option) => option.threads > 0 || option.drafts > 0);
+  }, [allDrafts, allSources, allThreads]);
+
+  const filterFn = useCallback(
+    (sourceId: string) => sourceFilter === null || sourceId === sourceFilter,
+    [sourceFilter],
   );
-  const jobs = data.cronJobs.filter((job) =>
+
+  const threads = useMemo(
+    () => allThreads.filter((thread) => filterFn(thread.sourceId)),
+    [allThreads, filterFn],
+  );
+  const drafts = useMemo(
+    () => allDrafts.filter((draft) => filterFn(draft.sourceId)),
+    [allDrafts, filterFn],
+  );
+
+  const followUpJobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
   );
-  const openLeadThreads = Number(data.sourceInbox?.recordCounts?.threads ?? 0);
-  const hotLeadThreads = sourceRecordCount(data, "hotThreads");
-  const people = sourceRecordCount(data, "people");
-  const crmPeople = sourceRecordCount(data, "crmPeople");
-  const potentialLeads = sourceRecordCount(data, "potentialLeads");
-  const actions = [
-    ...approvalCueActions(sessions, jobs, "Lead"),
-    ...jobs
-      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
-      .slice(0, 5)
-      .map((job) => jobAction(job, "Follow up", CalendarClock)),
-    ...sessions
-      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
-      .slice(0, 5)
-      .map((session) => sessionAction(session, "Lead thread", MessageSquare)),
-  ];
+  const leadJobIds = new Set(followUpJobs.map((job) => job.id));
+  const leadSessions = data.sessions.filter((session) => {
+    if (sessionMatches(session, ["lead", "outreach", "buyer", "seller", "follow-up", "follow up"])) {
+      return true;
+    }
+    if ((session.source ?? "") === "cron" && session.id?.startsWith("cron_")) {
+      const jobIdGuess = session.id.replace(/^cron_/, "").split("_", 1)[0];
+      return leadJobIds.has(jobIdGuess);
+    }
+    return false;
+  });
+
+  const hotLeads = threads.filter((thread) => thread.heatLabel === "hot").length;
+  const blockedSources = allSources.filter((source) => source.blocked);
+  const pulse = useMemo(() => computeResponsePulse(threads), [threads]);
+
+  const refresh = data.refresh;
 
   return (
+    <ThreadDrawerProvider data={data}>
     <HubShell
       data={data}
       eyebrow="Lead Desk"
-      hero="A sales board for who needs a reply, which conversations should be resumed, what follow-ups are scheduled, and what outreach needs approval."
-      icon={Users}
-      title="Leads shows the next sales moves."
+      icon={Inbox}
+      title="Today's sales moves."
     >
-      <WorkflowStrip
-        items={[
-          { icon: Target, label: "Hot leads", value: hotLeadThreads },
-          { icon: Send, label: "Drafts waiting", value: sourceRecordCount(data, "drafts") },
-          { icon: MessageSquare, label: "Open threads", value: openLeadThreads },
-          {
-            icon: CalendarClock,
-            label: "Follow-up tasks",
-            value: jobs.length,
-          },
-        ]}
-      />
-      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_28rem]">
-        <LeadWorkBoard data={data} />
-        <DraftMessagesBoard data={data} />
-      </div>
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ActionBoard
-          actions={actions}
-          title="Lead action board"
-          empty="No lead actions are waiting yet. When outreach sessions, follow-up schedules, or approvals exist, they will show up here."
+      <div className="flex w-full flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <LeadsTabBar active={tab} onChange={setTab} />
+          {tab === "templates" && (
+            <span className="text-xs text-foreground/70">
+              Templates control what the agent says. Edits apply on the next lane run.
+            </span>
+          )}
+        </div>
+
+        {tab === "templates" ? (
+          <TemplatesPanel />
+        ) : (
+          <>
+        <LeadFilterBar
+          active={sourceFilter}
+          drafts={drafts.length}
+          followUps={followUpJobs.length}
+          hot={hotLeads}
+          onSelect={setSourceFilter}
+          options={filterOptions}
+          pulse={pulse}
+          threads={threads.length}
         />
-        <TimedTasks jobs={jobs} empty="No lead follow-up schedules yet." title="Lead follow-ups" />
+
+        {blockedSources.length > 0 && (
+          <div className="rounded-2xl border border-warning/40 bg-warning/8 px-4 py-3 text-sm text-foreground">
+            <div className="flex items-center gap-2 text-warning">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-semibold">A lead source needs access.</span>
+            </div>
+            <div className="mt-2 space-y-1.5 text-xs text-foreground/75">
+              {blockedSources.slice(0, 3).map((source) => (
+                <div key={source.id}>
+                  <span className="font-medium text-foreground">{source.label}: </span>
+                  {source.nextOperatorStep || source.lastError || "Open Settings and reconnect this source."}
+                </div>
+              ))}
+              <Link
+                to="/config#composio"
+                className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-2 h-9 px-3")}
+              >
+                Open Settings
+              </Link>
+            </div>
+          </div>
+        )}
+
+        <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
+          <DraftMessagesBoard
+            data={data}
+            drafts={drafts}
+            keyboard
+            pageSize={12}
+            showOpenThread={false}
+            title="Approve replies"
+            emptyMessage={
+              sourceFilter
+                ? "No drafts waiting from this source. Switch the filter or wait for the next agent run."
+                : "Inbox zero on drafts. New approvals will land here as your agent generates replies."
+            }
+          />
+
+          <div className="flex flex-col gap-4">
+            <CollapsibleSection
+              title="Hot leads"
+              count={leadThreadBuckets(threads).hot.length}
+              description="Top scored leads across every connected source."
+              defaultOpen
+            >
+              <HotLeadsList data={data} threads={threads} />
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Recently skipped"
+              count={(data.sourceInbox?.skippedDrafts ?? []).length}
+              description="Skipped in the last 3 days. Restore brings it back to the queue."
+            >
+              <SkippedDraftsList data={data} />
+            </CollapsibleSection>
+          </div>
+        </div>
+
+        <CollapsibleSection
+          title="Channels"
+          description="Connected sources, profiles, and routing."
+        >
+          <ChannelsPanel
+            profiles={data.sourceInbox?.profiles ?? []}
+            sources={allSources}
+            threads={allThreads}
+          />
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Outreach lanes"
+          description="New Outreach, Hot Leads Watcher, Follow-ups."
+        >
+          <OutreachLanesGrid cronJobs={data.cronJobs} onChanged={refresh} />
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Lead activity"
+          count={leadSessions.length}
+          description="What the agent just did across your inbox."
+        >
+          <RecentSessions
+            title="Recent agent runs"
+            sessions={leadSessions}
+            empty="No agent activity yet. Once a lane runs, its sessions will surface here."
+          />
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="All scheduled jobs"
+          count={followUpJobs.length}
+          description="Every lead-related cron the agent is running."
+        >
+          <TimedTasks
+            jobs={followUpJobs}
+            empty="No additional schedules yet. Add custom ones from /cron."
+            title="Lead schedules"
+          />
+        </CollapsibleSection>
+          </>
+        )}
       </div>
-      <WorkflowStrip
-        items={[
-          { icon: Users, label: "People", value: people },
-          { icon: DatabaseIcon, label: "CRM matched", value: crmPeople },
-          { icon: Megaphone, label: "Social potentials", value: potentialLeads },
-          { icon: CheckCircle2, label: "Review gates", value: approvalCueCount(sessions, jobs) },
-        ]}
-      />
-      <ClientInboxPreview data={data} title="Source preview" />
-      <ContactOverviewBoard data={data} />
-      <RecentSessions
-        title="Lead conversations"
-        sessions={sessions}
-        empty="No lead-specific sessions found yet. Telegram, chat, and outreach runs will appear here when they include lead context."
-      />
     </HubShell>
+    </ThreadDrawerProvider>
   );
 }
 

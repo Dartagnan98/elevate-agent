@@ -504,6 +504,10 @@ def create_job(
     script: Optional[str] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
+    agent: Optional[str] = None,
+    tier: Optional[str] = None,
+    expected_readiness_version: Optional[str] = None,
+    backfill_pending: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -566,6 +570,19 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
 
+    normalized_agent = str(agent).strip() if isinstance(agent, str) else None
+    normalized_agent = normalized_agent or None
+    normalized_tier = str(tier).strip().lower() if isinstance(tier, str) else None
+    if normalized_tier:
+        try:
+            from elevate_cli.tier_resolver import VALID_TIERS as _VALID_TIERS
+        except Exception:
+            _VALID_TIERS = ("orchestrator", "draft", "utility", "send")
+        if normalized_tier not in _VALID_TIERS:
+            raise ValueError(f"unknown tier: {normalized_tier!r}")
+    normalized_readiness = str(expected_readiness_version).strip() if isinstance(expected_readiness_version, str) else None
+    normalized_readiness = normalized_readiness or None
+
     label_source = (prompt or (normalized_skills[0] if normalized_skills else None)) or "cron job"
     job = {
         "id": job_id,
@@ -598,6 +615,21 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        # /leads cron metadata: agent picker, tier resolver fallback, readiness gate, backfill iterator
+        "agent": normalized_agent,
+        "tier": normalized_tier,
+        "expected_readiness_version": normalized_readiness,
+        "backfill_pending": bool(backfill_pending),
+        # Backfill iterator state (Phase 4). Stays None until the lane's first
+        # backfill run reports progress via update_backfill_state().
+        # Shape: {day, total_estimate, queued_today, eligible_remaining, updated_at}
+        "backfill_state": None if not backfill_pending else {
+            "day": 0,
+            "total_estimate": 0,
+            "queued_today": 0,
+            "eligible_remaining": None,
+            "updated_at": None,
+        },
     }
 
     jobs = load_jobs()
@@ -670,6 +702,49 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         save_jobs(jobs)
         return _apply_skill_fields(jobs[i])
     return None
+
+
+def update_backfill_state(
+    job_id: str,
+    *,
+    queued_today: Optional[int] = None,
+    eligible_remaining: Optional[int] = None,
+    total_estimate: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Lane skill reports per-run backfill progress.
+
+    Increments ``day`` by 1, records the count it queued this run, and the
+    remaining eligible profile count it observed. When ``eligible_remaining``
+    hits 0, the job is marked ``backfill_pending=False`` and subsequent runs
+    use the incremental window instead of the backfill iterator.
+
+    Returns the refreshed job dict, or None if the job no longer exists.
+    """
+    job = get_job(job_id)
+    if not job:
+        return None
+    if not job.get("backfill_pending"):
+        # Iterator is done — accept the report but don't mutate pending state.
+        return job
+
+    state = dict(job.get("backfill_state") or {
+        "day": 0, "total_estimate": 0, "queued_today": 0,
+        "eligible_remaining": None, "updated_at": None,
+    })
+    state["day"] = int(state.get("day") or 0) + 1
+    if queued_today is not None:
+        state["queued_today"] = int(queued_today)
+    if eligible_remaining is not None:
+        state["eligible_remaining"] = int(eligible_remaining)
+    if total_estimate is not None:
+        state["total_estimate"] = int(total_estimate)
+    state["updated_at"] = _elevate_now().isoformat()
+
+    updates: Dict[str, Any] = {"backfill_state": state}
+    if state.get("eligible_remaining") == 0:
+        updates["backfill_pending"] = False
+
+    return update_job(job_id, updates)
 
 
 def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[Dict[str, Any]]:

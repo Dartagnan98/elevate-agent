@@ -150,6 +150,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(job),
     }),
+  updateCronJob: (id: string, updates: Record<string, unknown>) =>
+    fetchJSON<CronJob>(`/api/cron/jobs/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ updates }),
+    }),
   pauseCronJob: (id: string) =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}/pause`, { method: "POST" }),
   resumeCronJob: (id: string) =>
@@ -158,6 +164,107 @@ export const api = {
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}/trigger`, { method: "POST" }),
   deleteCronJob: (id: string) =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}`, { method: "DELETE" }),
+
+  // Outreach templates
+  getOutreachTemplates: (lane?: string) => {
+    const qs = lane ? `?lane=${encodeURIComponent(lane)}` : "";
+    return fetchJSON<{ templates: OutreachTemplate[] }>(`/api/outreach/templates${qs}`);
+  },
+  createOutreachTemplate: (body: { lane: string; name: string; body: string; channel?: string }) =>
+    fetchJSON<{ template: OutreachTemplate }>("/api/outreach/templates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateOutreachTemplate: (
+    id: string,
+    body: { name?: string; body?: string; channel?: string; active?: boolean },
+  ) =>
+    fetchJSON<{ template: OutreachTemplate }>(`/api/outreach/templates/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteOutreachTemplate: (id: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/outreach/templates/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  getOutreachOverview: () => fetchJSON<OutreachOverview>("/api/outreach/templates/overview"),
+  suggestOutreachTemplate: (body: { lane: string; channel?: string; extraBrief?: string }) =>
+    fetchJSON<{ template: OutreachTemplate }>("/api/outreach/templates/suggest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  approveOutreachTemplate: (id: string) =>
+    fetchJSON<{ template: OutreachTemplate }>(
+      `/api/outreach/templates/${encodeURIComponent(id)}/approve`,
+      { method: "POST" },
+    ),
+  rejectOutreachTemplate: (id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/outreach/templates/${encodeURIComponent(id)}/reject`,
+      { method: "POST" },
+    ),
+
+  // Composio
+  getComposioStatus: () => fetchJSON<ComposioStatus>("/api/composio/status"),
+  setComposioKey: (apiKey: string) =>
+    fetchJSON<ComposioStatus>("/api/composio/key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey }),
+    }),
+  clearComposioKey: () =>
+    fetchJSON<ComposioStatus>("/api/composio/key", { method: "DELETE" }),
+  getComposioConnections: () =>
+    fetchJSON<ComposioApiResult<ComposioConnectedAccount[]>>(
+      "/api/composio/connections",
+    ),
+  getComposioToolkits: (category?: string) => {
+    const qs = category ? `?category=${encodeURIComponent(category)}` : "";
+    return fetchJSON<ComposioApiResult<ComposioToolkit[]>>(`/api/composio/toolkits${qs}`);
+  },
+  initiateComposioConnection: (body: {
+    toolkitSlug: string;
+    redirectUrl?: string;
+    userId?: string;
+  }) =>
+    fetchJSON<ComposioApiResult<ComposioConnectInitResponse>>(
+      "/api/composio/connect",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteComposioConnection: (accountId: string) =>
+    fetchJSON<ComposioApiResult<unknown>>(
+      `/api/composio/connections/${encodeURIComponent(accountId)}`,
+      { method: "DELETE" },
+    ),
+  getComposioFacebookPages: () =>
+    fetchJSON<{
+      ok: boolean;
+      pages: Array<{
+        id: string;
+        name: string;
+        selected: boolean;
+        tasks?: string[];
+        connected_account_id?: string;
+      }>;
+      selected_page_ids: string[];
+      error?: string;
+    }>("/api/composio/facebook/pages"),
+  setComposioFacebookPages: (pageIds: string[]) =>
+    fetchJSON<{ ok: boolean; selected_page_ids: string[] }>(
+      "/api/composio/facebook/pages",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pageIds }),
+      },
+    ),
 
   // Skills & Toolsets
   getSkills: () => fetchJSON<SkillInfo[]>("/api/skills"),
@@ -270,6 +377,26 @@ export const api = {
     ),
   getSourceInbox: (limit = 16) =>
     fetchJSON<SourceInboxResponse>(`/api/source-inbox?limit=${limit}`),
+  getThreadContext: (sourceId: string, threadId: string, limit = 200) =>
+    fetchJSON<ThreadContextResponse>(
+      `/api/source-inbox/thread/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}?limit=${limit}`,
+    ),
+  // Manual trigger for the composio inbound puller — used by the hub Refresh
+  // button so a click pulls new DMs/replies in addition to re-reading state.
+  pullComposioInbound: () =>
+    fetchJSON<{
+      tick_at: string;
+      total_new: number;
+      total_fetched: number;
+      toolkits: Array<{
+        toolkit: string;
+        ok: boolean;
+        skipped?: boolean;
+        reason?: string;
+        new?: number;
+        fetched?: number;
+      }>;
+    }>("/api/composio/inbound/pull", { method: "POST" }),
   updateSourceInboxThread: (sourceId: string, threadId: string, action: "done" | "archive" | "restore" | "open") =>
     fetchJSON<SourceInboxResponse>("/api/source-inbox/thread", {
       method: "POST",
@@ -288,6 +415,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "scaffold", sourceId }),
     }),
+  refreshSourceConnector: (sourceId: string) =>
+    fetchJSON<SourceConnectorsResponse & { refresh?: { tick_at: string; total_new: number; total_fetched: number; toolkits: Array<Record<string, unknown>> } }>(
+      "/api/source-connectors",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "refresh", sourceId }),
+      },
+    ),
   getIntegrations: () => fetchJSON<IntegrationSettingsResponse>("/api/integrations"),
   saveIntegrations: (crm: CrmIntegrationForm) =>
     fetchJSON<IntegrationSettingsResponse>("/api/integrations", {
@@ -466,6 +602,186 @@ export interface SourceInboxDraft {
   approvalRequired: boolean;
   generated: boolean;
   record: SourceRecord;
+  skippedAt?: string | null;
+  score?: number | null;
+  leadLabel?: string | null;
+  scoreReason?: string | null;
+}
+
+export type OutreachLane = "new-outreach" | "hot-leads-watcher" | "follow-ups";
+
+export type OutreachTemplateStatus = "active" | "pending_approval" | "archived";
+
+export interface OutreachTemplate {
+  id: string;
+  lane: OutreachLane;
+  name: string;
+  body: string;
+  channel: string;
+  active: boolean;
+  status: OutreachTemplateStatus;
+  rationale?: string | null;
+  uses: number;
+  replies: number;
+  wins: number;
+  replyRate: number;
+  winRate: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OutreachLaneOverview {
+  lane: OutreachLane;
+  totalTemplates: number;
+  activeTemplates: number;
+  pendingTemplates: number;
+  totalAttempts: number;
+  totalReplies: number;
+  laneReplyRate: number;
+  best: OutreachTemplate | null;
+  worst: OutreachTemplate | null;
+  drift: {
+    template: OutreachTemplate;
+    recent: { uses: number; replies: number; wins: number; replyRate: number; winRate: number };
+    deltaPct: number;
+  }[];
+  pending: OutreachTemplate[];
+}
+
+export interface OutreachOverview {
+  lanes: OutreachLaneOverview[];
+  pendingTotal: number;
+  thresholds: { minUsesForRanking: number; driftDropPct: number; recentWindowDays: number };
+}
+
+export interface ComposioStatus {
+  configured: boolean;
+  hasKey: boolean;
+  valid: boolean;
+  baseUrl?: string;
+  error?: string;
+  status?: number;
+}
+
+export interface ComposioApiResult<T> {
+  ok: boolean;
+  data?: T;
+  status?: number;
+  error?: string;
+  raw?: unknown;
+}
+
+export interface ComposioToolkitMeta {
+  logo?: string;
+  description?: string;
+  app_url?: string;
+  tools_count?: number;
+  triggers_count?: number;
+  categories?: { id?: string; name?: string }[];
+  [key: string]: unknown;
+}
+
+export interface ComposioConnectedAccount {
+  id?: string;
+  status?: string;
+  toolkit?: { slug?: string; name?: string; logo?: string; meta?: ComposioToolkitMeta };
+  user_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+export interface ComposioToolkit {
+  slug?: string;
+  name?: string;
+  description?: string;
+  logo?: string;
+  meta?: ComposioToolkitMeta;
+  categories?: { slug?: string; id?: string; name?: string }[];
+  [key: string]: unknown;
+}
+
+export interface ComposioConnectInitResponse {
+  redirect_url?: string;
+  redirect_uri?: string;
+  connected_account_id?: string;
+  [key: string]: unknown;
+}
+
+export interface ThreadContextMessage {
+  id: string;
+  direction: "inbound" | "outbound" | string;
+  sender: string | null;
+  text: string;
+  timestamp: string | null;
+}
+
+export interface ThreadContextSend {
+  id: string;
+  channel: string | null;
+  status: string | null;
+  attempts: number;
+  providerMessageId: string | null;
+  payload: { text?: string; body?: string; [key: string]: unknown } | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ThreadContextMeta {
+  score: number;
+  label: string;
+  reason: string | null;
+  scoredBy: string | null;
+  scoredAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ThreadContextLead {
+  leadId: string | null;
+  displayName: string | null;
+  stage: string | null;
+  leadSource: string | null;
+  assignedUser: string | null;
+  score: number | null;
+  tags: string[];
+  summary: string | null;
+  emails: string[];
+  phones: string[];
+  channel: string | null;
+  timestamp: string | null;
+  lastSeenAt: string | null;
+}
+
+export interface ThreadContextActivity {
+  id: string;
+  type: string;
+  title: string | null;
+  summary: string | null;
+  timestamp: string | null;
+}
+
+export interface ThreadContextResponse {
+  sourceId: string;
+  threadId: string;
+  source: {
+    id?: string;
+    label?: string;
+    category?: string;
+    ownerAgent?: string;
+    connected?: boolean;
+  };
+  personName: string;
+  messageCount: number;
+  messages: ThreadContextMessage[];
+  lastInboundAt?: string | null;
+  lastOutboundAt?: string | null;
+  pendingDraft: SourceInboxDraft | null;
+  sends: ThreadContextSend[];
+  meta: ThreadContextMeta | null;
+  lead: ThreadContextLead | null;
+  notes: unknown[];
+  activity: ThreadContextActivity[];
+  stubs: { notes: string; activity: string };
 }
 
 export interface SourceInboxResponse {
@@ -480,6 +796,7 @@ export interface SourceInboxResponse {
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
   drafts: SourceInboxDraft[];
+  skippedDrafts?: SourceInboxDraft[];
 }
 
 export interface CrmIntegrationForm {

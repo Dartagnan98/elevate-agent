@@ -172,6 +172,153 @@ class InsightsEngine:
             "top_sessions": top_sessions,
         }
 
+    def generate_turn_usage(self, days: int = 7, source: str = None, limit: int = 25) -> Dict[str, Any]:
+        """Generate per-turn usage analytics from turn_usage.
+
+        This is Elevate-only usage recorded by the gateway, not provider account
+        totals. It intentionally reads the lightweight turn_usage table instead
+        of replaying session transcripts.
+        """
+        cutoff = time.time() - (days * 86400)
+        safe_limit = max(1, min(int(limit or 25), 200))
+        where = ["timestamp >= ?"]
+        params: list[Any] = [cutoff]
+        if source:
+            where.append("source = ?")
+            params.append(source)
+        where_sql = " AND ".join(where)
+
+        try:
+            rows = [
+                dict(row)
+                for row in self._conn.execute(
+                    f"SELECT * FROM turn_usage WHERE {where_sql} ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    (*params, safe_limit),
+                ).fetchall()
+            ]
+            totals = dict(self._conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS turns,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                    COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                    COALESCE(SUM(api_calls), 0) AS api_calls,
+                    COALESCE(SUM(estimated_cost_usd), 0.0) AS estimated_cost_usd,
+                    COALESCE(SUM(estimated_tool_schema_savings_tokens), 0) AS estimated_savings_tokens,
+                    AVG(latency_ms) AS avg_latency_ms,
+                    MAX(latency_ms) AS max_latency_ms,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_turns
+                FROM turn_usage
+                WHERE {where_sql}
+                """,
+                params,
+            ).fetchone())
+            profiles = [
+                dict(row)
+                for row in self._conn.execute(
+                    f"""
+                    SELECT
+                        COALESCE(NULLIF(gateway_tool_profile, ''), '(unknown)') AS profile,
+                        COUNT(*) AS turns,
+                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                        COALESCE(SUM(estimated_tool_schema_savings_tokens), 0) AS savings_tokens,
+                        AVG(latency_ms) AS avg_latency_ms
+                    FROM turn_usage
+                    WHERE {where_sql}
+                    GROUP BY profile
+                    ORDER BY turns DESC, total_tokens DESC
+                    LIMIT 10
+                    """,
+                    params,
+                ).fetchall()
+            ]
+            slowest = [
+                dict(row)
+                for row in self._conn.execute(
+                    f"""
+                    SELECT timestamp, source, model, gateway_tool_profile, latency_ms,
+                           total_tokens, status, error_type
+                    FROM turn_usage
+                    WHERE {where_sql}
+                    ORDER BY latency_ms DESC, id DESC
+                    LIMIT 5
+                    """,
+                    params,
+                ).fetchall()
+            ]
+        except Exception as exc:
+            return {
+                "days": days,
+                "source_filter": source,
+                "empty": True,
+                "error": str(exc),
+                "rows": [],
+                "totals": {},
+                "profiles": [],
+                "slowest": [],
+            }
+
+        return {
+            "days": days,
+            "source_filter": source,
+            "empty": not bool(totals.get("turns")),
+            "rows": rows,
+            "totals": totals,
+            "profiles": profiles,
+            "slowest": slowest,
+        }
+
+    def format_turn_usage_terminal(self, report: Dict[str, Any]) -> str:
+        """Format per-turn usage analytics for CLI output."""
+        if report.get("error"):
+            return f"Per-turn usage unavailable: {report['error']}"
+        days = report.get("days", 7)
+        source = report.get("source_filter") or "all sources"
+        if report.get("empty"):
+            return f"No per-turn usage rows for last {days} day(s), source={source}."
+
+        totals = report.get("totals") or {}
+        lines = [
+            f"Per-turn Elevate usage — last {days} day(s), source={source}",
+            "",
+            f"Turns: {int(totals.get('turns') or 0):,}  Failed: {int(totals.get('failed_turns') or 0):,}",
+            f"Tokens: {int(totals.get('total_tokens') or 0):,} total "
+            f"({int(totals.get('input_tokens') or 0):,} in / {int(totals.get('output_tokens') or 0):,} out / "
+            f"{int(totals.get('cache_read_tokens') or 0):,} cache read)",
+            f"API calls: {int(totals.get('api_calls') or 0):,}  Est. cost: ${float(totals.get('estimated_cost_usd') or 0.0):.4f}",
+            f"Estimated tool-schema savings: {int(totals.get('estimated_savings_tokens') or 0):,} tokens",
+            f"Latency: avg {int(totals.get('avg_latency_ms') or 0):,}ms / max {int(totals.get('max_latency_ms') or 0):,}ms",
+        ]
+
+        profiles = report.get("profiles") or []
+        if profiles:
+            lines.extend(["", "By profile:"])
+            for row in profiles:
+                lines.append(
+                    f"  {row.get('profile')}: {int(row.get('turns') or 0):,} turns, "
+                    f"{int(row.get('total_tokens') or 0):,} tokens, "
+                    f"{int(row.get('savings_tokens') or 0):,} saved, "
+                    f"avg {int(row.get('avg_latency_ms') or 0):,}ms"
+                )
+
+        slowest = report.get("slowest") or []
+        if slowest:
+            lines.extend(["", "Slowest turns:"])
+            for row in slowest:
+                ts = datetime.fromtimestamp(row.get("timestamp") or 0).strftime("%Y-%m-%d %H:%M")
+                status = row.get("status") or "ok"
+                err = f"/{row.get('error_type')}" if row.get("error_type") else ""
+                lines.append(
+                    f"  {ts} {row.get('source') or '-'} {row.get('gateway_tool_profile') or '-'} "
+                    f"{int(row.get('latency_ms') or 0):,}ms {int(row.get('total_tokens') or 0):,} tok {status}{err}"
+                )
+
+        return "\n".join(lines)
+
     # =========================================================================
     # Data gathering (SQL queries)
     # =========================================================================

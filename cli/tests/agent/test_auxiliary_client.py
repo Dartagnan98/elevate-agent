@@ -1413,3 +1413,33 @@ class TestAuxiliaryAuthRefreshRetry:
         mock_refresh.assert_called_once_with("anthropic")
         assert stale_client.chat.completions.create.await_count == 1
         assert fresh_client.chat.completions.create.await_count == 1
+
+
+class TestAnthropicExplicitApiKey:
+    def test_try_anthropic_uses_explicit_api_key_over_env(self):
+        with (
+            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="env-fallback-key"),
+            patch("agent.anthropic_adapter.build_anthropic_client") as mock_build,
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+        ):
+            mock_build.return_value = MagicMock()
+            from agent.auxiliary_client import _try_anthropic
+            client, _model = _try_anthropic("explicit-pool-key")
+
+        assert client is not None
+        assert mock_build.call_args.args[0] == "explicit-pool-key"
+
+    def test_resolve_provider_client_passes_explicit_api_key_to_anthropic(self):
+        with (
+            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="env-key"),
+            patch("agent.anthropic_adapter.build_anthropic_client") as mock_build,
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+        ):
+            mock_build.return_value = MagicMock()
+            client, _model = resolve_provider_client(
+                provider="anthropic",
+                explicit_api_key="explicit-fallback-key",
+            )
+
+        assert client is not None
+        assert mock_build.call_args.args[0] == "explicit-fallback-key"

@@ -125,7 +125,7 @@ _LOCK_FILE = _LOCK_DIR / ".tick.lock"
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata."""
     origin = job.get("origin")
-    if not origin:
+    if not isinstance(origin, dict):
         return None
     platform = origin.get("platform")
     chat_id = origin.get("chat_id")
@@ -694,6 +694,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         return prompt
 
     from tools.skills_tool import skill_view
+    try:
+        from tools.skill_usage import bump_use
+    except ImportError:
+        def bump_use(_skill_name: str) -> None:
+            return None
 
     parts = []
     skipped: list[str] = []
@@ -704,6 +709,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
             skipped.append(skill_name)
             continue
+
+        # Bump usage so the curator sees this skill as actively used.
+        try:
+            bump_use(skill_name)
+        except Exception:
+            logger.debug("Cron job: failed to bump skill usage for '%s'", skill_name, exc_info=True)
 
         content = str(loaded.get("content") or "").strip()
         if parts:
@@ -750,6 +761,56 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     
     job_id = job["id"]
     job_name = job["name"]
+
+    # Readiness gate (Phase /leads): if this job pinned an
+    # ``expected_readiness_version`` at create-time, re-check it at fire-time.
+    # Configuration can drift between create and run — a connector can
+    # disconnect, lane channels can change, templates can be deleted — and
+    # we'd rather skip with a clear reason than fire a job that operates
+    # against missing infrastructure. The skip is recorded so the dashboard
+    # can surface it instead of leaving the job silently bouncing.
+    expected_readiness = (job.get("expected_readiness_version") or "").strip()
+    if expected_readiness:
+        try:
+            from elevate_cli.onboarding import compute_onboarding_status
+            snap = compute_onboarding_status()
+        except Exception as exc:
+            logger.warning(
+                "Job '%s': readiness probe failed (%s) — proceeding without gate",
+                job_id, exc,
+            )
+            snap = None
+
+        if snap is not None:
+            current_version = str(snap.get("version") or "")
+            if not snap.get("ready"):
+                reason = (
+                    f"readiness_not_ready: required checks failing — "
+                    f"{[c['id'] for c in snap.get('checks', []) if not c.get('optional') and not c.get('ok')]}"
+                )
+                logger.warning("Job '%s' skipped at fire-time: %s", job_id, reason)
+                silent_doc = (
+                    f"# Cron Job: {job_name}\n\n"
+                    f"**Job ID:** {job_id}\n"
+                    f"**Run Time:** {_elevate_now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"Readiness gate failed — system not ready.\n\n"
+                    f"Reason: {reason}\n"
+                )
+                return True, silent_doc, SILENT_MARKER, None
+            if current_version != expected_readiness:
+                reason = (
+                    f"readiness_version_mismatch: job pinned {expected_readiness}, "
+                    f"current is {current_version}"
+                )
+                logger.warning("Job '%s' skipped at fire-time: %s", job_id, reason)
+                silent_doc = (
+                    f"# Cron Job: {job_name}\n\n"
+                    f"**Job ID:** {job_id}\n"
+                    f"**Run Time:** {_elevate_now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"Readiness gate failed — version drift.\n\n"
+                    f"Reason: {reason}\n"
+                )
+                return True, silent_doc, SILENT_MARKER, None
 
     # Wake-gate: if this job has a pre-check script, run it BEFORE building
     # the prompt so a ``{"wakeAgent": false}`` response can short-circuit
@@ -837,6 +898,25 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         model = job.get("model") or os.getenv("ELEVATE_MODEL") or ""
 
+        # Tier-based fallback (Phase 2 of /leads plan): if the job declares a
+        # tier but no concrete model, resolve the tier against the user's
+        # harness via tier_resolver. Job-level explicit model still wins.
+        _job_tier = (job.get("tier") or "").strip()
+        if not model and _job_tier:
+            try:
+                from elevate_cli.tier_resolver import resolve_tier_with_provider
+                tier_model, tier_provider = resolve_tier_with_provider(_job_tier)
+                if tier_model:
+                    model = tier_model
+                    if tier_provider and not job.get("provider"):
+                        job["provider"] = tier_provider
+                    logger.info(
+                        "Job '%s': resolved tier '%s' -> model %s (provider %s)",
+                        job_id, _job_tier, tier_model, tier_provider or "default",
+                    )
+            except Exception as e:
+                logger.warning("Job '%s': tier resolution failed for '%s': %s", job_id, _job_tier, e)
+
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
         _cfg = {}
         try:
@@ -846,7 +926,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 with open(_cfg_path) as _f:
                     _cfg = yaml.safe_load(_f) or {}
                 _model_cfg = _cfg.get("model", {})
-                if not job.get("model"):
+                if not model:
                     if isinstance(_model_cfg, str):
                         model = _model_cfg
                     elif isinstance(_model_cfg, dict):

@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-03",
+  "notes": [
+    "Per-toolkit send/inbound/read_only matrix used by the /leads channel picker.",
+    "Each entry's `verification` field tracks how we know the capability works:",
+    "  - `verified_live` = we have run execute_tool against a real account in this repo",
+    "  - `documented_unverified` = Composio docs claim support, no live test yet",
+    "  - `unverified_external_claim` = third-party claim (e.g. blog post) — UI must surface as caveat",
+    "  - `unsupported` = Composio does not expose this capability for this toolkit",
+    "Entries here gate what the channel picker can offer. New toolkits should be added before exposing them in the UI."
+  ],
+  "toolkits": {
+    "gmail": {
+      "send": {
+        "supported": true,
+        "slug": "GMAIL_SEND_EMAIL",
+        "required_args": ["recipient_email", "subject", "body"],
+        "verification": "documented_unverified"
+      },
+      "inbound": {
+        "supported": true,
+        "slug": "GMAIL_FETCH_EMAILS",
+        "required_args": ["query"],
+        "verification": "documented_unverified"
+      },
+      "read_only": false
+    },
+    "gmail_oauth2": {
+      "send": {
+        "supported": true,
+        "slug": "GMAIL_SEND_EMAIL",
+        "required_args": ["recipient_email", "subject", "body"],
+        "verification": "documented_unverified"
+      },
+      "inbound": {
+        "supported": true,
+        "slug": "GMAIL_FETCH_EMAILS",
+        "required_args": ["query"],
+        "verification": "documented_unverified"
+      },
+      "read_only": false
+    },
+    "instagram": {
+      "send": {
+        "supported": true,
+        "slug": "INSTAGRAM_SEND_TEXT_MESSAGE",
+        "required_args": ["recipient_id", "text"],
+        "verification": "documented_unverified"
+      },
+      "inbound": {
+        "supported": true,
+        "kind": "two_step",
+        "conversations_slug": "INSTAGRAM_LIST_ALL_CONVERSATIONS",
+        "messages_slug": "INSTAGRAM_LIST_ALL_MESSAGES",
+        "conversations_default_args": {},
+        "messages_default_args": {"limit": 50},
+        "conversations_id_field": "id",
+        "conversations_response_path": ["data", "data"],
+        "messages_response_path": ["data", "data"],
+        "verification": "verified_live"
+      },
+      "read_only": false
+    },
+    "linkedin": {
+      "send": {
+        "supported": false,
+        "slug": null,
+        "required_args": [],
+        "verification": "unsupported",
+        "note": "LinkedIn DM send is not supported by Composio (no public API). Do not expose."
+      },
+      "inbound": {
+        "supported": false,
+        "slug": null,
+        "required_args": [],
+        "verification": "unsupported"
+      },
+      "read_only": true
+    },
+    "facebook": {
+      "send": {
+        "supported": true,
+        "slug": "FACEBOOK_SEND_MESSAGE",
+        "required_args": ["page_id", "recipient_id", "message"],
+        "verification": "documented_unverified",
+        "note": "Send requires a Page Access Token; pass via custom_auth_params."
+      },
+      "inbound": {
+        "supported": true,
+        "kind": "page_walk",
+        "pages_slug": "FACEBOOK_GET_USER_PAGES",
+        "conversations_slug": "FACEBOOK_GET_PAGE_CONVERSATIONS",
+        "messages_slug": "FACEBOOK_GET_CONVERSATION_MESSAGES",
+        "pages_response_path": ["data", "response_data", "data"],
+        "conversations_response_path": ["data", "response_data", "data"],
+        "messages_response_path": ["data", "response_data", "messages", "data"],
+        "conversations_default_args": {"limit": 25, "fields": "id,participants,updated_time"},
+        "messages_default_args": {"limit": 25, "fields": "messages{id,created_time,from,to,message}"},
+        "selection_required": true,
+        "verification": "verified_live"
+      },
+      "read_only": false
+    },
+    "outlook": {
+      "send": {
+        "supported": true,
+        "slug": "OUTLOOK_SEND_EMAIL",
+        "required_args": ["to", "subject", "body"],
+        "verification": "documented_unverified"
+      },
+      "inbound": {
+        "supported": true,
+        "slug": "OUTLOOK_FETCH_MESSAGES",
+        "required_args": [],
+        "verification": "documented_unverified"
+      },
+      "read_only": false
+    },
+    "slack": {
+      "send": {
+        "supported": true,
+        "slug": "SLACK_SEND_MESSAGE",
+        "required_args": ["channel", "text"],
+        "verification": "documented_unverified"
+      },
+      "inbound": {
+        "supported": true,
+        "slug": "SLACK_FETCH_CONVERSATION_HISTORY",
+        "required_args": ["channel"],
+        "verification": "documented_unverified"
+      },
+      "read_only": false
+    }
+  },
+  "rate_limit_budget": {
+    "notes": "Phase 5a baseline. Refine when live polling shows actual ceilings.",
+    "default_poll_interval_minutes": 10,
+    "max_users_per_toolkit_at_default_interval": 50,
+    "fail_closed_when_unknown": true
+  }
+}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarDays, Clock, Pause, Play, Plus, Trash2, Zap } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { CalendarDays, Check, Clock, Pause, Pencil, Play, Plus, Trash2, X, Zap } from "lucide-react";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { api } from "@/lib/api";
 import type { CronJob } from "@/lib/api";
@@ -128,11 +129,338 @@ function buildSchedule({
   };
 }
 
+function inferScheduleMode(expr: string): {
+  mode: ScheduleMode;
+  time: string;
+  dayOfWeek: string;
+  dayOfMonth: string;
+  customSchedule: string;
+} {
+  const fallback = {
+    mode: "custom" as ScheduleMode,
+    time: "09:00",
+    dayOfWeek: "monday",
+    dayOfMonth: "1",
+    customSchedule: expr,
+  };
+  if (!expr) return fallback;
+  const trimmed = expr.trim();
+  const biweeklyMatch = trimmed.match(/^every\s+2w\s+on\s+(\w+)\s+at\s+(\d{1,2}):(\d{2})$/i);
+  if (biweeklyMatch) {
+    const anchor = biweeklyMatch[1].toLowerCase();
+    const weekday = WEEKDAYS.find((day) => day.value === anchor) ?? WEEKDAYS[0];
+    return {
+      mode: "biweekly",
+      time: `${biweeklyMatch[2].padStart(2, "0")}:${biweeklyMatch[3]}`,
+      dayOfWeek: weekday.value,
+      dayOfMonth: "1",
+      customSchedule: trimmed,
+    };
+  }
+  const cronMatch = trimmed.match(/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/);
+  if (!cronMatch) return fallback;
+  const [, minute, hour, dom, month, dow] = cronMatch;
+  const minuteNum = Number(minute);
+  const hourNum = Number(hour);
+  if (
+    !Number.isFinite(minuteNum) || minuteNum < 0 || minuteNum > 59 ||
+    !Number.isFinite(hourNum) || hourNum < 0 || hourNum > 23 ||
+    month !== "*"
+  ) {
+    return fallback;
+  }
+  const time = `${String(hourNum).padStart(2, "0")}:${String(minuteNum).padStart(2, "0")}`;
+  if (dom === "*" && dow === "*") {
+    return { ...fallback, mode: "daily", time };
+  }
+  if (dom === "*" && dow === "1-5") {
+    return { ...fallback, mode: "weekdays", time };
+  }
+  if (dom === "*") {
+    const weekday = WEEKDAYS.find((day) => day.cron === dow);
+    if (weekday) {
+      return { ...fallback, mode: "weekly", time, dayOfWeek: weekday.value };
+    }
+  }
+  if (dow === "*") {
+    const day = Number(dom);
+    if (Number.isFinite(day) && day >= 1 && day <= 31) {
+      return { ...fallback, mode: "monthly", time, dayOfMonth: String(day) };
+    }
+  }
+  return fallback;
+}
+
+function ScheduleFields({
+  customSchedule,
+  dayOfMonth,
+  dayOfWeek,
+  idPrefix,
+  scheduleMode,
+  setCustomSchedule,
+  setDayOfMonth,
+  setDayOfWeek,
+  setScheduleMode,
+  setTime,
+  time,
+}: {
+  customSchedule: string;
+  dayOfMonth: string;
+  dayOfWeek: string;
+  idPrefix: string;
+  scheduleMode: ScheduleMode;
+  setCustomSchedule: (v: string) => void;
+  setDayOfMonth: (v: string) => void;
+  setDayOfWeek: (v: string) => void;
+  setScheduleMode: (v: ScheduleMode) => void;
+  setTime: (v: string) => void;
+  time: string;
+}) {
+  const { t } = useI18n();
+  const schedule = useMemo(
+    () => buildSchedule({ customSchedule, dayOfMonth, dayOfWeek, mode: scheduleMode, time }),
+    [customSchedule, dayOfMonth, dayOfWeek, scheduleMode, time],
+  );
+  return (
+    <div className="grid gap-3 rounded-2xl border border-border/70 bg-card/35 p-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <Label htmlFor={`${idPrefix}-schedule-mode`}>{t.cron.schedule}</Label>
+          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+            <CalendarDays className="h-3.5 w-3.5" />
+            <span>{schedule.description}</span>
+          </div>
+        </div>
+        <Segmented
+          className="flex flex-wrap justify-start rounded-2xl bg-background/40 p-1"
+          onChange={(value) => setScheduleMode(value)}
+          options={SCHEDULE_OPTIONS}
+          size="sm"
+          value={scheduleMode}
+        />
+      </div>
+
+      {scheduleMode === "custom" ? (
+        <div className="grid gap-2">
+          <Label htmlFor={`${idPrefix}-schedule`}>{t.cron.schedulePlaceholder}</Label>
+          <Input
+            id={`${idPrefix}-schedule`}
+            placeholder="0 9 * * *"
+            value={customSchedule}
+            onChange={(e) => setCustomSchedule(e.target.value)}
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="grid gap-2">
+            <Label htmlFor={`${idPrefix}-time`}>Time</Label>
+            <Input
+              id={`${idPrefix}-time`}
+              type="time"
+              value={time}
+              onChange={(e) => setTime(e.target.value || "09:00")}
+            />
+          </div>
+
+          {(scheduleMode === "weekly" || scheduleMode === "biweekly") && (
+            <div className="grid gap-2">
+              <Label htmlFor={`${idPrefix}-weekday`}>Day</Label>
+              <Select
+                id={`${idPrefix}-weekday`}
+                value={dayOfWeek}
+                onValueChange={setDayOfWeek}
+              >
+                {WEEKDAYS.map((day) => (
+                  <SelectOption key={day.value} value={day.value}>
+                    {day.label}
+                  </SelectOption>
+                ))}
+              </Select>
+            </div>
+          )}
+
+          {scheduleMode === "monthly" && (
+            <div className="grid gap-2">
+              <Label htmlFor={`${idPrefix}-month-day`}>Day of month</Label>
+              <Select
+                id={`${idPrefix}-month-day`}
+                value={dayOfMonth}
+                onValueChange={setDayOfMonth}
+              >
+                {MONTH_DAYS.map((day) => (
+                  <SelectOption key={day.value} value={day.value}>
+                    {day.label}
+                  </SelectOption>
+                ))}
+              </Select>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2 rounded-xl bg-background/45 px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <span>{schedule.helper}</span>
+        <code className="w-fit rounded-lg bg-foreground/10 px-2 py-1 font-mono text-[0.72rem] text-foreground">
+          {schedule.expression || "schedule required"}
+        </code>
+      </div>
+    </div>
+  );
+}
+
+function EditJobForm({
+  job,
+  onCancel,
+  onSaved,
+}: {
+  job: CronJob;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const { t } = useI18n();
+  const { showToast } = useToast();
+  const initial = useMemo(
+    () => inferScheduleMode((job.schedule?.expr as string) || job.schedule_display || ""),
+    [job.id, job.schedule_display],
+  );
+  const [name, setName] = useState(job.name ?? "");
+  const [prompt, setPrompt] = useState(job.prompt ?? "");
+  const [deliver, setDeliver] = useState(job.deliver ?? "local");
+  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>(initial.mode);
+  const [time, setTime] = useState(initial.time);
+  const [dayOfWeek, setDayOfWeek] = useState(initial.dayOfWeek);
+  const [dayOfMonth, setDayOfMonth] = useState(initial.dayOfMonth);
+  const [customSchedule, setCustomSchedule] = useState(initial.customSchedule);
+  const [saving, setSaving] = useState(false);
+  const schedule = useMemo(
+    () => buildSchedule({ customSchedule, dayOfMonth, dayOfWeek, mode: scheduleMode, time }),
+    [customSchedule, dayOfMonth, dayOfWeek, scheduleMode, time],
+  );
+
+  const handleSave = async () => {
+    if (!prompt.trim() || !schedule.expression.trim()) {
+      showToast(`${t.cron.prompt} & ${t.cron.schedule} required`, "error");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.updateCronJob(job.id, {
+        name: name.trim(),
+        prompt: prompt.trim(),
+        schedule: schedule.expression.trim(),
+        deliver,
+      });
+      showToast(`Saved "${name.trim() || prompt.trim().slice(0, 30)}"`, "success");
+      onSaved();
+    } catch (e) {
+      showToast(`${t.config.failedToSave}: ${e}`, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="grid gap-4 px-4 pb-4 pt-3">
+      <div className="grid gap-2">
+        <Label htmlFor={`edit-${job.id}-name`}>{t.cron.nameOptional}</Label>
+        <Input
+          id={`edit-${job.id}-name`}
+          placeholder={t.cron.namePlaceholder}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor={`edit-${job.id}-prompt`}>{t.cron.prompt}</Label>
+        <textarea
+          id={`edit-${job.id}-prompt`}
+          className="flex min-h-[100px] w-full rounded-xl border border-input bg-card/55 px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </div>
+      <ScheduleFields
+        customSchedule={customSchedule}
+        dayOfMonth={dayOfMonth}
+        dayOfWeek={dayOfWeek}
+        idPrefix={`edit-${job.id}`}
+        scheduleMode={scheduleMode}
+        setCustomSchedule={setCustomSchedule}
+        setDayOfMonth={setDayOfMonth}
+        setDayOfWeek={setDayOfWeek}
+        setScheduleMode={setScheduleMode}
+        setTime={setTime}
+        time={time}
+      />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+        <div className="grid gap-2">
+          <Label htmlFor={`edit-${job.id}-deliver`}>{t.cron.deliverTo}</Label>
+          <Select
+            id={`edit-${job.id}-deliver`}
+            value={deliver}
+            onValueChange={(v) => setDeliver(v)}
+          >
+            <SelectOption value="local">{t.cron.delivery.local}</SelectOption>
+            <SelectOption value="telegram">{t.cron.delivery.telegram}</SelectOption>
+            <SelectOption value="discord">{t.cron.delivery.discord}</SelectOption>
+            <SelectOption value="slack">{t.cron.delivery.slack}</SelectOption>
+            <SelectOption value="email">{t.cron.delivery.email}</SelectOption>
+          </Select>
+        </div>
+        <div className="flex items-end gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={saving}>
+            <X className="h-3.5 w-3.5" />
+            {t.common.cancel}
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
+            <Check className="h-3.5 w-3.5" />
+            {saving ? t.common.saving : t.common.save}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CronPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const editParam = searchParams.get("edit");
+  const [editingId, setEditingId] = useState<string | null>(editParam);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
+
+  useEffect(() => {
+    if (editParam) {
+      setEditingId(editParam);
+    }
+  }, [editParam]);
+
+  useEffect(() => {
+    if (!editParam || !jobs.length) return;
+    if (!jobs.some((job) => job.id === editParam)) return;
+    requestAnimationFrame(() => {
+      document.getElementById(`cron-job-${editParam}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }, [editParam, jobs]);
+
+  const closeEditor = useCallback(() => {
+    setEditingId(null);
+    if (editParam) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("edit");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [editParam, setSearchParams]);
 
   // New job form state
   const [prompt, setPrompt] = useState("");
@@ -313,89 +641,19 @@ export default function CronPage() {
               />
             </div>
 
-            <div className="grid gap-3 rounded-2xl border border-border/70 bg-card/35 p-3">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="min-w-0">
-                  <Label htmlFor="cron-schedule-mode">{t.cron.schedule}</Label>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                    <CalendarDays className="h-3.5 w-3.5" />
-                    <span>{schedule.description}</span>
-                  </div>
-                </div>
-                <Segmented
-                  className="flex flex-wrap justify-start rounded-2xl bg-background/40 p-1"
-                  onChange={(value) => setScheduleMode(value)}
-                  options={SCHEDULE_OPTIONS}
-                  size="sm"
-                  value={scheduleMode}
-                />
-              </div>
-
-              {scheduleMode === "custom" ? (
-                <div className="grid gap-2">
-                  <Label htmlFor="cron-schedule">{t.cron.schedulePlaceholder}</Label>
-                  <Input
-                    id="cron-schedule"
-                    placeholder="0 9 * * *"
-                    value={customSchedule}
-                    onChange={(e) => setCustomSchedule(e.target.value)}
-                  />
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <div className="grid gap-2">
-                    <Label htmlFor="cron-time">Time</Label>
-                    <Input
-                      id="cron-time"
-                      type="time"
-                      value={time}
-                      onChange={(e) => setTime(e.target.value || "09:00")}
-                    />
-                  </div>
-
-                  {(scheduleMode === "weekly" || scheduleMode === "biweekly") && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="cron-weekday">Day</Label>
-                      <Select
-                        id="cron-weekday"
-                        value={dayOfWeek}
-                        onValueChange={setDayOfWeek}
-                      >
-                        {WEEKDAYS.map((day) => (
-                          <SelectOption key={day.value} value={day.value}>
-                            {day.label}
-                          </SelectOption>
-                        ))}
-                      </Select>
-                    </div>
-                  )}
-
-                  {scheduleMode === "monthly" && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="cron-month-day">Day of month</Label>
-                      <Select
-                        id="cron-month-day"
-                        value={dayOfMonth}
-                        onValueChange={setDayOfMonth}
-                      >
-                        {MONTH_DAYS.map((day) => (
-                          <SelectOption key={day.value} value={day.value}>
-                            {day.label}
-                          </SelectOption>
-                        ))}
-                      </Select>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex flex-col gap-2 rounded-xl bg-background/45 px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-                <span>{schedule.helper}</span>
-                <code className="w-fit rounded-lg bg-foreground/10 px-2 py-1 font-mono text-[0.72rem] text-foreground">
-                  {schedule.expression || "schedule required"}
-                </code>
-              </div>
-            </div>
+            <ScheduleFields
+              customSchedule={customSchedule}
+              dayOfMonth={dayOfMonth}
+              dayOfWeek={dayOfWeek}
+              idPrefix="cron"
+              scheduleMode={scheduleMode}
+              setCustomSchedule={setCustomSchedule}
+              setDayOfMonth={setDayOfMonth}
+              setDayOfWeek={setDayOfWeek}
+              setScheduleMode={setScheduleMode}
+              setTime={setTime}
+              time={time}
+            />
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,0.5fr)]">
               <div className="grid gap-2">
@@ -456,87 +714,111 @@ export default function CronPage() {
           </Card>
         )}
 
-        {jobs.map((job) => (
-          <Card key={job.id}>
-            <CardContent className="flex items-center gap-4 py-4">
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="font-medium text-sm truncate">
-                    {job.name ||
-                      job.prompt.slice(0, 60) +
-                        (job.prompt.length > 60 ? "..." : "")}
-                  </span>
-                  <Badge variant={STATUS_VARIANT[job.state] ?? "secondary"}>
-                    {job.state}
-                  </Badge>
-                  {job.deliver && job.deliver !== "local" && (
-                    <Badge variant="outline">{job.deliver}</Badge>
+        {jobs.map((job) => {
+          const isEditing = editingId === job.id;
+          return (
+            <Card key={job.id} id={`cron-job-${job.id}`}>
+              <CardContent className="flex items-center gap-4 py-4">
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-medium text-sm truncate">
+                      {job.name ||
+                        job.prompt.slice(0, 60) +
+                          (job.prompt.length > 60 ? "..." : "")}
+                    </span>
+                    <Badge variant={STATUS_VARIANT[job.state] ?? "secondary"}>
+                      {job.state}
+                    </Badge>
+                    {job.deliver && job.deliver !== "local" && (
+                      <Badge variant="outline">{job.deliver}</Badge>
+                    )}
+                  </div>
+                  {job.name && (
+                    <p className="text-xs text-muted-foreground truncate mb-1">
+                      {job.prompt.slice(0, 100)}
+                      {job.prompt.length > 100 ? "..." : ""}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                    <span className="font-mono">{job.schedule_display}</span>
+                    <span>
+                      {t.cron.last}: {formatTime(job.last_run_at)}
+                    </span>
+                    <span>
+                      {t.cron.next}: {formatTime(job.next_run_at)}
+                    </span>
+                  </div>
+                  {job.last_error && (
+                    <p className="text-xs text-destructive mt-1">
+                      {job.last_error}
+                    </p>
                   )}
                 </div>
-                {job.name && (
-                  <p className="text-xs text-muted-foreground truncate mb-1">
-                    {job.prompt.slice(0, 100)}
-                    {job.prompt.length > 100 ? "..." : ""}
-                  </p>
-                )}
-                <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                  <span className="font-mono">{job.schedule_display}</span>
-                  <span>
-                    {t.cron.last}: {formatTime(job.last_run_at)}
-                  </span>
-                  <span>
-                    {t.cron.next}: {formatTime(job.next_run_at)}
-                  </span>
+
+                {/* Actions */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={isEditing ? t.common.cancel : "Edit"}
+                    aria-label={isEditing ? t.common.cancel : "Edit"}
+                    onClick={() => (isEditing ? closeEditor() : setEditingId(job.id))}
+                  >
+                    {isEditing ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={job.state === "paused" ? t.cron.resume : t.cron.pause}
+                    aria-label={
+                      job.state === "paused" ? t.cron.resume : t.cron.pause
+                    }
+                    onClick={() => handlePauseResume(job)}
+                  >
+                    {job.state === "paused" ? (
+                      <Play className="h-4 w-4 text-success" />
+                    ) : (
+                      <Pause className="h-4 w-4 text-warning" />
+                    )}
+                  </Button>
+
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={t.cron.triggerNow}
+                    aria-label={t.cron.triggerNow}
+                    onClick={() => handleTrigger(job)}
+                  >
+                    <Zap className="h-4 w-4" />
+                  </Button>
+
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={t.common.delete}
+                    aria-label={t.common.delete}
+                    onClick={() => jobDelete.requestDelete(job.id)}
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
                 </div>
-                {job.last_error && (
-                  <p className="text-xs text-destructive mt-1">
-                    {job.last_error}
-                  </p>
-                )}
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center gap-1 shrink-0">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title={job.state === "paused" ? t.cron.resume : t.cron.pause}
-                  aria-label={
-                    job.state === "paused" ? t.cron.resume : t.cron.pause
-                  }
-                  onClick={() => handlePauseResume(job)}
-                >
-                  {job.state === "paused" ? (
-                    <Play className="h-4 w-4 text-success" />
-                  ) : (
-                    <Pause className="h-4 w-4 text-warning" />
-                  )}
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title={t.cron.triggerNow}
-                  aria-label={t.cron.triggerNow}
-                  onClick={() => handleTrigger(job)}
-                >
-                  <Zap className="h-4 w-4" />
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title={t.common.delete}
-                  aria-label={t.common.delete}
-                  onClick={() => jobDelete.requestDelete(job.id)}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+              </CardContent>
+              {isEditing && (
+                <div className="border-t border-border/55 bg-background/30">
+                  <EditJobForm
+                    job={job}
+                    onCancel={closeEditor}
+                    onSaved={() => {
+                      closeEditor();
+                      loadJobs();
+                    }}
+                  />
+                </div>
+              )}
+            </Card>
+          );
+        })}
       </div>
     </div>
   );

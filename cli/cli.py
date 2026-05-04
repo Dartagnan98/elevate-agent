@@ -6168,6 +6168,8 @@ class ElevateCLI:
                 # No active run — treat as a normal next-turn message.
                 self._pending_input.put(payload)
                 _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+        elif canonical == "goal":
+            self._handle_goal_command(cmd_original)
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
@@ -6758,6 +6760,143 @@ class ElevateCLI:
             print("   disconnect   Revert to default browser backend")
             print("   status       Show current browser mode")
             print()
+
+
+    # ────────────────────────────────────────────────────────────────
+    # /goal — persistent cross-turn goals (Ralph-style loop)
+    # ────────────────────────────────────────────────────────────────
+    def _get_goal_manager(self):
+        """Return the GoalManager bound to the current session_id."""
+        try:
+            from elevate_cli.goals import GoalManager
+            from elevate_cli.config import load_config
+        except Exception as exc:
+            logging.debug("goal manager unavailable: %s", exc)
+            return None
+
+        sid = getattr(self, "session_id", None) or ""
+        if not sid:
+            return None
+
+        existing = getattr(self, "_goal_manager", None)
+        if existing is not None and getattr(existing, "session_id", None) == sid:
+            return existing
+
+        try:
+            cfg = load_config() or {}
+            goals_cfg = cfg.get("goals") or {}
+            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+        except Exception:
+            max_turns = 20
+
+        mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
+        self._goal_manager = mgr
+        return mgr
+
+    def _handle_goal_command(self, cmd: str) -> None:
+        """Dispatch /goal subcommands: set / status / pause / resume / clear."""
+        parts = (cmd or "").strip().split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        mgr = self._get_goal_manager()
+        if mgr is None:
+            _cprint(f"  {_DIM}Goals unavailable (no active session).{_RST}")
+            return
+
+        lower = arg.lower()
+
+        if not arg or lower == "status":
+            _cprint(f"  {mgr.status_line()}")
+            return
+
+        if lower == "pause":
+            state = mgr.pause(reason="user-paused")
+            if state is None:
+                _cprint(f"  {_DIM}No goal set.{_RST}")
+            else:
+                _cprint(f"  ⏸ Goal paused: {state.goal}")
+            return
+
+        if lower == "resume":
+            state = mgr.resume()
+            if state is None:
+                _cprint(f"  {_DIM}No goal to resume.{_RST}")
+            else:
+                _cprint(f"  ▶ Goal resumed: {state.goal}")
+                _cprint(
+                    f"  {_DIM}Send any message (or type 'continue') to kick it off.{_RST}"
+                )
+            return
+
+        if lower in ("clear", "stop", "done"):
+            had = mgr.has_goal()
+            mgr.clear()
+            if had:
+                _cprint("  ✓ Goal cleared.")
+            else:
+                _cprint(f"  {_DIM}No active goal.{_RST}")
+            return
+
+        try:
+            state = mgr.set(arg)
+        except ValueError as exc:
+            _cprint(f"  Invalid goal: {exc}")
+            return
+
+        _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
+        _cprint(
+            f"  {_DIM}After each turn, a judge model checks if the goal is done. "
+            f"Elevate keeps working until it is, you pause/clear it, or the budget is "
+            f"exhausted. Use /goal status, /goal pause, /goal resume, /goal clear.{_RST}"
+        )
+        try:
+            self._pending_input.put(state.goal)
+        except Exception:
+            pass
+
+    def _maybe_continue_goal_after_turn(self) -> None:
+        """Judge an active goal after a CLI turn and queue continuation if needed."""
+        mgr = self._get_goal_manager()
+        if mgr is None or not mgr.is_active():
+            return
+
+        try:
+            if getattr(self, "_pending_input", None) is not None and not self._pending_input.empty():
+                return
+        except Exception:
+            pass
+
+        last_response = ""
+        try:
+            hist = self.conversation_history or []
+            for msg in reversed(hist):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") in ("text", "output_text")
+                        ]
+                        last_response = "\n".join(t for t in parts if t)
+                    else:
+                        last_response = str(content or "")
+                    break
+        except Exception:
+            last_response = ""
+
+        decision = mgr.evaluate_after_turn(last_response, user_initiated=True)
+        msg = decision.get("message") or ""
+        if msg:
+            _cprint(f"  {msg}")
+
+        if decision.get("should_continue"):
+            prompt = decision.get("continuation_prompt")
+            if prompt:
+                try:
+                    self._pending_input.put(prompt)
+                except Exception as exc:
+                    logging.debug("goal continuation enqueue failed: %s", exc)
 
     def _handle_skin_command(self, cmd: str):
         """Handle /skin [name] — show or change the display skin."""
@@ -10597,6 +10736,14 @@ class ElevateCLI:
                         self._last_scrollback_tool = ""
 
                         app.invalidate()  # Refresh status line
+
+                        # Goal continuation: if a standing goal is active, ask
+                        # the judge whether the turn satisfied it. If not, queue
+                        # the continuation prompt back into _pending_input.
+                        try:
+                            self._maybe_continue_goal_after_turn()
+                        except Exception as _goal_exc:
+                            logging.debug("goal continuation hook failed: %s", _goal_exc)
 
                         # Continuous voice: auto-restart recording after agent responds.
                         # Dispatch to a daemon thread so play_beep (sd.wait) and

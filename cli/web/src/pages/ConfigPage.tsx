@@ -32,10 +32,20 @@ import {
   ShieldCheck,
   Copy,
   KeyRound,
+  Plug,
+  ExternalLink,
+  Trash2,
+  AlertTriangle,
+  CheckCircle2,
+  CircleSlash,
+  Loader2,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   api,
+  type ComposioConnectedAccount,
+  type ComposioStatus,
+  type ComposioToolkit,
   type CrmIntegrationForm,
   type IntegrationSettingsResponse,
   type IntegrationTestResponse,
@@ -43,6 +53,7 @@ import {
   type SourceConnectorStatus,
 } from "@/lib/api";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
+import { CRM_PRESETS, applyPreset, findPresetForForm, type CrmPreset } from "@/lib/crmPresets";
 import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { AutoField } from "@/components/AutoField";
@@ -184,16 +195,445 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
 function connectorActionLabel(connector: SourceConnectorStatus, busy: boolean): string {
   if (busy) {
     if (connector.initializeBehavior === "local_messages_import") return "Importing";
-    if (connector.initializeBehavior === "composio_social_setup") return "Preparing Composio";
-    return "Creating task";
+    if (connector.initializeBehavior === "composio_social_setup") {
+      return connector.sourceExists ? "Syncing social accounts" : "Preparing Composio";
+    }
+    return connector.sourceExists ? "Refreshing" : "Creating task";
   }
   if (connector.initializeBehavior === "local_messages_import") {
     return connector.sourceExists ? "Re-import messages" : "Import messages";
   }
   if (connector.initializeBehavior === "composio_social_setup") {
-    return connector.sourceExists ? "Refresh Composio task" : "Set up Composio";
+    return connector.sourceExists ? "Sync social accounts" : "Set up Composio";
   }
   return connector.sourceExists ? "Refresh setup task" : "Create setup task";
+}
+
+const TOOLKIT_PAGE_SIZE = 24;
+
+function toolkitLogo(tk: ComposioToolkit | undefined): string | undefined {
+  if (!tk) return undefined;
+  return tk.meta?.logo ?? tk.logo;
+}
+
+function toolkitDescription(tk: ComposioToolkit | undefined): string | undefined {
+  if (!tk) return undefined;
+  return tk.meta?.description ?? tk.description;
+}
+
+function toolkitCategoryLabels(tk: ComposioToolkit): string[] {
+  const out = new Set<string>();
+  for (const c of tk.meta?.categories ?? []) {
+    const name = (c?.name ?? c?.id ?? "").toString().trim();
+    if (name) out.add(name.toLowerCase());
+  }
+  for (const c of tk.categories ?? []) {
+    const name = (c?.name ?? c?.slug ?? c?.id ?? "").toString().trim();
+    if (name) out.add(name.toLowerCase());
+  }
+  return [...out];
+}
+
+function ComposioPanel() {
+  const [status, setStatus] = useState<ComposioStatus | null>(null);
+  const [connections, setConnections] = useState<ComposioConnectedAccount[]>([]);
+  const [toolkits, setToolkits] = useState<ComposioToolkit[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [keyInput, setKeyInput] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+  const [connectingSlug, setConnectingSlug] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [toolkitQuery, setToolkitQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [visibleCount, setVisibleCount] = useState<number>(TOOLKIT_PAGE_SIZE);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const s = await api.getComposioStatus();
+      setStatus(s);
+      if (s.valid) {
+        const [conns, tks] = await Promise.all([
+          api.getComposioConnections(),
+          api.getComposioToolkits(),
+        ]);
+        const conData = (conns.data as { items?: ComposioConnectedAccount[] } | ComposioConnectedAccount[]) ?? [];
+        setConnections(Array.isArray(conData) ? conData : conData.items ?? []);
+        const tkData = (tks.data as { items?: ComposioToolkit[] } | ComposioToolkit[]) ?? [];
+        setToolkits(Array.isArray(tkData) ? tkData : tkData.items ?? []);
+      } else {
+        setConnections([]);
+        setToolkits([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  // After Connect opens the Composio OAuth tab in a new window, the user
+  // completes the flow there and switches back. Refresh on focus so the
+  // newly-linked account shows up without making them hit Refresh.
+  useEffect(() => {
+    const onFocus = () => {
+      if (status?.valid) void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refresh, status?.valid]);
+
+  const saveKey = async () => {
+    if (!keyInput.trim()) return;
+    setSavingKey(true);
+    setKeyError(null);
+    try {
+      const next = await api.setComposioKey(keyInput.trim());
+      setStatus(next);
+      if (!next.valid) {
+        setKeyError(next.error ?? "Key saved but Composio rejected it.");
+      } else {
+        setKeyInput("");
+      }
+      await refresh();
+    } catch (err) {
+      setKeyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingKey(false);
+    }
+  };
+
+  const clearKey = async () => {
+    setSavingKey(true);
+    setKeyError(null);
+    try {
+      const next = await api.clearComposioKey();
+      setStatus(next);
+      setConnections([]);
+      setToolkits([]);
+    } finally {
+      setSavingKey(false);
+    }
+  };
+
+  const connect = async (slug: string) => {
+    setConnectingSlug(slug);
+    setKeyError(null);
+    try {
+      const result = await api.initiateComposioConnection({ toolkitSlug: slug });
+      const url = result.data?.redirect_url ?? result.data?.redirect_uri;
+      if (url) {
+        window.open(url, "_blank", "noopener,noreferrer");
+      } else if (result.error) {
+        setKeyError(result.error);
+      } else {
+        setKeyError(
+          `Composio didn't return an OAuth URL for ${slug}. Try Refresh, then click Add another again.`,
+        );
+      }
+    } finally {
+      setConnectingSlug(null);
+    }
+  };
+
+  const disconnect = async (id: string) => {
+    if (!id) return;
+    setConnectingSlug(id);
+    try {
+      await api.deleteComposioConnection(id);
+      await refresh();
+    } finally {
+      setConnectingSlug(null);
+    }
+  };
+
+  const statusBadge = (() => {
+    if (!status) return <Badge variant="outline">checking...</Badge>;
+    if (!status.hasKey) return <Badge variant="outline">not configured</Badge>;
+    if (status.valid) return <Badge variant="success">connected</Badge>;
+    return <Badge variant="warning">key invalid</Badge>;
+  })();
+
+  const connectedSlugs = new Set(
+    connections.map((c) => c.toolkit?.slug).filter(Boolean) as string[],
+  );
+
+  const allCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const tk of toolkits) for (const c of toolkitCategoryLabels(tk)) set.add(c);
+    return [...set].sort();
+  }, [toolkits]);
+
+  const filteredToolkits = useMemo(() => {
+    const q = toolkitQuery.trim().toLowerCase();
+    return toolkits.filter((tk) => {
+      const slug = String(tk.slug ?? "").toLowerCase();
+      const name = String(tk.name ?? "").toLowerCase();
+      const desc = String(toolkitDescription(tk) ?? "").toLowerCase();
+      if (q && !slug.includes(q) && !name.includes(q) && !desc.includes(q)) return false;
+      if (categoryFilter !== "all") {
+        const cats = toolkitCategoryLabels(tk);
+        if (!cats.includes(categoryFilter)) return false;
+      }
+      return true;
+    });
+  }, [toolkits, toolkitQuery, categoryFilter]);
+
+  useEffect(() => {
+    setVisibleCount(TOOLKIT_PAGE_SIZE);
+  }, [toolkitQuery, categoryFilter]);
+
+  const visibleToolkits = filteredToolkits.slice(0, visibleCount);
+
+  return (
+    <Card id="composio" className="scroll-mt-24">
+      <CardHeader>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Plug className="h-4 w-4 text-primary" />
+              Composio
+            </CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              One auth hub for both messaging (Gmail, Twilio, WhatsApp) and social (Instagram, X, LinkedIn). Add your Composio API key, then connect each app. Apps shown below are pulled live from your Composio account.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {statusBadge}
+            <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
+              <RefreshCw className="h-3.5 w-3.5" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="rounded-2xl border border-border/65 bg-background/35 p-3">
+          <label className="mb-2 flex items-center gap-2 text-xs font-medium text-foreground">
+            <KeyRound className="h-3.5 w-3.5" />
+            API key
+          </label>
+          {status?.hasKey ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="flex-1 truncate rounded-md bg-background/60 px-2 py-1.5 text-xs">
+                {status.valid ? "key configured" : "key configured (invalid)"}
+              </code>
+              <Button variant="outline" size="sm" onClick={() => void clearKey()} disabled={savingKey}>
+                <Trash2 className="h-3.5 w-3.5" />
+                Remove
+              </Button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                type="password"
+                placeholder="ck_..."
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                className="min-w-[16rem] flex-1"
+              />
+              <Button size="sm" onClick={() => void saveKey()} disabled={savingKey || !keyInput.trim()}>
+                {savingKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Save
+              </Button>
+            </div>
+          )}
+          {keyError && (
+            <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-500">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{keyError}</span>
+            </div>
+          )}
+          {status && status.hasKey && !status.valid && !keyError && (
+            <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-500">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{status.error ?? "Composio rejected the key. Rotate it at composio.dev and re-save."}</span>
+            </div>
+          )}
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
+            Get a key at{" "}
+            <a
+              href="https://app.composio.dev/developers"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              composio.dev/developers
+              <ExternalLink className="ml-1 inline h-3 w-3" />
+            </a>
+            . Stored in your local .env, never sent anywhere except Composio.
+          </p>
+        </div>
+
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Connected accounts ({connections.length})
+            </h4>
+          </div>
+          {!status?.valid ? (
+            <div className="rounded-2xl border border-dashed border-border/65 bg-background/25 px-4 py-6 text-center text-xs text-muted-foreground">
+              <CircleSlash className="mx-auto mb-2 h-4 w-4" />
+              Add a working API key to see your connected accounts.
+            </div>
+          ) : connections.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-border/65 bg-background/25 px-4 py-6 text-center text-xs text-muted-foreground">
+              No accounts connected yet. Pick one below to start.
+            </div>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {connections.map((conn, idx) => (
+                <div
+                  key={String(conn.id ?? idx)}
+                  className="flex items-center gap-3 rounded-2xl border border-border/65 bg-background/35 p-3"
+                >
+                  {(conn.toolkit?.meta?.logo ?? conn.toolkit?.logo) ? (
+                    <img
+                      src={conn.toolkit?.meta?.logo ?? conn.toolkit?.logo}
+                      alt=""
+                      className="h-8 w-8 rounded-md bg-background/60 object-contain p-1"
+                    />
+                  ) : (
+                    <div className="flex h-8 w-8 items-center justify-center rounded-md bg-background/60">
+                      <Plug className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium text-foreground">
+                        {conn.toolkit?.name ?? conn.toolkit?.slug ?? "Unknown app"}
+                      </span>
+                      {conn.status === "ACTIVE" && (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      )}
+                    </div>
+                    {conn.user_id && (
+                      <div className="truncate text-xs text-muted-foreground">{conn.user_id}</div>
+                    )}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void disconnect(String(conn.id ?? ""))}
+                    disabled={connectingSlug === String(conn.id ?? "")}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {status?.valid && (
+          <div>
+            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Available apps ({filteredToolkits.length}
+                {filteredToolkits.length !== toolkits.length ? ` of ${toolkits.length}` : ""})
+              </h4>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    type="search"
+                    placeholder="Search apps..."
+                    value={toolkitQuery}
+                    onChange={(e) => setToolkitQuery(e.target.value)}
+                    className="h-8 w-44 pl-7 text-xs"
+                  />
+                </div>
+                {allCategories.length > 0 && (
+                  <select
+                    value={categoryFilter}
+                    onChange={(e) => setCategoryFilter(e.target.value)}
+                    className="h-8 rounded-md border border-border/65 bg-background/60 px-2 text-xs text-foreground"
+                  >
+                    <option value="all">All categories</option>
+                    {allCategories.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+            {filteredToolkits.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border/65 bg-background/25 px-4 py-6 text-center text-xs text-muted-foreground">
+                {toolkits.length === 0 ? "No toolkits returned by Composio." : "No apps match that filter."}
+              </div>
+            ) : (
+              <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+                {visibleToolkits.map((tk) => {
+                  const slug = String(tk.slug ?? "");
+                  const isConnected = connectedSlugs.has(slug);
+                  const logo = toolkitLogo(tk);
+                  const desc = toolkitDescription(tk);
+                  return (
+                    <div
+                      key={slug}
+                      className="group flex flex-col items-center gap-2 rounded-2xl border border-border/65 bg-background/35 p-3 text-center transition-colors hover:border-primary/60 hover:bg-background/55"
+                      title={desc ? `${tk.name ?? slug} — ${desc}` : tk.name ?? slug}
+                    >
+                      {logo ? (
+                        <img
+                          src={logo}
+                          alt=""
+                          className="h-10 w-10 rounded-md bg-background/60 object-contain p-1"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-background/60">
+                          <Plug className="h-4 w-4 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div className="w-full truncate text-xs font-medium text-foreground">
+                        {tk.name ?? slug}
+                      </div>
+                      <Button
+                        variant={isConnected ? "outline" : "default"}
+                        size="sm"
+                        className="h-7 w-full px-2 text-xs"
+                        onClick={() => void connect(slug)}
+                        disabled={connectingSlug === slug}
+                      >
+                        {connectingSlug === slug ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : isConnected ? (
+                          "Add another"
+                        ) : (
+                          "Connect"
+                        )}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {visibleCount < filteredToolkits.length && (
+              <div className="mt-3 flex items-center justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setVisibleCount((n) => n + TOOLKIT_PAGE_SIZE)}
+                >
+                  Load {Math.min(TOOLKIT_PAGE_SIZE, filteredToolkits.length - visibleCount)} more
+                </Button>
+              </div>
+            )}
+            {filteredToolkits.length > 0 && visibleCount >= filteredToolkits.length && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Showing all {filteredToolkits.length}{filteredToolkits.length !== toolkits.length ? ` of ${toolkits.length}` : ""} apps.
+              </p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function SourceConnectorSettingsPanel() {
@@ -201,6 +641,21 @@ function SourceConnectorSettingsPanel() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [composioAccounts, setComposioAccounts] = useState<ComposioConnectedAccount[]>([]);
+  const [composioReady, setComposioReady] = useState<boolean>(false);
+  const [lastSyncSummary, setLastSyncSummary] = useState<{
+    total_new?: number;
+    total_fetched?: number;
+    tick_at?: string;
+  } | null>(null);
+  const [fbPages, setFbPages] = useState<Array<{
+    id: string;
+    name: string;
+    selected: boolean;
+  }>>([]);
+  const [fbPickerOpen, setFbPickerOpen] = useState(false);
+  const [fbPickerLoading, setFbPickerLoading] = useState(false);
+  const [fbPickerSaving, setFbPickerSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -211,14 +666,79 @@ function SourceConnectorSettingsPanel() {
     }
   }, []);
 
+  const loadComposio = useCallback(async () => {
+    try {
+      const status = await api.getComposioStatus();
+      if (!status.valid) {
+        setComposioReady(false);
+        setComposioAccounts([]);
+        return;
+      }
+      setComposioReady(true);
+      const conns = await api.getComposioConnections();
+      const body = (conns.data as { items?: ComposioConnectedAccount[] } | ComposioConnectedAccount[]) ?? [];
+      setComposioAccounts(Array.isArray(body) ? body : body.items ?? []);
+    } catch {
+      // Composio key not set yet — leave empty, the source row still works.
+    }
+  }, []);
+
+  const loadFbPages = useCallback(async () => {
+    setFbPickerLoading(true);
+    try {
+      const resp = await api.getComposioFacebookPages();
+      if (resp.ok) {
+        setFbPages(resp.pages.map(p => ({ id: p.id, name: p.name, selected: p.selected })));
+      }
+    } catch {
+      // Composio not connected or no FB account — picker stays empty.
+    } finally {
+      setFbPickerLoading(false);
+    }
+  }, []);
+
+  const toggleFbPage = async (pageId: string) => {
+    const next = fbPages.map(p => p.id === pageId ? { ...p, selected: !p.selected } : p);
+    setFbPages(next);
+    setFbPickerSaving(true);
+    try {
+      const ids = next.filter(p => p.selected).map(p => p.id);
+      await api.setComposioFacebookPages(ids);
+    } finally {
+      setFbPickerSaving(false);
+    }
+  };
+
+  const hasFacebookAccount = composioAccounts.some(
+    a => (a.toolkit?.slug ?? "").toLowerCase() === "facebook",
+  );
+  const fbSelectedCount = fbPages.filter(p => p.selected).length;
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadComposio();
+  }, [load, loadComposio]);
 
-  const initialize = async (sourceId: string) => {
-    setBusyId(sourceId);
+  useEffect(() => {
+    if (hasFacebookAccount) {
+      void loadFbPages();
+    } else {
+      setFbPages([]);
+    }
+  }, [hasFacebookAccount, loadFbPages]);
+
+  const initialize = async (connector: SourceConnectorStatus) => {
+    setBusyId(connector.id);
     try {
-      setData(await api.scaffoldSourceConnector(sourceId));
+      const next = connector.sourceExists
+        ? await api.refreshSourceConnector(connector.id)
+        : await api.scaffoldSourceConnector(connector.id);
+      setData(next);
+      const refresh = (next as unknown as { refresh?: { total_new?: number; total_fetched?: number; tick_at?: string } }).refresh;
+      if (refresh && connector.initializeBehavior === "composio_social_setup") {
+        setLastSyncSummary(refresh);
+        void loadComposio();
+      }
     } finally {
       setBusyId(null);
     }
@@ -234,7 +754,7 @@ function SourceConnectorSettingsPanel() {
   const ready = connectors.filter((connector) => connector.state === "connected" || connector.state === "import_only").length;
 
   return (
-    <Card>
+    <Card id="connectors" className="scroll-mt-24">
       <CardHeader>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -280,6 +800,97 @@ function SourceConnectorSettingsPanel() {
                   {connector.nextOperatorStep}
                 </div>
               )}
+              {connector.initializeBehavior === "composio_social_setup" && (
+                <div className="mt-3 rounded-xl border border-border/45 bg-background/45 p-2.5 text-xs">
+                  {!composioReady ? (
+                    <div className="text-muted-foreground">
+                      Add your Composio API key in the Composio panel to connect social accounts.
+                    </div>
+                  ) : composioAccounts.length === 0 ? (
+                    <div className="text-muted-foreground">
+                      No social accounts connected yet. Add one from the Composio panel below.
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        Social accounts ({composioAccounts.length})
+                      </div>
+                      <ul className="flex flex-wrap gap-1.5">
+                        {composioAccounts.map((acc, idx) => {
+                          const logo = acc.toolkit?.meta?.logo ?? acc.toolkit?.logo;
+                          const name = acc.toolkit?.name ?? acc.toolkit?.slug ?? "Unknown";
+                          return (
+                            <li
+                              key={String(acc.id ?? idx)}
+                              className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background/50 px-2 py-0.5"
+                              title={acc.user_id ? `${name} • ${acc.user_id}` : name}
+                            >
+                              {logo ? (
+                                <img src={logo} alt="" className="h-3.5 w-3.5 rounded-sm object-contain" />
+                              ) : (
+                                <Plug className="h-3 w-3 text-muted-foreground" />
+                              )}
+                              <span className="text-[11px] text-foreground">{name}</span>
+                              {acc.status === "ACTIVE" && (
+                                <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {hasFacebookAccount && (
+                        <div className="mt-3 rounded-xl border border-border/40 bg-background/60 p-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                              Facebook pages on /leads
+                            </div>
+                            <button
+                              type="button"
+                              className="text-[11px] text-primary hover:underline"
+                              onClick={() => {
+                                setFbPickerOpen((v) => !v);
+                                if (!fbPickerOpen) void loadFbPages();
+                              }}
+                            >
+                              {fbPickerOpen ? "Done" : "Edit"}
+                            </button>
+                          </div>
+                          <div className="mt-1 text-[11px] text-muted-foreground">
+                            {fbPickerLoading
+                              ? "Loading pages..."
+                              : fbPages.length === 0
+                                ? "No pages found on this Facebook account."
+                                : `${fbSelectedCount} of ${fbPages.length} pages will sync to the leads board. The Composio MCP stays connected to all of them.`}
+                            {fbPickerSaving && <span className="ml-1 italic">Saving...</span>}
+                          </div>
+                          {fbPickerOpen && fbPages.length > 0 && (
+                            <ul className="mt-2 grid gap-1 sm:grid-cols-2">
+                              {fbPages.map((p) => (
+                                <li key={p.id}>
+                                  <label className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12px] text-foreground hover:bg-background/80">
+                                    <input
+                                      type="checkbox"
+                                      checked={p.selected}
+                                      onChange={() => void toggleFbPage(p.id)}
+                                      className="h-3.5 w-3.5"
+                                    />
+                                    <span className="truncate">{p.name}</span>
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )}
+                      {lastSyncSummary && (
+                        <div className="mt-2 text-[11px] text-muted-foreground">
+                          Last sync: {lastSyncSummary.total_new ?? 0} new / {lastSyncSummary.total_fetched ?? 0} fetched
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
               <div className="mt-3 flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline">{connector.ownerAgent}</Badge>
                 {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
@@ -287,7 +898,7 @@ function SourceConnectorSettingsPanel() {
                   variant={connector.sourceExists ? "outline" : "default"}
                   size="sm"
                   className="ml-auto h-7 px-2.5"
-                  onClick={() => void initialize(connector.id)}
+                  onClick={() => void initialize(connector)}
                   disabled={busyId === connector.id}
                 >
                   {connectorActionLabel(connector, busyId === connector.id)}
@@ -322,17 +933,36 @@ function CrmIntegrationSettingsPanel() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<IntegrationTestResponse | null>(null);
+  const [mode, setMode] = useState<"picker" | "preset" | "custom">("picker");
+  const [selectedPreset, setSelectedPreset] = useState<CrmPreset | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const next = await api.getIntegrations();
       setData(next);
-      setForm({ ...next.crm, apiKey: "" });
+      const initialForm = { ...next.crm, apiKey: "" };
+      setForm(initialForm);
+      const matchingPreset = findPresetForForm(initialForm);
+      if (matchingPreset) {
+        setSelectedPreset(matchingPreset);
+        setMode("preset");
+      } else if (initialForm.provider || initialForm.baseUrl) {
+        setMode("custom");
+      } else {
+        setMode("picker");
+      }
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const connectedPresetSlug = useMemo(() => {
+    if (!data?.crm.hasApiKey) return null;
+    const matching = findPresetForForm(data.crm);
+    return matching?.slug ?? null;
+  }, [data]);
 
   useEffect(() => {
     void load();
@@ -354,6 +984,26 @@ function CrmIntegrationSettingsPanel() {
     );
   };
 
+  const choosePreset = (preset: CrmPreset) => {
+    setSelectedPreset(preset);
+    setForm((current) => applyPreset(preset, current));
+    setMode("preset");
+    setTestResult(null);
+    setShowAdvanced(false);
+  };
+
+  const chooseCustom = () => {
+    setSelectedPreset(null);
+    setMode("custom");
+    setTestResult(null);
+  };
+
+  const backToPicker = () => {
+    setMode("picker");
+    setTestResult(null);
+    setShowAdvanced(false);
+  };
+
   const save = async () => {
     if (!form) return;
     setSaving(true);
@@ -361,7 +1011,13 @@ function CrmIntegrationSettingsPanel() {
     try {
       const next = await api.saveIntegrations(form);
       setData(next);
-      setForm({ ...next.crm, apiKey: "" });
+      const nextForm = { ...next.crm, apiKey: "" };
+      setForm(nextForm);
+      const matchingPreset = findPresetForForm(nextForm);
+      if (matchingPreset) {
+        setSelectedPreset(matchingPreset);
+        setMode("preset");
+      }
     } finally {
       setSaving(false);
     }
@@ -377,24 +1033,178 @@ function CrmIntegrationSettingsPanel() {
     }
   };
 
+  const canSave = form && (form.apiKey || form.hasApiKey) && (form.baseUrl || mode === "custom");
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-primary" />
-          CRM/API connector
+          Connect your CRM
         </CardTitle>
-        <p className="text-xs leading-5 text-muted-foreground">
-          Provider-neutral CRM settings. Lofty, Follow Up Boss, kvCORE, and other presets can fill this shape later.
+        <p className="text-xs leading-5 text-foreground/70">
+          Pick your CRM, paste your API key, and we handle the rest. Lofty, Follow Up Boss, Sierra, BoldTrail and Brivity are pre-wired.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
         {loading || !form ? (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
+          <div className="rounded-2xl border border-border bg-card px-4 py-6 text-sm text-foreground/70">
             Loading CRM settings...
           </div>
         ) : (
           <>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+              {CRM_PRESETS.map((preset) => {
+                const isSelected = mode === "preset" && selectedPreset?.slug === preset.slug;
+                const isConnected = connectedPresetSlug === preset.slug;
+                return (
+                  <button
+                    key={preset.slug}
+                    type="button"
+                    onClick={() => choosePreset(preset)}
+                    title={`${preset.label} — ${preset.description}`}
+                    className={`group flex flex-col items-center gap-2 rounded-2xl border bg-card p-3 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${isSelected ? "border-primary" : "border-border"}`}
+                  >
+                    <div className="relative">
+                      <img
+                        src={preset.logo}
+                        alt=""
+                        width={40}
+                        height={40}
+                        loading="lazy"
+                        decoding="async"
+                        className="h-10 w-10 rounded-md bg-card object-contain p-1"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.display = "none";
+                          const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
+                          if (fallback) fallback.style.display = "flex";
+                        }}
+                      />
+                      <div className="hidden h-10 w-10 items-center justify-center rounded-md bg-card">
+                        <Plug className="h-4 w-4 text-foreground/70" />
+                      </div>
+                      {isConnected && (
+                        <CheckCircle2 className="absolute -right-1 -top-1 h-3.5 w-3.5 rounded-full bg-card text-emerald-500" />
+                      )}
+                    </div>
+                    <div className="w-full truncate text-xs font-medium text-foreground">{preset.label}</div>
+                    <Button
+                      variant={isConnected ? "outline" : "default"}
+                      size="sm"
+                      className="h-7 w-full px-2 text-xs"
+                    >
+                      {isConnected ? "Connected" : "Connect"}
+                    </Button>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={chooseCustom}
+                title="Other — wire up any REST CRM"
+                className={`group flex flex-col items-center gap-2 rounded-2xl border bg-card p-3 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${mode === "custom" ? "border-primary" : "border-border"}`}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-card">
+                  <Settings2 className="h-4 w-4 text-foreground/70" />
+                </div>
+                <div className="w-full truncate text-xs font-medium text-foreground">Other / Custom</div>
+                <Button variant="outline" size="sm" className="h-7 w-full px-2 text-xs">Wire up</Button>
+              </button>
+            </div>
+
+            {mode === "preset" && selectedPreset && (
+              <div className="space-y-3 rounded-2xl border border-border bg-card p-4">
+                <div className="flex items-center gap-3">
+                  <img
+                    src={selectedPreset.logo}
+                    alt=""
+                    width={32}
+                    height={32}
+                    className="h-8 w-8 rounded-md bg-card object-contain p-1"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.display = "none";
+                    }}
+                  />
+                  <span className="text-sm font-semibold text-foreground">{selectedPreset.label}</span>
+                </div>
+                {selectedPreset.notice && (
+              <div className="rounded-2xl border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning">
+                <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
+                {selectedPreset.notice}
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-foreground/80" htmlFor="crm-preset-api-key">
+                {selectedPreset.keyLabel}
+              </label>
+              <Input
+                id="crm-preset-api-key"
+                type="password"
+                value={form.apiKey ?? ""}
+                placeholder={form.hasApiKey ? `Saved · ${form.apiKeyPreview ?? "•••"}` : "Paste your API key"}
+                onChange={(e) => patch({ apiKey: e.target.value })}
+              />
+              <a
+                href={selectedPreset.helpUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-foreground/65 transition-colors hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Where do I find this? — {selectedPreset.helpText}
+              </a>
+            </div>
+            {testResult && (
+              <div className={`rounded-2xl border px-3 py-2 text-xs ${testResult.success ? "border-success/25 bg-success/10 text-success" : "border-warning/25 bg-warning/10 text-warning"}`}>
+                {testResult.message ?? testResult.error ?? "Test finished"}
+              </div>
+            )}
+            <div className="flex flex-wrap justify-between gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-9 px-3 text-foreground/70"
+                onClick={() => setShowAdvanced((v) => !v)}
+              >
+                {showAdvanced ? "Hide advanced" : "Show advanced"}
+              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" className="h-9 px-3" onClick={() => void test()} disabled={testing || !canSave}>
+                  {testing ? "Testing" : "Test connection"}
+                </Button>
+                <Button size="sm" className="h-9 px-3" onClick={() => void save()} disabled={saving || !canSave}>
+                  {saving ? "Saving" : "Connect"}
+                </Button>
+              </div>
+            </div>
+            {showAdvanced && (
+              <div className="space-y-3 rounded-2xl border border-border bg-card p-3">
+                <div className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55">
+                  Advanced — pre-wired by preset
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
+                  <Input value={form.baseUrl} placeholder="base URL" onChange={(e) => patch({ baseUrl: e.target.value })} />
+                  <Input value={form.authHeader} placeholder="header" onChange={(e) => patch({ authHeader: e.target.value })} />
+                  <Input value={form.authPrefix} placeholder="prefix" onChange={(e) => patch({ authPrefix: e.target.value })} />
+                  <Input value={form.endpoints.leads} placeholder="leads endpoint" onChange={(e) => patchNested("endpoints", "leads", e.target.value)} />
+                  <Input value={form.endpoints.lead} placeholder="lead endpoint" onChange={(e) => patchNested("endpoints", "lead", e.target.value)} />
+                  <Input value={form.endpoints.notes} placeholder="notes endpoint" onChange={(e) => patchNested("endpoints", "notes", e.target.value)} />
+                </div>
+              </div>
+            )}
+              </div>
+            )}
+            {mode === "custom" && (
+              <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Settings2 className="h-4 w-4 text-foreground/70" />
+                <span className="text-sm font-semibold text-foreground">Custom CRM</span>
+              </div>
+              <Button variant="ghost" size="sm" className="h-9 px-3" onClick={backToPicker}>
+                Change CRM
+              </Button>
+            </div>
             <div className="grid gap-2 md:grid-cols-3">
               <Input value={form.provider} placeholder="provider" onChange={(e) => patch({ provider: e.target.value })} />
               <Input value={form.label} placeholder="label" onChange={(e) => patch({ label: e.target.value })} />
@@ -414,7 +1224,7 @@ function CrmIntegrationSettingsPanel() {
               <Input value={form.dbColumns.stage} placeholder="crm_stage" onChange={(e) => patchNested("dbColumns", "stage", e.target.value)} />
               <Input value={form.dbColumns.tags} placeholder="crm_tags" onChange={(e) => patchNested("dbColumns", "tags", e.target.value)} />
             </div>
-            <div className="rounded-2xl border border-border/65 bg-background/35 p-3 text-xs leading-5 text-muted-foreground">
+            <div className="rounded-2xl border border-border bg-card p-3 text-xs leading-5 text-foreground/65">
               <div>Config: <code className="bg-transparent p-0">{data?.configPath}</code></div>
               <div>Secrets: <code className="bg-transparent p-0">{data?.secretsPath}</code></div>
             </div>
@@ -424,13 +1234,15 @@ function CrmIntegrationSettingsPanel() {
               </div>
             )}
             <div className="flex flex-wrap justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => void test()} disabled={testing}>
+              <Button variant="outline" size="sm" className="h-9 px-3" onClick={() => void test()} disabled={testing}>
                 {testing ? "Testing" : "Test"}
               </Button>
-              <Button size="sm" onClick={() => void save()} disabled={saving}>
+              <Button size="sm" className="h-9 px-3" onClick={() => void save()} disabled={saving}>
                 {saving ? "Saving" : "Save CRM"}
               </Button>
             </div>
+              </div>
+            )}
           </>
         )}
       </CardContent>
@@ -460,6 +1272,22 @@ export default function ConfigPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (!location.hash) return;
+    const id = location.hash.replace("#", "");
+    if (!id) return;
+    const tryScroll = (attempt = 0) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      if (attempt < 10) window.setTimeout(() => tryScroll(attempt + 1), 100);
+    };
+    tryScroll();
+  }, [location.hash]);
 
   useLayoutEffect(() => {
     if (!config || !schema) {
@@ -898,6 +1726,10 @@ export default function ConfigPage() {
             );
           })}
         </div>
+      </section>
+
+      <section>
+        <ComposioPanel />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(24rem,0.95fr)]">

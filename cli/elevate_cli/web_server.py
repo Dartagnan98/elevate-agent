@@ -1256,6 +1256,69 @@ def get_model_info():
         return dict(_EMPTY_MODEL_INFO)
 
 
+@app.get("/api/models/available")
+def get_models_available():
+    """Return harness-available models for tier-mapping UI.
+
+    Wraps :func:`elevate_cli.tier_resolver.list_available_models`. Only
+    authenticated providers are listed because un-authed providers cannot be
+    called by the runtime — listing them would let the user trap themselves.
+    """
+    try:
+        from elevate_cli.tier_resolver import list_available_models
+        return list_available_models()
+    except Exception:
+        _log.exception("GET /api/models/available failed")
+        return {"models": [], "default": ""}
+
+
+@app.get("/api/config/tiers")
+def get_config_tiers():
+    """Return the persisted tier->model mapping plus current resolved tiers.
+
+    Resolved values reflect what ``resolve_tier`` would return *right now*
+    given the persisted mapping + harness fallbacks, so the UI can show
+    "configured" vs "auto-resolved" in one trip.
+    """
+    try:
+        from elevate_cli.tier_resolver import (
+            VALID_TIERS,
+            load_tier_config,
+            resolve_tier_with_provider,
+        )
+        mapping = load_tier_config()
+        resolved = {}
+        for tier_id in VALID_TIERS:
+            model_id, provider = resolve_tier_with_provider(tier_id)
+            resolved[tier_id] = {"model": model_id, "provider": provider}
+        return {
+            "tiers": list(VALID_TIERS),
+            "mapping": mapping,
+            "resolved": resolved,
+        }
+    except Exception:
+        _log.exception("GET /api/config/tiers failed")
+        return {"tiers": [], "mapping": {}, "resolved": {}}
+
+
+class _TierMappingBody(BaseModel):
+    mapping: Dict[str, Any]
+
+
+@app.put("/api/config/tiers")
+def put_config_tiers(body: _TierMappingBody):
+    """Persist the tier->model mapping. Validates tier names + writes atomically."""
+    try:
+        from elevate_cli.tier_resolver import save_tier_config, load_tier_config
+        save_tier_config(body.mapping or {})
+        return {"ok": True, "mapping": load_tier_config()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/config/tiers failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
     """Reverse _normalize_config_for_web before saving.
 
@@ -2411,6 +2474,20 @@ class CronJobCreate(BaseModel):
     schedule: str
     name: str = ""
     deliver: str = "local"
+    # Phase 3 (/leads): universal cron form fields. All optional so existing
+    # callers keep working. Skill-bound mode = pass `skill`. Per-job model is
+    # the explicit override; tier is the harness-resolved fallback.
+    skill: Optional[str] = None
+    skills: Optional[List[str]] = None
+    agent: Optional[str] = None
+    tier: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    enabled_toolsets: Optional[List[str]] = None
+    workdir: Optional[str] = None
+    expected_readiness_version: Optional[str] = None
+    backfill_pending: bool = False
 
 
 class CronJobUpdate(BaseModel):
@@ -2468,10 +2545,62 @@ async def get_cron_job(job_id: str):
 @app.post("/api/cron/jobs")
 async def create_cron_job(body: CronJobCreate):
     from cron.jobs import create_job
+    from elevate_cli.onboarding import compute_onboarding_status
+
+    # Readiness gate: a job that pins ``expected_readiness_version`` is
+    # declaring "I only make sense once the system is configured to this
+    # snapshot." Reject if the snapshot has drifted (or system isn't ready)
+    # so the wizard surfaces the mismatch instead of silently scheduling a
+    # job that will skip itself at fire-time.
+    if body.expected_readiness_version:
+        try:
+            snap = compute_onboarding_status()
+        except Exception as exc:
+            _log.exception("readiness probe failed during POST /api/cron/jobs")
+            raise HTTPException(status_code=503, detail=f"readiness probe failed: {exc}")
+        if not snap.get("ready"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "system_not_ready",
+                    "message": "Onboarding readiness checks not all passing — finish setup before pinning a readiness version.",
+                    "current_version": snap.get("version"),
+                    "checks": snap.get("checks"),
+                },
+            )
+        if str(snap.get("version")) != str(body.expected_readiness_version):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "readiness_version_mismatch",
+                    "message": "Onboarding state changed since the wizard read it — refresh and resubmit.",
+                    "current_version": snap.get("version"),
+                    "expected_version": body.expected_readiness_version,
+                },
+            )
+
     try:
-        job = create_job(prompt=body.prompt, schedule=body.schedule,
-                         name=body.name, deliver=body.deliver)
+        job = create_job(
+            prompt=body.prompt,
+            schedule=body.schedule,
+            name=body.name,
+            deliver=body.deliver,
+            skill=body.skill,
+            skills=body.skills,
+            agent=body.agent,
+            tier=body.tier,
+            model=body.model,
+            provider=body.provider,
+            base_url=body.base_url,
+            enabled_toolsets=body.enabled_toolsets,
+            workdir=body.workdir,
+            expected_readiness_version=body.expected_readiness_version,
+            backfill_pending=body.backfill_pending,
+        )
         return job
+    except ValueError as e:
+        # Tier validation, workdir validation — surface to UI as 400.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         _log.exception("POST /api/cron/jobs failed")
         raise HTTPException(status_code=400, detail=str(e))
@@ -2484,6 +2613,50 @@ async def update_cron_job(job_id: str, body: CronJobUpdate):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+class _BackfillProgressBody(BaseModel):
+    queued_today: Optional[int] = None
+    eligible_remaining: Optional[int] = None
+    total_estimate: Optional[int] = None
+
+
+@app.get("/api/cron/jobs/{job_id}/backfill")
+async def get_cron_job_backfill(job_id: str):
+    """Return the lane's backfill progress: pending flag + day/eligible counters."""
+    from cron.jobs import get_job
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "backfill_pending": bool(job.get("backfill_pending")),
+        "backfill_state": job.get("backfill_state"),
+    }
+
+
+@app.post("/api/cron/jobs/{job_id}/backfill/progress")
+async def post_cron_job_backfill_progress(job_id: str, body: _BackfillProgressBody):
+    """Lane skill calls this at end of each backfill run to record progress.
+
+    Increments day, records queued_today + eligible_remaining + total_estimate.
+    When eligible_remaining hits 0, the job's ``backfill_pending`` is cleared
+    and subsequent runs use the incremental window.
+    """
+    from cron.jobs import update_backfill_state
+    job = update_backfill_state(
+        job_id,
+        queued_today=body.queued_today,
+        eligible_remaining=body.eligible_remaining,
+        total_estimate=body.total_estimate,
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "backfill_pending": bool(job.get("backfill_pending")),
+        "backfill_state": job.get("backfill_state"),
+    }
 
 
 @app.post("/api/cron/jobs/{job_id}/pause")
@@ -2561,6 +2734,19 @@ async def get_source_inbox(limit: int = 16):
         raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")
 
 
+@app.get("/api/source-inbox/thread/{source_id}/{thread_id}")
+async def get_source_inbox_thread(source_id: str, thread_id: str, limit: int = 200):
+    try:
+        from elevate_cli.source_connectors import build_thread_context_response
+
+        return build_thread_context_response(source_id, thread_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/source-inbox/thread/%s/%s failed", source_id, thread_id)
+        raise HTTPException(status_code=500, detail=f"Thread context failed: {exc}")
+
+
 @app.post("/api/source-inbox/thread")
 async def update_source_inbox_thread(body: SourceInboxThreadAction):
     try:
@@ -2592,18 +2778,716 @@ async def update_source_inbox_draft(body: SourceInboxDraftAction):
         raise HTTPException(status_code=500, detail=f"Source draft update failed: {exc}")
 
 
+@app.get("/api/source-inbox/draft/{source_id}/{thread_id}/{task_id}/send-status")
+async def get_source_inbox_draft_send_status(source_id: str, thread_id: str, task_id: str):
+    try:
+        from elevate_cli import sender
+
+        status = sender.status_for_task(source_id, thread_id, task_id)
+        if status is None:
+            return {"queued": False, "status": None}
+        return {"queued": True, **status}
+    except Exception as exc:
+        _log.exception("GET /api/source-inbox/draft/.../send-status failed")
+        raise HTTPException(status_code=500, detail=f"Send status lookup failed: {exc}")
+
+
+@app.post("/api/sender/tick")
+async def post_sender_tick(batch: int = 10):
+    """Manual sender tick — useful for tests/admin. Cron calls this on schedule."""
+    try:
+        from elevate_cli import sender
+
+        return sender.tick(batch=max(1, min(100, batch)))
+    except Exception as exc:
+        _log.exception("POST /api/sender/tick failed")
+        raise HTTPException(status_code=500, detail=f"Sender tick failed: {exc}")
+
+
+@app.get("/api/sender/stats")
+async def get_sender_stats():
+    try:
+        from elevate_cli import outreach_db
+
+        return {"queue": outreach_db.send_queue_stats()}
+    except Exception as exc:
+        _log.exception("GET /api/sender/stats failed")
+        raise HTTPException(status_code=500, detail=f"Sender stats failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: thread scoring (lead scorer + dead label cron)
+# ---------------------------------------------------------------------------
+
+class _ThreadScoreBody(BaseModel):
+    sourceId: str
+    threadId: str
+    score: int
+    label: str
+    reason: Optional[str] = None
+    scoredBy: Optional[str] = None
+
+
+class _ThreadDeadBody(BaseModel):
+    sourceId: str
+    threadId: str
+    reason: Optional[str] = None
+    scoredBy: Optional[str] = None
+
+
+@app.get("/api/threads/meta")
+async def list_thread_meta_endpoint(
+    label: Optional[str] = None,
+    minScore: Optional[int] = None,
+    limit: int = 200,
+):
+    try:
+        from elevate_cli import outreach_db
+
+        return {
+            "items": outreach_db.list_thread_meta(label=label, min_score=minScore, limit=limit),
+            "stats": outreach_db.thread_meta_stats(),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/threads/meta failed")
+        raise HTTPException(status_code=500, detail=f"List thread meta failed: {exc}")
+
+
+@app.get("/api/threads/meta/{source_id}/{thread_id}")
+async def get_thread_meta_endpoint(source_id: str, thread_id: str):
+    try:
+        from elevate_cli import outreach_db
+
+        meta = outreach_db.get_thread_meta(source_id, thread_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="not scored")
+        return {"meta": meta}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/threads/meta/{source_id}/{thread_id} failed")
+        raise HTTPException(status_code=500, detail=f"Get thread meta failed: {exc}")
+
+
+@app.post("/api/threads/score")
+async def score_thread_endpoint(body: _ThreadScoreBody):
+    try:
+        from elevate_cli import outreach_db
+
+        meta = outreach_db.upsert_thread_score(
+            body.sourceId,
+            body.threadId,
+            score=body.score,
+            label=body.label,
+            reason=body.reason,
+            scored_by=body.scoredBy,
+        )
+        return {"meta": meta}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/threads/score failed")
+        raise HTTPException(status_code=500, detail=f"Score thread failed: {exc}")
+
+
+@app.post("/api/threads/dead")
+async def mark_thread_dead_endpoint(body: _ThreadDeadBody):
+    try:
+        from elevate_cli import outreach_db
+
+        meta = outreach_db.mark_thread_dead(
+            body.sourceId,
+            body.threadId,
+            reason=body.reason,
+            scored_by=body.scoredBy,
+        )
+        return {"meta": meta}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/threads/dead failed")
+        raise HTTPException(status_code=500, detail=f"Mark dead failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: per-lane channel picker
+# ---------------------------------------------------------------------------
+
+class _LaneChannelsBody(BaseModel):
+    channels: list[str]
+
+
+def _build_available_channels() -> dict[str, Any]:
+    """Compute which channels the user can pick from for a lane, derived
+    from (a) currently connected source connectors that aren't read-only and
+    (b) Composio toolkits whose capability matrix says ``send.supported``
+    AND have at least one connected account (no live account = nothing to
+    send through, even if the matrix supports it).
+
+    The shape is two arrays so the dashboard can render them in two groups:
+
+    ```
+    {
+      "sourceChannels": [{id, label, channel, state}],
+      "composioChannels": [{toolkit, slug, verification, label, accountCount}]
+    }
+    ```
+    """
+    from elevate_cli.source_connectors import build_source_connectors_response
+    from elevate_cli import composio_client
+
+    src_resp = build_source_connectors_response()
+    source_channels: list[dict[str, Any]] = []
+    for c in src_resp.get("connectors", []):
+        sid = str(c.get("id") or "")
+        if not sid:
+            continue
+        state = str(c.get("state") or "").lower()
+        # Skip connectors that are read-only / not configured / blocked. The
+        # picker should only show channels the user can actually send through.
+        if state in {"blocked", "not_configured"}:
+            continue
+        source_channels.append({
+            "id": f"source:{sid}",
+            "sourceId": sid,
+            "label": str(c.get("label") or sid),
+            "channel": str(c.get("channel") or sid),
+            "state": state or "ok",
+        })
+
+    matrix = composio_client.load_capability_matrix() or {}
+    composio_channels: list[dict[str, Any]] = []
+    for slug, entry in (matrix.get("toolkits") or {}).items():
+        send = (entry or {}).get("send") or {}
+        if not send.get("supported"):
+            continue
+        # Per Codex review #5: a "supported" toolkit with zero connected
+        # accounts is not actually a channel the user can pick. Probe live
+        # accounts; if Composio is unreachable, omit the toolkit rather than
+        # advertise a channel we know the user can't use.
+        try:
+            accounts_resp = composio_client.list_all_connected_accounts(toolkit=slug)
+            if not accounts_resp.get("ok"):
+                continue
+            accounts = (accounts_resp.get("data") or {}).get("items") or []
+            if not accounts:
+                continue
+        except Exception:
+            continue
+        composio_channels.append({
+            "id": f"composio:{slug}",
+            "toolkit": slug,
+            "slug": send.get("slug"),
+            "label": str(slug).replace("_", " ").title(),
+            "verification": send.get("verification") or "unknown",
+            "accountCount": len(accounts),
+        })
+
+    return {
+        "sourceChannels": source_channels,
+        "composioChannels": composio_channels,
+    }
+
+
+def _reconcile_lane_config(config: dict[str, Any], available: dict[str, Any]) -> dict[str, Any]:
+    """Strip stale enabled channels from a lane config snapshot.
+
+    Saved configs survive across connector disconnects and Composio account
+    revocations — without reconciliation the dashboard would render channels
+    the user can't actually use. We don't mutate the DB row here; the GET
+    response simply hides stale entries (and surfaces them under
+    ``droppedChannels`` so the UI can flag the change).
+    """
+    if not isinstance(config, dict):
+        return config
+    valid_ids = (
+        {c["id"] for c in available.get("sourceChannels", [])}
+        | {c["id"] for c in available.get("composioChannels", [])}
+    )
+    saved = list(config.get("enabledChannels") or [])
+    kept = [c for c in saved if c in valid_ids]
+    dropped = [c for c in saved if c not in valid_ids]
+    if not dropped:
+        return config
+    out = dict(config)
+    out["enabledChannels"] = kept
+    out["droppedChannels"] = dropped
+    return out
+
+
+@app.get("/api/lanes")
+async def list_lanes_endpoint():
+    """Return every lane's saved channel selection plus the universe of
+    available channels the picker should expose. Saved channels that no
+    longer exist in the availability set are stripped on the way out and
+    reported under ``droppedChannels`` so the UI can flag the regression."""
+    try:
+        from elevate_cli import outreach_db
+
+        avail = _build_available_channels()
+        lanes = [_reconcile_lane_config(l, avail) for l in outreach_db.list_lane_configs()]
+        return {
+            "lanes": lanes,
+            "available": avail,
+        }
+    except Exception as exc:
+        _log.exception("GET /api/lanes failed")
+        raise HTTPException(status_code=500, detail=f"List lanes failed: {exc}")
+
+
+@app.get("/api/lanes/{lane}/channels")
+async def get_lane_channels_endpoint(lane: str):
+    try:
+        from elevate_cli import outreach_db
+
+        avail = _build_available_channels()
+        return {
+            "config": _reconcile_lane_config(outreach_db.get_lane_config(lane), avail),
+            "available": avail,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/lanes/{lane}/channels failed")
+        raise HTTPException(status_code=500, detail=f"Get lane channels failed: {exc}")
+
+
+@app.get("/api/onboarding/status")
+async def get_onboarding_status_endpoint(request: Request):
+    """Cheap polling endpoint for the dashboard onboarding wizard.
+
+    The dashboard sends ``If-None-Match: <etag>`` (Phase O wires the wizard
+    to poll every ~10s). If the etag matches, return 304 — saves a render
+    cycle on the lane cards. We respond with the bare etag in the ``ETag``
+    response header on 200s so the next request can short-circuit.
+    """
+    from fastapi import Response
+    from fastapi.responses import JSONResponse
+    from elevate_cli.onboarding import compute_onboarding_status, parse_if_none_match
+
+    try:
+        status = compute_onboarding_status()
+        inm = parse_if_none_match(request.headers.get("if-none-match"))
+        etag = status["etag"]
+        if inm and inm == etag:
+            return Response(status_code=304, headers={"ETag": f'"{etag}"'})
+        return JSONResponse(status, headers={"ETag": f'"{etag}"'})
+    except Exception as exc:
+        _log.exception("GET /api/onboarding/status failed")
+        raise HTTPException(status_code=500, detail=f"Onboarding status failed: {exc}")
+
+
+@app.post("/api/outreach/templates/seed-all")
+async def seed_all_templates_endpoint():
+    """Idempotent re-seed of the lane templates. Wizard calls this when the
+    `templates_seeded` check is failing. Existing user-edited templates with
+    the same ``(lane, name)`` are left alone."""
+    try:
+        from elevate_cli import outreach_db
+
+        return outreach_db.seed_all_templates()
+    except Exception as exc:
+        _log.exception("POST /api/outreach/templates/seed-all failed")
+        raise HTTPException(status_code=500, detail=f"Seed templates failed: {exc}")
+
+
+@app.put("/api/lanes/{lane}/channels")
+async def put_lane_channels_endpoint(lane: str, body: _LaneChannelsBody):
+    """Replace the lane's enabled channels. The server validates each entry
+    against the live availability set so callers can't persist a channel the
+    user can't actually use."""
+    try:
+        from elevate_cli import outreach_db
+
+        avail = _build_available_channels()
+        valid_ids = {c["id"] for c in avail["sourceChannels"]} | {c["id"] for c in avail["composioChannels"]}
+
+        cleaned: list[str] = []
+        rejected: list[str] = []
+        for raw in body.channels:
+            cid = str(raw).strip()
+            if not cid:
+                continue
+            if cid in valid_ids:
+                cleaned.append(cid)
+            else:
+                rejected.append(cid)
+
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown or unsupported channels: {', '.join(rejected)}",
+            )
+
+        config = outreach_db.set_lane_channels(lane, cleaned)
+        return {"config": config, "available": avail}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/lanes/{lane}/channels failed")
+        raise HTTPException(status_code=500, detail=f"Set lane channels failed: {exc}")
+
+
 @app.post("/api/source-connectors")
 async def update_source_connector(body: SourceConnectorAction):
-    if body.action != "scaffold":
+    if body.action not in {"scaffold", "refresh"}:
         raise HTTPException(status_code=400, detail="Unsupported source connector action")
     try:
-        from elevate_cli.source_connectors import build_source_connectors_response, scaffold_source
+        from elevate_cli.source_connectors import (
+            build_source_connectors_response,
+            initialize_apple_messages_source,
+            scaffold_source,
+        )
 
-        scaffold_source(body.sourceId)
-        return {"ok": True, **build_source_connectors_response()}
+        refresh_summary: dict[str, Any] | None = None
+        if body.action == "refresh":
+            if body.sourceId == "apple-messages":
+                initialize_apple_messages_source()
+            elif body.sourceId == "crm":
+                scaffold_source("crm")
+            elif body.sourceId == "social":
+                from elevate_cli import composio_inbound
+
+                refresh_summary = composio_inbound.pull_all_supported()
+            else:
+                # Generic refresh: re-run scaffold so the connector record / task is up to date.
+                scaffold_source(body.sourceId)
+        else:
+            scaffold_source(body.sourceId)
+
+        payload: dict[str, Any] = {"ok": True, **build_source_connectors_response()}
+        if refresh_summary is not None:
+            payload["refresh"] = refresh_summary
+        return payload
     except Exception as exc:
         _log.exception("POST /api/source-connectors failed")
         raise HTTPException(status_code=500, detail=f"Source connector update failed: {exc}")
+
+
+class OutreachTemplateCreate(BaseModel):
+    lane: str
+    name: str
+    body: str
+    channel: str = "any"
+
+
+class OutreachTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    body: Optional[str] = None
+    channel: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@app.get("/api/outreach/templates")
+async def list_outreach_templates(lane: Optional[str] = None):
+    try:
+        from elevate_cli import outreach_db
+
+        return {"templates": outreach_db.list_templates(lane=lane)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/outreach/templates failed")
+        raise HTTPException(status_code=500, detail=f"List templates failed: {exc}")
+
+
+@app.post("/api/outreach/templates")
+async def create_outreach_template(body: OutreachTemplateCreate):
+    try:
+        from elevate_cli import outreach_db
+
+        return {"template": outreach_db.create_template(
+            lane=body.lane, name=body.name, body=body.body, channel=body.channel
+        )}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/outreach/templates failed")
+        raise HTTPException(status_code=500, detail=f"Create template failed: {exc}")
+
+
+@app.put("/api/outreach/templates/{template_id}")
+async def update_outreach_template(template_id: str, body: OutreachTemplateUpdate):
+    try:
+        from elevate_cli import outreach_db
+
+        return {"template": outreach_db.update_template(
+            template_id,
+            name=body.name,
+            body=body.body,
+            channel=body.channel,
+            active=body.active,
+        )}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/outreach/templates failed")
+        raise HTTPException(status_code=500, detail=f"Update template failed: {exc}")
+
+
+@app.delete("/api/outreach/templates/{template_id}")
+async def delete_outreach_template(template_id: str):
+    try:
+        from elevate_cli import outreach_db
+
+        ok = outreach_db.delete_template(template_id)
+        return {"ok": ok}
+    except Exception as exc:
+        _log.exception("DELETE /api/outreach/templates failed")
+        raise HTTPException(status_code=500, detail=f"Delete template failed: {exc}")
+
+
+@app.get("/api/outreach/templates/overview")
+async def get_outreach_overview():
+    try:
+        from elevate_cli import outreach_db
+
+        return outreach_db.overview()
+    except Exception as exc:
+        _log.exception("GET /api/outreach/templates/overview failed")
+        raise HTTPException(status_code=500, detail=f"Overview failed: {exc}")
+
+
+class OutreachSuggestBody(BaseModel):
+    lane: str
+    channel: str = "any"
+    extraBrief: Optional[str] = None
+
+
+@app.post("/api/outreach/templates/suggest")
+async def suggest_outreach_template(body: OutreachSuggestBody):
+    try:
+        from elevate_cli import template_suggester
+
+        saved = template_suggester.suggest_and_save(
+            body.lane,
+            channel=body.channel,
+            extra_brief=body.extraBrief,
+        )
+        return {"template": saved}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/outreach/templates/suggest failed")
+        raise HTTPException(status_code=500, detail=f"Suggest failed: {exc}")
+
+
+@app.post("/api/outreach/templates/{template_id}/approve")
+async def approve_outreach_template(template_id: str):
+    try:
+        from elevate_cli import outreach_db
+
+        return {"template": outreach_db.approve_template(template_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/outreach/templates/approve failed")
+        raise HTTPException(status_code=500, detail=f"Approve failed: {exc}")
+
+
+@app.post("/api/outreach/templates/{template_id}/reject")
+async def reject_outreach_template(template_id: str):
+    try:
+        from elevate_cli import outreach_db
+
+        ok = outreach_db.reject_template(template_id)
+        return {"ok": ok}
+    except Exception as exc:
+        _log.exception("POST /api/outreach/templates/reject failed")
+        raise HTTPException(status_code=500, detail=f"Reject failed: {exc}")
+
+
+class ComposioKeyBody(BaseModel):
+    apiKey: str
+
+
+class ComposioConnectBody(BaseModel):
+    toolkitSlug: str
+    redirectUrl: Optional[str] = None
+    userId: Optional[str] = None
+
+
+class ComposioFacebookSelectionBody(BaseModel):
+    pageIds: list[str]
+
+
+@app.get("/api/composio/status")
+async def composio_status():
+    try:
+        from elevate_cli import composio_client
+
+        return composio_client.get_status()
+    except Exception as exc:
+        _log.exception("GET /api/composio/status failed")
+        raise HTTPException(status_code=500, detail=f"Composio status failed: {exc}")
+
+
+@app.post("/api/composio/key")
+async def composio_set_key(body: ComposioKeyBody):
+    try:
+        from elevate_cli import composio_client
+
+        result = composio_client.set_api_key(body.apiKey)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Invalid key"))
+        return composio_client.get_status()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/composio/key failed")
+        raise HTTPException(status_code=500, detail=f"Set Composio key failed: {exc}")
+
+
+@app.delete("/api/composio/key")
+async def composio_clear_key():
+    try:
+        from elevate_cli import composio_client
+
+        composio_client.clear_api_key()
+        return composio_client.get_status()
+    except Exception as exc:
+        _log.exception("DELETE /api/composio/key failed")
+        raise HTTPException(status_code=500, detail=f"Clear Composio key failed: {exc}")
+
+
+@app.get("/api/composio/connections")
+async def composio_connections():
+    try:
+        from elevate_cli import composio_client
+
+        return composio_client.list_connected_accounts()
+    except Exception as exc:
+        _log.exception("GET /api/composio/connections failed")
+        raise HTTPException(status_code=500, detail=f"List Composio connections failed: {exc}")
+
+
+@app.get("/api/composio/connections/all")
+async def composio_connections_all(
+    toolkit: Optional[str] = None,
+    page_size: int = 100,
+    max_pages: int = 50,
+):
+    """Paginated list of all connected accounts. Phase 5a: replaces single-page calls."""
+    try:
+        from elevate_cli import composio_client
+        return composio_client.list_all_connected_accounts(
+            toolkit=toolkit, page_size=page_size, max_pages=max_pages,
+        )
+    except Exception as exc:
+        _log.exception("GET /api/composio/connections/all failed")
+        raise HTTPException(status_code=500, detail=f"List all Composio connections failed: {exc}")
+
+
+@app.get("/api/composio/capabilities")
+async def composio_capabilities(toolkit: Optional[str] = None):
+    """Return the per-toolkit send/inbound matrix for the channel picker.
+
+    Pass ``?toolkit=<slug>`` to look up a single toolkit, otherwise the
+    full matrix comes back. Unknown toolkits return an explicit
+    ``unverified`` stub so the UI can render a disabled chip with a reason.
+    """
+    try:
+        from elevate_cli import composio_client
+        if toolkit:
+            return composio_client.capability(toolkit)
+        return composio_client.load_capability_matrix()
+    except Exception as exc:
+        _log.exception("GET /api/composio/capabilities failed")
+        raise HTTPException(status_code=500, detail=f"Composio capabilities failed: {exc}")
+
+
+@app.get("/api/composio/toolkits")
+async def composio_toolkits(category: Optional[str] = None, all: bool = True, limit: int = 100):
+    """List Composio toolkits.
+
+    Defaults to walking every page so the hub UI can show the full catalog.
+    Pass ``all=false`` to get just the first page (useful for cheap probes).
+    """
+    try:
+        from elevate_cli import composio_client
+
+        if all:
+            return composio_client.list_all_toolkits(category=category, page_size=limit)
+        return composio_client.list_toolkits(category=category, limit=limit)
+    except Exception as exc:
+        _log.exception("GET /api/composio/toolkits failed")
+        raise HTTPException(status_code=500, detail=f"List Composio toolkits failed: {exc}")
+
+
+@app.post("/api/composio/connect")
+async def composio_connect(body: ComposioConnectBody):
+    try:
+        from elevate_cli import composio_client
+
+        return composio_client.initiate_connection(
+            body.toolkitSlug,
+            redirect_url=body.redirectUrl,
+            user_id=body.userId,
+        )
+    except Exception as exc:
+        _log.exception("POST /api/composio/connect failed")
+        raise HTTPException(status_code=500, detail=f"Composio connect failed: {exc}")
+
+
+@app.delete("/api/composio/connections/{account_id}")
+async def composio_delete_connection(account_id: str):
+    try:
+        from elevate_cli import composio_client
+
+        return composio_client.delete_connected_account(account_id)
+    except Exception as exc:
+        _log.exception("DELETE /api/composio/connections failed")
+        raise HTTPException(status_code=500, detail=f"Delete Composio connection failed: {exc}")
+
+
+@app.get("/api/composio/facebook/pages")
+async def composio_facebook_pages():
+    """List FB pages from connected Facebook accounts plus current selection.
+
+    Used by the page-picker on the source-connector card so the user can
+    choose which pages surface on the /leads board. Selection persists
+    independent of MCP — the Composio connection itself stays full-scope.
+    """
+    try:
+        from elevate_cli import composio_inbound
+
+        return composio_inbound.list_facebook_pages_for_picker()
+    except Exception as exc:
+        _log.exception("GET /api/composio/facebook/pages failed")
+        raise HTTPException(status_code=500, detail=f"Composio FB pages failed: {exc}")
+
+
+@app.put("/api/composio/facebook/pages")
+async def composio_facebook_set_pages(body: ComposioFacebookSelectionBody):
+    try:
+        from elevate_cli import composio_inbound
+
+        return composio_inbound.set_facebook_page_selection(body.pageIds or [])
+    except Exception as exc:
+        _log.exception("PUT /api/composio/facebook/pages failed")
+        raise HTTPException(status_code=500, detail=f"Composio FB selection save failed: {exc}")
+
+
+@app.post("/api/composio/inbound/pull")
+async def composio_inbound_pull():
+    """Manual trigger for the composio inbound puller.
+
+    The 10-min cron tick runs ``pull_all_supported()`` automatically; this
+    endpoint exposes the same call so the dashboard Refresh button can
+    surface "actually fetched something new" instead of just re-reading the
+    last tick's JSONL files. Returns the same summary shape as the cron tick.
+    """
+    try:
+        from elevate_cli import composio_inbound
+
+        return composio_inbound.pull_all_supported()
+    except Exception as exc:
+        _log.exception("POST /api/composio/inbound/pull failed")
+        raise HTTPException(status_code=500, detail=f"Composio inbound pull failed: {exc}")
 
 
 @app.get("/api/integrations")
@@ -2674,6 +3558,27 @@ async def toggle_skill(body: SkillToggle):
         disabled.add(body.name)
     save_disabled_skills(config, disabled)
     return {"ok": True, "name": body.name, "enabled": body.enabled}
+
+
+@app.get("/api/skills/{name}/steps")
+async def get_skill_steps(name: str):
+    """Return the `steps:` list declared in a skill's frontmatter, or [].
+
+    Used by the cron form on `/leads` to preview which steps will run when
+    a skill-bound cron job fires. Tier names only — concrete model resolves
+    at run time via `tier_resolver` against the user's harness config.
+    """
+    import json
+    from tools.skills_tool import skill_view
+    from elevate_cli.skill_steps import parse_steps_from_text
+
+    payload = json.loads(skill_view(name))
+    if not payload.get("success"):
+        return {"name": name, "steps": [], "error": payload.get("error", "skill not found")}
+
+    content = str(payload.get("content") or "")
+    steps = parse_steps_from_text(content, source=name)
+    return {"name": name, "steps": steps}
 
 
 @app.get("/api/tools/toolsets")

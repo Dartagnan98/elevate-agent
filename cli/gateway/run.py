@@ -40,6 +40,22 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 # from _enforce_agent_cache_cap() and _session_expiry_watcher() below.
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
+_TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+
+
+def _telegramize_command_mentions(text: str, platform: Any) -> str:
+    """Rewrite slash-command mentions to Telegram-valid command names."""
+    platform_value = getattr(platform, "value", platform)
+    if platform_value != "telegram":
+        return text
+
+    from elevate_cli.commands import _sanitize_telegram_name
+
+    def _replace(match: re.Match[str]) -> str:
+        sanitized = _sanitize_telegram_name(match.group(1))
+        return f"/{sanitized}" if sanitized else match.group(0)
+
+    return _TELEGRAM_COMMAND_MENTION_RE.sub(_replace, text)
 
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
@@ -873,6 +889,8 @@ class GatewayRunner:
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        # Recent voice transcripts per (guild,user) for duplicate suppression.
+        self._recent_voice_transcripts: Dict[tuple[int, int], List[tuple[float, str]]] = {}
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
@@ -1665,6 +1683,59 @@ class GatewayRunner:
         if not adapter:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
+
+    def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> None:
+        """Append a queued event to the session FIFO without merging text.
+
+        The adapter's _pending_messages dict is the next-turn slot. If that
+        slot is occupied, keep overflow in runner._queued_events so queued
+        goal continuations do not overwrite real user messages or each other.
+        """
+        if adapter is None:
+            return
+        pending_slot = getattr(adapter, "_pending_messages", None)
+        if pending_slot is None:
+            return
+        queued_events = getattr(self, "_queued_events", None)
+        if queued_events is None:
+            queued_events = {}
+            self._queued_events = queued_events
+        if session_key in pending_slot:
+            queued_events.setdefault(session_key, []).append(queued_event)
+        else:
+            pending_slot[session_key] = queued_event
+
+    def _promote_queued_event(
+        self,
+        session_key: str,
+        adapter: Any,
+        pending_event: Optional["MessageEvent"],
+    ) -> Optional["MessageEvent"]:
+        """Promote the next overflow event after the pending slot is drained."""
+        queued_events = getattr(self, "_queued_events", None)
+        if not queued_events:
+            return pending_event
+        overflow = queued_events.get(session_key)
+        if not overflow:
+            return pending_event
+        next_queued = overflow.pop(0)
+        if not overflow:
+            queued_events.pop(session_key, None)
+        if pending_event is None:
+            return next_queued
+        if adapter is not None and hasattr(adapter, "_pending_messages"):
+            adapter._pending_messages[session_key] = next_queued
+        else:
+            queued_events.setdefault(session_key, []).insert(0, next_queued)
+        return pending_event
+
+    def _queue_depth(self, session_key: str, *, adapter: Any = None) -> int:
+        """Return total pending FIFO events for a session."""
+        queued_events = getattr(self, "_queued_events", None) or {}
+        depth = len(queued_events.get(session_key, []))
+        if adapter is not None and session_key in getattr(adapter, "_pending_messages", {}):
+            depth += 1
+        return depth
 
     @staticmethod
     def _gateway_tool_profile_mode(user_config: dict, platform_key: str) -> str:
@@ -4016,6 +4087,15 @@ class GatewayRunner:
             if _cmd_def_inner and _cmd_def_inner.name == "model":
                 return "Agent is running — wait or /stop first, then switch models."
 
+            # /goal is safe mid-run for status/pause/clear (inspection and
+            # control-plane only). Setting a new goal mid-run is rejected
+            # so we don't race a second continuation prompt against the current turn.
+            if _cmd_def_inner and _cmd_def_inner.name == "goal":
+                _goal_arg = (event.get_command_args() or "").strip().lower()
+                if not _goal_arg or _goal_arg in ("status", "pause", "resume", "clear", "stop", "done"):
+                    return await self._handle_goal_command(event)
+                return "Agent is running — use /goal status / pause / clear mid-run, or /stop before setting a new goal."
+
             # /approve and /deny must bypass the running-agent interrupt path.
             # The agent thread is blocked on a threading.Event inside
             # tools/approval.py — sending an interrupt won't unblock it.
@@ -4335,6 +4415,9 @@ class GatewayRunner:
             # at the end of this function so the rewritten text is sent
             # to the agent as a regular user turn.
 
+        if canonical == "goal":
+            return await self._handle_goal_command(event)
+
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
@@ -4480,7 +4563,27 @@ class GatewayRunner:
         _run_generation = self._begin_session_run_generation(_quick_key)
 
         try:
-            return await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
+            _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
+            try:
+                _final_text = ""
+                if isinstance(_agent_result, dict):
+                    _final_text = str(_agent_result.get("final_response") or "")
+                elif isinstance(_agent_result, str):
+                    _final_text = _agent_result
+                if _final_text.strip():
+                    try:
+                        session_entry = self.session_store.get_or_create_session(source)
+                    except Exception:
+                        session_entry = None
+                    if session_entry is not None:
+                        self._post_turn_goal_continuation(
+                            session_entry=session_entry,
+                            source=source,
+                            final_response=_final_text,
+                        )
+            except Exception as _goal_exc:
+                logger.debug("goal continuation hook failed: %s", _goal_exc)
+            return _agent_result
         finally:
             # If _run_agent replaced the sentinel with a real agent and
             # then cleaned it up, this is a no-op.  If we exited early
@@ -6050,7 +6153,10 @@ class GatewayRunner:
                     lines.append(f"\n... and {len(sorted_cmds) - 10} more. Use `/commands` for the full paginated list.")
         except Exception:
             pass
-        return "\n".join(lines)
+        return _telegramize_command_mentions(
+            "\n".join(lines),
+            getattr(getattr(event, "source", None), "platform", None),
+        )
 
     async def _handle_commands_command(self, event: MessageEvent) -> str:
         """Handle /commands [page] - paginated list of all commands and skills."""
@@ -6103,7 +6209,10 @@ class GatewayRunner:
             lines.extend(["", " | ".join(nav_parts)])
         if page != requested_page:
             lines.append(f"_(Requested page {requested_page} was out of range, showing page {page}.)_")
-        return "\n".join(lines)
+        return _telegramize_command_mentions(
+            "\n".join(lines),
+            getattr(getattr(event, "source", None), "platform", None),
+        )
     
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model for this session.
@@ -6545,6 +6654,174 @@ class GatewayRunner:
         # Let the normal message handler process it
         return await self._handle_message(retry_event)
     
+
+    # ────────────────────────────────────────────────────────────────
+    # /goal — persistent cross-turn goals (Ralph-style loop)
+    # ────────────────────────────────────────────────────────────────
+    def _get_goal_manager_for_event(self, event: "MessageEvent"):
+        """Return a GoalManager bound to the session for this gateway event."""
+        try:
+            from elevate_cli.goals import GoalManager
+        except Exception as exc:
+            logger.debug("goal manager unavailable: %s", exc)
+            return None, None
+        try:
+            session_entry = self.session_store.get_or_create_session(event.source)
+        except Exception as exc:
+            logger.debug("goal manager: session lookup failed: %s", exc)
+            return None, None
+        sid = getattr(session_entry, "session_id", None) or ""
+        if not sid:
+            return None, None
+        try:
+            goals_cfg = (
+                (self.config or {}).get("goals", {})
+                if isinstance(self.config, dict)
+                else getattr(self.config, "goals", {}) or {}
+            )
+            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+        except Exception:
+            max_turns = 20
+        return GoalManager(session_id=sid, default_max_turns=max_turns), session_entry
+
+    async def _handle_goal_command(self, event: "MessageEvent") -> str:
+        """Handle /goal for gateway platforms."""
+        args = (event.get_command_args() or "").strip()
+        lower = args.lower()
+
+        mgr, session_entry = self._get_goal_manager_for_event(event)
+        if mgr is None:
+            return "Goals unavailable on this session."
+
+        if not args or lower == "status":
+            return mgr.status_line()
+
+        if lower == "pause":
+            state = mgr.pause(reason="user-paused")
+            if state is None:
+                return "No goal set."
+            return f"⏸ Goal paused: {state.goal}"
+
+        if lower == "resume":
+            state = mgr.resume()
+            if state is None:
+                return "No goal to resume."
+            return (
+                f"▶ Goal resumed: {state.goal}\n"
+                "Send any message to continue, or wait — I'll take the next step on the next turn."
+            )
+
+        if lower in ("clear", "stop", "done"):
+            had = mgr.has_goal()
+            mgr.clear()
+            return "✓ Goal cleared." if had else "No active goal."
+
+        try:
+            state = mgr.set(args)
+        except ValueError as exc:
+            return f"Invalid goal: {exc}"
+
+        adapter = self.adapters.get(event.source.platform) if event.source else None
+        _quick_key = self._session_key_for_source(event.source) if event.source else None
+        if adapter and _quick_key:
+            try:
+                kickoff_event = MessageEvent(
+                    text=state.goal,
+                    message_type=MessageType.TEXT,
+                    source=event.source,
+                    message_id=event.message_id,
+                    channel_prompt=event.channel_prompt,
+                )
+                self._enqueue_fifo(_quick_key, kickoff_event, adapter)
+            except Exception as exc:
+                logger.debug("goal kickoff enqueue failed: %s", exc)
+
+        return (
+            f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}\n"
+            "I'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\n"
+            "Controls: /goal status · /goal pause · /goal resume · /goal clear"
+        )
+
+    def _post_turn_goal_continuation(
+        self,
+        *,
+        session_entry: Any,
+        source: Any,
+        final_response: str,
+    ) -> None:
+        """Run the goal judge after a gateway turn and enqueue continuation if needed."""
+        try:
+            from elevate_cli.goals import GoalManager
+        except Exception as exc:
+            logger.debug("goal continuation: goals module unavailable: %s", exc)
+            return
+
+        sid = getattr(session_entry, "session_id", None) or ""
+        if not sid:
+            return
+
+        try:
+            goals_cfg = (
+                (self.config or {}).get("goals", {})
+                if isinstance(self.config, dict)
+                else getattr(self.config, "goals", {}) or {}
+            )
+            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+        except Exception:
+            max_turns = 20
+
+        mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
+        if not mgr.is_active():
+            return
+
+        decision = mgr.evaluate_after_turn(final_response or "", user_initiated=True)
+        msg = decision.get("message") or ""
+
+        if msg and source is not None:
+            try:
+                adapter = self.adapters.get(source.platform)
+                if adapter is not None and hasattr(adapter, "send"):
+                    import asyncio as _asyncio
+                    thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    coro = adapter.send(
+                        chat_id=source.chat_id,
+                        content=msg,
+                        metadata=thread_meta,
+                    )
+                    if _asyncio.iscoroutine(coro):
+                        try:
+                            loop = _asyncio.get_running_loop()
+                            loop.create_task(coro)
+                        except RuntimeError:
+                            try:
+                                _asyncio.run(coro)
+                            except Exception:
+                                pass
+            except Exception as exc:
+                logger.debug("goal continuation: status send failed: %s", exc)
+
+        if not decision.get("should_continue"):
+            return
+
+        prompt = decision.get("continuation_prompt") or ""
+        if not prompt or source is None:
+            return
+
+        try:
+            adapter = self.adapters.get(source.platform)
+            _quick_key = self._session_key_for_source(source)
+            if adapter and _quick_key:
+                cont_event = MessageEvent(
+                    text=prompt,
+                    message_type=MessageType.TEXT,
+                    source=source,
+                    message_id=None,
+                    channel_prompt=None,
+                )
+                self._enqueue_fifo(_quick_key, cont_event, adapter)
+        except Exception as exc:
+            logger.debug("goal continuation: enqueue failed: %s", exc)
+
     async def _handle_undo_command(self, event: MessageEvent) -> str:
         """Handle /undo command - remove the last user/assistant exchange."""
         source = event.source
@@ -6774,6 +7051,41 @@ class GatewayRunner:
         adapter = self.adapters.get(Platform.DISCORD)
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
 
+    def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
+        """Suppress repeated STT outputs for the same recent utterance."""
+        from difflib import SequenceMatcher
+
+        normalized = re.sub(r"\s+", " ", transcript).strip().lower()
+        normalized = re.sub(r"[^\w\s]", "", normalized)
+        if not normalized:
+            return False
+
+        now = time.monotonic()
+        window_seconds = 12.0
+        key = (guild_id, user_id)
+        recent_store = getattr(self, "_recent_voice_transcripts", None)
+        if not isinstance(recent_store, dict):
+            recent_store = {}
+            self._recent_voice_transcripts = recent_store
+        recent = [
+            (ts, txt)
+            for ts, txt in recent_store.get(key, [])
+            if now - ts <= window_seconds
+        ]
+
+        for _, prior in recent:
+            if prior == normalized:
+                recent_store[key] = recent
+                return True
+            if len(prior) >= 16 and len(normalized) >= 16:
+                if SequenceMatcher(None, prior, normalized).ratio() >= 0.95:
+                    recent_store[key] = recent
+                    return True
+
+        recent.append((now, normalized))
+        recent_store[key] = recent[-5:]
+        return False
+
     async def _handle_voice_channel_input(
         self, guild_id: int, user_id: int, transcript: str
     ):
@@ -6809,6 +7121,15 @@ class GatewayRunner:
         # Check authorization before processing voice input
         if not self._is_user_authorized(source):
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
+            return
+
+        if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
+            logger.info(
+                "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
+                guild_id,
+                user_id,
+                transcript[:100],
+            )
             return
 
         # Show transcript in text channel (after auth, with mention sanitization)
@@ -9350,6 +9671,10 @@ class GatewayRunner:
         if isinstance(pending_approvals, dict):
             pending_approvals.pop(session_key, None)
 
+        pending_skills_reload_notes = getattr(self, "_pending_skills_reload_notes", None)
+        if isinstance(pending_skills_reload_notes, dict):
+            pending_skills_reload_notes.pop(session_key, None)
+
         try:
             from tools.approval import clear_session as _clear_approval_session
         except Exception:
@@ -11367,6 +11692,10 @@ class GatewayRunner:
             pending = None
             if result and adapter and session_key:
                 pending_event = _dequeue_pending_event(adapter, session_key)
+                # FIFO overflow: after consuming the adapter's next-up slot,
+                # promote the next queued event so goal continuations and
+                # /queue messages preserve order without overwriting the slot.
+                pending_event = self._promote_queued_event(session_key, adapter, pending_event)
                 if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
                     interrupt_message = result.get("interrupt_message")
                     if _is_control_interrupt_message(interrupt_message):
@@ -11649,10 +11978,13 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     """
     from cron.scheduler import tick as cron_tick
     from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache
+    from elevate_cli import sender as outbound_sender
 
     IMAGE_CACHE_EVERY = 60   # ticks — once per hour at default 60s interval
     CHANNEL_DIR_EVERY = 5    # ticks — every 5 minutes
     MEMORY_MAINTENANCE_EVERY = 15  # ticks — every 15 minutes
+    SENDER_TICK_EVERY = 2    # ticks — every 2 minutes at default 60s interval
+    INBOUND_TICK_EVERY = 10  # ticks — every 10 minutes; matches composio_capabilities.json default_poll_interval_minutes
 
     logger.info("Cron ticker started (interval=%ds)", interval)
     tick_count = 0
@@ -11663,6 +11995,22 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             logger.debug("Cron tick error: %s", e)
 
         tick_count += 1
+
+        if tick_count % SENDER_TICK_EVERY == 0:
+            try:
+                outbound_sender.tick(batch=20)
+            except Exception as e:
+                logger.debug("Sender tick error: %s", e)
+
+        if tick_count % INBOUND_TICK_EVERY == 0:
+            try:
+                from elevate_cli import composio_inbound
+                summary = composio_inbound.pull_all_supported()
+                if summary.get("total_new"):
+                    logger.info("Composio inbound tick: %d new across %d toolkits",
+                                summary["total_new"], len(summary.get("toolkits", [])))
+            except Exception as e:
+                logger.debug("Composio inbound tick error: %s", e)
 
         if tick_count % CHANNEL_DIR_EVERY == 0 and adapters:
             try:

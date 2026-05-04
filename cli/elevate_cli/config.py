@@ -349,6 +349,10 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["elevate-cli"],
+    "goals": {
+        # Max autonomous continuation turns for /goal before pausing.
+        "max_turns": 20,
+    },
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).

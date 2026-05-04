@@ -604,6 +604,17 @@ def load_gateway_config() -> GatewayConfig:
                     plat_data["extra"] = extra
                 extra.update(bridged)
 
+            # Bridge top-level require_mention to Telegram when telegram:
+            # does not already provide one. Common shorthand in config.yaml.
+            _tl_require_mention = yaml_cfg.get("require_mention")
+            if _tl_require_mention is not None:
+                _tg_section = yaml_cfg.get("telegram") or {}
+                if isinstance(_tg_section, dict) and "require_mention" not in _tg_section:
+                    _tg_plat = platforms_data.setdefault(Platform.TELEGRAM.value, {})
+                    _tg_extra = _tg_plat.setdefault("extra", {})
+                    if isinstance(_tg_extra, dict):
+                        _tg_extra.setdefault("require_mention", _tl_require_mention)
+
             # Slack settings → env vars (env vars take precedence)
             slack_cfg = yaml_cfg.get("slack", {})
             if isinstance(slack_cfg, dict):
@@ -669,8 +680,9 @@ def load_gateway_config() -> GatewayConfig:
             # Telegram settings → env vars (env vars take precedence)
             telegram_cfg = yaml_cfg.get("telegram", {})
             if isinstance(telegram_cfg, dict):
-                if "require_mention" in telegram_cfg and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
-                    os.environ["TELEGRAM_REQUIRE_MENTION"] = str(telegram_cfg["require_mention"]).lower()
+                _effective_rm = telegram_cfg.get("require_mention", yaml_cfg.get("require_mention"))
+                if _effective_rm is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
+                    os.environ["TELEGRAM_REQUIRE_MENTION"] = str(_effective_rm).lower()
                 if "mention_patterns" in telegram_cfg and not os.getenv("TELEGRAM_MENTION_PATTERNS"):
                     os.environ["TELEGRAM_MENTION_PATTERNS"] = json.dumps(telegram_cfg["mention_patterns"])
                 frc = telegram_cfg.get("free_response_chats")

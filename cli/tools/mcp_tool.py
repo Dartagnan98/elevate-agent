@@ -1593,6 +1593,7 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "session expired",
     "session not found",
     "unknown session",
+    "session terminated",
 )
 
 
@@ -1800,7 +1801,14 @@ def _run_on_mcp_loop(coro, timeout: float = 30):
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return future.result(timeout=0)
+                future.cancel()
+                try:
+                    future.result(timeout=0.5)
+                except concurrent.futures.CancelledError:
+                    pass
+                except concurrent.futures.TimeoutError:
+                    logger.warning("MCP coroutine did not acknowledge cancellation after %.1fs timeout", timeout)
+                raise TimeoutError(f"MCP operation timed out after {timeout:.1f}s")
             wait_timeout = min(wait_timeout, remaining)
 
         try:
