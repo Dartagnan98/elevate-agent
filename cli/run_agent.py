@@ -1244,7 +1244,20 @@ class AIAgent:
                 _gr_label = " + Guardrails" if self._bedrock_guardrail_config else ""
                 print(f"🤖 AI Agent initialized with model: {self.model} (AWS Bedrock, {self._bedrock_region}{_gr_label})")
         else:
-            if api_key and base_url:
+            if self.provider == "claude-code-cli":
+                # Local Claude Code bridge. Bypasses native Anthropic third-party
+                # OAuth/API billing by shelling out to the first-party Claude CLI.
+                client_kwargs = {
+                    "api_key": api_key or "claude-code-cli",
+                    "base_url": base_url or "claude-code-cli://local",
+                }
+                if _provider_timeout is not None:
+                    client_kwargs["timeout"] = _provider_timeout
+                if self.acp_command:
+                    client_kwargs["command"] = self.acp_command
+                if self.acp_args:
+                    client_kwargs["args"] = self.acp_args
+            elif api_key and base_url:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
@@ -4810,6 +4823,17 @@ class AIAgent:
             client = CopilotACPClient(**client_kwargs)
             logger.info(
                 "Copilot ACP client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
+        if self.provider == "claude-code-cli" or str(client_kwargs.get("base_url", "")).startswith("claude-code-cli://"):
+            from agent.claude_code_cli_client import ClaudeCodeCLIClient
+
+            client = ClaudeCodeCLIClient(**client_kwargs)
+            logger.info(
+                "Claude Code CLI client created (%s, shared=%s) %s",
                 reason,
                 shared,
                 self._client_log_context(),

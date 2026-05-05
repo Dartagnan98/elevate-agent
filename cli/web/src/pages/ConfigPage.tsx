@@ -246,6 +246,17 @@ function ComposioPanel() {
   const [toolkitQuery, setToolkitQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [visibleCount, setVisibleCount] = useState<number>(TOOLKIT_PAGE_SIZE);
+  const [customAuthState, setCustomAuthState] = useState<{
+    slug: string;
+    name: string;
+    authScheme?: string;
+    authGuideUrl?: string | null;
+    required: Array<{ name: string; displayName?: string; description?: string; type?: string; required?: boolean }>;
+    optional: Array<{ name: string; displayName?: string; description?: string; type?: string; default?: string }>;
+    values: Record<string, string>;
+    submitting: boolean;
+    error: string | null;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -326,7 +337,55 @@ function ComposioPanel() {
       const url = result.data?.redirect_url ?? result.data?.redirect_uri;
       if (url) {
         window.open(url, "_blank", "noopener,noreferrer");
-      } else if (result.error) {
+        return;
+      }
+      // Composio returned no managed creds for this toolkit — fetch its
+      // schema and open the custom-credentials modal so the user can paste
+      // their own client_id / client_secret.
+      const errMsg = (result.error || "") + " " + JSON.stringify((result as unknown as Record<string, unknown>).raw ?? "");
+      const needsCustom =
+        /Default auth config not found/i.test(errMsg) ||
+        /Auth_Config_DefaultAuthConfigNotFound/i.test(errMsg) ||
+        /use_custom_auth/i.test(errMsg);
+      if (needsCustom) {
+        const details = await api.getComposioToolkitDetails(slug);
+        const tk = (details as unknown as { name?: string; slug?: string; auth_config_details?: unknown[] }) ?? {};
+        // The /toolkits/{slug} payload comes back un-wrapped (no {ok,data})
+        // in the `data` field via _request(); but our typed wrapper still
+        // returns ComposioApiResult. Pull the underlying body either way.
+        const body = (details.data ?? details) as unknown as {
+          name?: string;
+          slug?: string;
+          auth_config_details?: Array<{
+            name?: string;
+            mode?: string;
+            fields?: { auth_config_creation?: { required?: unknown[]; optional?: unknown[] } };
+          }>;
+          auth_guide_url?: string | null;
+        };
+        const scheme = body.auth_config_details?.[0];
+        const required = (scheme?.fields?.auth_config_creation?.required ?? []) as Array<{
+          name: string; displayName?: string; description?: string; type?: string; required?: boolean;
+        }>;
+        const optional = (scheme?.fields?.auth_config_creation?.optional ?? []) as Array<{
+          name: string; displayName?: string; description?: string; type?: string; default?: string;
+        }>;
+        setCustomAuthState({
+          slug,
+          name: body.name || tk.name || slug,
+          authScheme: scheme?.mode,
+          authGuideUrl: body.auth_guide_url || null,
+          required,
+          optional,
+          values: Object.fromEntries(
+            [...required.map((f) => [f.name, ""]), ...optional.map((f) => [f.name, f.default ?? ""])],
+          ) as Record<string, string>,
+          submitting: false,
+          error: null,
+        });
+        return;
+      }
+      if (result.error) {
         setKeyError(result.error);
       } else {
         setKeyError(
@@ -335,6 +394,49 @@ function ComposioPanel() {
       }
     } finally {
       setConnectingSlug(null);
+    }
+  };
+
+  const submitCustomAuth = async () => {
+    if (!customAuthState) return;
+    const missing = customAuthState.required.filter((f) => !(customAuthState.values[f.name] || "").trim());
+    if (missing.length > 0) {
+      setCustomAuthState({
+        ...customAuthState,
+        error: `Required: ${missing.map((m) => m.displayName || m.name).join(", ")}`,
+      });
+      return;
+    }
+    setCustomAuthState({ ...customAuthState, submitting: true, error: null });
+    try {
+      const creds: Record<string, string> = {};
+      for (const f of [...customAuthState.required, ...customAuthState.optional]) {
+        const v = customAuthState.values[f.name];
+        if (v && v.trim()) creds[f.name] = v.trim();
+      }
+      const result = await api.createComposioCustomAuth({
+        toolkitSlug: customAuthState.slug,
+        credentials: creds,
+        authScheme: customAuthState.authScheme,
+      });
+      const url = result.data?.redirect_url ?? result.data?.redirect_uri;
+      if (url) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        setCustomAuthState(null);
+        await refresh();
+      } else {
+        setCustomAuthState({
+          ...customAuthState,
+          submitting: false,
+          error: result.error || "Composio returned no redirect URL.",
+        });
+      }
+    } catch (err) {
+      setCustomAuthState({
+        ...customAuthState,
+        submitting: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   };
 
@@ -632,6 +734,94 @@ function ComposioPanel() {
           </div>
         )}
       </CardContent>
+      {customAuthState && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
+          onClick={() => !customAuthState.submitting && setCustomAuthState(null)}
+        >
+          <div
+            className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-border px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-base font-semibold">{customAuthState.name}</div>
+                  <div className="text-xs text-muted-foreground">
+                    This connection requires custom OAuth credentials.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !customAuthState.submitting && setCustomAuthState(null)}
+                  className="rounded-full bg-background/60 px-2 py-1 font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                >
+                  close
+                </button>
+              </div>
+              {customAuthState.authGuideUrl && (
+                <a
+                  href={customAuthState.authGuideUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2 inline-block text-xs text-primary hover:underline"
+                >
+                  View auth setup guide ↗
+                </a>
+              )}
+            </div>
+            <div className="space-y-4 px-5 py-4 max-h-[60vh] overflow-y-auto">
+              {[...customAuthState.required, ...customAuthState.optional].map((field) => {
+                const isOptional = !customAuthState.required.find((r) => r.name === field.name);
+                const isSecret = /secret|password|token|key/i.test(field.name);
+                return (
+                  <div key={field.name} className="space-y-1">
+                    <label className="flex items-center gap-1.5 text-sm font-medium">
+                      {field.displayName || field.name}
+                      {!isOptional && <span className="text-destructive">*</span>}
+                      {isOptional && (
+                        <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">optional</span>
+                      )}
+                    </label>
+                    {field.description && (
+                      <div className="text-xs text-muted-foreground">{field.description}</div>
+                    )}
+                    <input
+                      type={isSecret ? "password" : "text"}
+                      value={customAuthState.values[field.name] || ""}
+                      onChange={(e) =>
+                        setCustomAuthState({
+                          ...customAuthState,
+                          values: { ...customAuthState.values, [field.name]: e.target.value },
+                          error: null,
+                        })
+                      }
+                      placeholder={field.displayName || field.name}
+                      className="w-full rounded-lg border border-border bg-background/40 px-3 py-2 text-sm outline-none focus:border-primary/60"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                );
+              })}
+              {customAuthState.error && (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {customAuthState.error}
+                </div>
+              )}
+            </div>
+            <div className="border-t border-border px-5 py-3">
+              <Button
+                onClick={submitCustomAuth}
+                disabled={customAuthState.submitting}
+                className="w-full"
+              >
+                {customAuthState.submitting ? "Creating..." : "Create Auth Config & Connect"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

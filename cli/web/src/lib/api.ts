@@ -238,6 +238,25 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
+  getComposioToolkitDetails: (slug: string) =>
+    fetchJSON<ComposioApiResult<ComposioToolkitDetails>>(
+      `/api/composio/toolkits/${encodeURIComponent(slug)}`,
+    ),
+  createComposioCustomAuth: (body: {
+    toolkitSlug: string;
+    credentials: Record<string, string>;
+    authScheme?: string;
+    redirectUrl?: string;
+    userId?: string;
+  }) =>
+    fetchJSON<ComposioApiResult<ComposioConnectInitResponse>>(
+      "/api/composio/auth-configs/custom",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   deleteComposioConnection: (accountId: string) =>
     fetchJSON<ComposioApiResult<unknown>>(
       `/api/composio/connections/${encodeURIComponent(accountId)}`,
@@ -265,6 +284,75 @@ export const api = {
         body: JSON.stringify({ pageIds }),
       },
     ),
+
+  // Ayrshare (publishing layer for /social-media)
+  getAyrshareStatus: () => fetchJSON<AyrshareStatus>("/api/ayrshare/status"),
+  setAyrshareKey: (apiKey: string) =>
+    fetchJSON<AyrshareStatus>("/api/ayrshare/key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey }),
+    }),
+  clearAyrshareKey: () =>
+    fetchJSON<AyrshareStatus>("/api/ayrshare/key", { method: "DELETE" }),
+  getAyrshareProfiles: () =>
+    fetchJSON<{ ok: boolean; data?: unknown; error?: string }>(
+      "/api/ayrshare/profiles",
+    ),
+  getAyrshareScheduled: () =>
+    fetchJSON<{ ok: boolean; data?: unknown; error?: string }>(
+      "/api/ayrshare/scheduled",
+    ),
+  getAyrshareHistory: (params?: { lastRecords?: number; lastDays?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.lastRecords) qs.set("last_records", String(params.lastRecords));
+    if (params?.lastDays) qs.set("last_days", String(params.lastDays));
+    const tail = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<{ ok: boolean; data?: unknown; error?: string }>(
+      `/api/ayrshare/history${tail}`,
+    );
+  },
+
+  // Social content engine (backs the /social-media page)
+  getSocialSnapshot: (signal?: AbortSignal) =>
+    fetchJSON<SocialSnapshot>("/api/social/snapshot", { signal }),
+  getSocialIdeas: (status?: string, signal?: AbortSignal) => {
+    const tail = status ? `?status=${encodeURIComponent(status)}` : "";
+    return fetchJSON<{ items: SocialIdea[]; count: number }>(
+      `/api/social/ideas${tail}`,
+      { signal },
+    );
+  },
+  socialIdeaAction: (
+    recordId: string,
+    body: { action: "approve" | "reject" | "edit"; notes?: string; edit?: Partial<SocialIdea> },
+  ) =>
+    fetchJSON<{ ok: boolean; record_id: string; action: string }>(
+      `/api/social/ideas/${encodeURIComponent(recordId)}/action`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  getSocialRecentPosts: (limit = 30, signal?: AbortSignal) =>
+    fetchJSON<{ items: SocialMetricRow[]; count: number }>(
+      `/api/social/recent-posts?limit=${limit}`,
+      { signal },
+    ),
+  refreshSocialMetrics: (
+    opts: { platform?: "instagram" | "facebook" | "youtube"; lookbackDays?: number; maxPosts?: number } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts.platform) qs.set("platform", opts.platform);
+    if (opts.lookbackDays) qs.set("lookback_days", String(opts.lookbackDays));
+    if (opts.maxPosts) qs.set("max_posts", String(opts.maxPosts));
+    const tail = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<{
+      ok: boolean;
+      results: Record<string, { platform: string; status: string; posts_seen?: number; errors?: string[] }>;
+    }>(`/api/social/refresh${tail}`, { method: "POST" });
+  },
 
   // Skills & Toolsets
   getSkills: () => fetchJSON<SkillInfo[]>("/api/skills"),
@@ -663,6 +751,123 @@ export interface ComposioStatus {
   status?: number;
 }
 
+export interface AyrshareStatus {
+  configured: boolean;
+  hasKey: boolean;
+  valid: boolean;
+  baseUrl?: string;
+  error?: string;
+  status?: number;
+  active_social_accounts?: string[];
+  display_names?: Array<{
+    platform?: string;
+    displayName?: string;
+    userImage?: string;
+    [key: string]: unknown;
+  }>;
+  monthly_post_count?: number;
+  monthly_post_quota?: number;
+}
+
+export interface SocialDerived {
+  reach?: number | null;
+  impressions?: number | null;
+  plays?: number | null;
+  likes?: number | null;
+  comments?: number | null;
+  saves?: number | null;
+  shares?: number | null;
+  video_views?: number | null;
+  engagement_total?: number | null;
+  engagement_rate?: number | null;
+  save_rate?: number | null;
+  hook_rate?: number | null;
+  hold_rate?: number | null;
+  avg_watch_time_sec?: number | null;
+  duration_sec?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SocialPostSummary {
+  platform?: string;
+  post_id: string;
+  permalink?: string | null;
+  caption?: string | null;
+  media_type?: string;
+  posted_at?: string | null;
+  derived: SocialDerived;
+}
+
+export interface SocialPlatformBlock {
+  post_count: number;
+  totals: { reach: number; impressions: number; engagement_total: number };
+  averages: {
+    engagement_rate: number | null;
+    hook_rate: number | null;
+    hold_rate: number | null;
+    save_rate: number | null;
+  };
+  top_posts: SocialPostSummary[];
+  bottom_posts: SocialPostSummary[];
+  account_metrics: Record<string, unknown>;
+}
+
+export interface SocialSnapshot {
+  exists?: boolean;
+  generated_at?: string;
+  lookback_days?: number;
+  window_start?: string;
+  platforms?: Record<string, SocialPlatformBlock>;
+  totals?: { post_count: number; reach: number; impressions: number; engagement_total: number };
+  top_posts?: SocialPostSummary[];
+  bottom_posts?: SocialPostSummary[];
+  format_breakdown?: Record<string, Record<string, number>>;
+  wow_delta?: {
+    post_count_delta: number;
+    engagement_rate_delta: number | null;
+    hook_rate_delta: number | null;
+    hold_rate_delta: number | null;
+  };
+  account_metrics?: Record<string, Record<string, unknown>>;
+  message?: string;
+  snapshot_path?: string;
+}
+
+export interface SocialIdea {
+  source_record_id: string;
+  source_id?: string;
+  title?: string;
+  status?: string;
+  task_type?: string;
+  approval_required?: boolean;
+  timestamp?: string;
+  platform: string;
+  format: string;
+  hook: string;
+  concept: string;
+  outline?: string[];
+  best_post_time?: string | null;
+  target_audience?: string | null;
+  grounded_in?: { metric?: string; trend?: string; signal?: string };
+  reasoning?: string | null;
+  suggested_assets?: string[];
+  draft_text?: string;
+  notes?: Array<{ ts: string; text: string }>;
+  last_action_at?: string;
+}
+
+export interface SocialMetricRow {
+  platform: string;
+  post_id: string;
+  fetched_at: string;
+  posted_at?: string | null;
+  media_type?: string;
+  permalink?: string | null;
+  caption?: string | null;
+  metrics: Record<string, unknown>;
+  raw?: Record<string, unknown> | null;
+}
+
 export interface ComposioApiResult<T> {
   ok: boolean;
   data?: T;
@@ -705,6 +910,41 @@ export interface ComposioConnectInitResponse {
   redirect_url?: string;
   redirect_uri?: string;
   connected_account_id?: string;
+  [key: string]: unknown;
+}
+
+export interface ComposioAuthField {
+  name: string;
+  displayName?: string;
+  type?: string;
+  description?: string;
+  required?: boolean;
+  default?: string;
+}
+
+export interface ComposioAuthScheme {
+  name: string;
+  mode: string;
+  fields?: {
+    auth_config_creation?: {
+      required?: ComposioAuthField[];
+      optional?: ComposioAuthField[];
+    };
+    connected_account_initiation?: {
+      required?: ComposioAuthField[];
+      optional?: ComposioAuthField[];
+    };
+  };
+  auth_hint_url?: string | null;
+}
+
+export interface ComposioToolkitDetails {
+  name?: string;
+  slug?: string;
+  composio_managed_auth_schemes?: string[];
+  auth_config_details?: ComposioAuthScheme[];
+  auth_guide_url?: string | null;
+  meta?: ComposioToolkitMeta;
   [key: string]: unknown;
 }
 

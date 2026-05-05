@@ -7018,6 +7018,7 @@ For more help on a command:
             "nous",
             "openai-codex",
             "copilot-acp",
+            "claude-code-cli",
             "copilot",
             "anthropic",
             "gemini",

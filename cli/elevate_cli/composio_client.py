@@ -380,6 +380,43 @@ def create_managed_auth_config(toolkit_slug: str) -> dict[str, Any]:
     return _request("POST", "/api/v3/auth_configs", json_body=body)
 
 
+def get_toolkit_details(toolkit_slug: str) -> dict[str, Any]:
+    """Fetch full toolkit metadata: auth modes, required credential fields, etc.
+
+    Used by the UI to render a dynamic credentials form for toolkits that
+    require ``use_custom_auth`` (TikTok, X/Twitter, Reddit, etc — anything
+    where ``composio_managed_auth_schemes`` is empty).
+    """
+    return _request("GET", f"/api/v3/toolkits/{toolkit_slug}")
+
+
+def create_custom_auth_config(
+    toolkit_slug: str,
+    credentials: dict[str, Any],
+    *,
+    auth_scheme: Optional[str] = None,
+) -> dict[str, Any]:
+    """Create a ``use_custom_auth`` auth_config with the user's own creds.
+
+    For OAuth toolkits the credentials dict typically contains
+    ``client_id`` + ``client_secret`` (and optionally ``scopes``,
+    ``oauth_redirect_uri``). For API-key toolkits it carries an
+    ``api_key``. The exact schema is exposed by ``get_toolkit_details``
+    under ``auth_config_details[].fields.auth_config_creation``.
+    """
+    auth_block: dict[str, Any] = {
+        "type": "use_custom_auth",
+        "credentials": credentials or {},
+    }
+    if auth_scheme:
+        auth_block["auth_scheme"] = auth_scheme
+    body = {
+        "toolkit": {"slug": toolkit_slug},
+        "auth_config": auth_block,
+    }
+    return _request("POST", "/api/v3/auth_configs", json_body=body)
+
+
 def _auth_config_toolkit_slug(item: dict[str, Any]) -> str:
     """Extract toolkit slug from an auth_config record across response shapes."""
     if not isinstance(item, dict):

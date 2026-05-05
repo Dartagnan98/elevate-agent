@@ -3315,6 +3315,14 @@ class ComposioFacebookSelectionBody(BaseModel):
     pageIds: list[str]
 
 
+class ComposioCustomAuthBody(BaseModel):
+    toolkitSlug: str
+    credentials: dict
+    authScheme: Optional[str] = None
+    redirectUrl: Optional[str] = None
+    userId: Optional[str] = None
+
+
 @app.get("/api/composio/status")
 async def composio_status():
     try:
@@ -3433,6 +3441,62 @@ async def composio_connect(body: ComposioConnectBody):
         raise HTTPException(status_code=500, detail=f"Composio connect failed: {exc}")
 
 
+@app.get("/api/composio/toolkits/{slug}")
+async def composio_toolkit_details(slug: str):
+    """Return full toolkit metadata, including required custom-auth fields.
+
+    The dashboard reads ``composio_managed_auth_schemes`` (empty → custom
+    creds required) and ``auth_config_details[*].fields.auth_config_creation``
+    to render a dynamic credentials form.
+    """
+    try:
+        from elevate_cli import composio_client
+
+        return composio_client.get_toolkit_details(slug)
+    except Exception as exc:
+        _log.exception("GET /api/composio/toolkits/{slug} failed")
+        raise HTTPException(status_code=500, detail=f"Toolkit details failed: {exc}")
+
+
+@app.post("/api/composio/auth-configs/custom")
+async def composio_create_custom_auth(body: ComposioCustomAuthBody):
+    """Create a ``use_custom_auth`` config and immediately initiate a connect.
+
+    Single round-trip from the UI: user submits client_id + client_secret
+    (and any optional fields like scopes), we create the auth_config with
+    those creds, then kick off the OAuth handshake using the new id and
+    return the redirect_url so the UI can open the consent screen.
+    """
+    try:
+        from elevate_cli import composio_client
+
+        created = composio_client.create_custom_auth_config(
+            body.toolkitSlug,
+            body.credentials or {},
+            auth_scheme=body.authScheme,
+        )
+        if not created.get("ok"):
+            return created
+        data = created.get("data") or {}
+        ac = data.get("auth_config") if isinstance(data, dict) else None
+        ac_id = (ac or {}).get("id") if isinstance(ac, dict) else None
+        if not ac_id:
+            return {"ok": False, "error": "auth_config created but no id returned", "raw": created}
+        link = composio_client.initiate_connection(
+            body.toolkitSlug,
+            redirect_url=body.redirectUrl,
+            user_id=body.userId,
+            auth_config_id=ac_id,
+        )
+        if isinstance(link, dict) and isinstance(link.get("data"), dict):
+            link["data"].setdefault("auth_config_id", ac_id)
+            link["data"].setdefault("auth_config_created", True)
+        return link
+    except Exception as exc:
+        _log.exception("POST /api/composio/auth-configs/custom failed")
+        raise HTTPException(status_code=500, detail=f"Custom auth config failed: {exc}")
+
+
 @app.delete("/api/composio/connections/{account_id}")
 async def composio_delete_connection(account_id: str):
     try:
@@ -3488,6 +3552,339 @@ async def composio_inbound_pull():
     except Exception as exc:
         _log.exception("POST /api/composio/inbound/pull failed")
         raise HTTPException(status_code=500, detail=f"Composio inbound pull failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Ayrshare publisher routes
+# ---------------------------------------------------------------------------
+
+
+class AyrshareKeyBody(BaseModel):
+    apiKey: str
+
+
+@app.get("/api/ayrshare/status")
+async def ayrshare_status():
+    try:
+        from elevate_cli import ayrshare_client
+
+        return ayrshare_client.get_status()
+    except Exception as exc:
+        _log.exception("GET /api/ayrshare/status failed")
+        raise HTTPException(status_code=500, detail=f"Ayrshare status failed: {exc}")
+
+
+@app.post("/api/ayrshare/key")
+async def ayrshare_set_key(body: AyrshareKeyBody):
+    try:
+        from elevate_cli import ayrshare_client
+
+        result = ayrshare_client.set_api_key(body.apiKey)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Invalid key"))
+        return ayrshare_client.get_status()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/ayrshare/key failed")
+        raise HTTPException(status_code=500, detail=f"Set Ayrshare key failed: {exc}")
+
+
+@app.delete("/api/ayrshare/key")
+async def ayrshare_clear_key():
+    try:
+        from elevate_cli import ayrshare_client
+
+        ayrshare_client.clear_api_key()
+        return ayrshare_client.get_status()
+    except Exception as exc:
+        _log.exception("DELETE /api/ayrshare/key failed")
+        raise HTTPException(status_code=500, detail=f"Clear Ayrshare key failed: {exc}")
+
+
+@app.get("/api/ayrshare/profiles")
+async def ayrshare_profiles():
+    """List connected social profiles (which platforms have OAuth tokens stored in Ayrshare)."""
+    try:
+        from elevate_cli import ayrshare_client
+
+        return ayrshare_client.profiles()
+    except Exception as exc:
+        _log.exception("GET /api/ayrshare/profiles failed")
+        raise HTTPException(status_code=500, detail=f"Ayrshare profiles failed: {exc}")
+
+
+@app.get("/api/ayrshare/scheduled")
+async def ayrshare_scheduled():
+    """List currently scheduled (not yet posted) posts."""
+    try:
+        from elevate_cli import ayrshare_client
+
+        return ayrshare_client.list_scheduled()
+    except Exception as exc:
+        _log.exception("GET /api/ayrshare/scheduled failed")
+        raise HTTPException(status_code=500, detail=f"Ayrshare scheduled failed: {exc}")
+
+
+@app.get("/api/ayrshare/history")
+async def ayrshare_history(last_records: int = 100, last_days: Optional[int] = None):
+    """List past posts with engagement metrics."""
+    try:
+        from elevate_cli import ayrshare_client
+
+        return ayrshare_client.history(last_records=last_records, last_days=last_days)
+    except Exception as exc:
+        _log.exception("GET /api/ayrshare/history failed")
+        raise HTTPException(status_code=500, detail=f"Ayrshare history failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Social content engine routes — backs the /social-media page
+# ---------------------------------------------------------------------------
+
+
+def _social_snapshot_path() -> Path:
+    elevate_home = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate")
+    workspace = (
+        os.environ.get("ELEVATE_WORKSPACE_ID")
+        or os.environ.get("ELEVATE_WORKSPACE")
+        or "default"
+    )
+    return elevate_home / "state" / workspace / "social-snapshot.json"
+
+
+def _social_metrics_path() -> Path:
+    return _social_snapshot_path().parent / "social-metrics.jsonl"
+
+
+def _social_tasks_path() -> Path:
+    try:
+        from elevate_cli.source_connectors import get_source_root_info
+        info = get_source_root_info()
+        root = Path(info.get("sourceRoot") or "")
+        if root.parts:
+            return root / "social" / "tasks.jsonl"
+    except Exception:
+        pass
+    elevate_home = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate")
+    return elevate_home / "tools" / "data" / "sources" / "social" / "tasks.jsonl"
+
+
+def _read_social_tasks() -> list[dict]:
+    path = _social_tasks_path()
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def _write_social_tasks(records: list[dict]) -> None:
+    path = _social_tasks_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+class SocialIdeaActionBody(BaseModel):
+    action: str  # approve | reject | edit
+    notes: Optional[str] = None
+    edit: Optional[dict] = None
+
+
+@app.get("/api/social/snapshot")
+async def social_snapshot():
+    """Read the latest weekly snapshot built by aggregate.py."""
+    path = _social_snapshot_path()
+    if not path.exists():
+        return {
+            "exists": False,
+            "snapshot_path": str(path),
+            "message": "No snapshot yet. Run the social-content-engine skill or the aggregator script.",
+        }
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log.exception("GET /api/social/snapshot failed")
+        raise HTTPException(status_code=500, detail=f"Snapshot read failed: {exc}")
+
+
+@app.get("/api/social/ideas")
+async def social_ideas(status: Optional[str] = None):
+    """List social post ideas (defaults to open/pending approval)."""
+    try:
+        all_tasks = _read_social_tasks()
+        ideas = [t for t in all_tasks if str(t.get("task_type") or "").lower() == "social_post_idea"]
+        if status:
+            ideas = [t for t in ideas if str(t.get("status") or "").lower() == status.lower()]
+        else:
+            ideas = [t for t in ideas if str(t.get("status") or "").lower() in ("open", "pending_approval")]
+        ideas.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+        return {"items": ideas, "count": len(ideas)}
+    except Exception as exc:
+        _log.exception("GET /api/social/ideas failed")
+        raise HTTPException(status_code=500, detail=f"Idea read failed: {exc}")
+
+
+@app.post("/api/social/ideas/{record_id}/action")
+async def social_idea_action(record_id: str, body: SocialIdeaActionBody):
+    """Approve / reject / edit a social post idea. Updates tasks.jsonl in place."""
+    action = (body.action or "").lower().strip()
+    if action not in {"approve", "reject", "edit"}:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+    try:
+        records = _read_social_tasks()
+    except Exception as exc:
+        _log.exception("POST /api/social/ideas action read failed")
+        raise HTTPException(status_code=500, detail=f"Read failed: {exc}")
+
+    from datetime import datetime, timezone
+    found = False
+    for r in records:
+        if str(r.get("source_record_id") or "") != record_id:
+            continue
+        if str(r.get("task_type") or "").lower() != "social_post_idea":
+            continue
+        found = True
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        r["last_action_at"] = ts
+        if body.notes:
+            r.setdefault("notes", []).append({"ts": ts, "text": body.notes})
+        if action == "approve":
+            r["status"] = "approved"
+            r["approval_required"] = False
+        elif action == "reject":
+            r["status"] = "rejected"
+            r["approval_required"] = False
+        elif action == "edit" and body.edit:
+            for k in ("hook", "concept", "outline", "best_post_time", "platform", "format", "target_audience"):
+                if k in body.edit:
+                    r[k] = body.edit[k]
+        break
+
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Idea {record_id} not found")
+
+    try:
+        _write_social_tasks(records)
+    except Exception as exc:
+        _log.exception("POST /api/social/ideas action write failed")
+        raise HTTPException(status_code=500, detail=f"Write failed: {exc}")
+
+    return {"ok": True, "record_id": record_id, "action": action}
+
+
+@app.get("/api/social/recent-posts")
+async def social_recent_posts(limit: int = 30):
+    """Return the latest fetched metric row per (platform, post_id), newest first."""
+    path = _social_metrics_path()
+    if not path.exists():
+        return {"items": [], "count": 0, "snapshot_path": str(path)}
+    by_key: dict[tuple[str, str], dict] = {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                platform = row.get("platform")
+                post_id = row.get("post_id")
+                if not platform or not post_id:
+                    continue
+                if str(row.get("media_type") or "").upper() == "ACCOUNT":
+                    continue
+                key = (platform, post_id)
+                existing = by_key.get(key)
+                if not existing:
+                    by_key[key] = row
+                    continue
+                # Merge: prefer the newest fetched_at for metrics/captions,
+                # but preserve the `raw` payload from whichever row has it
+                # (the fetcher only writes raw on first_seen).
+                if (row.get("fetched_at") or "") > (existing.get("fetched_at") or ""):
+                    preserved_raw = existing.get("raw") or row.get("raw")
+                    by_key[key] = row
+                    if preserved_raw and not by_key[key].get("raw"):
+                        by_key[key]["raw"] = preserved_raw
+                else:
+                    if row.get("raw") and not existing.get("raw"):
+                        existing["raw"] = row.get("raw")
+    except Exception as exc:
+        _log.exception("GET /api/social/recent-posts failed")
+        raise HTTPException(status_code=500, detail=f"Read failed: {exc}")
+
+    items = list(by_key.values())
+    items.sort(key=lambda x: x.get("posted_at") or x.get("fetched_at") or "", reverse=True)
+    items = items[: max(1, min(limit, 1000))]
+    return {"items": items, "count": len(items)}
+
+
+def _load_social_fetcher(module_name: str):
+    """Import a fetcher script from the installed social-content-engine skill."""
+    elevate_home = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate")
+    skill_root = elevate_home / "skills" / "social-media" / "social-content-engine" / "scripts"
+    script_path = skill_root / f"{module_name}.py"
+    if not script_path.exists():
+        # Fall back to the source tree (dev install)
+        repo_root = Path(__file__).resolve().parent.parent
+        script_path = repo_root / "skills" / "social-content-engine" / "scripts" / f"{module_name}.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Fetcher script not found: {module_name}.py")
+    spec = importlib.util.spec_from_file_location(f"_social_{module_name}", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load {module_name}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@app.post("/api/social/refresh")
+async def social_refresh(platform: Optional[str] = None, lookback_days: int = 730, max_posts: int = 200):
+    """Pull fresh metrics from connected social platforms via Composio.
+
+    `platform` may be one of `instagram`, `facebook`, `youtube`, or omitted to
+    refresh all. Runs the fetchers in a thread to avoid blocking the event loop.
+    """
+    requested = (platform or "").strip().lower()
+    targets = [requested] if requested else ["instagram", "facebook", "youtube"]
+    valid = {"instagram", "facebook", "youtube"}
+    targets = [t for t in targets if t in valid]
+    if not targets:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+
+    module_map = {
+        "instagram": "instagram_insights",
+        "facebook": "facebook_insights",
+        "youtube": "youtube_analytics",
+    }
+
+    results: dict[str, Any] = {}
+
+    def _run_one(p: str) -> dict:
+        try:
+            mod = _load_social_fetcher(module_map[p])
+            return mod.fetch(lookback_days=lookback_days, max_posts=max_posts)
+        except Exception as exc:
+            _log.exception("social refresh %s failed", p)
+            return {"platform": p, "status": "error", "error": str(exc)}
+
+    for p in targets:
+        results[p] = await asyncio.to_thread(_run_one, p)
+
+    return {"ok": True, "results": results}
 
 
 @app.get("/api/integrations")

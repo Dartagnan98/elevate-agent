@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -91,15 +93,27 @@ import SkillsPage from "@/pages/SkillsPage";
 import ChatPage from "@/pages/ChatPage";
 import AgentHubPage from "@/pages/AgentHubPage";
 import ProjectPage from "@/pages/ProjectPage";
-import {
-  RealEstateAdminPage,
-  RealEstateAdsPage,
-  RealEstateLeadsPage,
-  RealEstateMemoryPage,
-  RealEstateSocialMediaPage,
-  RealEstateTasksPage,
-  RealEstateTodayPage,
-} from "@/pages/RealEstateHubPages";
+const RealEstateAdminPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateAdminPage })),
+);
+const RealEstateAdsPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateAdsPage })),
+);
+const RealEstateLeadsPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage })),
+);
+const RealEstateMemoryPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateMemoryPage })),
+);
+const RealEstateSocialMediaPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateSocialMediaPage })),
+);
+const RealEstateTasksPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateTasksPage })),
+);
+const RealEstateTodayPage = lazy(() =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateTodayPage })),
+);
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -521,12 +535,21 @@ export default function App() {
                   (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
                 )}
               >
-                <Routes>
-                  {routes.map(({ key, path, element }) => (
-                    <Route key={key} path={path} element={element} />
-                  ))}
-                  <Route path="*" element={<Navigate to="/today" replace />} />
-                </Routes>
+                <Suspense
+                  fallback={
+                    <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Loading…
+                    </div>
+                  }
+                >
+                  <Routes>
+                    {routes.map(({ key, path, element }) => (
+                      <Route key={key} path={path} element={element} />
+                    ))}
+                    <Route path="*" element={<Navigate to="/today" replace />} />
+                  </Routes>
+                </Suspense>
               </div>
               <PluginSlot name="post-main" />
             </div>

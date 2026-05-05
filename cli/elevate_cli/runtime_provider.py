@@ -745,6 +745,15 @@ def resolve_runtime_provider(
     behavior (api_mode derived from config).
     """
     requested_provider = resolve_requested_provider(requested)
+    if requested_provider == "claude-code-cli":
+        return {
+            "provider": "claude-code-cli",
+            "api_mode": "chat_completions",
+            "base_url": "claude-code-cli://local",
+            "api_key": "claude-code-cli",
+            "source": "claude-code-cli",
+            "requested_provider": requested_provider,
+        }
 
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,
