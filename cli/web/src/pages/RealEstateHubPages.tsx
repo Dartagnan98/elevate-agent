@@ -6107,19 +6107,19 @@ function AdminCardDetailPanel({
   const laneLabel = ADMIN_SIDE_LABELS[card.side].title;
 
   return createPortal(
-    <div className="fixed inset-0 z-50 grid grid-cols-1 sm:grid-cols-[1fr_min(28rem,100%)]">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center sm:items-center sm:p-6">
       <button
         type="button"
         aria-label="Close detail"
         onClick={onClose}
-        className="hidden bg-background/60 backdrop-blur-sm sm:block"
+        className="absolute inset-0 bg-background/60 backdrop-blur-sm"
       />
       <aside
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="flex h-full flex-col border-l border-border/60 bg-card shadow-xl"
+        className="relative flex h-full w-full flex-col bg-card shadow-2xl sm:h-auto sm:max-h-full sm:w-full sm:max-w-[36rem] sm:rounded-2xl sm:border sm:border-border/60"
       >
         <header className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
           <div className="min-w-0">
