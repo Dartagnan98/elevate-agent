@@ -1013,9 +1013,11 @@ function profileHasVerifier(profile: SourceInboxProfile): boolean {
 }
 
 function LeadProfilesWorkbench({
+  showHeader = true,
   profiles,
   threads,
 }: {
+  showHeader?: boolean;
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
 }) {
@@ -1164,15 +1166,17 @@ function LeadProfilesWorkbench({
 
   return (
     <div className="divide-y divide-border/40">
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-        <div>
-          <div className="text-sm font-semibold text-foreground">Profiles</div>
-          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
-            People built from CRM, inbox, SMS, and social sources. Push a seller lead straight into the Admin CMA lane.
-          </p>
+      {showHeader && (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold text-foreground">Profiles</div>
+            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+              People built from CRM, inbox, SMS, and social sources. Push a seller lead straight into the Admin CMA lane.
+            </p>
+          </div>
+          <Badge variant="outline">{profiles.length} profiles</Badge>
         </div>
-        <Badge variant="outline">{profiles.length} profiles</Badge>
-      </div>
+      )}
 
       {sortedProfiles.map((profile) => {
         const thread = threadByProfileId.get(profile.id);
@@ -1268,6 +1272,44 @@ function LeadProfilesWorkbench({
         );
       })}
     </div>
+  );
+}
+
+function LeadProfilesListPage({
+  profiles,
+  threads,
+}: {
+  profiles: SourceInboxProfile[];
+  threads: SourceInboxThread[];
+}) {
+  const verifiedCount = profiles.filter(profileHasVerifier).length;
+  const potentialLeadCount = profiles.filter((profile) => profile.isPotentialLead).length;
+
+  return (
+    <section
+      id="leads-panel-profiles"
+      role="tabpanel"
+      aria-labelledby="leads-tab-profiles"
+      className="space-y-3"
+    >
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-foreground">Profile list</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
+            Source-matched people with phone/email verification, conversation context, and direct Admin CMA handoff.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">{profiles.length} total</Badge>
+          <Badge variant={verifiedCount ? "success" : "warning"}>{verifiedCount} verified</Badge>
+          <Badge variant={potentialLeadCount ? "warning" : "outline"}>{potentialLeadCount} potential leads</Badge>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-2xl border border-border bg-card">
+        <LeadProfilesWorkbench showHeader={false} profiles={profiles} threads={threads} />
+      </div>
+    </section>
   );
 }
 
@@ -4257,7 +4299,7 @@ const LANE_META: Record<OutreachLane, { label: string; icon: typeof Sparkles; to
 };
 
 const LEAD_TABS = [
-  { id: "inbox" as const, label: "Inbox", icon: Inbox },
+  { id: "action-board" as const, label: "Action Board", icon: Radar },
   { id: "profiles" as const, label: "Profiles", icon: Users },
   { id: "templates" as const, label: "Templates", icon: BookText },
 ];
@@ -4878,7 +4920,7 @@ export function RealEstateLeadsPage() {
   const data = useRealEstateHubData();
   useHubHeader("Leads", data);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
-  const [tab, setTab] = useState<LeadTab>("inbox");
+  const [tab, setTab] = useState<LeadTab>("action-board");
 
   const allThreads = useMemo(() => data.sourceInbox?.threads ?? [], [data.sourceInbox?.threads]);
   const allDrafts = useMemo(() => data.sourceInbox?.drafts ?? [], [data.sourceInbox?.drafts]);
@@ -4954,18 +4996,30 @@ export function RealEstateLeadsPage() {
   const pulse = useMemo(() => computeResponsePulse(threads), [threads]);
 
   const refresh = data.refresh;
+  const shellIcon = tab === "profiles" ? Users : tab === "templates" ? BookText : Radar;
+  const shellTitle =
+    tab === "profiles"
+      ? "Lead profiles."
+      : tab === "templates"
+        ? "Lead templates."
+        : "Lead action board.";
 
   return (
     <ThreadDrawerProvider data={data}>
     <HubShell
       data={data}
       eyebrow="Lead Desk"
-      icon={Inbox}
-      title="Today's sales moves."
+      icon={shellIcon}
+      title={shellTitle}
     >
       <div className="flex w-full flex-col gap-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <LeadsTabBar active={tab} onChange={setTab} />
+          {tab === "profiles" && (
+            <span className="text-xs text-foreground/70">
+              A searchable source-filtered list of people, separate from the action board.
+            </span>
+          )}
           {tab === "templates" && (
             <span className="text-xs text-foreground/70">
               Templates control what the agent says. Edits apply on the next lane run.
@@ -4974,7 +5028,9 @@ export function RealEstateLeadsPage() {
         </div>
 
         {tab === "templates" ? (
-          <TemplatesPanel />
+          <div id="leads-panel-templates" role="tabpanel" aria-labelledby="leads-tab-templates">
+            <TemplatesPanel />
+          </div>
         ) : (
           <>
             <LeadFilterBar
@@ -5013,11 +5069,14 @@ export function RealEstateLeadsPage() {
             )}
 
             {tab === "profiles" ? (
-              <div className="rounded-2xl border border-border bg-card">
-                <LeadProfilesWorkbench profiles={profiles} threads={threads} />
-              </div>
+              <LeadProfilesListPage profiles={profiles} threads={threads} />
             ) : (
-              <>
+              <section
+                id="leads-panel-action-board"
+                role="tabpanel"
+                aria-labelledby="leads-tab-action-board"
+                className="space-y-5"
+              >
                 <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
                   <DraftMessagesBoard
                     data={data}
@@ -5100,7 +5159,7 @@ export function RealEstateLeadsPage() {
                     title="Lead schedules"
                   />
                 </CollapsibleSection>
-              </>
+              </section>
             )}
           </>
         )}
