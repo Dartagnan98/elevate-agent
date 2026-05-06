@@ -754,24 +754,66 @@ def _name_key(value: str) -> str | None:
     return f"name:{normalized}"
 
 
-def _profile_match_keys(record: JsonRecord, thread: JsonRecord) -> list[str]:
-    candidates: list[str] = []
+def _profile_verifiers(record: JsonRecord) -> list[JsonRecord]:
+    verifiers: list[JsonRecord] = []
+
+    def add(kind: str, value: str, key: str | None) -> None:
+        if key:
+            verifiers.append({"kind": kind, "value": value, "key": key})
+
     for field in ("phones", "phone", "handle", "chat_identifier", "participant_handles"):
         for value in _string_values(record.get(field)):
-            key = _phone_key(value) or _email_key(value)
-            if key:
-                candidates.append(key)
+            phone_key = _phone_key(value)
+            if phone_key:
+                add("phone", value, phone_key)
+                continue
+            add("email", value, _email_key(value))
     for field in ("emails", "email"):
         for value in _string_values(record.get(field)):
-            key = _email_key(value)
-            if key:
-                candidates.append(key)
-    name = str(thread.get("personName") or record.get("display_name") or "").strip()
-    name_match = _name_key(name)
-    if name_match:
-        candidates.append(name_match)
-    seen: set[str] = set()
-    return [key for key in candidates if not (key in seen or seen.add(key))]
+            add("email", value, _email_key(value))
+
+    by_key: dict[str, JsonRecord] = {}
+    for verifier in verifiers:
+        key = str(verifier.get("key") or "")
+        if key and key not in by_key:
+            by_key[key] = verifier
+    return sorted(by_key.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("value") or "")))
+
+
+def _profile_match_keys(record: JsonRecord, thread: JsonRecord) -> list[str]:
+    return [str(item["key"]) for item in _profile_verifiers(record) if item.get("key")]
+
+
+def _merge_profile_verifiers(existing: Any, incoming: list[JsonRecord]) -> list[JsonRecord]:
+    by_key: dict[str, JsonRecord] = {}
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, str):
+                # Older cached profile data may have stored verifier keys as strings.
+                key = item.strip()
+                if key:
+                    kind = key.split(":", 1)[0] if ":" in key else "unknown"
+                    by_key[key] = {"kind": kind, "value": key.split(":", 1)[-1], "key": key}
+                continue
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            value = str(item.get("value") or "").strip()
+            kind = str(item.get("kind") or "").strip()
+            if key and value and kind:
+                by_key[key] = {"kind": kind, "value": value, "key": key}
+    elif isinstance(existing, str):
+        key = existing.strip()
+        if key:
+            kind = key.split(":", 1)[0] if ":" in key else "unknown"
+            by_key[key] = {"kind": kind, "value": key.split(":", 1)[-1], "key": key}
+    for item in incoming:
+        key = str(item.get("key") or "").strip()
+        value = str(item.get("value") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        if key and value and kind:
+            by_key[key] = {"kind": kind, "value": value, "key": key}
+    return sorted(by_key.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("value") or "")))
 
 
 def _profile_contact_values(record: JsonRecord) -> tuple[list[str], list[str]]:
@@ -841,6 +883,7 @@ def _profile_label(score: int) -> str:
 def _merge_profile(profile: JsonRecord, source: JsonRecord, thread: JsonRecord) -> None:
     record = _as_dict(thread.get("record"))
     phones, emails = _profile_contact_values(record)
+    verifiers = _profile_verifiers(record)
     contact_id = str(thread.get("contactId") or record.get("contact_id") or "").strip()
     conversation_id = str(
         thread.get("conversationId")
@@ -857,6 +900,7 @@ def _merge_profile(profile: JsonRecord, source: JsonRecord, thread: JsonRecord) 
         profile["conversationIds"] = sorted({*profile.get("conversationIds", []), conversation_id})
     profile["phones"] = sorted({*profile.get("phones", []), *phones})
     profile["emails"] = sorted({*profile.get("emails", []), *emails})
+    profile["verifiers"] = _merge_profile_verifiers(profile.get("verifiers"), verifiers)
     profile["threadIds"] = sorted({*profile.get("threadIds", []), str(thread.get("id") or "")})
     profile["threadCount"] = len(profile["threadIds"])
     profile["hasConversation"] = True
@@ -901,6 +945,7 @@ def _profiles_from_threads(threads: list[JsonRecord], source_by_id: dict[str, Js
                 "channels": [],
                 "contactIds": [],
                 "conversationIds": [],
+                "verifiers": [],
                 "phones": [],
                 "emails": [],
                 "threadIds": [],

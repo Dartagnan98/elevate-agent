@@ -95,6 +95,7 @@ import type {
   SourceConnectorStatus,
   SourceInboxDraft,
   SourceInboxProfile,
+  SourceInboxProfileVerifier,
   SourceInboxResponse,
   SourceInboxThread,
   SocialIdea,
@@ -993,6 +994,24 @@ function profilePrimaryContactId(profile: SourceInboxProfile): string | null {
   return profile.contactIds?.[0] ?? null;
 }
 
+function profileVerifiers(profile: SourceInboxProfile): SourceInboxProfileVerifier[] {
+  return (profile.verifiers ?? []).filter((verifier) => verifier.key && verifier.value);
+}
+
+function verifierSummary(verifiers: SourceInboxProfileVerifier[]): string {
+  const kinds = Array.from(new Set(verifiers.map((verifier) => verifier.kind))).sort();
+  if (!kinds.length) return "needs phone/email";
+  return `verified by ${kinds.join(" + ")}`;
+}
+
+function profileVerifierSummary(profile: SourceInboxProfile): string {
+  return verifierSummary(profileVerifiers(profile));
+}
+
+function profileHasVerifier(profile: SourceInboxProfile): boolean {
+  return profileVerifiers(profile).length > 0;
+}
+
 function LeadProfilesWorkbench({
   profiles,
   threads,
@@ -1077,6 +1096,7 @@ function LeadProfilesWorkbench({
           sourceProfileName: profile.displayName,
           sourceContactIds: profile.contactIds ?? [],
           sourceConversationIds: profile.conversationIds ?? [],
+          sourceVerifiers: profileVerifiers(profile),
           sourceThreadIds: profile.threadIds,
           sourceIds: profile.sourceIds,
           sourceLabels: profile.sources,
@@ -1184,6 +1204,9 @@ function LeadProfilesWorkbench({
                   </Badge>
                   {profile.hasCrm && <Badge variant="success">CRM</Badge>}
                   {profile.isPotentialLead && <Badge variant="warning">potential lead</Badge>}
+                  <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
+                    {profileVerifierSummary(profile)}
+                  </Badge>
                   {dealId && <Badge variant="success">in Admin CMA</Badge>}
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
@@ -5163,6 +5186,7 @@ type AdminSourceContext = {
   channels: string[];
   contactIds: string[];
   conversationIds: string[];
+  verifiers: SourceInboxProfileVerifier[];
   rejectedContactId?: string;
 };
 
@@ -5643,6 +5667,22 @@ function adminNumberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function adminVerifierList(value: unknown): SourceInboxProfileVerifier[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const kind = adminStringValue(record.kind);
+      const verifierValue = adminStringValue(record.value);
+      const key = adminStringValue(record.key);
+      if (!kind || !verifierValue || !key) return null;
+      return { kind, value: verifierValue, key };
+    })
+    .filter((item): item is SourceInboxProfileVerifier => item !== null)
+    .slice(0, 6);
+}
+
 function adminSourceContextFromDeal(deal: AdminDeal): AdminSourceContext | undefined {
   const extra = deal.extraToggles ?? {};
   if (!adminStringValue(extra.sourceProfileId) && extra.workflow !== "cma") return undefined;
@@ -5656,6 +5696,7 @@ function adminSourceContextFromDeal(deal: AdminDeal): AdminSourceContext | undef
     channels: adminStringList(extra.sourceChannels),
     contactIds: adminStringList(extra.sourceContactIds),
     conversationIds: adminStringList(extra.sourceConversationIds),
+    verifiers: adminVerifierList(extra.sourceVerifiers),
     rejectedContactId: adminStringValue(extra.sourcePrimaryContactIdRejected),
   };
 }
@@ -6491,6 +6532,9 @@ function AdminCardSourceSection({ context }: { context: AdminSourceContext }) {
         </span>
         {heat && <Badge variant={context.heatLabel ? heatVariant({ heatLabel: context.heatLabel }) : "outline"}>{heat}</Badge>}
         {context.contactIds.length > 0 && !context.rejectedContactId && <Badge variant="success">DB contact</Badge>}
+        <Badge variant={context.verifiers.length > 0 ? "success" : "warning"}>
+          {verifierSummary(context.verifiers)}
+        </Badge>
         {context.rejectedContactId && <Badge variant="warning">source contact only</Badge>}
       </div>
       {context.latestText && (

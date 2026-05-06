@@ -707,6 +707,12 @@ export interface SourceInboxThread {
   record: SourceRecord;
 }
 
+export interface SourceInboxProfileVerifier {
+  kind: "phone" | "email" | string;
+  value: string;
+  key: string;
+}
+
 export interface SourceInboxProfile {
   id: string;
   displayName: string;
@@ -715,6 +721,7 @@ export interface SourceInboxProfile {
   channels: string[];
   contactIds: string[];
   conversationIds: string[];
+  verifiers: SourceInboxProfileVerifier[];
   phones: string[];
   emails: string[];
   threadIds: string[];

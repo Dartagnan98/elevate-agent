@@ -177,6 +177,58 @@ def test_source_inbox_includes_populated_threads():
     assert response["profiles"][0]["conversationIds"] == [conv["id"]]
     assert response["profiles"][0]["threadIds"] == ["apple-messages:t-1"]
     assert response["profiles"][0]["emails"] == ["jane@example.com"]
+    assert response["profiles"][0]["verifiers"] == [
+        {"kind": "email", "value": "jane@example.com", "key": "email:jane@example.com"}
+    ]
+
+
+def test_source_inbox_does_not_merge_name_only_profiles():
+    with connect() as conn:
+        first = upsert_contact(conn, display_name="Jordan Seller", source_key="lofty:c-1")
+        second = upsert_contact(conn, display_name="Jordan Seller", source_key="lofty:c-2")
+        first_conv = get_or_create_conversation(
+            conn,
+            contact_id=first["id"],
+            source_id="apple-messages",
+            channel="imessage",
+            thread_key="seller-a",
+        )
+        second_conv = get_or_create_conversation(
+            conn,
+            contact_id=second["id"],
+            source_id="gmail",
+            channel="email",
+            thread_key="seller-b",
+        )
+        record_inbound(
+            conn,
+            contact_id=first["id"],
+            conversation_id=first_conv["id"],
+            channel="imessage",
+            body="thinking about selling soon",
+            source_id="apple-messages",
+            thread_key="seller-a",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        record_inbound(
+            conn,
+            contact_id=second["id"],
+            conversation_id=second_conv["id"],
+            channel="email",
+            body="can you send a valuation?",
+            source_id="gmail",
+            thread_key="seller-b",
+            ts="2026-05-01T10:05:00+00:00",
+        )
+        bump_conversation_counters(conn, first_conv["id"], direction="inbound", ts="2026-05-01T10:00:00+00:00")
+        bump_conversation_counters(conn, second_conv["id"], direction="inbound", ts="2026-05-01T10:05:00+00:00")
+
+    response = db_source_inbox_response(limit=16)
+    profiles = response["profiles"]
+    assert len(profiles) == 2
+    assert all(profile["displayName"] == "Jordan Seller" for profile in profiles)
+    assert all(profile["verifiers"] == [] for profile in profiles)
+    assert sorted(profile["threadIds"][0] for profile in profiles) == ["apple-messages:seller-a", "gmail:seller-b"]
 
 
 def test_source_inbox_includes_private_search_buyers():
