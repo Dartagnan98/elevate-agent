@@ -173,6 +173,9 @@ def test_source_inbox_includes_populated_threads():
     assert counts["people"] == 1
     assert counts["conversationPeople"] == 1
     assert response["profiles"][0]["displayName"] == "Jane Buyer"
+    assert response["profiles"][0]["contactIds"] == [contact["id"]]
+    assert response["profiles"][0]["conversationIds"] == [conv["id"]]
+    assert response["profiles"][0]["threadIds"] == ["apple-messages:t-1"]
     assert response["profiles"][0]["emails"] == ["jane@example.com"]
 
 

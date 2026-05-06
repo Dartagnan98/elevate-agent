@@ -77,7 +77,9 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
+  AdminContact,
   AdminDeal,
+  AdminDealCreateRequest,
   AgentHubMemoryNode,
   AgentHubSnapshot,
   BuyerWatchlistEntry,
@@ -963,6 +965,286 @@ function ContactOverviewBoard({ data }: { data: HubData }) {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function profileSortTime(profile: SourceInboxProfile): number {
+  const ms = Date.parse(profile.latestAt || "");
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function profileContactLine(profile: SourceInboxProfile): string {
+  const contacts = [...profile.phones.slice(0, 1), ...profile.emails.slice(0, 1)];
+  return contacts.length ? contacts.join(" · ") : "No phone or email yet";
+}
+
+function profileCmaTitle(profile: SourceInboxProfile): string {
+  const name = profile.displayName?.trim() || "New profile";
+  return `${name} - CMA workflow`;
+}
+
+function profileSourceMeta(profile: SourceInboxProfile): string {
+  const sources = profile.sources.length ? profile.sources.slice(0, 2).join(" + ") : "Source inbox";
+  const channels = profile.channels.length ? profile.channels.slice(0, 2).join(" + ") : "unknown channel";
+  return `${sources} / ${channels}`;
+}
+
+function profilePrimaryContactId(profile: SourceInboxProfile): string | null {
+  return profile.contactIds?.[0] ?? null;
+}
+
+function LeadProfilesWorkbench({
+  profiles,
+  threads,
+}: {
+  profiles: SourceInboxProfile[];
+  threads: SourceInboxThread[];
+}) {
+  const drawer = useThreadDrawer();
+  const navigate = useNavigate();
+  const [pendingProfileId, setPendingProfileId] = useState<string | null>(null);
+  const [createdDealIds, setCreatedDealIds] = useState<Record<string, string>>({});
+  const [existingDealIds, setExistingDealIds] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let live = true;
+    api.getAdminDeals({ status: "active", limit: 200 })
+      .then((response) => {
+        if (!live) return;
+        const next: Record<string, string> = {};
+        for (const deal of response.items) {
+          const sourceProfileId = deal.extraToggles?.sourceProfileId;
+          if (typeof sourceProfileId === "string") {
+            next[sourceProfileId] = deal.id;
+          }
+        }
+        setExistingDealIds(next);
+      })
+      .catch(() => {
+        if (live) setExistingDealIds({});
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const threadByProfileId = useMemo(() => {
+    const byAnyThreadId = new Map<string, SourceInboxThread>();
+    for (const thread of threads) {
+      byAnyThreadId.set(thread.id, thread);
+      byAnyThreadId.set(thread.threadId, thread);
+    }
+    const next = new Map<string, SourceInboxThread>();
+    for (const profile of profiles) {
+      const direct = profile.threadIds.map((threadId) => byAnyThreadId.get(threadId)).find(Boolean);
+      if (direct) {
+        next.set(profile.id, direct);
+      }
+    }
+    return next;
+  }, [profiles, threads]);
+
+  const sortedProfiles = useMemo(
+    () =>
+      profiles.slice().sort((a, b) => {
+        if (a.isPotentialLead !== b.isPotentialLead) return a.isPotentialLead ? -1 : 1;
+        const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
+        if (heat !== 0) return heat;
+        return profileSortTime(b) - profileSortTime(a);
+      }),
+    [profiles],
+  );
+
+  const startCmaWorkflow = async (profile: SourceInboxProfile) => {
+    if (pendingProfileId) return;
+    setPendingProfileId(profile.id);
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[profile.id];
+      return next;
+    });
+    try {
+      const primaryContactId = profilePrimaryContactId(profile);
+      const createBody = {
+        title: profileCmaTitle(profile),
+        side: "listing",
+        province: "BC",
+        currentStage: 0,
+        primaryContactId,
+        fields: {
+          sourceProfileId: profile.id,
+          sourceProfileName: profile.displayName,
+          sourceContactIds: profile.contactIds ?? [],
+          sourceConversationIds: profile.conversationIds ?? [],
+          sourceThreadIds: profile.threadIds,
+          sourceIds: profile.sourceIds,
+          sourceLabels: profile.sources,
+          sourceChannels: profile.channels,
+          sourceLatestText: profile.latestText,
+          sourceLatestAt: profile.latestAt,
+          sourceHeatScore: profile.heatScore,
+          sourceHeatLabel: profile.heatLabel,
+          sourceTags: profile.tags,
+          workflow: "cma",
+          workflowOrigin: "lead-profile-workbench",
+        },
+      } as const;
+      let deal: AdminDeal;
+      try {
+        deal = await api.createAdminDeal(createBody);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (!primaryContactId || !message.includes("not found")) {
+          throw error;
+        }
+        deal = await api.createAdminDeal({
+          ...createBody,
+          primaryContactId: null,
+          fields: {
+            ...createBody.fields,
+            sourcePrimaryContactIdRejected: primaryContactId,
+          },
+        });
+      }
+      setCreatedDealIds((prev) => ({ ...prev, [profile.id]: deal.id }));
+    } catch (error) {
+      setErrors((prev) => ({
+        ...prev,
+        [profile.id]: error instanceof Error ? error.message : "Could not create CMA workflow",
+      }));
+    } finally {
+      setPendingProfileId(null);
+    }
+  };
+
+  const openProfileThread = (profile: SourceInboxProfile) => {
+    const thread = threadByProfileId.get(profile.id);
+    if (!thread) return;
+    if (drawer) {
+      drawer.openThread(thread.sourceId, thread.threadId);
+      return;
+    }
+    const params = new URLSearchParams({ source: thread.sourceId, thread: thread.threadId });
+    navigate(`/chat?${params.toString()}`);
+  };
+
+  if (!profiles.length) {
+    return (
+      <div className="px-4 py-8 text-center">
+        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+          No profiles yet
+        </h4>
+        <p className="mt-2 text-sm leading-6 text-foreground/75">
+          Synced contacts and conversations will appear here with a direct path into Admin CMA work.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-border/40">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <div>
+          <div className="text-sm font-semibold text-foreground">Profiles</div>
+          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+            People built from CRM, inbox, SMS, and social sources. Push a seller lead straight into the Admin CMA lane.
+          </p>
+        </div>
+        <Badge variant="outline">{profiles.length} profiles</Badge>
+      </div>
+
+      {sortedProfiles.map((profile) => {
+        const thread = threadByProfileId.get(profile.id);
+        const dealId = createdDealIds[profile.id] ?? existingDealIds[profile.id];
+        const pending = pendingProfileId === profile.id;
+        const error = errors[profile.id];
+        return (
+          <div key={profile.id} className="px-4 py-3">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={cn(
+                      "h-2.5 w-2.5 rounded-full",
+                      profile.heatLabel === "hot"
+                        ? "bg-destructive"
+                        : profile.heatLabel === "warm"
+                          ? "bg-warning"
+                          : profile.heatLabel === "watch"
+                            ? "bg-success"
+                            : "bg-muted-foreground/45",
+                    )}
+                  />
+                  <div className="min-w-0 truncate text-sm font-semibold text-foreground">
+                    {profile.displayName}
+                  </div>
+                  <Badge variant={heatVariant(profile)}>
+                    {profile.heatLabel} {profile.heatScore}
+                  </Badge>
+                  {profile.hasCrm && <Badge variant="success">CRM</Badge>}
+                  {profile.isPotentialLead && <Badge variant="warning">potential lead</Badge>}
+                  {dealId && <Badge variant="success">in Admin CMA</Badge>}
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                  {profile.latestText || "No recent source context yet."}
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[0.72rem] text-muted-foreground">
+                  <Badge variant="outline">{profileSourceMeta(profile)}</Badge>
+                  <Badge variant="outline">{profileContactLine(profile)}</Badge>
+                  {profilePrimaryContactId(profile) && <Badge variant="outline">DB contact</Badge>}
+                  <Badge variant="outline">{profile.threadCount} thread{profile.threadCount === 1 ? "" : "s"}</Badge>
+                  <Badge variant="outline">{profileWhen(profile)}</Badge>
+                  {profile.tags.slice(0, 3).map((tag) => (
+                    <Badge key={tag} variant="outline">{tag}</Badge>
+                  ))}
+                </div>
+                {error && (
+                  <p className="mt-2 text-xs leading-5 text-destructive">
+                    {error}
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!thread}
+                  onClick={() => openProfileThread(profile)}
+                >
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  Open thread
+                </Button>
+                {dealId ? (
+                  <Link
+                    to="/admin"
+                    className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3")}
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Open Admin
+                  </Link>
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => startCmaWorkflow(profile)}
+                    disabled={pendingProfileId !== null}
+                  >
+                    {pending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <BriefcaseBusiness className="h-3.5 w-3.5" />
+                    )}
+                    Start CMA
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -2550,17 +2832,20 @@ function HotLeadsList({
 }
 
 function LeadPipelineTabs({
-  data,
-  threads,
   buyers,
+  data,
+  profiles,
+  threads,
 }: {
-  data: HubData;
-  threads: SourceInboxThread[];
   buyers: BuyerWatchlistEntry[];
+  data: HubData;
+  profiles: SourceInboxProfile[];
+  threads: SourceInboxThread[];
 }) {
   const followUpCount = leadThreadBuckets(threads).followUp.length;
   const buyerCount = buyers.length;
-  const defaultTab = followUpCount > 0 || buyerCount === 0 ? "follow-ups" : "buyers";
+  const profileCount = profiles.length;
+  const defaultTab = followUpCount > 0 ? "follow-ups" : profileCount > 0 ? "profiles" : buyerCount > 0 ? "buyers" : "follow-ups";
 
   return (
     <div className="rounded-2xl border border-border bg-card">
@@ -2603,18 +2888,39 @@ function LeadPipelineTabs({
                     {buyerCount}
                   </span>
                 </TabsTrigger>
+                <TabsTrigger
+                  active={active === "profiles"}
+                  value="profiles"
+                  onClick={() => setActive("profiles")}
+                >
+                  <span>Profiles</span>
+                  <span
+                    className={cn(
+                      "font-mono-ui ml-2 rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
+                      active === "profiles"
+                        ? "bg-foreground/10 text-foreground"
+                        : "bg-foreground/5 text-muted-foreground",
+                    )}
+                  >
+                    {profileCount}
+                  </span>
+                </TabsTrigger>
               </TabsList>
               <span className="hidden truncate text-xs text-muted-foreground sm:inline">
                 {active === "follow-ups"
                   ? "Replies waiting on you, hottest first."
-                  : "MLS buyers actively shopping."}
+                  : active === "buyers"
+                    ? "MLS buyers actively shopping."
+                    : "Profile records ready for lead or CMA action."}
               </span>
             </div>
             <div>
               {active === "follow-ups" ? (
                 <FollowUpThreadsList data={data} threads={threads} />
-              ) : (
+              ) : active === "buyers" ? (
                 <PrivateSearchBuyersList buyers={buyers} />
+              ) : (
+                <LeadProfilesWorkbench profiles={profiles} threads={threads} />
               )}
             </div>
           </>
@@ -3095,6 +3401,7 @@ type LeadSourceOption = {
   id: string;
   label: string;
   drafts: number;
+  profiles: number;
   threads: number;
 };
 
@@ -3106,6 +3413,7 @@ function LeadFilterBar({
   onSelect,
   options,
   pulse,
+  profiles,
   threads,
 }: {
   active: string | null;
@@ -3115,6 +3423,7 @@ function LeadFilterBar({
   onSelect: (id: string | null) => void;
   options: LeadSourceOption[];
   pulse?: ResponsePulse;
+  profiles: number;
   threads: number;
 }) {
   type Stat = {
@@ -3126,6 +3435,7 @@ function LeadFilterBar({
   const queueStats: Stat[] = [
     { label: "Drafts to approve", value: drafts, tone: drafts > 0 ? "warning" : "muted", emphasis: "primary" },
     { label: "Hot leads", value: hot, tone: hot > 0 ? "default" : "muted", emphasis: "primary" },
+    { label: "Profiles", value: profiles, tone: profiles > 0 ? "default" : "muted", emphasis: "primary" },
     { label: "Open threads", value: threads, tone: "default", emphasis: "primary" },
     { label: "Follow-ups scheduled", value: followUps, tone: "muted", emphasis: "primary" },
   ];
@@ -3196,7 +3506,7 @@ function LeadFilterBar({
               key={option.id}
               active={active === option.id}
               label={option.label}
-              meta={`${option.drafts ? `${option.drafts} drafts · ` : ""}${option.threads}`}
+              meta={`${option.drafts ? `${option.drafts} drafts · ` : ""}${option.profiles ? `${option.profiles} profiles · ` : ""}${option.threads}`}
               onClick={() => onSelect(option.id)}
             />
           ))}
@@ -4570,9 +4880,10 @@ export function RealEstateLeadsPage() {
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [tab, setTab] = useState<LeadTab>("inbox");
 
-  const allThreads = data.sourceInbox?.threads ?? [];
-  const allDrafts = data.sourceInbox?.drafts ?? [];
-  const allSources = data.sourceInbox?.sources ?? [];
+  const allThreads = useMemo(() => data.sourceInbox?.threads ?? [], [data.sourceInbox?.threads]);
+  const allDrafts = useMemo(() => data.sourceInbox?.drafts ?? [], [data.sourceInbox?.drafts]);
+  const allProfiles = useMemo(() => data.sourceInbox?.profiles ?? [], [data.sourceInbox?.profiles]);
+  const allSources = useMemo(() => data.sourceInbox?.sources ?? [], [data.sourceInbox?.sources]);
 
   const filterOptions = useMemo<LeadSourceOption[]>(() => {
     const seen = new Map<string, LeadSourceOption>();
@@ -4582,6 +4893,7 @@ export function RealEstateLeadsPage() {
         id: source.id,
         label: source.label,
         drafts: 0,
+        profiles: 0,
         threads: 0,
       });
     }
@@ -4593,8 +4905,16 @@ export function RealEstateLeadsPage() {
       const entry = seen.get(draft.sourceId);
       if (entry) entry.drafts += 1;
     }
-    return Array.from(seen.values()).filter((option) => option.threads > 0 || option.drafts > 0);
-  }, [allDrafts, allSources, allThreads]);
+    for (const profile of allProfiles) {
+      for (const sourceId of profile.sourceIds) {
+        const entry = seen.get(sourceId);
+        if (entry) entry.profiles += 1;
+      }
+    }
+    return Array.from(seen.values()).filter(
+      (option) => option.threads > 0 || option.drafts > 0 || option.profiles > 0,
+    );
+  }, [allDrafts, allProfiles, allSources, allThreads]);
 
   const filterFn = useCallback(
     (sourceId: string) => sourceFilter === null || sourceId === sourceFilter,
@@ -4608,6 +4928,10 @@ export function RealEstateLeadsPage() {
   const drafts = useMemo(
     () => allDrafts.filter((draft) => filterFn(draft.sourceId)),
     [allDrafts, filterFn],
+  );
+  const profiles = useMemo(
+    () => allProfiles.filter((profile) => sourceFilter === null || profile.sourceIds.includes(sourceFilter)),
+    [allProfiles, sourceFilter],
   );
 
   const followUpJobs = data.cronJobs.filter((job) =>
@@ -4661,6 +4985,7 @@ export function RealEstateLeadsPage() {
           onSelect={setSourceFilter}
           options={filterOptions}
           pulse={pulse}
+          profiles={profiles.length}
           threads={threads.length}
         />
 
@@ -4713,9 +5038,10 @@ export function RealEstateLeadsPage() {
             </CollapsibleSection>
 
             <LeadPipelineTabs
-              data={data}
-              threads={threads}
               buyers={data.sourceInbox?.privateSearchBuyers ?? []}
+              data={data}
+              profiles={profiles}
+              threads={threads}
             />
 
             <CollapsibleSection
@@ -4827,6 +5153,19 @@ type AdminConditionField = AdminEnumField | AdminToggleField;
 type AdminConditionValue = string | boolean | null;
 type AdminCompletedByStage = Partial<Record<AdminStageNumber, Record<string, boolean>>>;
 
+type AdminSourceContext = {
+  profileName?: string;
+  latestText?: string;
+  latestAt?: string;
+  heatLabel?: string;
+  heatScore?: number;
+  sources: string[];
+  channels: string[];
+  contactIds: string[];
+  conversationIds: string[];
+  rejectedContactId?: string;
+};
+
 type AdminCard = {
   id: string;
   side: AdminSide;
@@ -4840,6 +5179,7 @@ type AdminCard = {
   pinnedTop25?: boolean;
   completedByStage?: AdminCompletedByStage;
   conditions?: Partial<Record<AdminConditionField, AdminConditionValue>>;
+  sourceContext?: AdminSourceContext;
 };
 
 const ADMIN_SIDE_LABELS: Record<AdminSide, { title: string; description: string }> = {
@@ -5287,6 +5627,39 @@ function completedStagesFromDeal(deal: AdminDeal, side: AdminSide): AdminComplet
   return completed;
 }
 
+function adminStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function adminStringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function adminNumberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function adminSourceContextFromDeal(deal: AdminDeal): AdminSourceContext | undefined {
+  const extra = deal.extraToggles ?? {};
+  if (!adminStringValue(extra.sourceProfileId) && extra.workflow !== "cma") return undefined;
+  return {
+    profileName: adminStringValue(extra.sourceProfileName),
+    latestText: adminStringValue(extra.sourceLatestText),
+    latestAt: adminStringValue(extra.sourceLatestAt),
+    heatLabel: adminStringValue(extra.sourceHeatLabel),
+    heatScore: adminNumberValue(extra.sourceHeatScore),
+    sources: adminStringList(extra.sourceLabels),
+    channels: adminStringList(extra.sourceChannels),
+    contactIds: adminStringList(extra.sourceContactIds),
+    conversationIds: adminStringList(extra.sourceConversationIds),
+    rejectedContactId: adminStringValue(extra.sourcePrimaryContactIdRejected),
+  };
+}
+
 function adminCardFromDeal(deal: AdminDeal): AdminCard {
   const side = isAdminSide(deal.side) ? deal.side : "listing";
   const stage = toAdminStage(deal.currentStage);
@@ -5303,6 +5676,7 @@ function adminCardFromDeal(deal: AdminDeal): AdminCard {
     pinnedTop25: deal.extraToggles?.pinnedTop25 === true || deal.extraToggles?.top25 === true,
     completedByStage: completedStagesFromDeal(deal, side),
     conditions: adminConditionsFromDeal(deal),
+    sourceContext: adminSourceContextFromDeal(deal),
   };
 }
 
@@ -5349,93 +5723,169 @@ function errorMessage(error: unknown, fallback: string): string {
 
 // Dev fallback cards. Anonymized visual scaffolding used only when the Admin Deals API errors.
 const ADMIN_CARDS_SEED: AdminCard[] = [
-  {
-    id: "c1", side: "listing", stage: 0, client: "Riverside Drive seller", contactInitials: "RD",
+  // ── Listings ────────────────────────────────────────────────────────
+  { id: "c1", side: "listing", stage: 0, client: "Riverside Dr seller", contactInitials: "RD",
     property: "Riverside Dr · CMA delivered", nextLabel: "Pricing call", daysOut: 1, pinnedTop25: true,
     completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true } },
-    conditions: { signing_authority: "seller", listing_track: "standard", listing_type: "mls" },
-  },
-  {
-    id: "c2", side: "listing", stage: 3, client: "Lewis Creek seller", contactInitials: "LC",
-    property: "Lewis Creek Rd · Listing prep", nextLabel: "MLC sign", daysOut: 3, pinnedTop25: true,
+    conditions: { signing_authority: "seller", listing_track: "standard", listing_type: "mls" } },
+  { id: "c1b", side: "listing", stage: 0, client: "Pinecrest estate", contactInitials: "PE",
+    property: "Pinecrest Pl · Inherited property", nextLabel: "Estate review", daysOut: 4,
+    completedByStage: { 0: { "draft-cma-followup": true } },
+    conditions: { estate_status: "estate", signing_authority: "executor" } },
+  { id: "c1c", side: "listing", stage: 0, client: "Aberdeen condo seller", contactInitials: "AC",
+    property: "Aberdeen Crt #305 · Walk-through booked", nextLabel: "CMA delivery", daysOut: 2,
+    completedByStage: {},
+    conditions: { property_subtype: "condo", listing_type: "mls" } },
+  { id: "c2", side: "listing", stage: 1, client: "Sahali rancher", contactInitials: "SR",
+    property: "Sahali · Intake meeting Tue", nextLabel: "Legal names", daysOut: 2,
+    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true, "missing-info-list": true } },
+    conditions: { signing_authority: "spouse_pair", property_subtype: "detached" } },
+  { id: "c2b", side: "listing", stage: 1, client: "Glenrose seller", contactInitials: "GL",
+    property: "Glenrose Dr · Awaiting forms", nextLabel: "Forms back", daysOut: 5,
+    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true } },
+    conditions: { listing_track: "standard" } },
+  { id: "c3", side: "listing", stage: 2, client: "Lewis Creek seller", contactInitials: "LC",
+    property: "Lewis Creek Rd · Title pulled", nextLabel: "Photo prep", daysOut: 3, pinnedTop25: true,
     completedByStage: {
       0: { "draft-cma-followup": true, "pricing-recap": true, "track-objections": true, "missing-info-list": true, "listing-intake-prep": true },
       1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
-      2: { "pull-title": true },
-    },
-    conditions: { signing_authority: "seller", property_subtype: "detached", lockbox: true },
-  },
-  {
-    id: "c3", side: "listing", stage: 5, client: "Clifford Ave seller", contactInitials: "CA",
-    property: "Clifford Ave · Live on MLS", nextLabel: "Weekly update", daysOut: 2,
+      2: { "pull-title": true } },
+    conditions: { signing_authority: "seller", property_subtype: "detached", lockbox: true } },
+  { id: "c3b", side: "listing", stage: 2, client: "Brocklehurst bungalow", contactInitials: "BR",
+    property: "Brock · Photos Fri", nextLabel: "Stager visit", daysOut: 1,
+    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true }, 1: { "intake-legal-names": true } },
+    conditions: { listing_type: "mls" } },
+  { id: "c4", side: "listing", stage: 3, client: "Westsyde split", contactInitials: "WS",
+    property: "Westsyde · MLC out for sign", nextLabel: "Digisign chase", daysOut: 1,
+    completedByStage: {
+      0: { "draft-cma-followup": true, "pricing-recap": true, "missing-info-list": true },
+      1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
+      2: { "pull-title": true, "organize-photos": true },
+      3: { "fill-mlc": true, "digisign-send": true } },
+    conditions: { signing_authority: "spouse_pair", property_subtype: "detached" } },
+  { id: "c5", side: "listing", stage: 4, client: "Clifford Ave seller", contactInitials: "CA",
+    property: "Clifford Ave · Live on MLS", nextLabel: "Weekly update", daysOut: 2, pinnedTop25: true,
     completedByStage: {
       0: { "draft-cma-followup": true, "pricing-recap": true, "track-objections": true, "missing-info-list": true, "listing-intake-prep": true },
       1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
       2: { "pull-title": true, "organize-photos": true },
       3: { "fill-mlc": true, "digisign-send": true, "track-signatures": true },
-      4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true, "email-blast": true },
-    },
-    conditions: { listing_track: "standard", property_subtype: "townhouse", delayed_offer: true },
-  },
-  {
-    id: "c4", side: "listing", stage: 7, client: "Birch Bay seller", contactInitials: "BB",
-    property: "Birch Bay · Accepted offer", nextLabel: "Subject removal", daysOut: 4, pinnedTop25: true,
+      4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true, "email-blast": true } },
+    conditions: { listing_track: "standard", property_subtype: "townhouse", delayed_offer: true } },
+  { id: "c5b", side: "listing", stage: 4, client: "Knutsford acreage", contactInitials: "KN",
+    property: "Knutsford · Just live", nextLabel: "OH plan", daysOut: 3,
+    completedByStage: { 4: { "mls-remarks": true, "feature-sheet": true } },
+    conditions: { property_subtype: "acreage", lockbox: true } },
+  { id: "c6", side: "listing", stage: 5, client: "Valleyview townhouse", contactInitials: "VV",
+    property: "Valleyview · 6 showings booked", nextLabel: "Showing feedback", daysOut: 0, pinnedTop25: true,
+    completedByStage: { 4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true } },
+    conditions: { property_subtype: "townhouse" } },
+  { id: "c6b", side: "listing", stage: 5, client: "Juniper Ridge", contactInitials: "JR",
+    property: "Juniper · Open house Sat", nextLabel: "OH supplies", daysOut: 2,
+    completedByStage: { 4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true, "email-blast": true } },
+    conditions: { listing_type: "mls" } },
+  { id: "c7", side: "listing", stage: 6, client: "Mt Paul seller", contactInitials: "MP",
+    property: "Mt Paul · Offer in", nextLabel: "Counter draft", daysOut: 0,
+    completedByStage: { 6: { "offer-summary": true } },
+    conditions: { multiple_offers: true } },
+  { id: "c7b", side: "listing", stage: 6, client: "Bestwick semi-detached", contactInitials: "BS",
+    property: "Bestwick · Reviewing 2 offers", nextLabel: "Owner call", daysOut: 0, pinnedTop25: true,
+    completedByStage: { 6: { "offer-summary": true } },
+    conditions: { multiple_offers: true, dual_rep: false } },
+  { id: "c8", side: "listing", stage: 7, client: "Birch Bay seller", contactInitials: "BB",
+    property: "Birch Bay · Subjects ticking", nextLabel: "Subject removal", daysOut: 4,
     completedByStage: {
       6: { "offer-summary": true, "subject-deadline": true, "inspection-timing": true },
-      7: { "deposit-confirmed": true },
-    },
-    conditions: { multiple_offers: true, transaction_type: "residential", fintrac_form_type: "individual" },
-  },
-  {
-    id: "c5", side: "listing", stage: 9, client: "Maple Ridge seller", contactInitials: "MR",
-    property: "Maple Ridge · Subjects off", nextLabel: "Possession", daysOut: 8,
+      7: { "deposit-confirmed": true } },
+    conditions: { multiple_offers: true, transaction_type: "residential", fintrac_form_type: "individual" } },
+  { id: "c8b", side: "listing", stage: 7, client: "Oakridge seller", contactInitials: "OK",
+    property: "Oakridge · Inspection Tue", nextLabel: "Inspector follow-up", daysOut: 2,
+    completedByStage: { 7: { "deposit-confirmed": true } },
+    conditions: { property_subtype: "detached" } },
+  { id: "c9", side: "listing", stage: 8, client: "Pacific Way seller", contactInitials: "PW",
+    property: "Pacific Way · Closing this Fri", nextLabel: "Possession check", daysOut: 5,
+    completedByStage: { 8: { "completion-checklist": true } },
+    conditions: { transaction_type: "residential" } },
+  { id: "c10", side: "listing", stage: 9, client: "Maple Ridge seller", contactInitials: "MR",
+    property: "Maple Ridge · Possessed", nextLabel: "Closing gift", daysOut: 8,
     completedByStage: {
       8: { "completion-checklist": true, "key-handoff": true },
-      9: { "closing-gift": true, "thank-you": true, "anniversary": true, "past-client-nurture": true },
-    },
-    conditions: { listing_type: "mls", estate_status: "none" },
-  },
-  {
-    id: "b1", side: "buyer", stage: 1, client: "Tessa & Ryan", contactInitials: "TR",
-    property: "Looking N. Kamloops · 3bd", nextLabel: "Showing route", daysOut: 2,
+      9: { "closing-gift": true, "thank-you": true, "anniversary": true, "past-client-nurture": true } },
+    conditions: { listing_type: "mls", estate_status: "none" } },
+
+  // ── Buyers ─────────────────────────────────────────────────────────
+  { id: "b1", side: "buyer", stage: 0, client: "Vasquez family", contactInitials: "VF",
+    property: "First-time · 3-4bd · ≤$650k", nextLabel: "Mortgage broker intro", daysOut: 1,
+    completedByStage: {},
+    conditions: { transaction_type: "residential" } },
+  { id: "b1b", side: "buyer", stage: 0, client: "Owen H", contactInitials: "OH",
+    property: "Investment · 2bd condo · ≤$420k", nextLabel: "Profile call", daysOut: 3,
+    completedByStage: {},
+    conditions: { property_subtype: "condo" } },
+  { id: "b2", side: "buyer", stage: 1, client: "Tessa & Ryan", contactInitials: "TR",
+    property: "Looking N. Kamloops · 3bd", nextLabel: "Showing route", daysOut: 2, pinnedTop25: true,
     completedByStage: { 0: { "buyer-profile": true, "search-criteria": true }, 1: { shortlist: true } },
-    conditions: { transaction_type: "residential" },
-  },
-  {
-    id: "b2", side: "buyer", stage: 3, client: "Nadia P", contactInitials: "NP",
-    property: "Saw 4 props · interested in #2", nextLabel: "Offer prep", daysOut: 1, pinnedTop25: true,
+    conditions: { transaction_type: "residential" } },
+  { id: "b2b", side: "buyer", stage: 1, client: "Carlita M", contactInitials: "CM",
+    property: "Sahali area · townhouse · ≤$580k", nextLabel: "MLS hotsheet", daysOut: 4,
+    completedByStage: { 0: { "buyer-profile": true, "search-criteria": true } },
+    conditions: { property_subtype: "townhouse" } },
+  { id: "b3", side: "buyer", stage: 2, client: "DeMarco family", contactInitials: "DM",
+    property: "5 props on tour Sat", nextLabel: "Tour wrap", daysOut: 1,
+    completedByStage: { 1: { shortlist: true, "showing-route": true } },
+    conditions: { property_subtype: "detached" } },
+  { id: "b3b", side: "buyer", stage: 2, client: "Priya & Nik", contactInitials: "PN",
+    property: "Tour 3 props Wed", nextLabel: "Showing notes", daysOut: 2,
+    completedByStage: { 1: { shortlist: true, "showing-route": true, "preview-notes": true } },
+    conditions: {} },
+  { id: "b4", side: "buyer", stage: 3, client: "Nadia P", contactInitials: "NP",
+    property: "Saw 4 · interested in #2", nextLabel: "Offer prep", daysOut: 1, pinnedTop25: true,
     completedByStage: {
       0: { "buyer-profile": true, "search-criteria": true },
       1: { shortlist: true, "showing-route": true, "preview-notes": true },
       2: { "followup-draft": true, "feedback-summary": true },
-      3: { "criteria-update": true, "comp-pull": true },
-    },
-    conditions: { sale_of_buyers_property: true, property_subtype: "detached" },
-  },
-  {
-    id: "b3", side: "buyer", stage: 5, client: "Henson family", contactInitials: "HF",
-    property: "Westsyde · Accepted offer", nextLabel: "Inspection", daysOut: 3, pinnedTop25: true,
+      3: { "criteria-update": true, "comp-pull": true } },
+    conditions: { sale_of_buyers_property: true, property_subtype: "detached" } },
+  { id: "b4b", side: "buyer", stage: 3, client: "Reggie L", contactInitials: "RL",
+    property: "Lost #1 · re-shortlisting", nextLabel: "New criteria", daysOut: 2,
+    completedByStage: { 2: { "followup-draft": true, "feedback-summary": true } },
+    conditions: {} },
+  { id: "b5", side: "buyer", stage: 4, client: "Beaumont couple", contactInitials: "BC",
+    property: "Drafting on Mt Paul", nextLabel: "CPS draft", daysOut: 0, pinnedTop25: true,
+    completedByStage: { 3: { "criteria-update": true, "comp-pull": true } },
+    conditions: { property_subtype: "detached" } },
+  { id: "b5b", side: "buyer", stage: 4, client: "Krista S", contactInitials: "KS",
+    property: "Comps pulled · offer Tue", nextLabel: "Lender confirm", daysOut: 1,
+    completedByStage: { 3: { "criteria-update": true, "comp-pull": true } },
+    conditions: {} },
+  { id: "b6", side: "buyer", stage: 5, client: "Henson family", contactInitials: "HF",
+    property: "Westsyde · Accepted offer", nextLabel: "Inspection", daysOut: 3,
     completedByStage: {
       4: { "lender-paperwork": true, "accepted-offer-checklist": true, "doc-list": true },
-      5: { "inspection-booked": true },
-    },
-    conditions: { fintrac_form_type: "individual", dual_rep: false },
-  },
-  {
-    id: "b4", side: "buyer", stage: 7, client: "Marisol C", contactInitials: "MC",
-    property: "Brock · Subjects clearing", nextLabel: "Subjects off", daysOut: 1,
+      5: { "inspection-booked": true } },
+    conditions: { fintrac_form_type: "individual", dual_rep: false } },
+  { id: "b7", side: "buyer", stage: 6, client: "Theo & Pia", contactInitials: "TP",
+    property: "Conditions running", nextLabel: "Strata docs review", daysOut: 2,
+    completedByStage: { 6: { "inspection-summary": true } },
+    conditions: { property_subtype: "condo" } },
+  { id: "b8", side: "buyer", stage: 7, client: "Marisol C", contactInitials: "MC",
+    property: "Brock · Subjects clearing", nextLabel: "Subjects off", daysOut: 1, pinnedTop25: true,
     completedByStage: { 7: { "subjects-removed": true, "deposit-received": true, "completion-locked": true } },
-    conditions: { property_subtype: "condo", unrepresented_other_side: true },
-  },
-  {
-    id: "b5", side: "buyer", stage: 9, client: "Eli & Jordan", contactInitials: "EJ",
+    conditions: { property_subtype: "condo", unrepresented_other_side: true } },
+  { id: "b8b", side: "buyer", stage: 7, client: "Lin Tran", contactInitials: "LT",
+    property: "Sahali · subjects in 4d", nextLabel: "Inspector quote", daysOut: 3,
+    completedByStage: { 7: { "deposit-received": true } },
+    conditions: {} },
+  { id: "b9", side: "buyer", stage: 8, client: "Ortega household", contactInitials: "OR",
+    property: "Closing next Wed", nextLabel: "Lawyer chase", daysOut: 6,
+    completedByStage: { 8: { "completion-checklist": true } },
+    conditions: { transaction_type: "residential" } },
+  { id: "b10", side: "buyer", stage: 9, client: "Eli & Jordan", contactInitials: "EJ",
     property: "Aberdeen · Possession Fri", nextLabel: "Key handoff", daysOut: 5,
     completedByStage: {
       8: { "completion-checklist": true, "final-walkthrough": true },
-      9: { "utility-reminder": true, "key-handoff": true, "closing-gift": true, "thank-you": true },
-    },
-    conditions: { transaction_type: "residential", lockbox: true },
-  },
+      9: { "utility-reminder": true, "key-handoff": true, "closing-gift": true, "thank-you": true } },
+    conditions: { transaction_type: "residential", lockbox: true } },
 ];
 
 function useAdminDeals(): {
@@ -5446,6 +5896,8 @@ function useAdminDeals(): {
   refresh: () => Promise<void>;
   moveDeal: (dealId: string, toStage: AdminStageNumber) => Promise<void>;
   setDealToggle: (dealId: string, field: string, value: AdminConditionValue) => Promise<void>;
+  addLocalDeal: (card: AdminCard) => void;
+  replaceLocalDeal: (placeholderId: string, deal: AdminDeal) => void;
 } {
   const [deals, setDeals] = useState<AdminCard[]>([]);
   const [loading, setLoading] = useState(true);
@@ -5462,8 +5914,13 @@ function useAdminDeals(): {
     setLoading(true);
     try {
       const nextDeals = await loadDeals();
-      setDeals(nextDeals);
-      setUsingDevFallback(false);
+      if (nextDeals.length === 0) {
+        setDeals(ADMIN_CARDS_SEED);
+        setUsingDevFallback(true);
+      } else {
+        setDeals(nextDeals);
+        setUsingDevFallback(false);
+      }
     } catch (err) {
       setError(errorMessage(err, "Admin deals failed"));
       setDeals(ADMIN_CARDS_SEED);
@@ -5480,8 +5937,13 @@ function useAdminDeals(): {
     loadDeals()
       .then((nextDeals) => {
         if (cancelled) return;
-        setDeals(nextDeals);
-        setUsingDevFallback(false);
+        if (nextDeals.length === 0) {
+          setDeals(ADMIN_CARDS_SEED);
+          setUsingDevFallback(true);
+        } else {
+          setDeals(nextDeals);
+          setUsingDevFallback(false);
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -5537,7 +5999,16 @@ function useAdminDeals(): {
     [refresh],
   );
 
-  return { deals, loading, error, usingDevFallback, refresh, moveDeal, setDealToggle };
+  const addLocalDeal = useCallback((card: AdminCard) => {
+    setDeals((prev) => [card, ...prev]);
+  }, []);
+
+  const replaceLocalDeal = useCallback((placeholderId: string, deal: AdminDeal) => {
+    const fresh = adminCardFromDeal(deal);
+    setDeals((prev) => prev.map((card) => (card.id === placeholderId ? fresh : card)));
+  }, []);
+
+  return { deals, loading, error, usingDevFallback, refresh, moveDeal, setDealToggle, addLocalDeal, replaceLocalDeal };
 }
 
 function dueLabel(days?: number): { text: string; tone: "muted" | "warn" | "danger" | "ok" } {
@@ -5574,34 +6045,29 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
       className="w-full text-left rounded-xl border border-border/60 bg-background/40 p-3 hover:border-border hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors cursor-grab active:cursor-grabbing"
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
-            {card.contactInitials}
-          </div>
-          <div className="truncate text-[0.92rem] font-semibold leading-tight text-foreground">
-            {card.client}
-          </div>
+        <div className="truncate text-[0.95rem] font-semibold leading-tight text-foreground">
+          {card.client}
         </div>
         {card.pinnedTop25 && (
-          <span title="TOP 25" className="inline-flex h-5 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 text-[0.6rem] font-semibold uppercase tracking-wider text-warning">
+          <span title="TOP 25" className="inline-flex h-5 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 font-mono-ui text-[0.65rem] font-semibold uppercase tracking-wider text-warning">
             <Flame className="h-2.5 w-2.5" />
             Top
           </span>
         )}
       </div>
       {card.property && (
-        <div className="mt-1.5 flex items-start gap-1.5 text-[0.72rem] text-muted-foreground">
+        <div className="mt-1.5 flex items-start gap-1.5 text-[0.78rem] text-muted-foreground">
           <Building2 className="mt-[2px] h-3 w-3 shrink-0" />
           <span className="truncate">{card.property}</span>
         </div>
       )}
       {card.nextLabel && (
-        <div className="mt-2 flex items-center gap-1.5 text-[0.72rem]">
+        <div className="mt-2 flex items-center gap-1.5 text-[0.78rem]">
           <CalendarClock className="h-3 w-3 text-muted-foreground" />
-          <span className="text-foreground">{card.nextLabel}</span>
+          <span className="truncate text-foreground">{card.nextLabel}</span>
           <span
             className={cn(
-              "ml-auto font-mono-ui text-[0.66rem]",
+              "ml-auto shrink-0 font-mono-ui text-[0.7rem]",
               due.tone === "danger" && "text-destructive",
               due.tone === "warn" && "text-warning",
               due.tone === "ok" && "text-muted-foreground",
@@ -5612,12 +6078,12 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
           </span>
         </div>
       )}
-      <div className="mt-2">
-        <div className="flex items-center justify-between text-[0.66rem] text-muted-foreground">
+      <div className="mt-3">
+        <div className="flex items-center justify-between text-[0.7rem] text-muted-foreground">
           <span>
             {done}/{total} done
           </span>
-          <span>{pct}%</span>
+          <span className="font-mono-ui">{pct}%</span>
         </div>
         <div
           role="progressbar"
@@ -5625,14 +6091,14 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-label="Stage checklist progress"
-          className="mt-1 h-1 w-full overflow-hidden rounded-full bg-border/50"
+          className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-border/50"
         >
           <div className="h-full bg-primary/70" style={{ width: `${pct}%` }} />
         </div>
         {nextItem && (
-          <div className="mt-1.5 truncate text-[0.7rem] text-muted-foreground">
-            <span className="font-mono-ui mr-1 uppercase tracking-wider text-[0.6rem]">Next</span>
-            {nextItem}
+          <div className="mt-2 flex items-center gap-1.5 truncate text-[0.78rem] text-muted-foreground">
+            <span className="font-mono-ui shrink-0 text-[0.65rem] uppercase tracking-wider">Next</span>
+            <span className="truncate">{nextItem}</span>
           </div>
         )}
       </div>
@@ -5666,30 +6132,30 @@ function AdminKanbanColumn(props: {
         onCardDrop(stage);
       }}
       className={cn(
-        "flex h-full min-w-[12rem] flex-col rounded-2xl border bg-card/30 transition-colors",
+        "flex h-full min-w-[16rem] flex-col rounded-2xl border bg-card/30 transition-colors",
         isDragOver ? "border-primary/60 bg-primary/5" : "border-border/60",
       )}
     >
-      <div className="border-b border-border/60 px-3 py-2">
-        <div className="flex items-baseline justify-between gap-2">
-          <div className="min-w-0">
-            <div className="font-mono-ui text-[0.58rem] uppercase tracking-[0.14em] text-primary">
+      <div className="border-b border-border/60 px-3 py-2.5" title={label.subtitle}>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-primary">
               {column.stageNumber}
-            </div>
-            <div className="truncate text-[0.82rem] font-semibold text-foreground">{label.title}</div>
+            </span>
+            <span className="truncate text-[0.88rem] font-semibold text-foreground">{label.title}</span>
           </div>
-          <span className="font-mono-ui text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+          <span className="font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground">
             {cards.length}
           </span>
-        </div>
-        <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
-          {label.subtitle}
         </div>
       </div>
       <div className="flex flex-col gap-2 p-2">
         {cards.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border/40 bg-background/20 px-3 py-4 text-center text-[0.7rem] text-muted-foreground">
-            empty
+          <div className="rounded-xl border border-dashed border-border/40 bg-background/20 px-3 py-4 text-center text-[0.72rem] text-muted-foreground">
+            <div>empty</div>
+            <div className="mt-1 font-mono-ui text-[0.62rem] uppercase tracking-[0.12em] text-muted-foreground/80">
+              {label.subtitle}
+            </div>
           </div>
         ) : (
           cards.map((card) => (
@@ -5709,7 +6175,6 @@ function AdminKanbanColumn(props: {
 function AdminKanbanSwimlane({
   side,
   title,
-  icon: Icon,
   description,
   cardsByStage,
   totalCount,
@@ -5719,7 +6184,6 @@ function AdminKanbanSwimlane({
 }: {
   side: AdminSide;
   title: string;
-  icon: ComponentType<{ className?: string }>;
   description: string;
   cardsByStage: Record<AdminStageNumber, AdminCard[]>;
   totalCount: number;
@@ -5728,20 +6192,16 @@ function AdminKanbanSwimlane({
   onCardDrop: (side: AdminSide, stage: AdminStageNumber) => void;
 }) {
   return (
-    <section className="flex flex-col gap-2">
+    <section aria-label={title} className="flex flex-col gap-2">
       <div className="flex items-baseline justify-between gap-3 px-1">
-        <div className="flex items-center gap-2">
-          <Icon className="h-4 w-4 text-primary" />
-          <h2 className="text-[0.95rem] font-semibold text-foreground">{title}</h2>
-          <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
-            {totalCount} active
-          </span>
-        </div>
-        <span className="text-[0.72rem] text-muted-foreground hidden sm:inline">{description}</span>
+        <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+          {totalCount} active
+        </span>
+        <span className="hidden text-[0.72rem] text-muted-foreground sm:inline">{description}</span>
       </div>
       <div
         className="grid gap-2 overflow-x-auto pb-1"
-        style={{ gridTemplateColumns: `repeat(${ADMIN_STAGE_NUMBERS.length}, minmax(12rem, 1fr))` }}
+        style={{ gridTemplateColumns: `repeat(${ADMIN_STAGE_NUMBERS.length}, 16rem)` }}
       >
         {ADMIN_STAGE_NUMBERS.map((stage) => (
           <AdminKanbanColumn
@@ -5802,7 +6262,7 @@ function AdminTop25Strip({
       ) : (
         <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
           {pinned.map((card) => (
-            <div key={card.id} className="min-w-[14rem] max-w-[14rem]">
+            <div key={card.id} className="min-w-[16rem] max-w-[16rem]">
               <AdminKanbanCard card={card} onSelect={onCardSelect} onDragStart={onCardDragStart} />
             </div>
           ))}
@@ -6019,6 +6479,43 @@ function AdminCardConditionsSection({
   );
 }
 
+function AdminCardSourceSection({ context }: { context: AdminSourceContext }) {
+  const heat = context.heatLabel
+    ? `${context.heatLabel}${context.heatScore != null ? ` ${context.heatScore}` : ""}`
+    : null;
+  return (
+    <section className="mb-3 rounded-xl border border-border/60 bg-background/35 px-3 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[0.86rem] font-semibold text-foreground">
+          {context.profileName || "Source profile"}
+        </span>
+        {heat && <Badge variant={context.heatLabel ? heatVariant({ heatLabel: context.heatLabel }) : "outline"}>{heat}</Badge>}
+        {context.contactIds.length > 0 && !context.rejectedContactId && <Badge variant="success">DB contact</Badge>}
+        {context.rejectedContactId && <Badge variant="warning">source contact only</Badge>}
+      </div>
+      {context.latestText && (
+        <p className="mt-2 line-clamp-3 text-[0.8rem] leading-5 text-muted-foreground">
+          {context.latestText}
+        </p>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {context.sources.map((source) => (
+          <Badge key={`source-${source}`} variant="outline">{source}</Badge>
+        ))}
+        {context.channels.map((channel) => (
+          <Badge key={`channel-${channel}`} variant="outline">{channel}</Badge>
+        ))}
+        {context.conversationIds.length > 0 && (
+          <Badge variant="outline">
+            {context.conversationIds.length} conversation{context.conversationIds.length === 1 ? "" : "s"}
+          </Badge>
+        )}
+        {context.latestAt && <Badge variant="outline">{isoTimeAgo(context.latestAt)}</Badge>}
+      </div>
+    </section>
+  );
+}
+
 function AdminCardDetailPanel({
   card,
   onClose,
@@ -6192,6 +6689,7 @@ function AdminCardDetailPanel({
         )}
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
+          {card.sourceContext && <AdminCardSourceSection context={card.sourceContext} />}
           <div className="flex flex-col gap-2">
             {ADMIN_STAGE_NUMBERS.map((stage) => (
                 <AdminCardStageSection
@@ -6214,11 +6712,364 @@ function AdminCardDetailPanel({
   );
 }
 
+function NewDealDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (placeholderCard: AdminCard, request: AdminDealCreateRequest) => Promise<void>;
+}) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLElement>(null);
+  const [title, setTitle] = useState("");
+  const [side, setSide] = useState<AdminSide>("listing");
+  const [stage, setStage] = useState<AdminStageNumber>(0);
+  const [contactId, setContactId] = useState<string | null>(null);
+  const [contactQuery, setContactQuery] = useState("");
+  const [contacts, setContacts] = useState<AdminContact[]>([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactsError, setContactsError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const root = dialogRef.current;
+    if (!root) return;
+    const focusableSelector =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const getFocusables = () =>
+      Array.from(root.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+        (el) => !el.hasAttribute("inert") && el.offsetParent !== null,
+      );
+    queueMicrotask(() => {
+      const focusables = getFocusables();
+      focusables[0]?.focus();
+    });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusables = getFocusables();
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    root.addEventListener("keydown", onKey);
+    return () => {
+      root.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus?.();
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setContactsLoading(true);
+    setContactsError(null);
+    api
+      .getAdminContacts({ limit: 200 })
+      .then((response) => {
+        if (cancelled) return;
+        setContacts(response.items);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setContactsError(err instanceof Error ? err.message : "Could not load contacts");
+      })
+      .finally(() => {
+        if (!cancelled) setContactsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filteredContacts = useMemo(() => {
+    const q = contactQuery.trim().toLowerCase();
+    if (!q) return contacts.slice(0, 8);
+    return contacts
+      .filter((contact) => {
+        const haystack = [contact.displayName, contact.primaryEmail, contact.primaryPhone]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(q);
+      })
+      .slice(0, 8);
+  }, [contacts, contactQuery]);
+
+  const selectedContact = contacts.find((c) => c.id === contactId) ?? null;
+
+  const handleSelectContact = (contact: AdminContact) => {
+    setContactId(contact.id);
+    setContactQuery("");
+    if (!title.trim() && contact.displayName) {
+      setTitle(contact.displayName);
+    }
+  };
+
+  const clearContact = () => {
+    setContactId(null);
+    setContactQuery("");
+  };
+
+  const canSubmit = title.trim().length > 0 && !submitting;
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    const cleanTitle = title.trim();
+    const placeholderId = `local-${Date.now()}`;
+    const stageLabel = adminStageLabel(side, stage);
+    const placeholder: AdminCard = {
+      id: placeholderId,
+      side,
+      stage,
+      client: cleanTitle,
+      contactInitials: initialsFromTitle(cleanTitle),
+      property: undefined,
+      nextLabel: stageLabel.title,
+      pinnedTop25: false,
+      completedByStage: {},
+      conditions: {},
+    };
+    const request: AdminDealCreateRequest = {
+      title: cleanTitle,
+      side,
+      currentStage: stage,
+      primaryContactId: contactId,
+    };
+    try {
+      await onCreated(placeholder, request);
+      onClose();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Could not create deal");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center sm:items-center sm:p-6">
+      <button
+        type="button"
+        aria-label="Close new deal"
+        onClick={onClose}
+        className="absolute inset-0 bg-background/60 backdrop-blur-sm"
+      />
+      <aside
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="relative flex h-full w-full flex-col bg-card shadow-2xl sm:h-auto sm:max-h-full sm:w-full sm:max-w-[28rem] sm:rounded-2xl sm:border sm:border-border/60"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
+          <div className="min-w-0">
+            <div className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              New deal
+            </div>
+            <h2 id={titleId} className="mt-0.5 text-[1rem] font-semibold leading-tight text-foreground">
+              Add a card to the board
+            </h2>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-11 w-11 shrink-0" aria-label="Close">
+            <CloseIcon className="h-4 w-4" />
+          </Button>
+        </div>
+        <form onSubmit={handleSubmit} className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
+          <div>
+            <label className="font-mono-ui block text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground" htmlFor={`${titleId}-side`}>
+              Side
+            </label>
+            <div id={`${titleId}-side`} role="radiogroup" className="mt-1.5 grid grid-cols-2 gap-2">
+              {(["listing", "buyer"] as AdminSide[]).map((option) => {
+                const active = side === option;
+                const Icon = option === "listing" ? Home : Users;
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => setSide(option)}
+                    className={cn(
+                      "flex min-h-11 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-[0.86rem] font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30",
+                      active
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border/60 bg-background/40 text-muted-foreground hover:border-border hover:text-foreground",
+                    )}
+                  >
+                    <Icon className={cn("h-4 w-4", active ? "text-primary" : "text-muted-foreground")} />
+                    {ADMIN_SIDE_LABELS[option].title}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor={`${titleId}-contact`} className="font-mono-ui block text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              Contact (optional)
+            </label>
+            {selectedContact ? (
+              <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[0.88rem] font-medium text-foreground">
+                    {selectedContact.displayName ?? "(unnamed)"}
+                  </div>
+                  <div className="truncate text-[0.72rem] text-muted-foreground">
+                    {selectedContact.primaryEmail ?? selectedContact.primaryPhone ?? selectedContact.id}
+                  </div>
+                </div>
+                <Button type="button" variant="ghost" size="sm" onClick={clearContact}>
+                  Change
+                </Button>
+              </div>
+            ) : (
+              <>
+                <input
+                  id={`${titleId}-contact`}
+                  type="text"
+                  value={contactQuery}
+                  onChange={(e) => setContactQuery(e.target.value)}
+                  placeholder={contactsLoading ? "Loading contacts…" : "Search by name, email, phone"}
+                  className="mt-1.5 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.88rem] text-foreground placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  autoComplete="off"
+                />
+                {contactsError && (
+                  <div className="mt-1 text-[0.72rem] text-warning">{contactsError}</div>
+                )}
+                {filteredContacts.length > 0 && (
+                  <div className="mt-1.5 max-h-48 overflow-y-auto rounded-lg border border-border/40 bg-background/50">
+                    {filteredContacts.map((contact) => (
+                      <button
+                        key={contact.id}
+                        type="button"
+                        onClick={() => handleSelectContact(contact)}
+                        className="flex w-full items-start gap-3 border-b border-border/30 px-3 py-2 text-left last:border-b-0 hover:bg-background/80 focus:outline-none focus:bg-background/80"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[0.86rem] font-medium text-foreground">
+                            {contact.displayName ?? "(unnamed)"}
+                          </div>
+                          <div className="truncate text-[0.72rem] text-muted-foreground">
+                            {contact.primaryEmail ?? contact.primaryPhone ?? "no contact info"}
+                          </div>
+                        </div>
+                        {contact.type && (
+                          <span className="font-mono-ui shrink-0 text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+                            {contact.type}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!contactsLoading && contacts.length === 0 && !contactsError && (
+                  <div className="mt-1 text-[0.72rem] text-muted-foreground">
+                    No contacts in DB yet. Skip this field or sync your CRM first.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div>
+            <label htmlFor={`${titleId}-title`} className="font-mono-ui block text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              Title <span className="text-destructive">*</span>
+            </label>
+            <input
+              id={`${titleId}-title`}
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder={side === "listing" ? "e.g. Lewis Creek seller" : "e.g. Tessa & Ryan"}
+              required
+              className="mt-1.5 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.88rem] text-foreground placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
+
+          <div>
+            <label htmlFor={`${titleId}-stage`} className="font-mono-ui block text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              Starting stage
+            </label>
+            <select
+              id={`${titleId}-stage`}
+              value={stage}
+              onChange={(e) => setStage(toAdminStage(Number(e.target.value)))}
+              className="mt-1.5 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.88rem] text-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+            >
+              {ADMIN_STAGE_NUMBERS.map((s) => {
+                const def = adminStageDefinition(s);
+                return (
+                  <option key={s} value={s}>
+                    {def.stageNumber} · {def.labels[side].title}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          {submitError && (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-[0.78rem] text-destructive">
+              {submitError}
+            </div>
+          )}
+
+          <div className="mt-auto flex items-center justify-end gap-2 border-t border-border/60 pt-3">
+            <Button type="button" variant="ghost" onClick={onClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!canSubmit}>
+              {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Create deal
+            </Button>
+          </div>
+        </form>
+      </aside>
+    </div>,
+    document.body,
+  );
+}
+
 function AdminKanbanBoard() {
   const adminDeals = useAdminDeals();
   const cards = adminDeals.deals;
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [activeSide, setActiveSide] = useState<AdminSide>("listing");
+  const [showNewDeal, setShowNewDeal] = useState(false);
   const draggingIdRef = useRef<string | null>(null);
+
+  const handleCreateDeal = useCallback(
+    async (placeholder: AdminCard, request: AdminDealCreateRequest) => {
+      adminDeals.addLocalDeal(placeholder);
+      setActiveSide(placeholder.side);
+      try {
+        const created = await api.createAdminDeal(request);
+        adminDeals.replaceLocalDeal(placeholder.id, created);
+      } catch (err) {
+        if (isApiNotFound(err)) {
+          console.warn("POST /api/admin/deals returned 404; keeping optimistic local card.");
+          return;
+        }
+        throw err;
+      }
+    },
+    [adminDeals],
+  );
 
   const selectedCard = cards.find((c) => c.id === selectedCardId) ?? null;
 
@@ -6301,10 +7152,16 @@ function AdminKanbanBoard() {
             <span className="truncate text-[0.72rem] text-warning">{adminDeals.error}</span>
           )}
         </div>
-        <Button variant="outline" size="sm" onClick={() => void adminDeals.refresh()} disabled={adminDeals.loading}>
-          <RefreshCw className={cn("h-3.5 w-3.5", adminDeals.loading && "animate-spin")} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={() => setShowNewDeal(true)}>
+            <Plus className="h-3.5 w-3.5" />
+            New deal
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void adminDeals.refresh()} disabled={adminDeals.loading}>
+            <RefreshCw className={cn("h-3.5 w-3.5", adminDeals.loading && "animate-spin")} />
+            Refresh
+          </Button>
+        </div>
       </div>
       <AdminTop25Strip
         cards={cards}
@@ -6312,24 +7169,44 @@ function AdminKanbanBoard() {
         onCardSelect={setSelectedCardId}
         onCardDragStart={handleCardDragStart}
       />
+      <div role="tablist" aria-label="Deal side" className="flex items-center gap-1 border-b border-border/60">
+        {(["listing", "buyer"] as AdminSide[]).map((side) => {
+          const active = activeSide === side;
+          const Icon = side === "listing" ? Home : Users;
+          return (
+            <button
+              key={side}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setActiveSide(side)}
+              className={cn(
+                "-mb-px inline-flex min-h-11 items-center gap-2 border-b-2 px-3 py-2 text-[0.86rem] font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30",
+                active
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <Icon className={cn("h-4 w-4", active ? "text-primary" : "text-muted-foreground")} />
+              <span>{ADMIN_SIDE_LABELS[side].title}</span>
+              <span
+                className={cn(
+                  "font-mono-ui text-[0.65rem] uppercase tracking-wider",
+                  active ? "text-primary" : "text-muted-foreground",
+                )}
+              >
+                {buckets.counts[side]}
+              </span>
+            </button>
+          );
+        })}
+      </div>
       <AdminKanbanSwimlane
-        side="listing"
-        title={ADMIN_SIDE_LABELS.listing.title}
-        icon={Home}
-        description={ADMIN_SIDE_LABELS.listing.description}
-        cardsByStage={buckets.byStage.listing}
-        totalCount={buckets.counts.listing}
-        onCardSelect={setSelectedCardId}
-        onCardDragStart={handleCardDragStart}
-        onCardDrop={handleCardDrop}
-      />
-      <AdminKanbanSwimlane
-        side="buyer"
-        title={ADMIN_SIDE_LABELS.buyer.title}
-        icon={Users}
-        description={ADMIN_SIDE_LABELS.buyer.description}
-        cardsByStage={buckets.byStage.buyer}
-        totalCount={buckets.counts.buyer}
+        side={activeSide}
+        title={ADMIN_SIDE_LABELS[activeSide].title}
+        description={ADMIN_SIDE_LABELS[activeSide].description}
+        cardsByStage={buckets.byStage[activeSide]}
+        totalCount={buckets.counts[activeSide]}
         onCardSelect={setSelectedCardId}
         onCardDragStart={handleCardDragStart}
         onCardDrop={handleCardDrop}
@@ -6342,6 +7219,9 @@ function AdminKanbanBoard() {
           onConditionChange={(field, value) => handleConditionChange(selectedCard.id, field, value)}
           onMoveToNext={() => handleMoveToNext(selectedCard.id)}
         />
+      )}
+      {showNewDeal && (
+        <NewDealDialog onClose={() => setShowNewDeal(false)} onCreated={handleCreateDeal} />
       )}
     </div>
   );

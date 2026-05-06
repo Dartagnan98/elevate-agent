@@ -841,9 +841,20 @@ def _profile_label(score: int) -> str:
 def _merge_profile(profile: JsonRecord, source: JsonRecord, thread: JsonRecord) -> None:
     record = _as_dict(thread.get("record"))
     phones, emails = _profile_contact_values(record)
+    contact_id = str(thread.get("contactId") or record.get("contact_id") or "").strip()
+    conversation_id = str(
+        thread.get("conversationId")
+        or record.get("conversation_id")
+        or record.get("source_record_id")
+        or ""
+    ).strip()
     profile["sources"] = sorted({*profile.get("sources", []), str(thread.get("sourceLabel") or source.get("label") or "")})
     profile["sourceIds"] = sorted({*profile.get("sourceIds", []), str(thread.get("sourceId") or source.get("id") or "")})
     profile["channels"] = sorted({*profile.get("channels", []), str(thread.get("channel") or "")})
+    if contact_id:
+        profile["contactIds"] = sorted({*profile.get("contactIds", []), contact_id})
+    if conversation_id:
+        profile["conversationIds"] = sorted({*profile.get("conversationIds", []), conversation_id})
     profile["phones"] = sorted({*profile.get("phones", []), *phones})
     profile["emails"] = sorted({*profile.get("emails", []), *emails})
     profile["threadIds"] = sorted({*profile.get("threadIds", []), str(thread.get("id") or "")})
@@ -888,6 +899,8 @@ def _profiles_from_threads(threads: list[JsonRecord], source_by_id: dict[str, Js
                 "sources": [],
                 "sourceIds": [],
                 "channels": [],
+                "contactIds": [],
+                "conversationIds": [],
                 "phones": [],
                 "emails": [],
                 "threadIds": [],

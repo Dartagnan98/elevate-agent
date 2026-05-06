@@ -483,6 +483,12 @@ export const api = {
     const tail = qs.toString() ? `?${qs.toString()}` : "";
     return fetchJSON<AdminDealsResponse>(`/api/admin/deals${tail}`);
   },
+  createAdminDeal: (body: AdminDealCreateRequest) =>
+    fetchJSON<AdminDeal>("/api/admin/deals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   moveAdminDeal: (dealId: string, toStage: number) =>
     fetchJSON<AdminDeal>(`/api/admin/deals/${encodeURIComponent(dealId)}/move`, {
       method: "POST",
@@ -495,6 +501,17 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ field, value }),
     }),
+  getAdminContacts: (
+    params: { tab?: string; type?: string; limit?: number; offset?: number } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.tab) qs.set("tab", params.tab);
+    if (params.type) qs.set("type", params.type);
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    if (params.offset != null) qs.set("offset", String(params.offset));
+    const tail = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<AdminContactsResponse>(`/api/admin/contacts${tail}`);
+  },
 
   // Real-estate source connectors and integrations
   getSourceConnectors: () =>
@@ -696,6 +713,8 @@ export interface SourceInboxProfile {
   sources: string[];
   sourceIds: string[];
   channels: string[];
+  contactIds: string[];
+  conversationIds: string[];
   phones: string[];
   emails: string[];
   threadIds: string[];
@@ -786,6 +805,17 @@ export type AdminDealSide = "listing" | "buyer";
 
 export type AdminDealToggleValue = string | boolean | null;
 
+export interface AdminDealCreateRequest {
+  title: string;
+  side: AdminDealSide;
+  province?: string;
+  currentStage?: number;
+  primaryContactId?: string | null;
+  loftyContactId?: string | null;
+  listingAddress?: string | null;
+  fields?: Record<string, unknown>;
+}
+
 export interface AdminDeal {
   id: string;
   title: string;
@@ -825,6 +855,24 @@ export interface AdminDeal {
 export interface AdminDealsResponse {
   items: AdminDeal[];
   count: number;
+}
+
+export interface AdminContact {
+  id: string;
+  displayName: string | null;
+  primaryEmail: string | null;
+  primaryPhone: string | null;
+  type: string | null;
+  stage: string | null;
+  lastActivityAt: string | null;
+}
+
+export interface AdminContactsResponse {
+  items: AdminContact[];
+  count: number;
+  tab: string | null;
+  limit: number;
+  offset: number;
 }
 
 export interface ComposioStatus {
