@@ -517,6 +517,7 @@ def _dispatch_safely(
                 deal_event_id=deal_event_id,
                 trigger=trigger,
                 actor=actor,
+                create_cron_jobs=True,
                 **kwargs,
             )
         except Exception:

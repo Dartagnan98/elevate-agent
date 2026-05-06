@@ -202,6 +202,7 @@ def test_move_deal_stage_creates_action_run_via_hook():
     assert run["registryId"] == action["id"]
     assert run["dealId"] == deal["id"]
     assert run["status"] == "queued"
+    assert run["cronJobId"]
     assert run["payload"]["toStage"] == 5
     assert run["payload"]["registryName"] == "just_listed entry"
 
@@ -231,8 +232,33 @@ def test_toggle_change_creates_action_run_via_hook():
         runs = list_action_runs(conn, deal_id=deal["id"])
 
     assert len(runs) == 1
+    assert runs[0]["cronJobId"]
     assert runs[0]["payload"]["fieldKey"] == "multiple_offers"
     assert runs[0]["payload"]["fieldNew"] is True
+
+
+def test_approval_required_action_does_not_spawn_cron_job():
+    deal = _new_listing_deal()
+    with connect() as conn:
+        create_action(
+            conn,
+            name="approval gated entry",
+            trigger="stage_entry",
+            skill="marketing",
+            side="listing",
+            to_stage=5,
+            approval_required=True,
+        )
+
+    with connect() as conn:
+        move_deal_stage(conn, deal["id"], to_stage=5, actor="human:test")
+
+    with connect() as conn:
+        runs = list_action_runs(conn, deal_id=deal["id"])
+
+    assert len(runs) == 1
+    assert runs[0]["cronJobId"] is None
+    assert runs[0]["payload"]["registryName"] == "approval gated entry"
 
 
 def test_evaluate_skips_when_action_disabled():

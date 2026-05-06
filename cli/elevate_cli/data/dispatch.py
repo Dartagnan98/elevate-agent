@@ -578,7 +578,7 @@ def evaluate(
             continue
 
         cron_job_id: str | None = None
-        if create_cron_jobs:
+        if create_cron_jobs and not action.get("approvalRequired"):
             cron_job_id = _spawn_cron_job(
                 action=action,
                 deal=deal,
@@ -627,7 +627,7 @@ def _spawn_cron_job(
         prompt = "\n".join(prompt_lines)
         job = cron_jobs.create_job(
             prompt=prompt,
-            schedule="now",
+            schedule=now_iso(),
             name=f"admin:{action.get('name')}:{deal.get('id')[:8]}",
             repeat=1,
             deliver="local",

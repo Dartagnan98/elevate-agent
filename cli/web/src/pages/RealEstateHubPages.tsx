@@ -1135,7 +1135,8 @@ Workflow rules:
 3. If the property address or appointment context is missing, draft or queue the next same-channel follow-up needed to get it. Do not fabricate missing details and do not create an Admin record yet.
 4. Once the appointment/property context is present, run the CMA skill workflow from ${PROFILE_SKILL_WORKDIR}. Preserve CMA handoffs and generated artifacts.
 5. Only after the CMA outputs are complete, create or update the Elevate Sellers Admin/CMA record with sourceProfileId=${profile.id}, sourceAdminSide=listing, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
-6. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into CMA/Admin.`;
+6. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the listing card at Admin stage 0 (CMA) unless the CMA outcome clearly belongs in a later listing stage. This stage event is what lets the Admin action registry run next.
+7. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into CMA/Admin.`;
   }
 
   return `Run the Skyleigh buyer qualification handoff for this lead profile.
@@ -1148,7 +1149,8 @@ Workflow rules:
 2. Use the outreach/lead context to determine whether a buyer appointment, qualification, financing, search criteria, or follow-up is still needed.
 3. If qualification details are missing, draft or queue the next same-channel message needed to collect them. Do not fabricate budget, financing, timeline, or area criteria.
 4. After the buyer workflow has enough appointment and qualification context, create or update the Elevate Buyers Admin record with sourceProfileId=${profile.id}, sourceAdminSide=buyer, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
-5. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into Buyers Admin.`;
+5. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the buyer card at Admin stage 0 (Intake) unless the qualification outcome clearly belongs in a later buyer stage. This stage event is what lets the Admin action registry run next.
+6. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into Buyers Admin.`;
 }
 
 function profileSourceMeta(profile: SourceInboxProfile): string {
