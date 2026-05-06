@@ -987,13 +987,18 @@ type ProfilePendingAdminAction = {
   side: AdminDealSide;
 };
 
-type ProfileActionBucketId = "push-admin" | "needs-verifier" | "follow-up" | "in-admin";
+type ProfileActionBucketId = "active-conversation" | "push-admin" | "needs-verifier" | "follow-up" | "in-admin";
 
 const PROFILE_ACTION_BUCKETS: Array<{
   id: ProfileActionBucketId;
   label: string;
   description: string;
 }> = [
+  {
+    id: "active-conversation",
+    label: "Active conversations",
+    description: "People they are actively messaging stay first, sorted by the newest conversation activity.",
+  },
   {
     id: "push-admin",
     label: "Push to Admin",
@@ -1079,7 +1084,31 @@ function profileHasAdminDeal(dealIds?: ProfileAdminDealIds): boolean {
   return Boolean(dealIds?.listing || dealIds?.buyer);
 }
 
-function profileActionBucket(profile: SourceInboxProfile, dealIds?: ProfileAdminDealIds): ProfileActionBucketId {
+function threadSortTime(thread: SourceInboxThread): number {
+  const ms = Date.parse(thread.latestAt || "");
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function isActiveProfileThread(thread: SourceInboxThread): boolean {
+  const status = String(thread.status || "open").toLowerCase();
+  return status !== "done" && status !== "archived";
+}
+
+function profileHasActiveConversation(
+  profile: SourceInboxProfile,
+  threadsForProfile?: SourceInboxThread[],
+): boolean {
+  if (!profile.hasConversation || profile.threadCount < 1) return false;
+  if (!threadsForProfile?.length) return true;
+  return threadsForProfile.some(isActiveProfileThread);
+}
+
+function profileActionBucket(
+  profile: SourceInboxProfile,
+  dealIds?: ProfileAdminDealIds,
+  activeConversation = false,
+): ProfileActionBucketId {
+  if (activeConversation) return "active-conversation";
   if (profileHasAdminDeal(dealIds)) return "in-admin";
   if (!profileHasVerifier(profile)) return "needs-verifier";
   if (profile.isPotentialLead || profile.heatLabel === "hot" || profile.heatLabel === "warm") return "push-admin";
@@ -1091,6 +1120,14 @@ function profileActionSort(a: SourceInboxProfile, b: SourceInboxProfile): number
   const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
   if (heat !== 0) return heat;
   return profileSortTime(b) - profileSortTime(a);
+}
+
+function profileConversationSort(a: SourceInboxProfile, b: SourceInboxProfile): number {
+  const recency = profileSortTime(b) - profileSortTime(a);
+  if (recency !== 0) return recency;
+  const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
+  if (heat !== 0) return heat;
+  return a.displayName.localeCompare(b.displayName);
 }
 
 function LeadProfilesWorkbench({
@@ -1134,21 +1171,41 @@ function LeadProfilesWorkbench({
     };
   }, []);
 
-  const threadByProfileId = useMemo(() => {
+  const threadsByProfileId = useMemo(() => {
     const byAnyThreadId = new Map<string, SourceInboxThread>();
     for (const thread of threads) {
       byAnyThreadId.set(thread.id, thread);
       byAnyThreadId.set(thread.threadId, thread);
     }
-    const next = new Map<string, SourceInboxThread>();
+    const next = new Map<string, SourceInboxThread[]>();
     for (const profile of profiles) {
-      const direct = profile.threadIds.map((threadId) => byAnyThreadId.get(threadId)).find(Boolean);
-      if (direct) {
-        next.set(profile.id, direct);
+      const matches: SourceInboxThread[] = [];
+      for (const threadId of profile.threadIds) {
+        const thread = byAnyThreadId.get(threadId);
+        if (thread && !matches.some((match) => match.id === thread.id)) {
+          matches.push(thread);
+        }
+      }
+      if (matches.length) {
+        matches.sort((a, b) => {
+          const active = Number(isActiveProfileThread(b)) - Number(isActiveProfileThread(a));
+          if (active !== 0) return active;
+          return threadSortTime(b) - threadSortTime(a);
+        });
+        next.set(profile.id, matches);
       }
     }
     return next;
   }, [profiles, threads]);
+
+  const threadByProfileId = useMemo(() => {
+    const next = new Map<string, SourceInboxThread>();
+    for (const [profileId, profileThreads] of threadsByProfileId) {
+      const activeThread = profileThreads.find(isActiveProfileThread);
+      next.set(profileId, activeThread ?? profileThreads[0]);
+    }
+    return next;
+  }, [threadsByProfileId]);
 
   const combinedDealIdsByProfile = useMemo(() => {
     const next: Record<string, ProfileAdminDealIds> = {};
@@ -1163,19 +1220,28 @@ function LeadProfilesWorkbench({
 
   const profileSections = useMemo(() => {
     const grouped: Record<ProfileActionBucketId, SourceInboxProfile[]> = {
+      "active-conversation": [],
       "push-admin": [],
       "needs-verifier": [],
       "follow-up": [],
       "in-admin": [],
     };
     for (const profile of profiles) {
-      grouped[profileActionBucket(profile, combinedDealIdsByProfile[profile.id])].push(profile);
+      grouped[
+        profileActionBucket(
+          profile,
+          combinedDealIdsByProfile[profile.id],
+          profileHasActiveConversation(profile, threadsByProfileId.get(profile.id)),
+        )
+      ].push(profile);
     }
     return PROFILE_ACTION_BUCKETS.map((bucket) => ({
       ...bucket,
-      profiles: grouped[bucket.id].slice().sort(profileActionSort),
+      profiles: grouped[bucket.id]
+        .slice()
+        .sort(bucket.id === "active-conversation" ? profileConversationSort : profileActionSort),
     })).filter((section) => section.profiles.length > 0);
-  }, [combinedDealIdsByProfile, profiles]);
+  }, [combinedDealIdsByProfile, profiles, threadsByProfileId]);
 
   const pushProfileToAdmin = async (profile: SourceInboxProfile, side: AdminDealSide) => {
     if (pendingProfileAction) return;
@@ -1279,7 +1345,7 @@ function LeadProfilesWorkbench({
           <div>
             <div className="text-sm font-semibold text-foreground">Profiles</div>
             <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
-              People built from CRM, inbox, SMS, and social sources, grouped by the next action to take.
+              People built from CRM, inbox, SMS, and social sources, with active conversations pinned first.
             </p>
           </div>
           <Badge variant="outline">{profiles.length} profiles</Badge>
@@ -1302,6 +1368,7 @@ function LeadProfilesWorkbench({
 
           {section.profiles.map((profile) => {
             const thread = threadByProfileId.get(profile.id);
+            const activeConversation = profileHasActiveConversation(profile, threadsByProfileId.get(profile.id));
             const dealIds = combinedDealIdsByProfile[profile.id] ?? {};
             const sellerDealId = dealIds.listing;
             const buyerDealId = dealIds.buyer;
@@ -1335,6 +1402,7 @@ function LeadProfilesWorkbench({
                       </Badge>
                       {profile.hasCrm && <Badge variant="success">CRM</Badge>}
                       {profile.isPotentialLead && <Badge variant="warning">potential lead</Badge>}
+                      {activeConversation && <Badge variant="success">active conversation</Badge>}
                       <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
                         {profileVerifierSummary(profile)}
                       </Badge>
@@ -1451,7 +1519,7 @@ function LeadProfilesListPage({
         <div className="min-w-0">
           <h2 className="text-lg font-semibold text-foreground">Profile list</h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-            Source-matched people grouped by next action, with phone/email verification, conversation context, and buyer or seller admin handoff.
+            Active conversations stay at the top, then profiles are grouped by next action with phone/email verification and buyer or seller admin handoff.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
