@@ -2857,18 +2857,15 @@ function HotLeadsList({
 function LeadPipelineTabs({
   buyers,
   data,
-  profiles,
   threads,
 }: {
   buyers: BuyerWatchlistEntry[];
   data: HubData;
-  profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
 }) {
   const followUpCount = leadThreadBuckets(threads).followUp.length;
   const buyerCount = buyers.length;
-  const profileCount = profiles.length;
-  const defaultTab = followUpCount > 0 ? "follow-ups" : profileCount > 0 ? "profiles" : buyerCount > 0 ? "buyers" : "follow-ups";
+  const defaultTab = followUpCount > 0 || buyerCount === 0 ? "follow-ups" : "buyers";
 
   return (
     <div className="rounded-2xl border border-border bg-card">
@@ -2911,39 +2908,18 @@ function LeadPipelineTabs({
                     {buyerCount}
                   </span>
                 </TabsTrigger>
-                <TabsTrigger
-                  active={active === "profiles"}
-                  value="profiles"
-                  onClick={() => setActive("profiles")}
-                >
-                  <span>Profiles</span>
-                  <span
-                    className={cn(
-                      "font-mono-ui ml-2 rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
-                      active === "profiles"
-                        ? "bg-foreground/10 text-foreground"
-                        : "bg-foreground/5 text-muted-foreground",
-                    )}
-                  >
-                    {profileCount}
-                  </span>
-                </TabsTrigger>
               </TabsList>
               <span className="hidden truncate text-xs text-muted-foreground sm:inline">
                 {active === "follow-ups"
                   ? "Replies waiting on you, hottest first."
-                  : active === "buyers"
-                    ? "MLS buyers actively shopping."
-                    : "Profile records ready for lead or CMA action."}
+                  : "MLS buyers actively shopping."}
               </span>
             </div>
             <div>
               {active === "follow-ups" ? (
                 <FollowUpThreadsList data={data} threads={threads} />
-              ) : active === "buyers" ? (
-                <PrivateSearchBuyersList buyers={buyers} />
               ) : (
-                <LeadProfilesWorkbench profiles={profiles} threads={threads} />
+                <PrivateSearchBuyersList buyers={buyers} />
               )}
             </div>
           </>
@@ -4282,6 +4258,7 @@ const LANE_META: Record<OutreachLane, { label: string; icon: typeof Sparkles; to
 
 const LEAD_TABS = [
   { id: "inbox" as const, label: "Inbox", icon: Inbox },
+  { id: "profiles" as const, label: "Profiles", icon: Users },
   { id: "templates" as const, label: "Templates", icon: BookText },
 ];
 
@@ -5000,124 +4977,131 @@ export function RealEstateLeadsPage() {
           <TemplatesPanel />
         ) : (
           <>
-        <LeadFilterBar
-          active={sourceFilter}
-          drafts={drafts.length}
-          followUps={followUpJobs.length}
-          hot={hotLeads}
-          onSelect={setSourceFilter}
-          options={filterOptions}
-          pulse={pulse}
-          profiles={profiles.length}
-          threads={threads.length}
-        />
-
-        {blockedSources.length > 0 && (
-          <div className="rounded-2xl border border-warning/40 bg-warning/8 px-4 py-3 text-sm text-foreground">
-            <div className="flex items-center gap-2 text-warning">
-              <AlertTriangle className="h-4 w-4" />
-              <span className="font-semibold">A lead source needs access.</span>
-            </div>
-            <div className="mt-2 space-y-1.5 text-xs text-foreground/75">
-              {blockedSources.slice(0, 3).map((source) => (
-                <div key={source.id}>
-                  <span className="font-medium text-foreground">{source.label}: </span>
-                  {source.nextOperatorStep || source.lastError || "Open Settings and reconnect this source."}
-                </div>
-              ))}
-              <Link
-                to="/config#composio"
-                className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-2 h-9 px-3")}
-              >
-                Open Settings
-              </Link>
-            </div>
-          </div>
-        )}
-
-        <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
-          <DraftMessagesBoard
-            data={data}
-            drafts={drafts}
-            keyboard
-            pageSize={12}
-            showOpenThread={false}
-            title="Approve replies"
-            emptyMessage={
-              sourceFilter
-                ? "No drafts waiting from this source. Switch the filter or wait for the next agent run."
-                : "Inbox zero on drafts. New approvals will land here as your agent generates replies."
-            }
-          />
-
-          <div className="flex flex-col gap-4">
-            <CollapsibleSection
-              title="Hot leads"
-              count={leadThreadBuckets(threads).hot.length}
-              description="Top scored leads across every connected source."
-              defaultOpen
-            >
-              <HotLeadsList data={data} threads={threads} />
-            </CollapsibleSection>
-
-            <LeadPipelineTabs
-              buyers={data.sourceInbox?.privateSearchBuyers ?? []}
-              data={data}
-              profiles={profiles}
-              threads={threads}
+            <LeadFilterBar
+              active={sourceFilter}
+              drafts={drafts.length}
+              followUps={followUpJobs.length}
+              hot={hotLeads}
+              onSelect={setSourceFilter}
+              options={filterOptions}
+              pulse={pulse}
+              profiles={profiles.length}
+              threads={threads.length}
             />
 
-            <CollapsibleSection
-              title="Recently skipped"
-              count={(data.sourceInbox?.skippedDrafts ?? []).length}
-              description="Skipped in the last 3 days. Restore brings it back to the queue."
-            >
-              <SkippedDraftsList data={data} />
-            </CollapsibleSection>
-          </div>
-        </div>
+            {blockedSources.length > 0 && (
+              <div className="rounded-2xl border border-warning/40 bg-warning/8 px-4 py-3 text-sm text-foreground">
+                <div className="flex items-center gap-2 text-warning">
+                  <AlertTriangle className="h-4 w-4" />
+                  <span className="font-semibold">A lead source needs access.</span>
+                </div>
+                <div className="mt-2 space-y-1.5 text-xs text-foreground/75">
+                  {blockedSources.slice(0, 3).map((source) => (
+                    <div key={source.id}>
+                      <span className="font-medium text-foreground">{source.label}: </span>
+                      {source.nextOperatorStep || source.lastError || "Open Settings and reconnect this source."}
+                    </div>
+                  ))}
+                  <Link
+                    to="/config#composio"
+                    className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-2 h-9 px-3")}
+                  >
+                    Open Settings
+                  </Link>
+                </div>
+              </div>
+            )}
 
-        <CollapsibleSection
-          title="Channels"
-          description="Connected sources, profiles, and routing."
-        >
-          <ChannelsPanel
-            profiles={data.sourceInbox?.profiles ?? []}
-            sources={allSources}
-            threads={allThreads}
-          />
-        </CollapsibleSection>
+            {tab === "profiles" ? (
+              <div className="rounded-2xl border border-border bg-card">
+                <LeadProfilesWorkbench profiles={profiles} threads={threads} />
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
+                  <DraftMessagesBoard
+                    data={data}
+                    drafts={drafts}
+                    keyboard
+                    pageSize={12}
+                    showOpenThread={false}
+                    title="Approve replies"
+                    emptyMessage={
+                      sourceFilter
+                        ? "No drafts waiting from this source. Switch the filter or wait for the next agent run."
+                        : "Inbox zero on drafts. New approvals will land here as your agent generates replies."
+                    }
+                  />
 
-        <CollapsibleSection
-          title="Outreach lanes"
-          description="New Outreach, Hot Leads Watcher, Follow-ups, Private Searches."
-        >
-          <OutreachLanesGrid cronJobs={data.cronJobs} onChanged={refresh} />
-        </CollapsibleSection>
+                  <div className="flex flex-col gap-4">
+                    <CollapsibleSection
+                      title="Hot leads"
+                      count={leadThreadBuckets(threads).hot.length}
+                      description="Top scored leads across every connected source."
+                      defaultOpen
+                    >
+                      <HotLeadsList data={data} threads={threads} />
+                    </CollapsibleSection>
 
-        <CollapsibleSection
-          title="Lead activity"
-          count={leadSessions.length}
-          description="What the agent just did across your inbox."
-        >
-          <RecentSessions
-            title="Recent agent runs"
-            sessions={leadSessions}
-            empty="No agent activity yet. Once a lane runs, its sessions will surface here."
-          />
-        </CollapsibleSection>
+                    <LeadPipelineTabs
+                      buyers={data.sourceInbox?.privateSearchBuyers ?? []}
+                      data={data}
+                      threads={threads}
+                    />
 
-        <CollapsibleSection
-          title="All scheduled jobs"
-          count={followUpJobs.length}
-          description="Every lead-related cron the agent is running."
-        >
-          <TimedTasks
-            jobs={followUpJobs}
-            empty="No additional schedules yet. Add custom ones from /cron."
-            title="Lead schedules"
-          />
-        </CollapsibleSection>
+                    <CollapsibleSection
+                      title="Recently skipped"
+                      count={(data.sourceInbox?.skippedDrafts ?? []).length}
+                      description="Skipped in the last 3 days. Restore brings it back to the queue."
+                    >
+                      <SkippedDraftsList data={data} />
+                    </CollapsibleSection>
+                  </div>
+                </div>
+
+                <CollapsibleSection
+                  title="Channels"
+                  description="Connected sources, profiles, and routing."
+                >
+                  <ChannelsPanel
+                    profiles={data.sourceInbox?.profiles ?? []}
+                    sources={allSources}
+                    threads={allThreads}
+                  />
+                </CollapsibleSection>
+
+                <CollapsibleSection
+                  title="Outreach lanes"
+                  description="New Outreach, Hot Leads Watcher, Follow-ups, Private Searches."
+                >
+                  <OutreachLanesGrid cronJobs={data.cronJobs} onChanged={refresh} />
+                </CollapsibleSection>
+
+                <CollapsibleSection
+                  title="Lead activity"
+                  count={leadSessions.length}
+                  description="What the agent just did across your inbox."
+                >
+                  <RecentSessions
+                    title="Recent agent runs"
+                    sessions={leadSessions}
+                    empty="No agent activity yet. Once a lane runs, its sessions will surface here."
+                  />
+                </CollapsibleSection>
+
+                <CollapsibleSection
+                  title="All scheduled jobs"
+                  count={followUpJobs.length}
+                  description="Every lead-related cron the agent is running."
+                >
+                  <TimedTasks
+                    jobs={followUpJobs}
+                    empty="No additional schedules yet. Add custom ones from /cron."
+                    title="Lead schedules"
+                  />
+                </CollapsibleSection>
+              </>
+            )}
           </>
         )}
       </div>
