@@ -383,7 +383,7 @@ function jobAction(
     detail: job.prompt,
     icon,
     id: `job-${job.id}`,
-    meta: job.next_run_at ? `Next ${isoTimeAgo(job.next_run_at)}` : job.schedule_display || job.schedule.display,
+    meta: job.next_run_at ? `Next ${isoTimeAgo(job.next_run_at)}` : job.schedule_display || job.schedule.display || "Scheduled",
     status: job.last_error ? "error" : job.enabled ? "scheduled" : "paused",
     title: `${titlePrefix}: ${job.name || job.prompt.slice(0, 68)}`,
     to: "/cron",
@@ -987,7 +987,12 @@ type ProfilePendingAdminAction = {
   side: AdminDealSide;
 };
 
+type ProfileWorkflowJobIds = Partial<Record<AdminDealSide, string>>;
+
 type ProfileActionBucketId = "active-conversation" | "push-admin" | "needs-verifier" | "follow-up" | "in-admin";
+
+const PROFILE_SKILL_WORKDIR = "/Users/dartagnanpatricio/.elevate/tmp/skyleigh-tools";
+const PROFILE_WORKFLOW_JOB_PREFIX = "Lead profile workflow";
 
 const PROFILE_ACTION_BUCKETS: Array<{
   id: ProfileActionBucketId;
@@ -1001,8 +1006,8 @@ const PROFILE_ACTION_BUCKETS: Array<{
   },
   {
     id: "push-admin",
-    label: "Push to Admin",
-    description: "Verified hot or potential leads ready to become a buyer or seller admin workflow.",
+    label: "Ready for skill handoff",
+    description: "Verified hot or potential leads ready for a buyer workflow or seller CMA before Admin handoff.",
   },
   {
     id: "needs-verifier",
@@ -1023,33 +1028,127 @@ const PROFILE_ACTION_BUCKETS: Array<{
 
 const PROFILE_ADMIN_SIDE_COPY = {
   listing: {
-    actionLabel: "Send to Sellers",
+    actionLabel: "Run CMA skill",
+    queuedLabel: "CMA queued",
     openLabel: "Open Sellers",
     badgeLabel: "Sellers Admin",
-    workflow: "seller-admin",
-    errorLabel: "Sellers Admin",
+    queuedBadgeLabel: "CMA skill queued",
+    workflow: "seller-cma-admin",
+    skill: "cma",
+    workflowLabel: "Seller CMA",
+    errorLabel: "CMA skill",
   },
   buyer: {
-    actionLabel: "Send to Buyers",
+    actionLabel: "Run buyer skill",
+    queuedLabel: "Buyer queued",
     openLabel: "Open Buyers",
     badgeLabel: "Buyers Admin",
-    workflow: "buyer-admin",
-    errorLabel: "Buyers Admin",
+    queuedBadgeLabel: "buyer skill queued",
+    workflow: "buyer-admin-intake",
+    skill: "outreach",
+    workflowLabel: "Buyer qualification",
+    errorLabel: "buyer workflow",
   },
 } satisfies Record<
   AdminDealSide,
   {
     actionLabel: string;
+    queuedLabel: string;
     openLabel: string;
     badgeLabel: string;
+    queuedBadgeLabel: string;
     workflow: string;
+    skill: string;
+    workflowLabel: string;
     errorLabel: string;
   }
 >;
 
-function profileAdminTitle(profile: SourceInboxProfile, side: AdminDealSide): string {
+function profileWorkflowToken(side: AdminDealSide): string {
+  return side === "listing" ? "seller-cma" : "buyer-admin";
+}
+
+function profileSkillWorkflowName(profile: SourceInboxProfile, side: AdminDealSide): string {
   const name = profile.displayName?.trim() || "New profile";
-  return `${name} - ${side === "listing" ? "seller" : "buyer"} admin`;
+  return `${PROFILE_WORKFLOW_JOB_PREFIX}: ${profileWorkflowToken(side)}: ${name}: ${profile.id}`;
+}
+
+function profileSkillWorkflowJob(
+  profile: SourceInboxProfile,
+  side: AdminDealSide,
+  jobs: CronJob[],
+): CronJob | undefined {
+  const exactName = profileSkillWorkflowName(profile, side);
+  const token = profileWorkflowToken(side);
+  return (
+    jobs.find((job) => (job.name ?? "") === exactName) ??
+    jobs.find((job) => {
+      const name = job.name ?? "";
+      return name.includes(PROFILE_WORKFLOW_JOB_PREFIX) && name.includes(token) && name.includes(profile.id);
+    })
+  );
+}
+
+function profileSkillWorkflowContext(profile: SourceInboxProfile, side: AdminDealSide): string {
+  const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
+  return JSON.stringify(
+    {
+      profileId: profile.id,
+      targetSide: side,
+      workflow: sideCopy.workflow,
+      skill: sideCopy.skill,
+      displayName: profile.displayName,
+      primaryContactId: profilePrimaryContactId(profile),
+      contactIds: profile.contactIds ?? [],
+      conversationIds: profile.conversationIds ?? [],
+      threadIds: profile.threadIds,
+      sourceIds: profile.sourceIds,
+      sources: profile.sources,
+      channels: profile.channels,
+      phones: profile.phones,
+      emails: profile.emails,
+      verifiers: profileVerifiers(profile),
+      latestText: profile.latestText,
+      latestAt: profile.latestAt,
+      heatScore: profile.heatScore,
+      heatLabel: profile.heatLabel,
+      tags: profile.tags,
+      sourceMeta: profileSourceMeta(profile),
+    },
+    null,
+    2,
+  );
+}
+
+function profileSkillWorkflowPrompt(profile: SourceInboxProfile, side: AdminDealSide): string {
+  const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
+  const context = profileSkillWorkflowContext(profile, side);
+  if (side === "listing") {
+    return `Run the Skyleigh seller CMA handoff for this lead profile.
+
+Profile context:
+${context}
+
+Workflow rules:
+1. This is a skill-owned handoff, not a direct dashboard push to Sellers Admin.
+2. Confirm from the profile, thread history, or source records that there is enough seller appointment/property context to run the CMA.
+3. If the property address or appointment context is missing, draft or queue the next same-channel follow-up needed to get it. Do not fabricate missing details and do not create an Admin record yet.
+4. Once the appointment/property context is present, run the CMA skill workflow from ${PROFILE_SKILL_WORKDIR}. Preserve CMA handoffs and generated artifacts.
+5. Only after the CMA outputs are complete, create or update the Elevate Sellers Admin/CMA record with sourceProfileId=${profile.id}, sourceAdminSide=listing, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
+6. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into CMA/Admin.`;
+  }
+
+  return `Run the Skyleigh buyer qualification handoff for this lead profile.
+
+Profile context:
+${context}
+
+Workflow rules:
+1. This is a skill-owned handoff, not a direct dashboard push to Buyers Admin.
+2. Use the outreach/lead context to determine whether a buyer appointment, qualification, financing, search criteria, or follow-up is still needed.
+3. If qualification details are missing, draft or queue the next same-channel message needed to collect them. Do not fabricate budget, financing, timeline, or area criteria.
+4. After the buyer workflow has enough appointment and qualification context, create or update the Elevate Buyers Admin record with sourceProfileId=${profile.id}, sourceAdminSide=buyer, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
+5. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into Buyers Admin.`;
 }
 
 function profileSourceMeta(profile: SourceInboxProfile): string {
@@ -1131,10 +1230,14 @@ function profileConversationSort(a: SourceInboxProfile, b: SourceInboxProfile): 
 }
 
 function LeadProfilesWorkbench({
+  cronJobs,
+  onChanged,
   showHeader = true,
   profiles,
   threads,
 }: {
+  cronJobs: CronJob[];
+  onChanged: () => Promise<void>;
   showHeader?: boolean;
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
@@ -1142,7 +1245,7 @@ function LeadProfilesWorkbench({
   const drawer = useThreadDrawer();
   const navigate = useNavigate();
   const [pendingProfileAction, setPendingProfileAction] = useState<ProfilePendingAdminAction | null>(null);
-  const [createdDealIds, setCreatedDealIds] = useState<Record<string, ProfileAdminDealIds>>({});
+  const [queuedWorkflowIds, setQueuedWorkflowIds] = useState<Record<string, ProfileWorkflowJobIds>>({});
   const [existingDealIds, setExistingDealIds] = useState<Record<string, ProfileAdminDealIds>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -1212,11 +1315,8 @@ function LeadProfilesWorkbench({
     for (const [profileId, dealIds] of Object.entries(existingDealIds)) {
       next[profileId] = { ...dealIds };
     }
-    for (const [profileId, dealIds] of Object.entries(createdDealIds)) {
-      next[profileId] = { ...next[profileId], ...dealIds };
-    }
     return next;
-  }, [createdDealIds, existingDealIds]);
+  }, [existingDealIds]);
 
   const profileSections = useMemo(() => {
     const grouped: Record<ProfileActionBucketId, SourceInboxProfile[]> = {
@@ -1243,7 +1343,7 @@ function LeadProfilesWorkbench({
     })).filter((section) => section.profiles.length > 0);
   }, [combinedDealIdsByProfile, profiles, threadsByProfileId]);
 
-  const pushProfileToAdmin = async (profile: SourceInboxProfile, side: AdminDealSide) => {
+  const queueProfileSkillWorkflow = async (profile: SourceInboxProfile, side: AdminDealSide) => {
     if (pendingProfileAction) return;
     const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
     setPendingProfileAction({ profileId: profile.id, side });
@@ -1253,61 +1353,28 @@ function LeadProfilesWorkbench({
       return next;
     });
     try {
-      const primaryContactId = profilePrimaryContactId(profile);
-      const createBody: AdminDealCreateRequest = {
-        title: profileAdminTitle(profile, side),
-        side,
-        province: "BC",
-        currentStage: 0,
-        primaryContactId,
-        fields: {
-          sourceProfileId: profile.id,
-          sourceProfileName: profile.displayName,
-          sourceContactIds: profile.contactIds ?? [],
-          sourceConversationIds: profile.conversationIds ?? [],
-          sourceVerifiers: profileVerifiers(profile),
-          sourceThreadIds: profile.threadIds,
-          sourceIds: profile.sourceIds,
-          sourceLabels: profile.sources,
-          sourceChannels: profile.channels,
-          sourceLatestText: profile.latestText,
-          sourceLatestAt: profile.latestAt,
-          sourceHeatScore: profile.heatScore,
-          sourceHeatLabel: profile.heatLabel,
-          sourceTags: profile.tags,
-          workflow: sideCopy.workflow,
-          workflowOrigin: "lead-profile-list",
-          sourceAdminSide: side,
-        },
-      };
-      let deal: AdminDeal;
-      try {
-        deal = await api.createAdminDeal(createBody);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "";
-        if (!primaryContactId || !message.includes("not found")) {
-          throw error;
-        }
-        deal = await api.createAdminDeal({
-          ...createBody,
-          primaryContactId: null,
-          fields: {
-            ...(createBody.fields ?? {}),
-            sourcePrimaryContactIdRejected: primaryContactId,
-          },
-        });
-      }
-      setCreatedDealIds((prev) => ({
+      const job = await api.createCronJob({
+        name: profileSkillWorkflowName(profile, side),
+        schedule: "1m",
+        prompt: profileSkillWorkflowPrompt(profile, side),
+        deliver: "local",
+        skills: [sideCopy.skill],
+        tier: "orchestrator",
+        workdir: PROFILE_SKILL_WORKDIR,
+      });
+      await api.triggerCronJob(job.id);
+      setQueuedWorkflowIds((prev) => ({
         ...prev,
         [profile.id]: {
           ...prev[profile.id],
-          [side]: deal.id,
+          [side]: job.id,
         },
       }));
+      await onChanged();
     } catch (error) {
       setErrors((prev) => ({
         ...prev,
-        [profile.id]: error instanceof Error ? error.message : `Could not send profile to ${sideCopy.errorLabel}`,
+        [profile.id]: error instanceof Error ? error.message : `Could not queue ${sideCopy.errorLabel}`,
       }));
     } finally {
       setPendingProfileAction(null);
@@ -1372,6 +1439,12 @@ function LeadProfilesWorkbench({
             const dealIds = combinedDealIdsByProfile[profile.id] ?? {};
             const sellerDealId = dealIds.listing;
             const buyerDealId = dealIds.buyer;
+            const sellerWorkflowId =
+              queuedWorkflowIds[profile.id]?.listing ??
+              profileSkillWorkflowJob(profile, "listing", cronJobs)?.id;
+            const buyerWorkflowId =
+              queuedWorkflowIds[profile.id]?.buyer ??
+              profileSkillWorkflowJob(profile, "buyer", cronJobs)?.id;
             const sellerPending =
               pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "listing";
             const buyerPending =
@@ -1406,6 +1479,8 @@ function LeadProfilesWorkbench({
                       <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
                         {profileVerifierSummary(profile)}
                       </Badge>
+                      {sellerWorkflowId && <Badge variant="warning">{PROFILE_ADMIN_SIDE_COPY.listing.queuedBadgeLabel}</Badge>}
+                      {buyerWorkflowId && <Badge variant="warning">{PROFILE_ADMIN_SIDE_COPY.buyer.queuedBadgeLabel}</Badge>}
                       {sellerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.listing.badgeLabel}</Badge>}
                       {buyerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.buyer.badgeLabel}</Badge>}
                     </div>
@@ -1452,15 +1527,19 @@ function LeadProfilesWorkbench({
                         type="button"
                         size="sm"
                         variant="outline"
-                        onClick={() => pushProfileToAdmin(profile, "listing")}
-                        disabled={pendingProfileAction !== null}
+                        onClick={() => queueProfileSkillWorkflow(profile, "listing")}
+                        disabled={pendingProfileAction !== null || Boolean(sellerWorkflowId)}
                       >
                         {sellerPending ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : sellerWorkflowId ? (
+                          <CheckCircle2 className="h-3.5 w-3.5" />
                         ) : (
                           <Home className="h-3.5 w-3.5" />
                         )}
-                        {PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
+                        {sellerWorkflowId
+                          ? PROFILE_ADMIN_SIDE_COPY.listing.queuedLabel
+                          : PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
                       </Button>
                     )}
                     {buyerDealId ? (
@@ -1476,15 +1555,19 @@ function LeadProfilesWorkbench({
                         type="button"
                         size="sm"
                         variant="outline"
-                        onClick={() => pushProfileToAdmin(profile, "buyer")}
-                        disabled={pendingProfileAction !== null}
+                        onClick={() => queueProfileSkillWorkflow(profile, "buyer")}
+                        disabled={pendingProfileAction !== null || Boolean(buyerWorkflowId)}
                       >
                         {buyerPending ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : buyerWorkflowId ? (
+                          <CheckCircle2 className="h-3.5 w-3.5" />
                         ) : (
                           <Users className="h-3.5 w-3.5" />
                         )}
-                        {PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
+                        {buyerWorkflowId
+                          ? PROFILE_ADMIN_SIDE_COPY.buyer.queuedLabel
+                          : PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
                       </Button>
                     )}
                   </div>
@@ -1499,9 +1582,13 @@ function LeadProfilesWorkbench({
 }
 
 function LeadProfilesListPage({
+  cronJobs,
+  onChanged,
   profiles,
   threads,
 }: {
+  cronJobs: CronJob[];
+  onChanged: () => Promise<void>;
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
 }) {
@@ -1519,7 +1606,7 @@ function LeadProfilesListPage({
         <div className="min-w-0">
           <h2 className="text-lg font-semibold text-foreground">Profile list</h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-            Active conversations stay at the top, then profiles are grouped by next action with phone/email verification and buyer or seller admin handoff.
+            Active conversations stay at the top, then verified profiles queue buyer workflows or seller CMA before Admin handoff.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -1530,7 +1617,13 @@ function LeadProfilesListPage({
       </div>
 
       <div className="overflow-hidden rounded-2xl border border-border bg-card">
-        <LeadProfilesWorkbench showHeader={false} profiles={profiles} threads={threads} />
+        <LeadProfilesWorkbench
+          cronJobs={cronJobs}
+          onChanged={onChanged}
+          showHeader={false}
+          profiles={profiles}
+          threads={threads}
+        />
       </div>
     </section>
   );
@@ -5292,7 +5385,12 @@ export function RealEstateLeadsPage() {
             )}
 
             {tab === "profiles" ? (
-              <LeadProfilesListPage profiles={profiles} threads={threads} />
+              <LeadProfilesListPage
+                cronJobs={data.cronJobs}
+                onChanged={refresh}
+                profiles={profiles}
+                threads={threads}
+              />
             ) : (
               <section
                 id="leads-panel-action-board"

@@ -144,7 +144,7 @@ export const api = {
 
   // Cron jobs
   getCronJobs: () => fetchJSON<CronJob[]>("/api/cron/jobs"),
-  createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string }) =>
+  createCronJob: (job: CronJobCreateRequest) =>
     fetchJSON<CronJob>("/api/cron/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1699,14 +1699,37 @@ export interface CronJob {
   id: string;
   name?: string;
   prompt: string;
-  schedule: { kind: string; expr: string; display: string };
+  schedule: { kind: string; expr?: string; display?: string; run_at?: string; minutes?: number };
   schedule_display: string;
+  skill?: string | null;
+  skills?: string[];
+  workdir?: string | null;
+  tier?: string | null;
+  agent?: string | null;
   enabled: boolean;
   state: string;
   deliver?: string;
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_error?: string | null;
+}
+
+export interface CronJobCreateRequest {
+  prompt: string;
+  schedule: string;
+  name?: string;
+  deliver?: string;
+  skill?: string | null;
+  skills?: string[];
+  agent?: string | null;
+  tier?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  base_url?: string | null;
+  enabled_toolsets?: string[];
+  workdir?: string | null;
+  expected_readiness_version?: string | null;
+  backfill_pending?: boolean;
 }
 
 export interface SkillInfo {
