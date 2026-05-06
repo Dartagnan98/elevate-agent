@@ -81,6 +81,7 @@ import type {
   AdminDeal,
   AdminDealCreateRequest,
   AdminDealSide,
+  DealContext,
   AgentHubMemoryNode,
   AgentHubSnapshot,
   BuyerWatchlistEntry,
@@ -5984,6 +5985,7 @@ function initialsFromTitle(title: string): string {
 
 function adminConditionValueFromDeal(deal: AdminDeal, field: AdminConditionField): AdminConditionValue {
   const value = deal[ADMIN_DEAL_CONDITION_API_KEYS[field]];
+  if (value === undefined) return null;
   if (typeof value === "string" || typeof value === "boolean" || value == null) {
     return value;
   }
@@ -6926,6 +6928,234 @@ function AdminCardSourceSection({ context }: { context: AdminSourceContext }) {
   );
 }
 
+function isPersistedAdminDealId(id: string): boolean {
+  return /^[a-f0-9]{32}$/i.test(id);
+}
+
+function adminContextDate(value?: string | null): string {
+  if (!value) return "Not set";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  return isoTimeAgo(value);
+}
+
+function adminContextMoney(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "Not set";
+  return new Intl.NumberFormat("en-CA", {
+    style: "currency",
+    currency: "CAD",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function adminRunStatusVariant(status: string): "default" | "secondary" | "destructive" | "outline" | "success" | "warning" {
+  if (status === "succeeded" || status === "completed") return "success";
+  if (status === "failed" || status === "cancelled") return "destructive";
+  if (status === "waiting_human" || status === "waiting_external") return "warning";
+  if (status === "running" || status === "queued") return "secondary";
+  return "outline";
+}
+
+function AdminDealContextSection({
+  context,
+  loading,
+  error,
+}: {
+  context: DealContext | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const deal = context?.deal ?? null;
+  const primary = context?.primaryContact ?? null;
+  const coContacts = context?.coContacts ?? [];
+  const attachments = context?.attachments ?? [];
+  const priorRuns = context?.priorRuns ?? [];
+  const dateRows: Array<[string, string]> = deal
+    ? ([
+        ["Listing", deal.listingDate],
+        ["Offer", deal.offerDate],
+        ["Subjects", deal.subjectRemovalDate],
+        ["Deposit", deal.depositDueDate],
+        ["Completion", deal.completionDate],
+        ["Possession", deal.possessionDate],
+      ] as Array<[string, string | null | undefined]>).flatMap(([label, value]) =>
+        value ? [[label, value]] : [],
+      )
+    : [];
+  const moneyRows: Array<[string, number]> = deal
+    ? ([
+        ["List price", deal.listPrice],
+        ["Offer price", deal.offerPrice],
+        ["Deposit", deal.depositAmount],
+      ] as Array<[string, number | null | undefined]>).flatMap(([label, value]) =>
+        typeof value === "number" ? [[label, value]] : [],
+      )
+    : [];
+
+  return (
+    <section className="mb-3 rounded-xl border border-border/60 bg-background/35 px-3 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <DatabaseIcon className="h-4 w-4 shrink-0 text-primary" />
+          <h3 className="text-[0.88rem] font-semibold text-foreground">Transaction file</h3>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {loading && (
+            <Badge variant="outline" className="gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              loading
+            </Badge>
+          )}
+          {deal?.board && <Badge variant="outline">{deal.board}</Badge>}
+          {deal?.market && <Badge variant="outline">{deal.market}</Badge>}
+          {context && <Badge variant="outline">{attachments.length} docs</Badge>}
+          {context && <Badge variant="outline">{priorRuns.length} runs</Badge>}
+        </div>
+      </div>
+
+      {!loading && error && (
+        <div className="mt-2 rounded-lg border border-warning/35 bg-warning/10 px-3 py-2 text-[0.78rem] text-warning">
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && !context && (
+        <div className="mt-2 rounded-lg border border-dashed border-border/50 bg-background/25 px-3 py-3 text-[0.78rem] text-muted-foreground">
+          This preview card is not backed by a saved deal file yet.
+        </div>
+      )}
+
+      {context && deal && (
+        <div className="mt-3 space-y-3">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                Primary contact
+              </div>
+              <div className="mt-1 truncate text-[0.86rem] font-medium text-foreground">
+                {primary?.displayName ?? "Not linked"}
+              </div>
+              {(primary?.primaryEmail || primary?.primaryPhone) && (
+                <div className="mt-1 space-y-0.5 text-[0.74rem] text-muted-foreground">
+                  {primary.primaryEmail && <div className="truncate">{primary.primaryEmail}</div>}
+                  {primary.primaryPhone && <div>{primary.primaryPhone}</div>}
+                </div>
+              )}
+            </div>
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                Important dates
+              </div>
+              {dateRows.length > 0 ? (
+                <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 text-[0.74rem]">
+                  {dateRows.slice(0, 6).map(([label, value]) => (
+                    <div key={label} className="min-w-0">
+                      <span className="text-muted-foreground">{label}: </span>
+                      <span className="text-foreground">{adminContextDate(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-[0.74rem] text-muted-foreground">No dates set</div>
+              )}
+            </div>
+          </div>
+
+          {(moneyRows.length > 0 || deal.mlsNumber || deal.legalDescription) && (
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                File details
+              </div>
+              <div className="mt-1 grid gap-x-3 gap-y-1 text-[0.74rem] sm:grid-cols-2">
+                {moneyRows.map(([label, value]) => (
+                  <div key={label}>
+                    <span className="text-muted-foreground">{label}: </span>
+                    <span className="text-foreground">{adminContextMoney(value)}</span>
+                  </div>
+                ))}
+                {deal.mlsNumber && (
+                  <div>
+                    <span className="text-muted-foreground">MLS: </span>
+                    <span className="text-foreground">{deal.mlsNumber}</span>
+                  </div>
+                )}
+                {deal.legalDescription && (
+                  <div className="sm:col-span-2">
+                    <span className="text-muted-foreground">Legal: </span>
+                    <span className="text-foreground">{deal.legalDescription}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="grid gap-2 sm:grid-cols-3">
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                <Users className="h-3 w-3" />
+                Co-contacts
+              </div>
+              {coContacts.length > 0 ? (
+                <div className="mt-1.5 space-y-1">
+                  {coContacts.slice(0, 3).map((item) => (
+                    <div key={item.id} className="min-w-0 text-[0.74rem]">
+                      <span className="font-medium text-foreground">{item.role}</span>
+                      <span className="text-muted-foreground"> · </span>
+                      <span className="text-muted-foreground">{item.contact?.displayName ?? item.contactId}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1.5 text-[0.74rem] text-muted-foreground">None linked</div>
+              )}
+            </div>
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                <FileText className="h-3 w-3" />
+                Documents
+              </div>
+              {attachments.length > 0 ? (
+                <div className="mt-1.5 space-y-1">
+                  {attachments.slice(0, 3).map((item) => (
+                    <div key={item.id} className="min-w-0 text-[0.74rem]" title={item.filePath}>
+                      <span className="font-medium text-foreground">{item.kind}</span>
+                      {item.summary && <span className="text-muted-foreground"> · {item.summary}</span>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1.5 text-[0.74rem] text-muted-foreground">No docs attached</div>
+              )}
+            </div>
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                <Clock className="h-3 w-3" />
+                Prior runs
+              </div>
+              {priorRuns.length > 0 ? (
+                <div className="mt-1.5 space-y-1.5">
+                  {priorRuns.slice(0, 3).map((run) => (
+                    <div key={run.id} className="min-w-0">
+                      <div className="truncate text-[0.74rem] font-medium text-foreground">
+                        {run.registryName ?? run.skill ?? "Admin run"}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5">
+                        <Badge variant={adminRunStatusVariant(run.status)}>{run.status}</Badge>
+                        <span className="text-[0.68rem] text-muted-foreground">{isoTimeAgo(run.updatedAt)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1.5 text-[0.74rem] text-muted-foreground">No runs yet</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AdminCardDetailPanel({
   card,
   onClose,
@@ -6947,12 +7177,43 @@ function AdminCardDetailPanel({
   const nextLabel = nextStage == null ? null : adminStageLabel(card.side, nextStage);
 
   const [expanded, setExpanded] = useState<Set<AdminStageNumber>>(() => new Set([card.stage]));
+  const [dealContext, setDealContext] = useState<DealContext | null>(null);
+  const [dealContextLoading, setDealContextLoading] = useState(false);
+  const [dealContextError, setDealContextError] = useState<string | null>(null);
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     setExpanded((prev) => (prev.has(card.stage) ? prev : new Set([...prev, card.stage])));
   }, [card.stage]);
+
+  useEffect(() => {
+    let active = true;
+    setDealContext(null);
+    setDealContextError(null);
+    if (!isPersistedAdminDealId(card.id)) {
+      setDealContextLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+    setDealContextLoading(true);
+    api.getDealContext(card.id)
+      .then((context) => {
+        if (active) setDealContext(context);
+      })
+      .catch((err) => {
+        if (active) {
+          setDealContextError(errorMessage(err, "Deal context failed"));
+        }
+      })
+      .finally(() => {
+        if (active) setDealContextLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [card.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -7100,6 +7361,11 @@ function AdminCardDetailPanel({
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
           {card.sourceContext && <AdminCardSourceSection context={card.sourceContext} />}
+          <AdminDealContextSection
+            context={dealContext}
+            loading={dealContextLoading}
+            error={dealContextError}
+          />
           <div className="flex flex-col gap-2">
             {ADMIN_STAGE_NUMBERS.map((stage) => (
                 <AdminCardStageSection
@@ -7139,6 +7405,13 @@ function NewDealDialog({
   const [contacts, setContacts] = useState<AdminContact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsError, setContactsError] = useState<string | null>(null);
+  const [listingAddress, setListingAddress] = useState("");
+  const [propertySubtype, setPropertySubtype] = useState("");
+  const [listingType, setListingType] = useState("");
+  const [signingAuthority, setSigningAuthority] = useState("");
+  const [transactionType, setTransactionType] = useState("");
+  const [notes, setNotes] = useState("");
+  const [notesAutoFilled, setNotesAutoFilled] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -7226,11 +7499,28 @@ function NewDealDialog({
     if (!title.trim() && contact.displayName) {
       setTitle(contact.displayName);
     }
+    if (!notes.trim() || notesAutoFilled) {
+      const bits: string[] = [];
+      if (contact.sourceKey) bits.push(`Source: ${contact.sourceKey}`);
+      if (contact.type) bits.push(`Type: ${contact.type}`);
+      if (contact.stage) bits.push(`Stage: ${contact.stage}`);
+      if (contact.lastActivityAt) bits.push(`Last activity: ${isoTimeAgo(contact.lastActivityAt)}`);
+      if (contact.ownerNotes) bits.push(`\nNotes: ${contact.ownerNotes}`);
+      const filled = bits.join("\n");
+      if (filled) {
+        setNotes(filled);
+        setNotesAutoFilled(true);
+      }
+    }
   };
 
   const clearContact = () => {
     setContactId(null);
     setContactQuery("");
+    if (notesAutoFilled) {
+      setNotes("");
+      setNotesAutoFilled(false);
+    }
   };
 
   const canSubmit = title.trim().length > 0 && !submitting;
@@ -7241,25 +7531,49 @@ function NewDealDialog({
     setSubmitting(true);
     setSubmitError(null);
     const cleanTitle = title.trim();
+    const cleanAddress = listingAddress.trim();
+    const cleanNotes = notes.trim();
     const placeholderId = `local-${Date.now()}`;
     const stageLabel = adminStageLabel(side, stage);
+    const conditions: Partial<Record<AdminConditionField, AdminConditionValue>> = {};
+    const fields: Record<string, unknown> = {};
+    if (side === "listing") {
+      if (signingAuthority) {
+        fields.signing_authority = signingAuthority;
+        conditions.signing_authority = signingAuthority;
+      }
+      if (listingType) {
+        fields.listing_type = listingType;
+        conditions.listing_type = listingType;
+      }
+    } else if (transactionType) {
+      fields.transaction_type = transactionType;
+      conditions.transaction_type = transactionType;
+    }
+    if (propertySubtype) {
+      fields.property_subtype = propertySubtype;
+      conditions.property_subtype = propertySubtype;
+    }
+    if (cleanNotes) fields.notes = cleanNotes;
     const placeholder: AdminCard = {
       id: placeholderId,
       side,
       stage,
       client: cleanTitle,
       contactInitials: initialsFromTitle(cleanTitle),
-      property: undefined,
+      property: cleanAddress || undefined,
       nextLabel: stageLabel.title,
       pinnedTop25: false,
       completedByStage: {},
-      conditions: {},
+      conditions,
     };
     const request: AdminDealCreateRequest = {
       title: cleanTitle,
       side,
       currentStage: stage,
       primaryContactId: contactId,
+      listingAddress: side === "listing" ? cleanAddress || null : null,
+      fields,
     };
     try {
       await onCreated(placeholder, request);
@@ -7270,6 +7584,15 @@ function NewDealDialog({
       setSubmitting(false);
     }
   };
+
+  const subtypeOptions =
+    ADMIN_ENUM_CONDITIONS.find((c) => c.field === "property_subtype")?.options ?? [];
+  const listingTypeOptions =
+    ADMIN_ENUM_CONDITIONS.find((c) => c.field === "listing_type")?.options ?? [];
+  const signingAuthorityOptions =
+    ADMIN_ENUM_CONDITIONS.find((c) => c.field === "signing_authority")?.options ?? [];
+  const transactionTypeOptions =
+    ADMIN_ENUM_CONDITIONS.find((c) => c.field === "transaction_type")?.options ?? [];
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center sm:items-center sm:p-6">
@@ -7284,7 +7607,7 @@ function NewDealDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative flex h-full w-full flex-col bg-card shadow-2xl sm:h-auto sm:max-h-full sm:w-full sm:max-w-[28rem] sm:rounded-2xl sm:border sm:border-border/60"
+        className="relative flex h-full w-full flex-col bg-card shadow-2xl sm:h-auto sm:max-h-[calc(100vh-3rem)] sm:w-full sm:max-w-[34rem] sm:rounded-2xl sm:border sm:border-border/60"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
           <div className="min-w-0">
@@ -7335,18 +7658,63 @@ function NewDealDialog({
               Contact (optional)
             </label>
             {selectedContact ? (
-              <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2">
-                <div className="min-w-0">
-                  <div className="truncate text-[0.88rem] font-medium text-foreground">
-                    {selectedContact.displayName ?? "(unnamed)"}
+              <div className="mt-1.5 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[0.92rem] font-semibold text-foreground">
+                      {selectedContact.displayName ?? "(unnamed)"}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.74rem] text-muted-foreground">
+                      {selectedContact.primaryEmail && (
+                        <span className="inline-flex items-center gap-1">
+                          <Mail className="h-3 w-3" aria-hidden />
+                          <span className="truncate">{selectedContact.primaryEmail}</span>
+                        </span>
+                      )}
+                      {selectedContact.primaryPhone && (
+                        <span className="inline-flex items-center gap-1">
+                          <Phone className="h-3 w-3" aria-hidden />
+                          <span>{selectedContact.primaryPhone}</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="truncate text-[0.72rem] text-muted-foreground">
-                    {selectedContact.primaryEmail ?? selectedContact.primaryPhone ?? selectedContact.id}
-                  </div>
+                  <Button type="button" variant="ghost" size="sm" onClick={clearContact} className="shrink-0">
+                    Change
+                  </Button>
                 </div>
-                <Button type="button" variant="ghost" size="sm" onClick={clearContact}>
-                  Change
-                </Button>
+                {(selectedContact.type || selectedContact.stage || selectedContact.sourceKey) && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {selectedContact.type && (
+                      <span className="font-mono-ui rounded border border-border/60 bg-background/50 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+                        {selectedContact.type}
+                      </span>
+                    )}
+                    {selectedContact.stage && (
+                      <span className="font-mono-ui rounded border border-border/60 bg-background/50 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+                        {selectedContact.stage}
+                      </span>
+                    )}
+                    {selectedContact.sourceKey && (
+                      <span className="font-mono-ui rounded border border-border/60 bg-background/50 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+                        src: {selectedContact.sourceKey}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {(selectedContact.lastActivityAt || selectedContact.ownerNotes) && (
+                  <div className="mt-2 space-y-1 border-t border-primary/20 pt-2 text-[0.72rem] text-muted-foreground">
+                    {selectedContact.lastActivityAt && (
+                      <div className="inline-flex items-center gap-1">
+                        <Clock className="h-3 w-3" aria-hidden />
+                        <span>last activity {isoTimeAgo(selectedContact.lastActivityAt)}</span>
+                      </div>
+                    )}
+                    {selectedContact.ownerNotes && (
+                      <div className="line-clamp-2 italic">"{selectedContact.ownerNotes}"</div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <>
@@ -7431,6 +7799,130 @@ function NewDealDialog({
                 );
               })}
             </select>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-border/40 bg-background/30 px-3 py-3">
+            <div className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              {side === "listing" ? "Property" : "Search"}
+            </div>
+            {side === "listing" && (
+              <div>
+                <label htmlFor={`${titleId}-address`} className="block text-[0.74rem] text-muted-foreground">
+                  Listing address
+                </label>
+                <input
+                  id={`${titleId}-address`}
+                  type="text"
+                  value={listingAddress}
+                  onChange={(e) => setListingAddress(e.target.value)}
+                  placeholder="e.g. 123 Lewis Creek Rd, Kelowna BC"
+                  className="mt-1 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.86rem] text-foreground placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label htmlFor={`${titleId}-subtype`} className="block text-[0.74rem] text-muted-foreground">
+                  Property type
+                </label>
+                <select
+                  id={`${titleId}-subtype`}
+                  value={propertySubtype}
+                  onChange={(e) => setPropertySubtype(e.target.value)}
+                  className="mt-1 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.86rem] text-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                >
+                  <option value="">— select —</option>
+                  {subtypeOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {side === "listing" ? (
+                <div>
+                  <label htmlFor={`${titleId}-listing-type`} className="block text-[0.74rem] text-muted-foreground">
+                    Listing type
+                  </label>
+                  <select
+                    id={`${titleId}-listing-type`}
+                    value={listingType}
+                    onChange={(e) => setListingType(e.target.value)}
+                    className="mt-1 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.86rem] text-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  >
+                    <option value="">— select —</option>
+                    {listingTypeOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label htmlFor={`${titleId}-tx-type`} className="block text-[0.74rem] text-muted-foreground">
+                    Transaction type
+                  </label>
+                  <select
+                    id={`${titleId}-tx-type`}
+                    value={transactionType}
+                    onChange={(e) => setTransactionType(e.target.value)}
+                    className="mt-1 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.86rem] text-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  >
+                    <option value="">— select —</option>
+                    {transactionTypeOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+            {side === "listing" && (
+              <div>
+                <label htmlFor={`${titleId}-signing`} className="block text-[0.74rem] text-muted-foreground">
+                  Signing authority
+                </label>
+                <select
+                  id={`${titleId}-signing`}
+                  value={signingAuthority}
+                  onChange={(e) => setSigningAuthority(e.target.value)}
+                  className="mt-1 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.86rem] text-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                >
+                  <option value="">— select —</option>
+                  {signingAuthorityOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between">
+              <label htmlFor={`${titleId}-notes`} className="font-mono-ui block text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+                Notes
+              </label>
+              {notesAutoFilled && (
+                <span className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-primary">
+                  auto-filled from contact
+                </span>
+              )}
+            </div>
+            <textarea
+              id={`${titleId}-notes`}
+              value={notes}
+              onChange={(e) => {
+                setNotes(e.target.value);
+                if (notesAutoFilled) setNotesAutoFilled(false);
+              }}
+              rows={3}
+              placeholder="Anything relevant to start this deal — context, urgency, source"
+              className="mt-1.5 w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-[0.86rem] text-foreground placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
           </div>
 
           {submitError && (

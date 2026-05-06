@@ -112,11 +112,21 @@ from elevate_cli.data.templates import (
     template_stats_with_ambiguous,
 )
 from elevate_cli.data.deals import (
+    add_deal_attachment,
+    add_deal_contact,
     create_deal,
     get_deal,
+    get_deal_context,
+    list_deal_action_runs,
+    list_deal_attachments,
+    list_deal_contacts,
     list_deal_events,
     list_deals,
     move_deal_stage,
+    record_run_result,
+    set_deal_dates,
+    set_deal_fields,
+    set_deal_money,
     set_deal_toggle,
 )
 from elevate_cli.data.dispatch import (
@@ -175,8 +185,12 @@ __all__ = [
     "retire_template", "template_leaderboard", "template_stats",
     "template_stats_with_ambiguous",
     # deals
-    "create_deal", "get_deal", "list_deal_events", "list_deals",
-    "move_deal_stage", "set_deal_toggle",
+    "add_deal_attachment", "add_deal_contact", "create_deal",
+    "get_deal", "get_deal_context", "list_deal_action_runs",
+    "list_deal_attachments", "list_deal_contacts", "list_deal_events",
+    "list_deals", "move_deal_stage", "record_run_result",
+    "set_deal_dates", "set_deal_fields", "set_deal_money",
+    "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)
     "create_action", "delete_action", "evaluate_dispatch", "get_action",
     "list_action_runs", "list_actions", "list_conditional_docs",

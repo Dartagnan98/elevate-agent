@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from elevate_cli.data import connect, create_deal, list_deal_events
+from elevate_cli.data import connect, create_action, create_deal, evaluate_dispatch, list_deal_events, upsert_contact
 from elevate_cli.data.connection import _reset_schema_cache
 
 
@@ -67,6 +67,9 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
     assert body["title"] == "123 Main Listing"
     assert body["side"] == "listing"
     assert body["status"] == "active"
+    assert body["province"] == "BC"
+    assert body["board"] == "AOIR"
+    assert body["market"] == "Kamloops"
     assert body["currentStage"] == 1
     assert body["listingAddress"] == "123 Main St"
     assert body["loftyContactId"] == "lofty-123"
@@ -81,6 +84,32 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
     assert events[0]["actor"] == "human:web"
     assert events[0]["payload"]["fields"]["rush_file"] == "yes"
 
+
+
+def test_admin_jurisdiction_is_configured_and_not_switched_from_board(client):
+    resp = client.get("/api/admin/jurisdiction")
+    assert resp.status_code == 200, resp.text
+    jurisdiction = resp.json()
+    assert jurisdiction == {
+        "country": "CA",
+        "province": "BC",
+        "board": "AOIR",
+        "market": "Kamloops",
+        "packageKey": "ca.bc.aoir.kamloops",
+    }
+
+    created = client.post(
+        "/api/admin/deals",
+        json={"title": "Wrong province request", "side": "listing", "province": "AB", "board": "CREB", "market": "Calgary"},
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["province"] == "BC"
+    assert body["board"] == "AOIR"
+    assert body["market"] == "Kamloops"
+
+    switched = client.get("/api/admin/deals?province=AB")
+    assert switched.status_code == 400
 
 def test_get_deals_filters_by_side(client):
     listing = _create(title="Listing deal", side="listing")
@@ -165,6 +194,107 @@ def test_create_deal_invalid_side_returns_400(client):
         json={"title": "Bad deal", "side": "tenant"},
     )
     assert resp.status_code == 400
+
+
+
+def test_deal_context_endpoint_returns_source_of_truth_blob(client):
+    with connect() as conn:
+        primary = upsert_contact(
+            conn,
+            display_name="Seller One",
+            primary_email="seller@example.com",
+            type="listing",
+            stage="active",
+        )
+        lawyer = upsert_contact(
+            conn,
+            display_name="Lawyer One",
+            primary_email="lawyer@example.com",
+            type="other",
+            stage="active",
+        )
+        deal = create_deal(
+            conn,
+            title="Context Deal",
+            side="listing",
+            actor="human:test",
+            province="BC",
+            primary_contact_id=primary["id"],
+            fields={"property_subtype": "strata", "draft-cma-followup": True},
+        )
+
+    fields = client.post(
+        f"/api/deals/{deal['id']}/fields",
+        json={"fields": {"subjectRemovalDate": "2026-06-01", "listPrice": 799000}},
+    )
+    assert fields.status_code == 200, fields.text
+    assert fields.json()["subjectRemovalDate"] == "2026-06-01"
+    assert fields.json()["listPrice"] == 799000
+
+    linked = client.post(
+        f"/api/deals/{deal['id']}/contacts",
+        json={"role": "lawyer", "contactId": lawyer["id"], "notes": "Seller lawyer"},
+    )
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["role"] == "lawyer"
+
+    attached = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "cma_report", "filePath": "/tmp/cma.pdf", "summary": "CMA ready"},
+    )
+    assert attached.status_code == 200, attached.text
+
+    resp = client.get(f"/api/deals/{deal['id']}/context")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["deal"]["id"] == deal["id"]
+    assert body["deal"]["province"] == "BC"
+    assert body["primaryContact"]["displayName"] == "Seller One"
+    assert body["conditions"]["property_subtype"] == "strata"
+    assert body["checklist"]["draft-cma-followup"] is True
+    assert body["coContacts"][0]["role"] == "lawyer"
+    assert body["attachments"][0]["kind"] == "cma_report"
+
+
+def test_run_result_callback_updates_run_and_attaches_artifacts(client):
+    deal = _create(title="Run result deal", current_stage=1)
+    with connect() as conn:
+        action = create_action(
+            conn,
+            name="CMA on stage",
+            trigger="stage_entry",
+            skill="skyleigh:cma-collect",
+            side="listing",
+            to_stage=1,
+        )
+        runs = evaluate_dispatch(
+            conn,
+            deal_id=deal["id"],
+            trigger="stage_entry",
+            actor="human:test",
+            to_stage=1,
+        )
+    assert runs and runs[0]["registryId"] == action["id"]
+    run_id = runs[0]["id"]
+
+    resp = client.post(
+        f"/api/deals/{deal['id']}/runs/{run_id}/result",
+        json={
+            "status": "completed",
+            "artifacts": [
+                {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
+            ],
+            "next_tasks": [{"skill": "skyleigh:cma-pdf", "args": {"deal_id": deal["id"]}}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "succeeded"
+    assert body["outputPath"] == "/tmp/context-cma.pdf"
+
+    context = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert context["attachments"][0]["sourceRunId"] == run_id
+    assert context["priorRuns"][0]["payload"]["result"]["nextTasks"][0]["skill"] == "skyleigh:cma-pdf"
 
 
 def test_admin_deals_requires_session_token():

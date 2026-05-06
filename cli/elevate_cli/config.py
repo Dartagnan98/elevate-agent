@@ -349,6 +349,14 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["elevate-cli"],
+    "real_estate": {
+        # Admin deal flow jurisdiction. This is deployment/client config, not a visible admin-board switcher.
+        # The configured package determines forms, checklists, MLS/board overlays, and automation defaults.
+        "country": "CA",
+        "province": "BC",
+        "board": "AOIR",
+        "market": "Kamloops",
+    },
     "goals": {
         # Max autonomous continuation turns for /goal before pausing.
         "max_turns": 20,

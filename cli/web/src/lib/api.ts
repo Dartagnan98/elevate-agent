@@ -465,11 +465,13 @@ export const api = {
   getHarness: () => fetchJSON<HarnessSnapshot>("/api/harness"),
 
   // Admin Hub deals
+  getAdminJurisdiction: () => fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction"),
   getAdminDeals: (
     params: {
       side?: AdminDealSide;
       currentStage?: number;
       status?: string | null;
+      province?: string | null;
       limit?: number;
       offset?: number;
     } = {},
@@ -478,6 +480,7 @@ export const api = {
     if (params.side) qs.set("side", params.side);
     if (params.currentStage != null) qs.set("current_stage", String(params.currentStage));
     if (params.status !== undefined) qs.set("status", params.status ?? "");
+    if (params.province !== undefined) qs.set("province", params.province ?? "");
     if (params.limit != null) qs.set("limit", String(params.limit));
     if (params.offset != null) qs.set("offset", String(params.offset));
     const tail = qs.toString() ? `?${qs.toString()}` : "";
@@ -500,6 +503,32 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ field, value }),
+    }),
+  getDealContext: (dealId: string) =>
+    fetchJSON<DealContext>(`/api/deals/${encodeURIComponent(dealId)}/context`),
+  updateDealFields: (dealId: string, fields: Record<string, unknown>) =>
+    fetchJSON<AdminDeal>(`/api/deals/${encodeURIComponent(dealId)}/fields`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields }),
+    }),
+  addDealContact: (dealId: string, body: DealContactCreateRequest) =>
+    fetchJSON<DealContact>(`/api/deals/${encodeURIComponent(dealId)}/contacts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  addDealAttachment: (dealId: string, body: DealAttachmentCreateRequest) =>
+    fetchJSON<DealAttachment>(`/api/deals/${encodeURIComponent(dealId)}/attachments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  recordDealRunResult: (dealId: string, runId: string, body: DealRunResultRequest) =>
+    fetchJSON<AdminActionRun>(`/api/deals/${encodeURIComponent(dealId)}/runs/${encodeURIComponent(runId)}/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
   getAdminContacts: (
     params: { tab?: string; type?: string; limit?: number; offset?: number } = {},
@@ -815,7 +844,10 @@ export type AdminDealToggleValue = string | boolean | null;
 export interface AdminDealCreateRequest {
   title: string;
   side: AdminDealSide;
+  // Ignored by the API; deal jurisdiction is stamped from server config.
   province?: string;
+  board?: string | null;
+  market?: string | null;
   currentStage?: number;
   primaryContactId?: string | null;
   loftyContactId?: string | null;
@@ -830,6 +862,8 @@ export interface AdminDeal {
   currentStage: number;
   status: "active" | "closed" | "archived" | string;
   province: string | null;
+  board?: string | null;
+  market?: string | null;
   primaryContactId: string | null;
   loftyContactId: string | null;
   listingAddress: string | null;
@@ -857,11 +891,124 @@ export interface AdminDeal {
   lockbox: boolean | null;
   delayedOffer: boolean | null;
   saleOfBuyersProperty: boolean | null;
+  listingDate?: string | null;
+  offerDate?: string | null;
+  subjectRemovalDate?: string | null;
+  depositDueDate?: string | null;
+  completionDate?: string | null;
+  possessionDate?: string | null;
+  anniversaryDate?: string | null;
+  listPrice?: number | null;
+  offerPrice?: number | null;
+  depositAmount?: number | null;
+  commissionPct?: number | null;
+  mlsNumber?: string | null;
+  legalDescription?: string | null;
+  lotSizeSqft?: number | null;
+  yearBuilt?: number | null;
+  depositInTrustAt?: string | null;
+  listingPublishedAt?: string | null;
+  offerAcceptedAt?: string | null;
+  subjectsRemovedAt?: string | null;
+  completedAt?: string | null;
+}
+
+export interface DealContactCreateRequest {
+  role: string;
+  contactId: string;
+  notes?: string | null;
+}
+
+export interface DealContact {
+  id: string;
+  dealId: string;
+  role: string;
+  contactId: string;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  contact?: AdminContact | null;
+}
+
+export interface DealAttachmentCreateRequest {
+  kind: string;
+  filePath: string;
+  summary?: string | null;
+  sourceRunId?: string | null;
+  sourceSnapshotId?: string | null;
+}
+
+export interface DealAttachment {
+  id: string;
+  dealId: string;
+  kind: string;
+  filePath: string;
+  summary: string | null;
+  sourceRunId: string | null;
+  sourceSnapshotId: string | null;
+  createdAt: string;
+}
+
+export interface AdminActionRun {
+  id: string;
+  registryId: string;
+  dealId: string;
+  dealEventId: string | null;
+  cronJobId: string | null;
+  harnessRunId?: string | null;
+  status: string;
+  outputPath: string | null;
+  errorMessage: string | null;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  skill?: string | null;
+  registryName?: string | null;
+}
+
+export interface DealRunResultArtifact {
+  kind: string;
+  filePath?: string | null;
+  file_path?: string | null;
+  summary?: string | null;
+  sourceSnapshotId?: string | null;
+  source_snapshot_id?: string | null;
+}
+
+export interface DealRunResultRequest {
+  status: string;
+  artifacts?: DealRunResultArtifact[];
+  next_tasks?: Array<Record<string, unknown>>;
+  nextTasks?: Array<Record<string, unknown>>;
+  human_prompt?: Record<string, unknown> | null;
+  humanPrompt?: Record<string, unknown> | null;
+  error?: string | null;
+}
+
+export interface DealContext {
+  deal: AdminDeal;
+  primaryContact: AdminContact | null;
+  coContacts: DealContact[];
+  conditions: Record<string, AdminDealToggleValue>;
+  checklist: Record<string, unknown>;
+  attachments: DealAttachment[];
+  priorRuns: AdminActionRun[];
+  events: Array<Record<string, unknown>>;
+}
+
+export interface AdminJurisdiction {
+  country: string;
+  province: string;
+  board: string;
+  market: string;
+  packageKey: string;
 }
 
 export interface AdminDealsResponse {
   items: AdminDeal[];
   count: number;
+  jurisdiction?: AdminJurisdiction;
 }
 
 export interface AdminContact {
@@ -872,6 +1019,14 @@ export interface AdminContact {
   type: string | null;
   stage: string | null;
   lastActivityAt: string | null;
+  ownerNotes?: string | null;
+  parkedReason?: string | null;
+  hasOpenConflict?: boolean;
+  classifiedAt?: string | null;
+  sourceKey?: string | null;
+  ingestRunId?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface AdminContactsResponse {

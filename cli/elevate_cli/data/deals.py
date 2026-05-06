@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from elevate_cli.data._util import new_id, now_iso
 
 
 _VALID_SIDES = {"listing", "buyer"}
 _VALID_STATUSES = {"active", "closed", "archived"}
-_VALID_EVENT_KINDS = {"created", "stage_transition", "toggle_change"}
+_VALID_EVENT_KINDS = {"created", "stage_transition", "toggle_change", "run_result", "attachment_added", "contact_linked"}
 
 _ENUM_FIELDS = {
     "signing_authority",
@@ -119,6 +119,8 @@ def _row_to_deal(row: sqlite3.Row) -> dict[str, Any]:
         "currentStage": row["current_stage"],
         "status": row["status"],
         "province": row["province"],
+        "board": row["board"],
+        "market": row["market"],
         "primaryContactId": row["primary_contact_id"],
         "loftyContactId": row["lofty_contact_id"],
         "listingAddress": row["listing_address"],
@@ -127,6 +129,26 @@ def _row_to_deal(row: sqlite3.Row) -> dict[str, Any]:
         "updatedAt": row["updated_at"],
         "stageEnteredAt": row["stage_entered_at"],
         "closedAt": row["closed_at"],
+        "listingDate": row["listing_date"],
+        "offerDate": row["offer_date"],
+        "subjectRemovalDate": row["subject_removal_date"],
+        "depositDueDate": row["deposit_due_date"],
+        "completionDate": row["completion_date"],
+        "possessionDate": row["possession_date"],
+        "anniversaryDate": row["anniversary_date"],
+        "listPrice": row["list_price"],
+        "offerPrice": row["offer_price"],
+        "depositAmount": row["deposit_amount"],
+        "commissionPct": row["commission_pct"],
+        "mlsNumber": row["mls_number"],
+        "legalDescription": row["legal_description"],
+        "lotSizeSqft": row["lot_size_sqft"],
+        "yearBuilt": row["year_built"],
+        "depositInTrustAt": row["deposit_in_trust_at"],
+        "listingPublishedAt": row["listing_published_at"],
+        "offerAcceptedAt": row["offer_accepted_at"],
+        "subjectsRemovedAt": row["subjects_removed_at"],
+        "completedAt": row["completed_at"],
     }
     for field in sorted(_ENUM_FIELDS):
         deal[_field_api_name(field)] = row[field]
@@ -228,6 +250,9 @@ def list_deals(
     current_stage: int | None = None,
     status: str | None = "active",
     primary_contact_id: str | None = None,
+    province: str | None = None,
+    board: str | None = None,
+    market: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -257,6 +282,15 @@ def list_deals(
     if primary_contact_id is not None:
         sql += " AND primary_contact_id = ?"
         params.append(primary_contact_id)
+    if province is not None:
+        sql += " AND province = ?"
+        params.append(province)
+    if board is not None:
+        sql += " AND board = ?"
+        params.append(board)
+    if market is not None:
+        sql += " AND market = ?"
+        params.append(market)
     sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     return [_row_to_deal(r) for r in conn.execute(sql, params).fetchall()]
@@ -293,6 +327,8 @@ def create_deal(
     side: str,
     actor: str,
     province: str = "BC",
+    board: str | None = None,
+    market: str | None = None,
     current_stage: int = 0,
     primary_contact_id: str | None = None,
     lofty_contact_id: str | None = None,
@@ -322,6 +358,8 @@ def create_deal(
         "current_stage",
         "status",
         "province",
+        "board",
+        "market",
         "primary_contact_id",
         "lofty_contact_id",
         "listing_address",
@@ -337,6 +375,8 @@ def create_deal(
         current_stage,
         "active",
         province,
+        board,
+        market,
         primary_contact_id,
         lofty_contact_id,
         listing_address,
@@ -522,3 +562,406 @@ def _dispatch_safely(
             )
         except Exception:
             continue
+
+
+_DATE_FIELDS = {
+    "listing_date", "offer_date", "subject_removal_date", "deposit_due_date",
+    "completion_date", "possession_date", "anniversary_date",
+}
+_MONEY_FIELDS = {"list_price", "offer_price", "deposit_amount", "commission_pct"}
+_PROPERTY_FIELDS = {"mls_number", "legal_description", "lot_size_sqft", "year_built"}
+_STATUS_TS_FIELDS = {
+    "deposit_in_trust_at", "listing_published_at", "offer_accepted_at",
+    "subjects_removed_at", "completed_at",
+}
+_DEAL_DETAIL_FIELDS = _DATE_FIELDS | _MONEY_FIELDS | _PROPERTY_FIELDS | _STATUS_TS_FIELDS
+_API_TO_DB_DETAIL_FIELDS = {
+    "listingDate": "listing_date",
+    "offerDate": "offer_date",
+    "subjectRemovalDate": "subject_removal_date",
+    "depositDueDate": "deposit_due_date",
+    "completionDate": "completion_date",
+    "possessionDate": "possession_date",
+    "anniversaryDate": "anniversary_date",
+    "listPrice": "list_price",
+    "offerPrice": "offer_price",
+    "depositAmount": "deposit_amount",
+    "commissionPct": "commission_pct",
+    "mlsNumber": "mls_number",
+    "legalDescription": "legal_description",
+    "lotSizeSqft": "lot_size_sqft",
+    "yearBuilt": "year_built",
+    "depositInTrustAt": "deposit_in_trust_at",
+    "listingPublishedAt": "listing_published_at",
+    "offerAcceptedAt": "offer_accepted_at",
+    "subjectsRemovedAt": "subjects_removed_at",
+    "completedAt": "completed_at",
+}
+
+
+def _contact_row_to_api(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    try:
+        from elevate_cli.data.contacts import _row_to_contact
+        return _row_to_contact(row)
+    except Exception:
+        return dict(row)
+
+
+def _row_to_deal_contact(row: sqlite3.Row) -> dict[str, Any]:
+    contact = _contact_row_to_api(row) if "display_name" in row.keys() else None
+    return {
+        "id": row["id"],
+        "dealId": row["deal_id"],
+        "role": row["role"],
+        "contactId": row["contact_id"],
+        "notes": row["notes"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "contact": contact,
+    }
+
+
+def _row_to_deal_attachment(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "dealId": row["deal_id"],
+        "kind": row["kind"],
+        "filePath": row["file_path"],
+        "summary": row["summary"],
+        "sourceRunId": row["source_run_id"],
+        "sourceSnapshotId": row["source_snapshot_id"],
+        "createdAt": row["created_at"],
+    }
+
+
+def _normalize_detail_field(field: str) -> str:
+    field = _API_TO_DB_DETAIL_FIELDS.get(field, field)
+    if field not in _DEAL_DETAIL_FIELDS:
+        raise ValueError(f"unsupported deal detail field {field!r}")
+    return field
+
+
+def set_deal_fields(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    actor: str,
+    fields: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Set source-of-truth deal detail fields (dates, money, property, timestamps)."""
+    if not fields:
+        existing = get_deal(conn, deal_id)
+        if existing is None:
+            raise LookupError(f"deal {deal_id!r} not found")
+        return existing
+    row = conn.execute("SELECT * FROM deals WHERE id=?", (deal_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    updates: dict[str, Any] = {}
+    old_values: dict[str, Any] = {}
+    for raw_field, value in fields.items():
+        field = _normalize_detail_field(raw_field)
+        old_values[field] = row[field]
+        if field in _MONEY_FIELDS or field == "lot_size_sqft":
+            updates[field] = None if value is None or value == "" else float(value)
+        elif field == "year_built":
+            updates[field] = None if value is None or value == "" else int(value)
+        else:
+            updates[field] = None if value is None else str(value)
+    now = now_iso()
+    sets = ", ".join([f"{field}=?" for field in updates] + ["updated_at=?"])
+    conn.execute(
+        f"UPDATE deals SET {sets} WHERE id=?",
+        [*updates.values(), now, deal_id],
+    )
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="toggle_change",
+        actor=actor,
+        field_name="deal_fields",
+        old_value=old_values,
+        new_value=updates,
+        payload={"fields": updates},
+        created_at=now,
+    )
+    return get_deal(conn, deal_id)  # type: ignore[return-value]
+
+
+def set_deal_dates(conn: sqlite3.Connection, deal_id: str, *, actor: str, **dates: Any) -> dict[str, Any]:
+    return set_deal_fields(conn, deal_id, actor=actor, fields=dates)
+
+
+def set_deal_money(conn: sqlite3.Connection, deal_id: str, *, actor: str, **fields: Any) -> dict[str, Any]:
+    return set_deal_fields(conn, deal_id, actor=actor, fields=fields)
+
+
+def add_deal_contact(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    role: str,
+    contact_id: str,
+    notes: str | None = None,
+    actor: str = "system",
+) -> dict[str, Any]:
+    if get_deal(conn, deal_id) is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    if not role or not role.strip():
+        raise ValueError("role is required")
+    if conn.execute("SELECT id FROM contacts WHERE id=?", (contact_id,)).fetchone() is None:
+        raise LookupError(f"contact {contact_id!r} not found")
+    now = now_iso()
+    cid = new_id()
+    conn.execute(
+        """
+        INSERT INTO deal_contacts(id, deal_id, role, contact_id, notes, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(deal_id, role, contact_id) DO UPDATE SET
+            notes=excluded.notes,
+            updated_at=excluded.updated_at
+        """,
+        (cid, deal_id, role.strip(), contact_id, notes, now, now),
+    )
+    row = conn.execute(
+        "SELECT * FROM deal_contacts WHERE deal_id=? AND role=? AND contact_id=?",
+        (deal_id, role.strip(), contact_id),
+    ).fetchone()
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="contact_linked",
+        actor=actor,
+        payload={"role": role.strip(), "contactId": contact_id, "notes": notes},
+        created_at=now,
+    )
+    return _row_to_deal_contact(row)
+
+
+def list_deal_contacts(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    role: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT dc.*, c.*
+        FROM deal_contacts dc
+        JOIN contacts c ON c.id = dc.contact_id
+        WHERE dc.deal_id=?
+    """
+    params: list[Any] = [deal_id]
+    if role is not None:
+        sql += " AND dc.role=?"
+        params.append(role)
+    sql += " ORDER BY dc.role ASC, dc.updated_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = {
+            "id": row["id"],
+            "dealId": row["deal_id"],
+            "role": row["role"],
+            "contactId": row["contact_id"],
+            "notes": row["notes"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+        contact_row = conn.execute("SELECT * FROM contacts WHERE id=?", (row["contact_id"],)).fetchone()
+        item["contact"] = _contact_row_to_api(contact_row)
+        out.append(item)
+    return out
+
+
+def add_deal_attachment(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    kind: str,
+    file_path: str,
+    summary: str | None = None,
+    source_run_id: str | None = None,
+    source_snapshot_id: str | None = None,
+    actor: str = "system",
+) -> dict[str, Any]:
+    if get_deal(conn, deal_id) is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    if not kind or not kind.strip():
+        raise ValueError("attachment kind is required")
+    if not file_path or not file_path.strip():
+        raise ValueError("file_path is required")
+    aid = new_id()
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO deal_attachments(
+            id, deal_id, kind, file_path, summary,
+            source_run_id, source_snapshot_id, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (aid, deal_id, kind.strip(), file_path.strip(), summary, source_run_id, source_snapshot_id, now),
+    )
+    row = conn.execute("SELECT * FROM deal_attachments WHERE id=?", (aid,)).fetchone()
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="attachment_added",
+        actor=actor,
+        payload={"kind": kind.strip(), "filePath": file_path.strip(), "sourceRunId": source_run_id},
+        created_at=now,
+    )
+    return _row_to_deal_attachment(row)
+
+
+def list_deal_attachments(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    kind: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    sql = "SELECT * FROM deal_attachments WHERE deal_id=?"
+    params: list[Any] = [deal_id]
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    return [_row_to_deal_attachment(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def _row_to_action_run(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "registryId": row["registry_id"],
+        "dealId": row["deal_id"],
+        "dealEventId": row["deal_event_id"],
+        "cronJobId": row["cron_job_id"],
+        "harnessRunId": row["harness_run_id"],
+        "status": row["status"],
+        "outputPath": row["output_path"],
+        "errorMessage": row["error_message"],
+        "payload": _decode_json(row["payload_json"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "completedAt": row["completed_at"],
+        "skill": row["skill"] if "skill" in row.keys() else None,
+        "registryName": row["name"] if "name" in row.keys() else None,
+    }
+
+
+def list_deal_action_runs(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT r.*, a.skill, a.name
+        FROM admin_action_runs r
+        LEFT JOIN admin_action_registry a ON a.id = r.registry_id
+        WHERE r.deal_id=?
+        ORDER BY r.created_at DESC
+        LIMIT ?
+        """,
+        (deal_id, limit),
+    ).fetchall()
+    return [_row_to_action_run(row) for row in rows]
+
+
+def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
+    deal = get_deal(conn, deal_id)
+    if deal is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    primary = None
+    if deal.get("primaryContactId"):
+        primary = _contact_row_to_api(
+            conn.execute("SELECT * FROM contacts WHERE id=?", (deal["primaryContactId"],)).fetchone()
+        )
+    conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
+    return {
+        "deal": deal,
+        "primaryContact": primary,
+        "coContacts": list_deal_contacts(conn, deal_id),
+        "conditions": conditions,
+        "checklist": deal.get("extraToggles") or {},
+        "attachments": list_deal_attachments(conn, deal_id),
+        "priorRuns": list_deal_action_runs(conn, deal_id),
+        "events": list_deal_events(conn, deal_id, limit=50),
+    }
+
+
+def record_run_result(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    run_id: str,
+    *,
+    status: str,
+    artifacts: Sequence[Mapping[str, Any]] | None = None,
+    next_tasks: Sequence[Mapping[str, Any]] | None = None,
+    human_prompt: Mapping[str, Any] | None = None,
+    error: str | None = None,
+    actor: str = "skill",
+) -> dict[str, Any]:
+    if get_deal(conn, deal_id) is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    row = conn.execute(
+        "SELECT * FROM admin_action_runs WHERE id=? AND deal_id=?",
+        (run_id, deal_id),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"action run {run_id!r} not found for deal {deal_id!r}")
+    normalized_status = "succeeded" if status == "completed" else status
+    allowed = {"queued", "running", "succeeded", "completed", "failed", "skipped", "cancelled", "waiting_human", "waiting_external"}
+    if normalized_status not in allowed:
+        raise ValueError(f"invalid run status {status!r}")
+    now = now_iso()
+    completed_at = now if normalized_status in {"succeeded", "completed", "failed", "skipped", "cancelled"} else None
+    payload = _decode_json(row["payload_json"]) or {}
+    if not isinstance(payload, dict):
+        payload = {"prior": payload}
+    payload["result"] = {
+        "status": status,
+        "artifacts": [dict(item) for item in (artifacts or [])],
+        "nextTasks": [dict(item) for item in (next_tasks or [])],
+        "humanPrompt": dict(human_prompt) if human_prompt else None,
+        "error": error,
+        "recordedAt": now,
+    }
+    output_path = row["output_path"]
+    for artifact in artifacts or []:
+        attachment = add_deal_attachment(
+            conn,
+            deal_id,
+            kind=str(artifact.get("kind") or "artifact"),
+            file_path=str(artifact.get("file_path") or artifact.get("filePath") or ""),
+            summary=artifact.get("summary"),
+            source_run_id=run_id,
+            source_snapshot_id=artifact.get("source_snapshot_id") or artifact.get("sourceSnapshotId"),
+            actor=actor,
+        )
+        if output_path is None:
+            output_path = attachment["filePath"]
+    conn.execute(
+        """
+        UPDATE admin_action_runs
+        SET status=?, output_path=?, error_message=?, payload_json=?, updated_at=?, completed_at=?
+        WHERE id=?
+        """,
+        (normalized_status, output_path, error, _encode_json(payload), now, completed_at, run_id),
+    )
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="run_result",
+        actor=actor,
+        payload={"runId": run_id, "status": normalized_status, "humanPrompt": human_prompt, "error": error},
+        created_at=now,
+    )
+    updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
+    return _row_to_action_run(updated)
