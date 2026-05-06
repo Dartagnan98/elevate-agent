@@ -80,6 +80,7 @@ import type {
   AdminContact,
   AdminDeal,
   AdminDealCreateRequest,
+  AdminDealSide,
   AgentHubMemoryNode,
   AgentHubSnapshot,
   BuyerWatchlistEntry,
@@ -979,9 +980,71 @@ function profileContactLine(profile: SourceInboxProfile): string {
   return contacts.length ? contacts.join(" · ") : "No phone or email yet";
 }
 
-function profileCmaTitle(profile: SourceInboxProfile): string {
+type ProfileAdminDealIds = Partial<Record<AdminDealSide, string>>;
+
+type ProfilePendingAdminAction = {
+  profileId: string;
+  side: AdminDealSide;
+};
+
+type ProfileActionBucketId = "push-admin" | "needs-verifier" | "follow-up" | "in-admin";
+
+const PROFILE_ACTION_BUCKETS: Array<{
+  id: ProfileActionBucketId;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "push-admin",
+    label: "Push to Admin",
+    description: "Verified hot or potential leads ready to become a buyer or seller admin workflow.",
+  },
+  {
+    id: "needs-verifier",
+    label: "Needs phone or email",
+    description: "People with useful conversation context but no matching verifier yet.",
+  },
+  {
+    id: "follow-up",
+    label: "Follow up",
+    description: "Lower-urgency profiles to review, message, or keep watching from the source inbox.",
+  },
+  {
+    id: "in-admin",
+    label: "Already in Admin",
+    description: "Profiles already pushed into Buyers Admin, Sellers Admin, or both.",
+  },
+];
+
+const PROFILE_ADMIN_SIDE_COPY = {
+  listing: {
+    actionLabel: "Send to Sellers",
+    openLabel: "Open Sellers",
+    badgeLabel: "Sellers Admin",
+    workflow: "seller-admin",
+    errorLabel: "Sellers Admin",
+  },
+  buyer: {
+    actionLabel: "Send to Buyers",
+    openLabel: "Open Buyers",
+    badgeLabel: "Buyers Admin",
+    workflow: "buyer-admin",
+    errorLabel: "Buyers Admin",
+  },
+} satisfies Record<
+  AdminDealSide,
+  {
+    actionLabel: string;
+    openLabel: string;
+    badgeLabel: string;
+    workflow: string;
+    errorLabel: string;
+  }
+>;
+
+function profileAdminTitle(profile: SourceInboxProfile, side: AdminDealSide): string {
   const name = profile.displayName?.trim() || "New profile";
-  return `${name} - CMA workflow`;
+  return `${name} - ${side === "listing" ? "seller" : "buyer"} admin`;
 }
 
 function profileSourceMeta(profile: SourceInboxProfile): string {
@@ -1012,6 +1075,24 @@ function profileHasVerifier(profile: SourceInboxProfile): boolean {
   return profileVerifiers(profile).length > 0;
 }
 
+function profileHasAdminDeal(dealIds?: ProfileAdminDealIds): boolean {
+  return Boolean(dealIds?.listing || dealIds?.buyer);
+}
+
+function profileActionBucket(profile: SourceInboxProfile, dealIds?: ProfileAdminDealIds): ProfileActionBucketId {
+  if (profileHasAdminDeal(dealIds)) return "in-admin";
+  if (!profileHasVerifier(profile)) return "needs-verifier";
+  if (profile.isPotentialLead || profile.heatLabel === "hot" || profile.heatLabel === "warm") return "push-admin";
+  return "follow-up";
+}
+
+function profileActionSort(a: SourceInboxProfile, b: SourceInboxProfile): number {
+  if (a.isPotentialLead !== b.isPotentialLead) return a.isPotentialLead ? -1 : 1;
+  const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
+  if (heat !== 0) return heat;
+  return profileSortTime(b) - profileSortTime(a);
+}
+
 function LeadProfilesWorkbench({
   showHeader = true,
   profiles,
@@ -1023,9 +1104,9 @@ function LeadProfilesWorkbench({
 }) {
   const drawer = useThreadDrawer();
   const navigate = useNavigate();
-  const [pendingProfileId, setPendingProfileId] = useState<string | null>(null);
-  const [createdDealIds, setCreatedDealIds] = useState<Record<string, string>>({});
-  const [existingDealIds, setExistingDealIds] = useState<Record<string, string>>({});
+  const [pendingProfileAction, setPendingProfileAction] = useState<ProfilePendingAdminAction | null>(null);
+  const [createdDealIds, setCreatedDealIds] = useState<Record<string, ProfileAdminDealIds>>({});
+  const [existingDealIds, setExistingDealIds] = useState<Record<string, ProfileAdminDealIds>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -1033,11 +1114,14 @@ function LeadProfilesWorkbench({
     api.getAdminDeals({ status: "active", limit: 200 })
       .then((response) => {
         if (!live) return;
-        const next: Record<string, string> = {};
+        const next: Record<string, ProfileAdminDealIds> = {};
         for (const deal of response.items) {
           const sourceProfileId = deal.extraToggles?.sourceProfileId;
-          if (typeof sourceProfileId === "string") {
-            next[sourceProfileId] = deal.id;
+          if (typeof sourceProfileId === "string" && (deal.side === "listing" || deal.side === "buyer")) {
+            next[sourceProfileId] = {
+              ...next[sourceProfileId],
+              [deal.side]: deal.id,
+            };
           }
         }
         setExistingDealIds(next);
@@ -1066,20 +1150,37 @@ function LeadProfilesWorkbench({
     return next;
   }, [profiles, threads]);
 
-  const sortedProfiles = useMemo(
-    () =>
-      profiles.slice().sort((a, b) => {
-        if (a.isPotentialLead !== b.isPotentialLead) return a.isPotentialLead ? -1 : 1;
-        const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
-        if (heat !== 0) return heat;
-        return profileSortTime(b) - profileSortTime(a);
-      }),
-    [profiles],
-  );
+  const combinedDealIdsByProfile = useMemo(() => {
+    const next: Record<string, ProfileAdminDealIds> = {};
+    for (const [profileId, dealIds] of Object.entries(existingDealIds)) {
+      next[profileId] = { ...dealIds };
+    }
+    for (const [profileId, dealIds] of Object.entries(createdDealIds)) {
+      next[profileId] = { ...next[profileId], ...dealIds };
+    }
+    return next;
+  }, [createdDealIds, existingDealIds]);
 
-  const startCmaWorkflow = async (profile: SourceInboxProfile) => {
-    if (pendingProfileId) return;
-    setPendingProfileId(profile.id);
+  const profileSections = useMemo(() => {
+    const grouped: Record<ProfileActionBucketId, SourceInboxProfile[]> = {
+      "push-admin": [],
+      "needs-verifier": [],
+      "follow-up": [],
+      "in-admin": [],
+    };
+    for (const profile of profiles) {
+      grouped[profileActionBucket(profile, combinedDealIdsByProfile[profile.id])].push(profile);
+    }
+    return PROFILE_ACTION_BUCKETS.map((bucket) => ({
+      ...bucket,
+      profiles: grouped[bucket.id].slice().sort(profileActionSort),
+    })).filter((section) => section.profiles.length > 0);
+  }, [combinedDealIdsByProfile, profiles]);
+
+  const pushProfileToAdmin = async (profile: SourceInboxProfile, side: AdminDealSide) => {
+    if (pendingProfileAction) return;
+    const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
+    setPendingProfileAction({ profileId: profile.id, side });
     setErrors((prev) => {
       const next = { ...prev };
       delete next[profile.id];
@@ -1087,9 +1188,9 @@ function LeadProfilesWorkbench({
     });
     try {
       const primaryContactId = profilePrimaryContactId(profile);
-      const createBody = {
-        title: profileCmaTitle(profile),
-        side: "listing",
+      const createBody: AdminDealCreateRequest = {
+        title: profileAdminTitle(profile, side),
+        side,
         province: "BC",
         currentStage: 0,
         primaryContactId,
@@ -1108,10 +1209,11 @@ function LeadProfilesWorkbench({
           sourceHeatScore: profile.heatScore,
           sourceHeatLabel: profile.heatLabel,
           sourceTags: profile.tags,
-          workflow: "cma",
-          workflowOrigin: "lead-profile-workbench",
+          workflow: sideCopy.workflow,
+          workflowOrigin: "lead-profile-list",
+          sourceAdminSide: side,
         },
-      } as const;
+      };
       let deal: AdminDeal;
       try {
         deal = await api.createAdminDeal(createBody);
@@ -1124,19 +1226,25 @@ function LeadProfilesWorkbench({
           ...createBody,
           primaryContactId: null,
           fields: {
-            ...createBody.fields,
+            ...(createBody.fields ?? {}),
             sourcePrimaryContactIdRejected: primaryContactId,
           },
         });
       }
-      setCreatedDealIds((prev) => ({ ...prev, [profile.id]: deal.id }));
+      setCreatedDealIds((prev) => ({
+        ...prev,
+        [profile.id]: {
+          ...prev[profile.id],
+          [side]: deal.id,
+        },
+      }));
     } catch (error) {
       setErrors((prev) => ({
         ...prev,
-        [profile.id]: error instanceof Error ? error.message : "Could not create CMA workflow",
+        [profile.id]: error instanceof Error ? error.message : `Could not send profile to ${sideCopy.errorLabel}`,
       }));
     } finally {
-      setPendingProfileId(null);
+      setPendingProfileAction(null);
     }
   };
 
@@ -1158,7 +1266,7 @@ function LeadProfilesWorkbench({
           No profiles yet
         </h4>
         <p className="mt-2 text-sm leading-6 text-foreground/75">
-          Synced contacts and conversations will appear here with a direct path into Admin CMA work.
+          Synced contacts and conversations will appear here with buyer and seller admin handoff actions.
         </p>
       </div>
     );
@@ -1171,106 +1279,153 @@ function LeadProfilesWorkbench({
           <div>
             <div className="text-sm font-semibold text-foreground">Profiles</div>
             <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
-              People built from CRM, inbox, SMS, and social sources. Push a seller lead straight into the Admin CMA lane.
+              People built from CRM, inbox, SMS, and social sources, grouped by the next action to take.
             </p>
           </div>
           <Badge variant="outline">{profiles.length} profiles</Badge>
         </div>
       )}
 
-      {sortedProfiles.map((profile) => {
-        const thread = threadByProfileId.get(profile.id);
-        const dealId = createdDealIds[profile.id] ?? existingDealIds[profile.id];
-        const pending = pendingProfileId === profile.id;
-        const error = errors[profile.id];
-        return (
-          <div key={profile.id} className="px-4 py-3">
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={cn(
-                      "h-2.5 w-2.5 rounded-full",
-                      profile.heatLabel === "hot"
-                        ? "bg-destructive"
-                        : profile.heatLabel === "warm"
-                          ? "bg-warning"
-                          : profile.heatLabel === "watch"
-                            ? "bg-success"
-                            : "bg-muted-foreground/45",
-                    )}
-                  />
-                  <div className="min-w-0 truncate text-sm font-semibold text-foreground">
-                    {profile.displayName}
-                  </div>
-                  <Badge variant={heatVariant(profile)}>
-                    {profile.heatLabel} {profile.heatScore}
-                  </Badge>
-                  {profile.hasCrm && <Badge variant="success">CRM</Badge>}
-                  {profile.isPotentialLead && <Badge variant="warning">potential lead</Badge>}
-                  <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
-                    {profileVerifierSummary(profile)}
-                  </Badge>
-                  {dealId && <Badge variant="success">in Admin CMA</Badge>}
-                </div>
-                <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  {profile.latestText || "No recent source context yet."}
-                </p>
-                <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[0.72rem] text-muted-foreground">
-                  <Badge variant="outline">{profileSourceMeta(profile)}</Badge>
-                  <Badge variant="outline">{profileContactLine(profile)}</Badge>
-                  {profilePrimaryContactId(profile) && <Badge variant="outline">DB contact</Badge>}
-                  <Badge variant="outline">{profile.threadCount} thread{profile.threadCount === 1 ? "" : "s"}</Badge>
-                  <Badge variant="outline">{profileWhen(profile)}</Badge>
-                  {profile.tags.slice(0, 3).map((tag) => (
-                    <Badge key={tag} variant="outline">{tag}</Badge>
-                  ))}
-                </div>
-                {error && (
-                  <p className="mt-2 text-xs leading-5 text-destructive">
-                    {error}
-                  </p>
-                )}
+      {profileSections.map((section) => (
+        <div key={section.id} className="divide-y divide-border/40">
+          <div className="bg-background/30 px-4 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/90">
+                {section.label}
               </div>
-              <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={!thread}
-                  onClick={() => openProfileThread(profile)}
-                >
-                  <MessageSquare className="h-3.5 w-3.5" />
-                  Open thread
-                </Button>
-                {dealId ? (
-                  <Link
-                    to="/admin"
-                    className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3")}
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    Open Admin
-                  </Link>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => startCmaWorkflow(profile)}
-                    disabled={pendingProfileId !== null}
-                  >
-                    {pending ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <BriefcaseBusiness className="h-3.5 w-3.5" />
-                    )}
-                    Start CMA
-                  </Button>
-                )}
-              </div>
+              <Badge variant="outline">{section.profiles.length}</Badge>
             </div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {section.description}
+            </p>
           </div>
-        );
-      })}
+
+          {section.profiles.map((profile) => {
+            const thread = threadByProfileId.get(profile.id);
+            const dealIds = combinedDealIdsByProfile[profile.id] ?? {};
+            const sellerDealId = dealIds.listing;
+            const buyerDealId = dealIds.buyer;
+            const sellerPending =
+              pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "listing";
+            const buyerPending =
+              pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "buyer";
+            const error = errors[profile.id];
+            return (
+              <div key={profile.id} className="px-4 py-3">
+                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={cn(
+                          "h-2.5 w-2.5 rounded-full",
+                          profile.heatLabel === "hot"
+                            ? "bg-destructive"
+                            : profile.heatLabel === "warm"
+                              ? "bg-warning"
+                              : profile.heatLabel === "watch"
+                                ? "bg-success"
+                                : "bg-muted-foreground/45",
+                        )}
+                      />
+                      <div className="min-w-0 truncate text-sm font-semibold text-foreground">
+                        {profile.displayName}
+                      </div>
+                      <Badge variant={heatVariant(profile)}>
+                        {profile.heatLabel} {profile.heatScore}
+                      </Badge>
+                      {profile.hasCrm && <Badge variant="success">CRM</Badge>}
+                      {profile.isPotentialLead && <Badge variant="warning">potential lead</Badge>}
+                      <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
+                        {profileVerifierSummary(profile)}
+                      </Badge>
+                      {sellerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.listing.badgeLabel}</Badge>}
+                      {buyerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.buyer.badgeLabel}</Badge>}
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                      {profile.latestText || "No recent source context yet."}
+                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[0.72rem] text-muted-foreground">
+                      <Badge variant="outline">{profileSourceMeta(profile)}</Badge>
+                      <Badge variant="outline">{profileContactLine(profile)}</Badge>
+                      {profilePrimaryContactId(profile) && <Badge variant="outline">DB contact</Badge>}
+                      <Badge variant="outline">{profile.threadCount} thread{profile.threadCount === 1 ? "" : "s"}</Badge>
+                      <Badge variant="outline">{profileWhen(profile)}</Badge>
+                      {profile.tags.slice(0, 3).map((tag) => (
+                        <Badge key={tag} variant="outline">{tag}</Badge>
+                      ))}
+                    </div>
+                    {error && (
+                      <p className="mt-2 text-xs leading-5 text-destructive">
+                        {error}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={!thread}
+                      onClick={() => openProfileThread(profile)}
+                    >
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      Open thread
+                    </Button>
+                    {sellerDealId ? (
+                      <Link
+                        to="/admin"
+                        className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3")}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        {PROFILE_ADMIN_SIDE_COPY.listing.openLabel}
+                      </Link>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => pushProfileToAdmin(profile, "listing")}
+                        disabled={pendingProfileAction !== null}
+                      >
+                        {sellerPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Home className="h-3.5 w-3.5" />
+                        )}
+                        {PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
+                      </Button>
+                    )}
+                    {buyerDealId ? (
+                      <Link
+                        to="/admin"
+                        className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3")}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        {PROFILE_ADMIN_SIDE_COPY.buyer.openLabel}
+                      </Link>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => pushProfileToAdmin(profile, "buyer")}
+                        disabled={pendingProfileAction !== null}
+                      >
+                        {buyerPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Users className="h-3.5 w-3.5" />
+                        )}
+                        {PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1296,7 +1451,7 @@ function LeadProfilesListPage({
         <div className="min-w-0">
           <h2 className="text-lg font-semibold text-foreground">Profile list</h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-            Source-matched people with phone/email verification, conversation context, and direct Admin CMA handoff.
+            Source-matched people grouped by next action, with phone/email verification, conversation context, and buyer or seller admin handoff.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
