@@ -17,6 +17,14 @@ __pycache__/model_tools.cpython-310.pyc
 __pycache__/web_tools.cpython-310.pyc
 logs/
 data/
+# But the central data module's source code IS tracked. The blanket `data/`
+# rule above exists to ignore on-disk runtime data dirs (e.g. ~/.elevate/data
+# bind-mounts, scratch dirs left by tests). The Python package and its
+# tests are part of the codebase.
+!elevate_cli/data/
+!elevate_cli/data/**
+!tests/elevate_cli/data/
+!tests/elevate_cli/data/**
 .pytest_cache/
 tmp/
 temp_vision_images/

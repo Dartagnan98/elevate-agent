@@ -96,9 +96,7 @@ import ProjectPage from "@/pages/ProjectPage";
 const RealEstateAdminPage = lazy(() =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateAdminPage })),
 );
-const RealEstateAdsPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateAdsPage })),
-);
+const RealEstateTemplatesPage = lazy(() => import("@/pages/RealEstateTemplatesPage"));
 const RealEstateLeadsPage = lazy(() =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage })),
 );
@@ -153,9 +151,9 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/today": RealEstateTodayPage,
   "/leads": RealEstateLeadsPage,
   "/admin": RealEstateAdminPage,
+  "/admin/templates": RealEstateTemplatesPage,
   "/listings": AdminRedirect,
   "/deals": AdminRedirect,
-  "/ads": RealEstateAdsPage,
   "/social-media": RealEstateSocialMediaPage,
   "/marketing": MarketingRedirect,
   "/tasks": RealEstateTasksPage,
@@ -188,11 +186,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
     path: "/admin",
     label: "Admin",
     icon: BriefcaseBusiness,
-  },
-  {
-    path: "/ads",
-    label: "Ads",
-    icon: BarChart3,
   },
   {
     path: "/social-media",
@@ -1147,7 +1140,6 @@ function DesktopSidebar({
             <SidebarAction icon={Users} label="Leads" path="/leads" onNavigate={go} />
             <SidebarAction icon={BriefcaseBusiness} label="Admin" path="/admin" onNavigate={go} />
             <SidebarAction icon={Megaphone} label="Social Media" path="/social-media" onNavigate={go} />
-            <SidebarAction icon={BarChart3} label="Ads" path="/ads" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
             <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
           </div>

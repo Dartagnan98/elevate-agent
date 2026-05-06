@@ -7849,6 +7849,16 @@ For more help on a command:
     doctor_parser.set_defaults(func=cmd_doctor)
 
     # =========================================================================
+    # parity-report + migrate-data commands (data module — Sprint 1D/1E)
+    # =========================================================================
+    from elevate_cli.data_cli import (
+        add_migrate_data_parser,
+        add_parity_report_parser,
+    )
+    add_parity_report_parser(subparsers)
+    add_migrate_data_parser(subparsers)
+
+    # =========================================================================
     # harness command
     # =========================================================================
     harness_parser = subparsers.add_parser(

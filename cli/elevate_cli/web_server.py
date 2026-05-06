@@ -2606,6 +2606,63 @@ async def create_cron_job(body: CronJobCreate):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class _EnsureLanesBody(BaseModel):
+    """Bulk seed for the default /leads lanes. Each entry is a minimal
+    cron job spec; the server creates one only if no existing job has the
+    same case-insensitive name. Lets the UI declare its default lane set
+    in one place and have the backend converge to it on /leads load."""
+
+    lanes: List[CronJobCreate]
+
+
+@app.post("/api/cron/jobs/ensure-lanes")
+async def ensure_lanes(body: _EnsureLanesBody):
+    """Idempotently install the default outreach lanes (New Outreach,
+    Hot Leads Watcher, Follow-ups, Private Searches). Skips any lane
+    whose ``name`` already exists (case-insensitive).
+
+    Returns ``{created: [...], skipped: [...]}`` so the UI can decide
+    whether to refresh the cron list. Safe to call on every /leads
+    mount — after first install it's a pure no-op.
+    """
+    from cron.jobs import create_job, list_jobs
+
+    existing = list_jobs(include_disabled=True)
+    existing_names = {str(j.get("name") or "").strip().lower() for j in existing}
+
+    created: list[dict] = []
+    skipped: list[str] = []
+    for lane in body.lanes:
+        target = str(lane.name or "").strip()
+        if not target:
+            continue
+        if target.lower() in existing_names:
+            skipped.append(target)
+            continue
+        try:
+            job = create_job(
+                prompt=lane.prompt,
+                schedule=lane.schedule,
+                name=target,
+                deliver=lane.deliver or "local",
+                skill=lane.skill,
+                skills=lane.skills,
+                agent=lane.agent,
+                tier=lane.tier,
+                model=lane.model,
+                provider=lane.provider,
+                base_url=lane.base_url,
+                enabled_toolsets=lane.enabled_toolsets,
+                workdir=lane.workdir,
+            )
+            created.append(job)
+            existing_names.add(target.lower())
+        except Exception as exc:
+            _log.exception("ensure-lanes: failed to create %s", target)
+            skipped.append(f"{target} (error: {exc})")
+    return {"created": created, "skipped": skipped}
+
+
 @app.put("/api/cron/jobs/{job_id}")
 async def update_cron_job(job_id: str, body: CronJobUpdate):
     from cron.jobs import update_job
@@ -2727,8 +2784,16 @@ async def get_source_connector_records(source_id: str, limit: int = 12):
 async def get_source_inbox(limit: int = 16):
     try:
         from elevate_cli.source_connectors import build_source_inbox_response
+        from elevate_cli.data import db_source_inbox_response, shadow_read
 
-        return build_source_inbox_response(limit=limit)
+        # Sprint 2: db_fn is wired. Production stays on legacy until
+        # ELEVATE_DATA_PRIMARY=db flips after a clean parity window.
+        return shadow_read(
+            endpoint="GET /api/source-inbox",
+            request_args={"limit": limit},
+            jsonl_fn=lambda: build_source_inbox_response(limit=limit),
+            db_fn=lambda: db_source_inbox_response(limit=limit),
+        )
     except Exception as exc:
         _log.exception("GET /api/source-inbox failed")
         raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")
@@ -2738,8 +2803,14 @@ async def get_source_inbox(limit: int = 16):
 async def get_source_inbox_thread(source_id: str, thread_id: str, limit: int = 200):
     try:
         from elevate_cli.source_connectors import build_thread_context_response
+        from elevate_cli.data import db_thread_context_response, shadow_read
 
-        return build_thread_context_response(source_id, thread_id, limit=limit)
+        return shadow_read(
+            endpoint="GET /api/source-inbox/thread",
+            request_args={"sourceId": source_id, "threadId": thread_id, "limit": limit},
+            jsonl_fn=lambda: build_thread_context_response(source_id, thread_id, limit=limit),
+            db_fn=lambda: db_thread_context_response(source_id, thread_id, limit=limit),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -2813,6 +2884,724 @@ async def get_sender_stats():
     except Exception as exc:
         _log.exception("GET /api/sender/stats failed")
         raise HTTPException(status_code=500, detail=f"Sender stats failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3: lifecycle UX (classify, park, active leads, admin contacts,
+# identity conflicts, lead signal graduate). Single-user product so every
+# UI mutation is attributed to ``human:web``. Agents that mutate via
+# scheduled jobs use their own actor strings ("agent:autopilot", etc).
+# ---------------------------------------------------------------------------
+
+_WEB_ACTOR = "human:web"
+
+_ADMIN_CONTACTS_TAB_FILTERS = {
+    "all": {},
+    "buyers": {"type": "buyer"},
+    "listings": {"type": "listing"},
+    "parked": {"stage": "parked"},
+    "dormant": {"stage": "dormant"},
+    "dead": {"stage": "dead"},
+}
+
+
+class _ContactClassifyBody(BaseModel):
+    type: str  # 'buyer' | 'listing' | 'other'
+
+
+class _ContactParkBody(BaseModel):
+    reason: str
+
+
+class _ConflictResolveBody(BaseModel):
+    resolution: str  # 'merged_into:<contact_id>' | 'kept_separate' | 'discarded'
+
+
+class _SignalGraduateBody(BaseModel):
+    contactId: str
+
+
+class _TemplateRejectBody(BaseModel):
+    reason: str
+
+
+class _TemplateEditBody(BaseModel):
+    body: str
+
+
+class _DealCreateBody(BaseModel):
+    title: str
+    side: str
+    province: str = "BC"
+    currentStage: int = 0
+    primaryContactId: Optional[str] = None
+    loftyContactId: Optional[str] = None
+    listingAddress: Optional[str] = None
+    fields: Optional[Dict[str, Any]] = None
+
+
+class _DealMoveBody(BaseModel):
+    toStage: int
+
+
+class _DealToggleBody(BaseModel):
+    field: str
+    value: Any
+
+
+class _AdminActionCreateBody(BaseModel):
+    name: str
+    trigger: str
+    skill: str
+    side: Optional[str] = None
+    fromStage: Optional[int] = None
+    toStage: Optional[int] = None
+    fieldKey: Optional[str] = None
+    condition: Optional[Dict[str, Any]] = None
+    skillArgs: Optional[Dict[str, Any]] = None
+    provinceFilter: Optional[List[str]] = None
+    enabled: bool = True
+    priority: int = 0
+    approvalRequired: bool = False
+
+
+class _AdminActionUpdateBody(BaseModel):
+    name: Optional[str] = None
+    trigger: Optional[str] = None
+    skill: Optional[str] = None
+    side: Optional[str] = None
+    fromStage: Optional[int] = None
+    toStage: Optional[int] = None
+    fieldKey: Optional[str] = None
+    condition: Optional[Dict[str, Any]] = None
+    skillArgs: Optional[Dict[str, Any]] = None
+    provinceFilter: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = None
+    approvalRequired: Optional[bool] = None
+
+
+_ADMIN_TEMPLATES_TABS = {"live", "proposed", "retired"}
+
+
+@app.post("/api/contacts/{contact_id}/classify")
+async def post_contact_classify(contact_id: str, body: _ContactClassifyBody):
+    try:
+        from elevate_cli.data import classify_contact, connect, get_contact
+
+        with connect() as conn:
+            if get_contact(conn, contact_id) is None:
+                raise HTTPException(status_code=404, detail=f"contact {contact_id!r} not found")
+            return classify_contact(conn, contact_id, body.type, actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/contacts/%s/classify failed", contact_id)
+        raise HTTPException(status_code=500, detail=f"Classify failed: {exc}")
+
+
+@app.post("/api/contacts/{contact_id}/park")
+async def post_contact_park(contact_id: str, body: _ContactParkBody):
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(status_code=400, detail="reason is required")
+    try:
+        from elevate_cli.data import connect, get_contact, park_contact
+
+        with connect() as conn:
+            if get_contact(conn, contact_id) is None:
+                raise HTTPException(status_code=404, detail=f"contact {contact_id!r} not found")
+            return park_contact(conn, contact_id, body.reason.strip(), actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/contacts/%s/park failed", contact_id)
+        raise HTTPException(status_code=500, detail=f"Park failed: {exc}")
+
+
+@app.post("/api/contacts/{contact_id}/unpark")
+async def post_contact_unpark(contact_id: str):
+    try:
+        from elevate_cli.data import connect, get_contact, unpark_contact
+
+        with connect() as conn:
+            if get_contact(conn, contact_id) is None:
+                raise HTTPException(status_code=404, detail=f"contact {contact_id!r} not found")
+            return unpark_contact(conn, contact_id, actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/contacts/%s/unpark failed", contact_id)
+        raise HTTPException(status_code=500, detail=f"Unpark failed: {exc}")
+
+
+@app.get("/api/contacts/active")
+async def get_contacts_active(limit: int = 100):
+    """Active leads section — stage in ('first_touched', 'active'),
+    sorted by ``last_activity_at`` desc."""
+    try:
+        from elevate_cli.data import connect, find_contacts
+
+        safe_limit = max(1, min(500, int(limit)))
+        with connect() as conn:
+            rows = find_contacts(
+                conn,
+                stage_in=("first_touched", "active"),
+                limit=safe_limit,
+            )
+        return {"items": rows, "count": len(rows)}
+    except Exception as exc:
+        _log.exception("GET /api/contacts/active failed")
+        raise HTTPException(status_code=500, detail=f"Active contacts failed: {exc}")
+
+
+@app.get("/api/admin/contacts")
+async def get_admin_contacts(
+    type: Optional[str] = None,
+    stage: Optional[str] = None,
+    tab: Optional[str] = None,
+    lastActivityAfter: Optional[str] = None,
+    hasOpenConflict: Optional[bool] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Admin contacts list — supports tab presets (All/Buyers/Listings/
+    Parked/Dormant/Dead) plus arbitrary type/stage filters that override
+    the tab.
+    """
+    try:
+        from elevate_cli.data import connect, find_contacts
+
+        kwargs: Dict[str, Any] = {}
+        if tab:
+            tab_filter = _ADMIN_CONTACTS_TAB_FILTERS.get(tab.lower())
+            if tab_filter is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown tab {tab!r} (expected one of {sorted(_ADMIN_CONTACTS_TAB_FILTERS)})",
+                )
+            kwargs.update(tab_filter)
+        if type is not None:
+            kwargs["type"] = type
+        if stage is not None:
+            kwargs["stage"] = stage
+        if hasOpenConflict is not None:
+            kwargs["has_open_conflict"] = hasOpenConflict
+        if lastActivityAfter is not None:
+            kwargs["last_activity_after"] = lastActivityAfter
+        kwargs["limit"] = max(1, min(500, int(limit)))
+        kwargs["offset"] = max(0, int(offset))
+
+        with connect() as conn:
+            rows = find_contacts(conn, **kwargs)
+        return {"items": rows, "count": len(rows), "tab": tab, "limit": kwargs["limit"], "offset": kwargs["offset"]}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/contacts failed")
+        raise HTTPException(status_code=500, detail=f"Admin contacts failed: {exc}")
+
+
+@app.get("/api/admin/conflicts")
+async def get_admin_conflicts():
+    try:
+        from elevate_cli.data import connect, list_open_conflicts
+
+        with connect() as conn:
+            rows = list_open_conflicts(conn)
+        return {"items": rows, "count": len(rows)}
+    except Exception as exc:
+        _log.exception("GET /api/admin/conflicts failed")
+        raise HTTPException(status_code=500, detail=f"Admin conflicts failed: {exc}")
+
+
+@app.post("/api/admin/conflicts/{conflict_id}/resolve")
+async def post_admin_conflict_resolve(conflict_id: str, body: _ConflictResolveBody):
+    try:
+        from elevate_cli.data import connect, resolve_identity_conflict
+
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM identity_conflicts WHERE id=?", (conflict_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"conflict {conflict_id!r} not found")
+            return resolve_identity_conflict(
+                conn, conflict_id, resolution=body.resolution, actor=_WEB_ACTOR
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/conflicts/%s/resolve failed", conflict_id)
+        raise HTTPException(status_code=500, detail=f"Resolve conflict failed: {exc}")
+
+
+@app.get("/api/admin/signals")
+async def get_admin_signals(sourceId: Optional[str] = None, limit: int = 200):
+    try:
+        from elevate_cli.data import connect, list_open_signals
+
+        safe_limit = max(1, min(500, int(limit)))
+        with connect() as conn:
+            rows = list_open_signals(conn, source_id=sourceId, limit=safe_limit)
+        return {"items": rows, "count": len(rows)}
+    except Exception as exc:
+        _log.exception("GET /api/admin/signals failed")
+        raise HTTPException(status_code=500, detail=f"Admin signals failed: {exc}")
+
+
+@app.post("/api/admin/signals/{signal_id}/graduate")
+async def post_admin_signal_graduate(signal_id: str, body: _SignalGraduateBody):
+    if not body.contactId or not body.contactId.strip():
+        raise HTTPException(status_code=400, detail="contactId is required")
+    try:
+        from elevate_cli.data import (
+            connect,
+            get_contact,
+            get_lead_signal,
+            graduate_lead_signal,
+        )
+
+        with connect() as conn:
+            if get_lead_signal(conn, signal_id) is None:
+                raise HTTPException(status_code=404, detail=f"signal {signal_id!r} not found")
+            if get_contact(conn, body.contactId) is None:
+                raise HTTPException(status_code=404, detail=f"contact {body.contactId!r} not found")
+            return graduate_lead_signal(
+                conn, signal_id, contact_id=body.contactId, actor=_WEB_ACTOR
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/signals/%s/graduate failed", signal_id)
+        raise HTTPException(status_code=500, detail=f"Graduate signal failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# /admin/deals - Admin Hub deal cards
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/deals")
+async def get_admin_deals(
+    side: Optional[str] = None,
+    current_stage: Optional[int] = None,
+    status: Optional[str] = "active",
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Return Admin Hub deals for list and kanban filters."""
+    try:
+        from elevate_cli.data import connect, list_deals
+
+        with connect() as conn:
+            rows = list_deals(
+                conn,
+                side=side or None,
+                current_stage=current_stage,
+                status=status or None,
+                limit=limit,
+                offset=offset,
+            )
+            return {"items": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/deals failed")
+        raise HTTPException(status_code=500, detail=f"Admin deals failed: {exc}")
+
+
+@app.post("/api/admin/deals")
+async def post_admin_deal(body: _DealCreateBody):
+    """Create one Admin Hub deal card."""
+    try:
+        from elevate_cli.data import connect, create_deal
+
+        with connect() as conn:
+            return create_deal(
+                conn,
+                title=body.title,
+                side=body.side,
+                actor=_WEB_ACTOR,
+                province=body.province,
+                current_stage=body.currentStage,
+                primary_contact_id=body.primaryContactId,
+                lofty_contact_id=body.loftyContactId,
+                listing_address=body.listingAddress,
+                fields=body.fields,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/deals failed")
+        raise HTTPException(status_code=500, detail=f"Create deal failed: {exc}")
+
+
+@app.post("/api/admin/deals/{deal_id}/move")
+async def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
+    """Move one Admin Hub deal card to another stage."""
+    try:
+        from elevate_cli.data import connect, move_deal_stage
+
+        with connect() as conn:
+            return move_deal_stage(
+                conn,
+                deal_id,
+                to_stage=body.toStage,
+                actor=_WEB_ACTOR,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/deals/%s/move failed", deal_id)
+        raise HTTPException(status_code=500, detail=f"Move deal failed: {exc}")
+
+
+@app.post("/api/admin/deals/{deal_id}/toggle")
+async def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
+    """Update one checklist, toggle, or enum field on an Admin Hub deal."""
+    try:
+        from elevate_cli.data import connect, set_deal_toggle
+
+        with connect() as conn:
+            return set_deal_toggle(
+                conn,
+                deal_id,
+                field=body.field,
+                value=body.value,
+                actor=_WEB_ACTOR,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/deals/%s/toggle failed", deal_id)
+        raise HTTPException(status_code=500, detail=f"Toggle deal failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# /admin/actions — stage-action registry + run log
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/actions")
+async def get_admin_actions(
+    trigger: Optional[str] = None,
+    side: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    skill: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """List stage-action registry rows."""
+    try:
+        from elevate_cli.data import connect, list_actions
+
+        with connect() as conn:
+            rows = list_actions(
+                conn,
+                trigger=trigger or None,
+                side=side or None,
+                enabled=enabled,
+                skill=skill or None,
+                limit=limit,
+                offset=offset,
+            )
+            return {"items": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/actions failed")
+        raise HTTPException(status_code=500, detail=f"Admin actions failed: {exc}")
+
+
+@app.post("/api/admin/actions")
+async def post_admin_action(body: _AdminActionCreateBody):
+    """Create a new registry row."""
+    try:
+        from elevate_cli.data import connect, create_action
+
+        with connect() as conn:
+            return create_action(
+                conn,
+                name=body.name,
+                trigger=body.trigger,
+                skill=body.skill,
+                side=body.side,
+                from_stage=body.fromStage,
+                to_stage=body.toStage,
+                field_key=body.fieldKey,
+                condition=body.condition,
+                skill_args=body.skillArgs,
+                province_filter=body.provinceFilter,
+                enabled=body.enabled,
+                priority=body.priority,
+                approval_required=body.approvalRequired,
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/actions failed")
+        raise HTTPException(status_code=500, detail=f"Create action failed: {exc}")
+
+
+@app.patch("/api/admin/actions/{action_id}")
+async def patch_admin_action(action_id: str, body: _AdminActionUpdateBody):
+    """Update an existing registry row, bumping its version."""
+    try:
+        from elevate_cli.data import connect, update_action
+
+        with connect() as conn:
+            return update_action(
+                conn,
+                action_id,
+                name=body.name,
+                trigger=body.trigger,
+                skill=body.skill,
+                side=body.side,
+                from_stage=body.fromStage,
+                to_stage=body.toStage,
+                field_key=body.fieldKey,
+                condition=body.condition,
+                skill_args=body.skillArgs,
+                province_filter=body.provinceFilter,
+                enabled=body.enabled,
+                priority=body.priority,
+                approval_required=body.approvalRequired,
+            )
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PATCH /api/admin/actions/%s failed", action_id)
+        raise HTTPException(status_code=500, detail=f"Update action failed: {exc}")
+
+
+@app.delete("/api/admin/actions/{action_id}")
+async def delete_admin_action(action_id: str):
+    """Delete a registry row. Cascades to its queued runs."""
+    try:
+        from elevate_cli.data import connect, delete_action
+
+        with connect() as conn:
+            delete_action(conn, action_id)
+        return {"ok": True, "id": action_id}
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        _log.exception("DELETE /api/admin/actions/%s failed", action_id)
+        raise HTTPException(status_code=500, detail=f"Delete action failed: {exc}")
+
+
+@app.get("/api/admin/action-runs")
+async def get_admin_action_runs(
+    deal_id: Optional[str] = None,
+    registry_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """List recent dispatcher run rows."""
+    try:
+        from elevate_cli.data import connect, list_action_runs
+
+        with connect() as conn:
+            rows = list_action_runs(
+                conn,
+                deal_id=deal_id or None,
+                registry_id=registry_id or None,
+                status=status or None,
+                limit=limit,
+                offset=offset,
+            )
+            return {"items": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/action-runs failed")
+        raise HTTPException(status_code=500, detail=f"Admin runs failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# /admin/templates — template library (Live / Proposed / Retired tabs)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/templates")
+async def get_admin_templates(
+    tab: str = "live",
+    lane: Optional[str] = None,
+    channel: Optional[str] = None,
+):
+    """Return the template library for one of three tabs.
+
+    * ``tab=live`` (default) — leaderboard view, split into authoritative
+      (uses ≥ 50 OR age > 30d) and trial buckets. Versions roll up by
+      lineage so an edit doesn't reset the apparent stats.
+    * ``tab=proposed`` — agent-proposed templates awaiting human approval.
+    * ``tab=retired`` — historical, read-only.
+    """
+    tab_norm = tab.lower()
+    if tab_norm not in _ADMIN_TEMPLATES_TABS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown tab {tab!r} (expected one of {sorted(_ADMIN_TEMPLATES_TABS)})",
+        )
+    try:
+        from elevate_cli.data import (
+            connect,
+            list_proposed_templates,
+            list_templates,
+            template_leaderboard,
+        )
+
+        with connect() as conn:
+            if tab_norm == "live":
+                board = template_leaderboard(conn, lane=lane, channel=channel)
+                return {
+                    "tab": "live",
+                    "authoritative": board["authoritative"],
+                    "trial": board["trial"],
+                    "count": len(board["authoritative"]) + len(board["trial"]),
+                }
+            if tab_norm == "proposed":
+                rows = list_proposed_templates(conn)
+                return {"tab": "proposed", "items": rows, "count": len(rows)}
+            # retired
+            rows = list_templates(conn, status="retired", lane=lane)
+            return {"tab": "retired", "items": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/admin/templates failed")
+        raise HTTPException(status_code=500, detail=f"Admin templates failed: {exc}")
+
+
+@app.post("/api/admin/templates/{template_id}/approve")
+async def post_admin_template_approve(template_id: str):
+    """Flip a proposed template to status='live'. Records audit fields."""
+    try:
+        from elevate_cli.data import approve_template, connect, get_template
+
+        with connect() as conn:
+            if get_template(conn, template_id) is None:
+                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+            return approve_template(conn, template_id, actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/templates/%s/approve failed", template_id)
+        raise HTTPException(status_code=500, detail=f"Approve template failed: {exc}")
+
+
+@app.post("/api/admin/templates/{template_id}/reject")
+async def post_admin_template_reject(template_id: str, body: _TemplateRejectBody):
+    """Mark a proposed template ``status='retired'`` with a reason note."""
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(status_code=400, detail="reason is required")
+    try:
+        from elevate_cli.data import connect, get_template, reject_template
+
+        with connect() as conn:
+            if get_template(conn, template_id) is None:
+                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+            return reject_template(
+                conn, template_id, body.reason.strip(), actor=_WEB_ACTOR
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/admin/templates/%s/reject failed", template_id)
+        raise HTTPException(status_code=500, detail=f"Reject template failed: {exc}")
+
+
+@app.post("/api/admin/templates/{template_id}/edit")
+async def post_admin_template_edit(template_id: str, body: _TemplateEditBody):
+    """Bump version: parent → ``superseded``, new live row with ``version+1``."""
+    if not body.body or not body.body.strip():
+        raise HTTPException(status_code=400, detail="body is required")
+    try:
+        from elevate_cli.data import connect, edit_template, get_template
+
+        with connect() as conn:
+            if get_template(conn, template_id) is None:
+                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+            return edit_template(
+                conn, template_id, new_body=body.body, actor=_WEB_ACTOR
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/templates/%s/edit failed", template_id)
+        raise HTTPException(status_code=500, detail=f"Edit template failed: {exc}")
+
+
+@app.post("/api/admin/templates/{template_id}/retire")
+async def post_admin_template_retire(template_id: str):
+    """Soft-deprecate a live template. Counters stay queryable."""
+    try:
+        from elevate_cli.data import connect, get_template, retire_template
+
+        with connect() as conn:
+            if get_template(conn, template_id) is None:
+                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+            return retire_template(conn, template_id, actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/admin/templates/%s/retire failed", template_id)
+        raise HTTPException(status_code=500, detail=f"Retire template failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

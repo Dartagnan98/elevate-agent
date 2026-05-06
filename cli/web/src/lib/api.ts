@@ -150,6 +150,14 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(job),
     }),
+  ensureLaneCronJobs: (
+    lanes: { name: string; schedule: string; prompt: string; deliver?: string }[],
+  ) =>
+    fetchJSON<{ created: CronJob[]; skipped: string[] }>("/api/cron/jobs/ensure-lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lanes }),
+    }),
   updateCronJob: (id: string, updates: Record<string, unknown>) =>
     fetchJSON<CronJob>(`/api/cron/jobs/${id}`, {
       method: "PUT",
@@ -456,6 +464,38 @@ export const api = {
   getAgentHub: () => fetchJSON<AgentHubSnapshot>("/api/agent-hub"),
   getHarness: () => fetchJSON<HarnessSnapshot>("/api/harness"),
 
+  // Admin Hub deals
+  getAdminDeals: (
+    params: {
+      side?: AdminDealSide;
+      currentStage?: number;
+      status?: string | null;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.side) qs.set("side", params.side);
+    if (params.currentStage != null) qs.set("current_stage", String(params.currentStage));
+    if (params.status !== undefined) qs.set("status", params.status ?? "");
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    if (params.offset != null) qs.set("offset", String(params.offset));
+    const tail = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<AdminDealsResponse>(`/api/admin/deals${tail}`);
+  },
+  moveAdminDeal: (dealId: string, toStage: number) =>
+    fetchJSON<AdminDeal>(`/api/admin/deals/${encodeURIComponent(dealId)}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toStage }),
+    }),
+  setAdminDealToggle: (dealId: string, field: string, value: AdminDealToggleValue) =>
+    fetchJSON<AdminDeal>(`/api/admin/deals/${encodeURIComponent(dealId)}/toggle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ field, value }),
+    }),
+
   // Real-estate source connectors and integrations
   getSourceConnectors: () =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors"),
@@ -742,6 +782,51 @@ export interface OutreachOverview {
   thresholds: { minUsesForRanking: number; driftDropPct: number; recentWindowDays: number };
 }
 
+export type AdminDealSide = "listing" | "buyer";
+
+export type AdminDealToggleValue = string | boolean | null;
+
+export interface AdminDeal {
+  id: string;
+  title: string;
+  side: AdminDealSide;
+  currentStage: number;
+  status: "active" | "closed" | "archived" | string;
+  province: string | null;
+  primaryContactId: string | null;
+  loftyContactId: string | null;
+  listingAddress: string | null;
+  extraToggles: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  stageEnteredAt: string;
+  closedAt: string | null;
+  signingAuthority: string | null;
+  fintracFormType: string | null;
+  listingTrack: string | null;
+  propertySubtype: string | null;
+  estateStatus: string | null;
+  transactionType: string | null;
+  listingType: string | null;
+  pep: boolean | null;
+  tenanted: boolean | null;
+  poaSigning: boolean | null;
+  corporate: boolean | null;
+  hasSuite: boolean | null;
+  multipleOffers: boolean | null;
+  familyMember: boolean | null;
+  dualRep: boolean | null;
+  unrepresentedOtherSide: boolean | null;
+  lockbox: boolean | null;
+  delayedOffer: boolean | null;
+  saleOfBuyersProperty: boolean | null;
+}
+
+export interface AdminDealsResponse {
+  items: AdminDeal[];
+  count: number;
+}
+
 export interface ComposioStatus {
   configured: boolean;
   hasKey: boolean;
@@ -995,8 +1080,27 @@ export interface ThreadContextLead {
 export interface ThreadContextActivity {
   id: string;
   type: string;
+  subtype?: string | null;
   title: string | null;
   summary: string | null;
+  address?: string | null;
+  timestamp: string | null;
+}
+
+export interface ThreadContextNote {
+  id: string;
+  title: string;
+  summary: string;
+  author?: string | null;
+  timestamp: string | null;
+}
+
+export interface ThreadContextTask {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  dueAt?: string | null;
   timestamp: string | null;
 }
 
@@ -1019,9 +1123,28 @@ export interface ThreadContextResponse {
   sends: ThreadContextSend[];
   meta: ThreadContextMeta | null;
   lead: ThreadContextLead | null;
-  notes: unknown[];
+  notes: ThreadContextNote[];
+  tasks: ThreadContextTask[];
   activity: ThreadContextActivity[];
-  stubs: { notes: string; activity: string };
+}
+
+export interface BuyerWatchlistEntry {
+  id: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  score?: number | null;
+  tier?: string | null;
+  days?: number | null;
+  lastActivity?: string | null;
+  dateEntered?: string | null;
+  searches?: string[];
+  matchingListings?: string[];
+  profileUrl?: string | null;
+  source?: string;
+  sourceLabel?: string;
+  tags?: string[];
+  scrapedAt?: string | null;
 }
 
 export interface SourceInboxResponse {
@@ -1037,6 +1160,7 @@ export interface SourceInboxResponse {
   threads: SourceInboxThread[];
   drafts: SourceInboxDraft[];
   skippedDrafts?: SourceInboxDraft[];
+  privateSearchBuyers?: BuyerWatchlistEntry[];
 }
 
 export interface CrmIntegrationForm {

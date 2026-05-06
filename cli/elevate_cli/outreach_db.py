@@ -823,7 +823,52 @@ def mark_sent(queue_id: str, provider_message_id: str) -> dict[str, Any] | None:
             (SEND_STATUS_SENT, provider_message_id, now, queue_id),
         )
         row = conn.execute("SELECT * FROM send_queue WHERE id=?", (queue_id,)).fetchone()
-    return _row_to_send(row)
+    send = _row_to_send(row)
+    if send:
+        _mirror_send_to_operational_db(send)
+    return send
+
+
+def _mirror_send_to_operational_db(send: dict[str, Any]) -> None:
+    """Codex audit P2 (2026-05-05): on every successful send, mirror an
+    outbound event into operational.db so DB-primary readers
+    (db_thread_context_response) and downstream attribution see the send
+    without waiting for a CRM resync. Idempotent — the events table
+    enforces unique event_hash, so re-runs no-op.
+
+    Best-effort: failures here must not break the user-facing send path.
+    """
+    try:
+        payload = send.get("payload") or {}
+        body = payload.get("text") or payload.get("draft_text") or ""
+        if not body:
+            return
+        source_id = send.get("sourceId")
+        thread_id = send.get("threadId")
+        if not (source_id and thread_id):
+            return
+        from elevate_cli.data import connect as _data_connect
+        from elevate_cli.data import events as _data_events
+        with _data_connect() as conn:
+            conv = conn.execute(
+                "SELECT id, contact_id FROM conversations "
+                "WHERE source_id=? AND thread_key=?",
+                (source_id, thread_id),
+            ).fetchone()
+            if conv is None:
+                return  # no DB conversation yet — sync hasn't run
+            _data_events.record_outbound(
+                conn,
+                contact_id=conv["contact_id"],
+                conversation_id=conv["id"],
+                channel=send.get("channel") or "unknown",
+                body=str(body),
+                source_id=str(source_id),
+                thread_key=str(thread_id),
+            )
+    except Exception:
+        # Best-effort mirror — never block a real send on this.
+        return
 
 
 def mark_retrying(queue_id: str, *, error: str, next_retry_at: str) -> dict[str, Any] | None:

@@ -286,6 +286,136 @@ code { font-size: 0.875rem; }
   to   { transform: translateX(240%); }
 }
 
+@keyframes memory-node-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.86);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes memory-edge-flow {
+  from { stroke-dashoffset: 28; }
+  to   { stroke-dashoffset: 0; }
+}
+
+@keyframes memory-halo-breathe {
+  0%, 100% { opacity: 0.34; transform: scale(0.96); }
+  50%      { opacity: 0.58; transform: scale(1.08); }
+}
+
+.memory-constellation {
+  contain: layout paint;
+}
+
+.memory-constellation::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--background-base) 74%, transparent),
+      transparent 18%,
+      transparent 78%,
+      color-mix(in srgb, var(--background-base) 70%, transparent)
+    );
+}
+
+.memory-constellation-edge {
+  pointer-events: none;
+  transition:
+    opacity 180ms cubic-bezier(0.25, 1, 0.5, 1),
+    stroke 180ms cubic-bezier(0.25, 1, 0.5, 1),
+    stroke-width 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.memory-constellation-edge-flow {
+  stroke-dasharray: 20 8;
+  animation: memory-edge-flow 2.8s linear infinite;
+  animation-delay: var(--memory-edge-delay, 0ms);
+}
+
+.memory-constellation-edge-active {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--color-primary) 38%, transparent));
+}
+
+.memory-constellation-node {
+  cursor: pointer;
+  outline: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: memory-node-enter 440ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--memory-node-delay, 0ms);
+}
+
+.memory-constellation-halo {
+  opacity: 0.42;
+  pointer-events: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    opacity 180ms cubic-bezier(0.25, 1, 0.5, 1),
+    transform 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.memory-constellation-ring,
+.memory-constellation-core {
+  transition:
+    filter 180ms cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 180ms cubic-bezier(0.25, 1, 0.5, 1),
+    r 180ms cubic-bezier(0.25, 1, 0.5, 1),
+    stroke-width 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.memory-constellation-ring {
+  pointer-events: none;
+}
+
+.memory-constellation-node.is-linked .memory-constellation-halo {
+  opacity: 0.64;
+}
+
+.memory-constellation-node.is-linked .memory-constellation-ring {
+  opacity: 0.86;
+}
+
+.memory-constellation-node.is-linked .memory-constellation-core,
+.memory-constellation-node.is-pinned .memory-constellation-core {
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--color-primary) 26%, transparent));
+}
+
+.memory-constellation-node.is-muted .memory-constellation-halo,
+.memory-constellation-node.is-muted .memory-constellation-ring {
+  opacity: 0.1;
+}
+
+.memory-constellation-node.is-active .memory-constellation-halo,
+.memory-constellation-node:focus-visible .memory-constellation-halo {
+  animation: memory-halo-breathe 1.8s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+}
+
+.memory-constellation-node:focus-visible .memory-constellation-core {
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--color-primary) 42%, transparent));
+}
+
+.memory-constellation-label {
+  paint-order: stroke;
+  stroke: color-mix(in srgb, var(--background-base) 92%, transparent);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+  font-family: var(--theme-font-sans);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+  opacity: 0.84;
+  pointer-events: none;
+}
+
 .elevate-thinking-shimmer {
   position: relative;
   overflow: hidden;
@@ -312,6 +442,20 @@ code { font-size: 0.875rem; }
   .elevate-thinking-shimmer::after {
     animation: none;
     display: none;
+  }
+
+  .memory-constellation-edge-flow,
+  .memory-constellation-node,
+  .memory-constellation-node.is-active .memory-constellation-halo,
+  .memory-constellation-node:focus-visible .memory-constellation-halo {
+    animation: none;
+  }
+
+  .memory-constellation-edge,
+  .memory-constellation-halo,
+  .memory-constellation-ring,
+  .memory-constellation-core {
+    transition: none;
   }
 }
 

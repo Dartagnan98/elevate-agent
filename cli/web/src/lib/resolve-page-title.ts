@@ -37,9 +37,6 @@ export function resolvePageTitle(
   if (normalized === "/deals") {
     return "Admin";
   }
-  if (normalized === "/ads") {
-    return "Ads";
-  }
   if (normalized === "/social-media") {
     return "Social Media";
   }

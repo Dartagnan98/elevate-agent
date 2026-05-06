@@ -9,6 +9,8 @@ requiring a cloud backend.
 from __future__ import annotations
 
 import base64
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -306,7 +308,10 @@ def _record_timestamp(record: JsonRecord) -> str:
 
 
 def _read_jsonl_records(path: Path, *, limit: int = 12, tail: bool = False) -> list[JsonRecord]:
-    safe_limit = max(1, min(int(limit or 12), 100))
+    # No upper clamp here — callers explicitly pass small limits (UI preview reads ~12-100)
+    # or large limits (rewrite-preserve operations need 5000+). Earlier 100-row ceiling
+    # silently dropped preserved tasks/drafts past row 100 on every CRM sync.
+    safe_limit = max(1, int(limit or 12))
     if not path.exists():
         return []
 
@@ -920,6 +925,66 @@ def _replace_jsonl(path: Path, records: list[JsonRecord]) -> None:
         for record in records:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     tmp_path.replace(path)
+
+
+# ─── Snapshot lock (cross-file consistency) ───────────────────────────────
+#
+# A CRM sync rewrites four files (contacts.jsonl, conversations.jsonl,
+# lead-events.jsonl, tasks.jsonl) and a leads request reads all four. Per
+# Codex audit P1 (2026-05-05) the per-file ``Path.replace`` is atomic
+# alone but readers can still see torn snapshots between renames. The
+# shared lock below brackets the writer's full multi-file rewrite and
+# any reader that needs cross-file consistency. Best-effort — fcntl is
+# advisory; nothing crashes if a caller forgets to use it.
+
+@contextlib.contextmanager
+def _snapshot_writer_lock(source_dir: Path):
+    """Exclusive lock for a multi-file CRM snapshot rewrite. Wrap the
+    full block of ``_replace_jsonl`` calls that should land together."""
+    source_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = source_dir / ".snapshot.lock"
+    lock_path.touch(exist_ok=True)
+    fh = lock_path.open("a+")
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            pass  # Best-effort: never block sync on lock failure.
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
+
+
+@contextlib.contextmanager
+def _snapshot_reader_lock(source_dir: Path):
+    """Shared lock for cross-file reads. Wrap the block where a request
+    reads multiple JSONL files that must agree (e.g. ``_read_source_inbox``)."""
+    if not source_dir.exists():
+        # Nothing written yet — no torn-snapshot risk.
+        yield
+        return
+    lock_path = source_dir / ".snapshot.lock"
+    if not lock_path.exists():
+        # Writer hasn't run yet, nothing to coordinate with.
+        yield
+        return
+    fh = lock_path.open("r")
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
 
 
 def _configured_composio_server(config: dict[str, Any]) -> JsonRecord | None:
@@ -1658,14 +1723,17 @@ def build_source_records_response(
 
     source_dir = _source_dir(source_root, source_id)
     safe_limit = max(1, min(int(limit or 12), 100))
-    records = {
-        "contacts": _read_jsonl_records(source_dir / "contacts.jsonl", limit=safe_limit),
-        "conversations": _read_jsonl_records(source_dir / "conversations.jsonl", limit=safe_limit),
-        "messages": _read_jsonl_records(source_dir / "messages.jsonl", limit=safe_limit, tail=True),
-        "messageDays": _read_jsonl_records(source_dir / "message-days.jsonl", limit=safe_limit),
-        "leadEvents": _read_jsonl_records(source_dir / "lead-events.jsonl", limit=safe_limit),
-        "tasks": _read_jsonl_records(source_dir / "tasks.jsonl", limit=safe_limit),
-    }
+    # Shared lock so this multi-file read sees a consistent snapshot
+    # against any in-flight CRM sync (Codex audit P1, 2026-05-05).
+    with _snapshot_reader_lock(source_dir):
+        records = {
+            "contacts": _read_jsonl_records(source_dir / "contacts.jsonl", limit=safe_limit),
+            "conversations": _read_jsonl_records(source_dir / "conversations.jsonl", limit=safe_limit),
+            "messages": _read_jsonl_records(source_dir / "messages.jsonl", limit=safe_limit, tail=True),
+            "messageDays": _read_jsonl_records(source_dir / "message-days.jsonl", limit=safe_limit),
+            "leadEvents": _read_jsonl_records(source_dir / "lead-events.jsonl", limit=safe_limit),
+            "tasks": _read_jsonl_records(source_dir / "tasks.jsonl", limit=safe_limit),
+        }
     return {
         **info,
         "sourceId": source_id,
@@ -1798,6 +1866,10 @@ def build_source_inbox_response(
     }
     seen: set[str] = set()
     seen_drafts: set[str] = set()
+    # Canonical key: (source_id, thread_id) → "this thread already has a
+    # real persisted draft, don't stack a fallback on top." Codex audit
+    # P1 (2026-05-05): real AI drafts must supersede fallback drafts.
+    seen_thread_drafts: set[tuple[str, str]] = set()
     task_state_by_source: dict[str, JsonRecord] = {}
 
     # Phase 6: enrich each thread with lead-scorer meta (score / label / reason)
@@ -1887,6 +1959,11 @@ def build_source_inbox_response(
             if draft["id"] in seen_drafts:
                 continue
             seen_drafts.add(draft["id"])
+            # Mark this thread as already having a real draft — fallback
+            # generation below must skip it (Codex P1, 2026-05-05).
+            persisted_thread_id = str(draft.get("threadId") or "").strip()
+            if persisted_thread_id:
+                seen_thread_drafts.add((source_id, persisted_thread_id))
             drafts.append(draft)
 
     threads.sort(
@@ -1910,7 +1987,13 @@ def build_source_inbox_response(
         if _is_automated_sender_record(_as_dict(thread.get("record")) or thread):
             continue
         source_id = str(thread.get("sourceId") or "")
-        task_id = f"thread-draft:{thread.get('threadId')}"
+        thread_id_str = str(thread.get("threadId") or "")
+        # Canonical key: if a real persisted draft already covers this
+        # (source_id, thread_id), skip the fallback regardless of how
+        # Codex chose to name the task_id (Codex P1, 2026-05-05).
+        if thread_id_str and (source_id, thread_id_str) in seen_thread_drafts:
+            continue
+        task_id = f"thread-draft:{thread_id_str}"
         state = _as_dict(task_state_by_source.get(source_id, {}).get(task_id))
         status = str(state.get("status") or "").lower()
         if status in {"approved", "skipped", "done", "archived", "cancelled"}:
@@ -1919,6 +2002,8 @@ def build_source_inbox_response(
         if generated_id in seen_drafts:
             continue
         seen_drafts.add(generated_id)
+        if thread_id_str:
+            seen_thread_drafts.add((source_id, thread_id_str))
         generated_draft = _draft_from_thread(source_by_id.get(source_id, {}), thread)
         if state.get("draft_text"):
             generated_draft["draftText"] = str(state.get("draft_text"))
@@ -1946,6 +2031,7 @@ def build_source_inbox_response(
         key=lambda item: _parse_record_dt(item.get("skippedAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
         reverse=True,
     )
+    private_search_buyers = _read_private_search_buyers(source_root, limit=max(safe_limit, 50))
     return {
         **info,
         "limit": safe_limit,
@@ -1956,7 +2042,169 @@ def build_source_inbox_response(
         "threads": visible_threads,
         "drafts": drafts[:safe_limit],
         "skippedDrafts": skipped_drafts[: max(safe_limit, 50)],
+        "privateSearchBuyers": private_search_buyers,
     }
+
+
+def _collect_drafts_for_db_inbox(
+    *,
+    source_root: Path,
+    connectors: list[JsonRecord],
+    threads: list[JsonRecord],
+    skipped_cutoff: datetime,
+    max_drafts: int = 24,
+) -> tuple[list[JsonRecord], list[JsonRecord]]:
+    """Build the same drafts/skippedDrafts buckets as
+    :func:`build_source_inbox_response`, but driven by externally-provided
+    ``connectors`` and ``threads`` lists (so the DB-primary builder can
+    reuse the legacy draft pipeline without re-walking source dirs for
+    threads).
+
+    Codex audit P0 (2026-05-05): the DB readers were returning empty
+    ``drafts`` / ``skippedDrafts`` arrays, which broke the /leads queue
+    under ``ELEVATE_DATA_PRIMARY=db``. This helper collapses the
+    persisted-draft + fallback-draft logic into a single shared codepath.
+    """
+    drafts: list[JsonRecord] = []
+    skipped_drafts: list[JsonRecord] = []
+    seen_drafts: set[str] = set()
+    seen_thread_drafts: set[tuple[str, str]] = set()
+    task_state_by_source: dict[str, JsonRecord] = {}
+
+    try:
+        from elevate_cli import outreach_db as _odb
+        _meta_by_key: dict[tuple[str, str], dict[str, Any]] = {
+            (m["sourceId"], m["threadId"]): m for m in _odb.list_thread_meta(limit=1000)
+        }
+    except Exception:
+        _meta_by_key = {}
+
+    source_by_id = {str(s.get("id") or ""): s for s in connectors}
+
+    for source in connectors:
+        source_id = str(source.get("id") or "")
+        source_dir = _source_dir(source_root, source_id)
+        ui_state = _read_source_ui_state(source_dir)
+        task_states = _as_dict(ui_state.get("tasks"))
+        task_state_by_source[source_id] = task_states
+
+        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=100):
+            if not _is_message_draft_task(record):
+                continue
+            task_id = _task_key(record)
+            state = _as_dict(task_states.get(task_id))
+            status = str(state.get("status") or record.get("status") or "pending").lower()
+            thread_meta = _meta_by_key.get((source_id, _thread_key(record)))
+            if status == "skipped":
+                updated_dt = _parse_record_dt(state.get("updated_at"))
+                if updated_dt and updated_dt >= skipped_cutoff:
+                    draft = _draft_from_task(source, record, state)
+                    draft["skippedAt"] = state.get("updated_at")
+                    if thread_meta:
+                        draft["score"] = thread_meta.get("score")
+                        draft["leadLabel"] = thread_meta.get("label")
+                        draft["scoreReason"] = thread_meta.get("reason")
+                    skipped_drafts.append(draft)
+                continue
+            if status in {"approved", "done", "archived", "cancelled"}:
+                continue
+            draft = _draft_from_task(source, record, state)
+            if thread_meta:
+                draft["score"] = thread_meta.get("score")
+                draft["leadLabel"] = thread_meta.get("label")
+                draft["scoreReason"] = thread_meta.get("reason")
+            if draft["id"] in seen_drafts:
+                continue
+            seen_drafts.add(draft["id"])
+            persisted_thread_id = str(draft.get("threadId") or "").strip()
+            if persisted_thread_id:
+                seen_thread_drafts.add((source_id, persisted_thread_id))
+            drafts.append(draft)
+
+    for thread in threads:
+        if len(drafts) >= max_drafts:
+            break
+        if str(thread.get("direction") or "") != "inbound":
+            continue
+        if str(thread.get("heatLabel") or "") not in {"hot", "warm"} and not _is_social_intent(
+            source_by_id.get(str(thread.get("sourceId") or ""), {}),
+            thread,
+        ):
+            continue
+        if _is_automated_sender_record(_as_dict(thread.get("record")) or thread):
+            continue
+        source_id = str(thread.get("sourceId") or "")
+        thread_id_str = str(thread.get("threadId") or "")
+        if thread_id_str and (source_id, thread_id_str) in seen_thread_drafts:
+            continue
+        task_id = f"thread-draft:{thread_id_str}"
+        state = _as_dict(task_state_by_source.get(source_id, {}).get(task_id))
+        status = str(state.get("status") or "").lower()
+        if status in {"approved", "skipped", "done", "archived", "cancelled"}:
+            continue
+        generated_id = f"{source_id}:{task_id}"
+        if generated_id in seen_drafts:
+            continue
+        seen_drafts.add(generated_id)
+        if thread_id_str:
+            seen_thread_drafts.add((source_id, thread_id_str))
+        generated_draft = _draft_from_thread(source_by_id.get(source_id, {}), thread)
+        if state.get("draft_text"):
+            generated_draft["draftText"] = str(state.get("draft_text"))
+        generated_draft["score"] = thread.get("score")
+        generated_draft["leadLabel"] = thread.get("leadLabel")
+        generated_draft["scoreReason"] = thread.get("scoreReason")
+        drafts.append(generated_draft)
+
+    drafts.sort(
+        key=lambda item: (
+            1 if item.get("generated") is False else 0,
+            _parse_record_dt(item.get("latestAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        ),
+        reverse=True,
+    )
+    skipped_drafts.sort(
+        key=lambda item: _parse_record_dt(item.get("skippedAt")) or datetime.fromtimestamp(0, tz=timezone.utc),
+        reverse=True,
+    )
+    return drafts, skipped_drafts
+
+
+def _read_private_search_buyers(source_root: Path, *, limit: int = 50) -> list[JsonRecord]:
+    """Read mls-private-search/buyers.jsonl and project a watchlist payload.
+
+    Sorted by score desc (None last), then by recency (lower days = more recent).
+    """
+    path = source_root / "mls-private-search" / "buyers.jsonl"
+    if not path.exists():
+        return []
+    entries: list[JsonRecord] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                entries.append(entry)
+    except OSError:
+        return []
+
+    def _sort_key(entry: JsonRecord) -> tuple[int, int, int]:
+        score = entry.get("score")
+        score_val = -int(score) if isinstance(score, (int, float)) else 0
+        days = entry.get("days")
+        days_val = int(days) if isinstance(days, (int, float)) else 9999
+        has_score = 0 if isinstance(score, (int, float)) else 1
+        return (has_score, score_val, days_val)
+
+    entries.sort(key=_sort_key)
+    return entries[:max(limit, 1)]
 
 
 def _resolve_source_view(source_root: Path, source_id: str) -> JsonRecord | None:
@@ -2017,7 +2265,17 @@ def build_thread_context_response(
     safe_limit = max(20, min(int(limit or 200), 500))
     source_dir = _source_dir(source_root, source_id)
 
-    raw_messages = _read_jsonl_records(source_dir / "messages.jsonl", limit=2000, tail=True)
+    # Snapshot reader lock — keep messages/contacts/lead-events consistent
+    # against any in-flight CRM sync (Codex audit P1, 2026-05-05).
+    # Codex audit P2 (2026-05-05): tail-read lead-events so a thread's
+    # most-recent notes/activity are surfaced even when the file has
+    # >4000 lifetime events (prior code took the FIRST 4000, which
+    # silently dropped recent notes on long-running CRM syncs).
+    with _snapshot_reader_lock(source_dir):
+        raw_messages = _read_jsonl_records(source_dir / "messages.jsonl", limit=2000, tail=True)
+        contacts_iter = _read_jsonl_records(source_dir / "contacts.jsonl", limit=2000)
+        lead_events_iter = _read_jsonl_records(source_dir / "lead-events.jsonl", limit=4000, tail=True)
+
     messages: list[JsonRecord] = []
     person_name = ""
     for record in raw_messages:
@@ -2034,7 +2292,7 @@ def build_thread_context_response(
     messages = messages[-safe_limit:]
 
     lead_record: JsonRecord | None = None
-    for record in _read_jsonl_records(source_dir / "contacts.jsonl", limit=2000):
+    for record in contacts_iter:
         if str(record.get("contact_id") or record.get("id") or "").strip() == thread_id:
             lead_record = record
             if not person_name:
@@ -2042,23 +2300,59 @@ def build_thread_context_response(
             break
 
     activity_records: list[JsonRecord] = []
-    for record in _read_jsonl_records(source_dir / "lead-events.jsonl", limit=2000):
+    notes_records: list[JsonRecord] = []
+    tasks_records: list[JsonRecord] = []
+    for record in lead_events_iter:
         if str(record.get("contact_id") or record.get("conversation_id") or "").strip() != thread_id:
+            continue
+        event_type = str(record.get("type") or record.get("event_type") or "event").strip()
+        timestamp = record.get("timestamp") or record.get("created_at") or record.get("last_seen_at")
+        rec_id = str(record.get("source_record_id") or record.get("id") or "")
+        if event_type == "lofty_note":
+            notes_records.append(
+                {
+                    "id": rec_id,
+                    "title": record.get("title") or "Note",
+                    "summary": record.get("summary") or record.get("text") or "",
+                    "author": record.get("author"),
+                    "timestamp": timestamp,
+                }
+            )
+            continue
+        if event_type == "lofty_task":
+            tasks_records.append(
+                {
+                    "id": rec_id,
+                    "title": record.get("title") or "Task",
+                    "summary": record.get("summary") or record.get("text") or "",
+                    "status": record.get("status") or "open",
+                    "dueAt": record.get("dueAt") or record.get("due_at"),
+                    "timestamp": timestamp,
+                }
+            )
             continue
         activity_records.append(
             {
-                "id": str(record.get("source_record_id") or record.get("id") or ""),
-                "type": record.get("type") or record.get("event_type") or "event",
+                "id": rec_id,
+                "type": event_type,
+                "subtype": record.get("subtype"),
                 "title": record.get("title") or record.get("summary") or record.get("text"),
                 "summary": record.get("summary") or record.get("text"),
-                "timestamp": record.get("timestamp") or record.get("created_at") or record.get("last_seen_at"),
+                "address": record.get("address"),
+                "timestamp": timestamp,
             }
         )
-    activity_records.sort(
-        key=lambda a: _parse_record_dt(a.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc),
-        reverse=True,
-    )
-    activity_records = activity_records[:20]
+
+    def _by_ts_desc(rows: list[JsonRecord]) -> list[JsonRecord]:
+        rows.sort(
+            key=lambda a: _parse_record_dt(a.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc),
+            reverse=True,
+        )
+        return rows
+
+    activity_records = _by_ts_desc(activity_records)[:30]
+    notes_records = _by_ts_desc(notes_records)[:30]
+    tasks_records = _by_ts_desc(tasks_records)[:30]
 
     lead: JsonRecord | None = None
     if lead_record is not None:
@@ -2151,12 +2445,9 @@ def build_thread_context_response(
         "sends": sends,
         "meta": meta,
         "lead": lead,
-        "notes": [],
+        "notes": notes_records,
+        "tasks": tasks_records,
         "activity": activity_records,
-        "stubs": {
-            "notes": "Notes endpoint not yet wired (planned: GET /api/contacts/{id}/notes).",
-            "activity": "Property activity endpoint not yet wired (planned: GET /api/contacts/{id}/activity).",
-        },
     }
 
 
@@ -2599,16 +2890,18 @@ def sync_generic_crm_source(
                 }
             )
 
-    _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
-    _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
-    _replace_jsonl(source_dir / "messages.jsonl", [])
-    _replace_jsonl(source_dir / "message-days.jsonl", [])
-    _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
-    preserved_tasks = [
-        r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
-        if str(r.get("task_type") or "").lower() != "lead_follow_up"
-    ]
-    _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks + task_records)
+    # Atomic multi-file rewrite (Codex audit P1, 2026-05-05).
+    with _snapshot_writer_lock(source_dir):
+        preserved_tasks = [
+            r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
+            if str(r.get("task_type") or "").lower() != "lead_follow_up"
+        ]
+        _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
+        _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
+        _replace_jsonl(source_dir / "messages.jsonl", [])
+        _replace_jsonl(source_dir / "message-days.jsonl", [])
+        _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
+        _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks + task_records)
     _write_json(
         source_dir / "source.json",
         {
@@ -2654,6 +2947,17 @@ def sync_generic_crm_source(
             },
         },
     )
+    # Continuous DB writethrough — Codex audit P0 (2026-05-05).
+    try:
+        _writethrough_to_operational_db(source_dir)
+    except Exception as exc:  # noqa: BLE001
+        if errors is not None:
+            errors.append(f"db writethrough: {exc}")
+        _write_json(
+            artifacts_dir / "last-db-writethrough-error.json",
+            {"checked_at": now, "error": str(exc)},
+        )
+
     view = connector_view(source_root, "crm")
     if view is None:
         raise RuntimeError(f"{label} source could not be read")
@@ -2691,6 +2995,402 @@ def _lofty_get(path: str, env_values: dict[str, str], params: dict[str, Any] | N
     with urllib.request.urlopen(request, timeout=18) as response:
         raw = response.read(1024 * 1024 * 4)
     return json.loads(raw.decode("utf-8") or "{}")
+
+
+_LOFTY_LIST_KEYS = (
+    "data",
+    "records",
+    "items",
+    "results",
+    "activities",
+    "notes",
+    "tasks",
+    "taskList",  # Lofty's actual wrapper for /v1.0/tasks
+)
+
+
+def _lofty_extract_list(payload: Any) -> list[JsonRecord]:
+    """Lofty wraps lists under inconsistent keys (``data``, ``records``,
+    ``items``, ``activities``, ``notes``, ``taskList``). Walk one level
+    deep looking for a list of dicts and return it; otherwise [] so the
+    caller can keep going."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in _LOFTY_LIST_KEYS:
+        candidate = payload.get(key)
+        if isinstance(candidate, list):
+            cleaned = [item for item in candidate if isinstance(item, dict)]
+            if cleaned:
+                return cleaned
+    inner = payload.get("data")
+    if isinstance(inner, dict):
+        for key in _LOFTY_LIST_KEYS:
+            candidate = inner.get(key)
+            if isinstance(candidate, list):
+                cleaned = [item for item in candidate if isinstance(item, dict)]
+                if cleaned:
+                    return cleaned
+    return []
+
+
+def _lofty_get_first_ok(
+    paths: tuple[str, ...],
+    env_values: dict[str, str],
+    params: dict[str, Any] | None = None,
+) -> list[JsonRecord]:
+    """Try each path in order; return the first response that yields a
+    non-empty list of records. 404/403/timeout on one path falls through
+    to the next instead of raising — Lofty's docs and reality diverge per
+    workspace.
+
+    Distinguishes "all paths returned an empty 200" (returns []) from
+    "every path errored" (raises the last exception so callers can count
+    real failures vs clean empties).
+    """
+    last_error: Exception | None = None
+    saw_ok = False
+    for path in paths:
+        try:
+            payload = _lofty_get(path, env_values, params)
+        except Exception as exc:  # noqa: BLE001 — defensive cross-endpoint probe
+            last_error = exc
+            continue
+        saw_ok = True
+        records = _lofty_extract_list(payload)
+        if records:
+            return records
+    if not saw_ok and last_error is not None:
+        # Every probe errored — surface so caller can count it as a real
+        # enrichment failure (Lofty 500/auth/timeout), not a clean empty lead.
+        raise last_error
+    return []
+
+
+def _lofty_get_activities(lead_id: str, env_values: dict[str, str], *, limit: int = 50) -> list[JsonRecord]:
+    """Pull the lead's activity feed (page views, saved-search hits,
+    tour requests, email opens). Tries v2.0 then v1.0 — endpoint shape
+    varies across Lofty/Chime tenant migrations."""
+    if not lead_id:
+        return []
+    params = {"limit": min(int(limit or 50), 100), "offset": 0}
+    return _lofty_get_first_ok(
+        (
+            f"v2.0/leads/{lead_id}/activities",
+            f"v1.0/leads/{lead_id}/activities",
+            f"v1.0/leads/{lead_id}/activity",
+        ),
+        env_values,
+        params,
+    )
+
+
+def _lofty_get_notes(lead_id: str, env_values: dict[str, str], *, limit: int = 50) -> list[JsonRecord]:
+    """Pull the lead's free-form notes (the ones agents type into Lofty).
+
+    Real Lofty shape: ``GET /v1.0/notes?leadId=<id>`` → ``{notes: [...]}``.
+    The ``/v1.0/leads/{id}/notes`` path is POST-only — GET 404s. Try the
+    real query-param shape first, then fall back in case a workspace runs
+    a different version."""
+    if not lead_id:
+        return []
+    return _lofty_get_first_ok(
+        (
+            f"v1.0/notes?leadId={urllib.parse.quote(lead_id)}",
+            f"v2.0/notes?leadId={urllib.parse.quote(lead_id)}",
+            f"v1.0/leads/{lead_id}/notes",
+        ),
+        env_values,
+        None,
+    )
+
+
+def _lofty_get_tasks(lead_id: str, env_values: dict[str, str], *, limit: int = 50) -> list[JsonRecord]:
+    """Pull the lead's tasks/follow-ups assigned in Lofty.
+
+    Real Lofty shape: ``GET /v1.0/tasks?leadId=<id>`` → ``{taskList: [...]}``."""
+    if not lead_id:
+        return []
+    return _lofty_get_first_ok(
+        (
+            f"v1.0/tasks?leadId={urllib.parse.quote(lead_id)}",
+            f"v2.0/tasks?leadId={urllib.parse.quote(lead_id)}",
+            f"v1.0/leads/{lead_id}/tasks",
+        ),
+        env_values,
+        None,
+    )
+
+
+def _lofty_epoch_ms_to_iso(value: Any) -> str | None:
+    """Lofty hands timestamps in three shapes: ms-epoch int (1775072765444),
+    ISO with ``GMT`` suffix (``2026-05-06T03:41:02GMT``), or already-clean
+    ISO. Normalize to ISO-8601 with explicit ``+00:00`` so downstream sort
+    keys are comparable. Returns ``None`` if the value can't be parsed."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            # Lofty's "created" field is ms since epoch.
+            seconds = float(value) / 1000.0 if value > 1e11 else float(value)
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat(timespec="seconds")
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # ``2026-05-06T03:41:02GMT`` → strip ``GMT``, add ``+00:00``.
+        if text.endswith("GMT"):
+            text = text[:-3] + "+00:00"
+        return text
+    return None
+
+
+def _lofty_listing_address(listing: Any) -> str | None:
+    """Lofty's activity records embed the property under ``listing`` —
+    pull a human-readable address from streetAddress + city + state."""
+    if not isinstance(listing, dict):
+        return None
+    parts: list[str] = []
+    street = str(listing.get("streetAddress") or "").strip()
+    if street:
+        parts.append(street)
+    city = str(listing.get("city") or "").strip()
+    state = str(listing.get("state") or "").strip()
+    if city:
+        parts.append(city)
+    if state:
+        parts.append(state)
+    return ", ".join(parts) if parts else None
+
+
+def _stable_hash_id(*parts: Any) -> str:
+    """Build a deterministic 12-char id from normalized payload fields.
+
+    Used as a fallback when Lofty hands us a record without an id —
+    array index would be unstable across syncs (a deleted earlier row
+    would shift all later ids). Hash makes the id stable to the record
+    content."""
+    payload = "|".join(str(p) if p is not None else "" for p in parts)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _lofty_normalize_activity(record: JsonRecord, lead_id: str) -> JsonRecord:
+    """Reduce a Lofty activity record to a stable shape for the event log.
+
+    Two real shapes are seen in the wild:
+
+    * Communication shape (``/v1.0/leads/{id}/activities``):
+      ``{id, leadId, agentId, activityTime, channel, communicationType,
+         direction, callingOutcome, leadPhoneNumber, emailEventType,
+         emailSubject, note}`` — channel is ``Text``/``Email``/``Call``,
+      direction ``Outbound``/``Inbound``, communicationType ``Auto``/``Manual``.
+    * Browse shape (older endpoint): ``{type, text, link, picture, listing,
+      created}`` where ``type`` is ``Browse``/``Search``/etc.
+
+    The normalizer picks whichever fields are present and builds a
+    human-readable title and timestamp."""
+    raw_id = (
+        record.get("id")
+        or record.get("activityId")
+        or record.get("eventId")
+        or record.get("uuid")
+        or ""
+    )
+
+    # Address first — useful for both title and summary.
+    address = record.get("propertyAddress") or record.get("address")
+    if not address:
+        listing = record.get("listing")
+        if isinstance(listing, dict):
+            address = _lofty_listing_address(listing)
+    if not address:
+        prop = record.get("property")
+        if isinstance(prop, dict):
+            address = prop.get("address") or prop.get("formattedAddress") or _lofty_listing_address(prop)
+
+    channel = str(record.get("channel") or "").strip()
+    direction = str(record.get("direction") or "").strip()
+    comm_type = str(record.get("communicationType") or "").strip()
+    email_subject = str(record.get("emailSubject") or "").strip()
+    calling_outcome = str(record.get("callingOutcome") or "").strip()
+    email_event = str(record.get("emailEventType") or "").strip()
+    note_text = str(record.get("note") or "").strip()
+
+    activity_type = str(
+        record.get("type")
+        or record.get("eventType")
+        or record.get("category")
+        or record.get("action")
+        or ""
+    ).strip()
+    # Communication shape has no `type`; synthesise a subtype from channel.
+    if not activity_type and channel:
+        activity_type = channel.lower()
+    if not activity_type:
+        activity_type = "activity"
+
+    # Title prefers a human-readable description if Lofty gave us one.
+    explicit_text = str(
+        record.get("title")
+        or record.get("description")
+        or record.get("summary")
+        or record.get("text")
+        or ""
+    ).strip()
+    if explicit_text:
+        title = explicit_text
+    elif channel:
+        # "Auto Text Outbound", "Manual Email Inbound: Subject", "Call Outbound — connected"
+        bits: list[str] = []
+        if comm_type and comm_type.lower() != "manual":
+            bits.append(comm_type)
+        bits.append(channel)
+        if direction:
+            bits.append(direction)
+        title = " ".join(bits).strip()
+        if email_subject:
+            title = f"{title}: {email_subject}".strip(": ")
+        elif calling_outcome:
+            title = f"{title} — {calling_outcome}".strip(" —")
+        elif email_event and channel.lower() == "email":
+            title = f"{title} ({email_event})".strip()
+    elif isinstance(address, str) and address:
+        verb = {"Browse": "Browsed", "Search": "Searched"}.get(
+            activity_type, activity_type.replace("_", " ").title()
+        )
+        title = f"{verb} {address}".strip()
+    else:
+        title = activity_type.replace("_", " ").title() or "Activity"
+
+    summary_source = (
+        record.get("description")
+        or record.get("body")
+        or note_text
+        or record.get("details")
+        or record.get("text")
+    )
+    summary = str(summary_source or title).strip()
+    if isinstance(address, str) and address and address not in summary:
+        summary = f"{summary} — {address}".strip(" —")
+
+    timestamp = _lofty_epoch_ms_to_iso(
+        record.get("createdAt")
+        or record.get("created_at")
+        or record.get("created")
+        or record.get("ts")
+        or record.get("timestamp")
+        or record.get("activityTime")
+        or record.get("eventTime")
+    )
+    return {
+        "id": str(raw_id) if raw_id else "",
+        "lead_id": lead_id,
+        "subtype": activity_type,
+        "title": title,
+        "summary": summary,
+        "address": address if isinstance(address, str) else None,
+        "link": record.get("link") if isinstance(record.get("link"), str) else None,
+        "timestamp": timestamp,
+    }
+
+
+def _lofty_normalize_note(record: JsonRecord, lead_id: str) -> JsonRecord:
+    raw_id = record.get("id") or record.get("noteId") or record.get("uuid") or ""
+    body = str(
+        record.get("content")
+        or record.get("body")
+        or record.get("note")
+        or record.get("text")
+        or ""
+    ).strip()
+    author = (
+        record.get("authorName")
+        or record.get("author")
+        or record.get("createdBy")
+        or record.get("userName")
+        or record.get("creatorName")
+        or None
+    )
+    timestamp = _lofty_epoch_ms_to_iso(
+        record.get("createdAt")
+        or record.get("created_at")
+        or record.get("createTime")
+        or record.get("ts")
+        or record.get("timestamp")
+    )
+    title = body[:80] + ("…" if len(body) > 80 else "")
+    return {
+        "id": str(raw_id) if raw_id else "",
+        "lead_id": lead_id,
+        "title": title or "Note",
+        "summary": body,
+        "author": author,
+        "timestamp": timestamp,
+    }
+
+
+def _lofty_normalize_task(record: JsonRecord, lead_id: str) -> JsonRecord:
+    """Real Lofty task shape:
+    ``{id, content, type, deadline, finishTime, createTime, finishFlag,
+    overdueFlag, deleteFlag, assignedUser, subject, body}``.
+    ``deadline``, ``finishTime``, ``createTime`` are ISO strings ending
+    in ``GMT``."""
+    raw_id = record.get("id") or record.get("taskId") or record.get("uuid") or ""
+    title = str(
+        record.get("subject")
+        or record.get("title")
+        or record.get("content")
+        or record.get("name")
+        or record.get("description")
+        or record.get("type")
+        or "Task"
+    ).strip() or "Task"
+    summary = str(
+        record.get("content")
+        or record.get("description")
+        or record.get("body")
+        or record.get("notes")
+        or title
+    ).strip()
+    finish_flag = bool(record.get("finishFlag"))
+    overdue_flag = bool(record.get("overdueFlag"))
+    raw_status = record.get("status") or record.get("state") or ""
+    if raw_status:
+        status = str(raw_status).strip().lower()
+    elif finish_flag:
+        status = "done"
+    elif overdue_flag:
+        status = "overdue"
+    elif record.get("completed"):
+        status = "done"
+    else:
+        status = "open"
+    due = _lofty_epoch_ms_to_iso(
+        record.get("deadline")
+        or record.get("dueDate")
+        or record.get("due_at")
+        or record.get("dueAt")
+        or record.get("scheduledFor")
+    )
+    timestamp = _lofty_epoch_ms_to_iso(
+        record.get("createTime")
+        or record.get("createdAt")
+        or record.get("created_at")
+    ) or due
+    return {
+        "id": str(raw_id) if raw_id else "",
+        "lead_id": lead_id,
+        "title": title,
+        "summary": summary,
+        "status": status,
+        "type": str(record.get("type") or "").strip() or None,
+        "assignedUser": record.get("assignedUser"),
+        "dueAt": due,
+        "timestamp": timestamp,
+    }
 
 
 def _lofty_write(
@@ -3077,21 +3777,39 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
             raise RuntimeError("Lofty CRM source could not be read")
         return view
 
+    # Lofty caps page size at 100. For limit>100 we paginate via offset.
+    # The two endpoints are tried in fall-through order: v2.0/working-leads
+    # returns the high-priority slice, v1.0/leads returns everything.
     leads: list[JsonRecord] = []
     attempted: list[str] = []
     errors: list[str] = []
-    for path, params in (
-        ("/v2.0/working-leads", {"aiStage": "HIGH_PRIORITY", "limit": min(limit, 100), "offset": 0, "sort": "UpdateTime", "desc": "true"}),
-        ("/v1.0/leads", {"limit": min(limit, 100), "offset": 0}),
+    page_size = 100
+    for path, base_params in (
+        ("/v2.0/working-leads", {"aiStage": "HIGH_PRIORITY", "sort": "UpdateTime", "desc": "true"}),
+        ("/v1.0/leads", {}),
     ):
         attempted.append(path)
-        try:
-            payload = _lofty_get(path, env_values, params)
+        offset = 0
+        endpoint_pulled = 0
+        while endpoint_pulled < limit:
+            params = {
+                **base_params,
+                "limit": min(page_size, limit - endpoint_pulled),
+                "offset": offset,
+            }
+            try:
+                payload = _lofty_get(path, env_values, params)
+            except Exception as exc:
+                errors.append(f"{path}@offset={offset}: {exc}")
+                break
             extracted = _extract_lead_records(payload)
-            if extracted:
-                leads.extend(extracted)
-        except Exception as exc:
-            errors.append(f"{path}: {exc}")
+            if not extracted:
+                break  # exhausted this endpoint
+            leads.extend(extracted)
+            endpoint_pulled += len(extracted)
+            offset += len(extracted)
+            if len(extracted) < page_size:
+                break  # short page = last page
 
     deduped: list[JsonRecord] = []
     seen_ids: set[str] = set()
@@ -3108,6 +3826,7 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
     conversation_records: list[JsonRecord] = []
     lead_events: list[JsonRecord] = []
     task_records: list[JsonRecord] = []
+    enrichment_summary: dict[str, int] = {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
     for lead in deduped:
         lead_id = str(lead.get("leadId") or lead.get("id") or lead.get("lead_id") or "").strip()
         record_id = f"lofty-lead:{lead_id or len(contact_records) + 1}"
@@ -3163,6 +3882,87 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                 "title": "Lofty lead synced",
             }
         )
+
+        # Enrichment: pull activities/notes/tasks for this lead and stamp
+        # each as a typed lead_event so the thread-context drawer can show
+        # what the lead has actually been doing — not just a score. Each
+        # endpoint is best-effort: a 404 or transient error on one lead
+        # must not break the whole sync.
+        if lead_id:
+            try:
+                activity_payload = _lofty_get_activities(lead_id, env_values)
+            except Exception:  # noqa: BLE001
+                activity_payload = []
+                enrichment_summary["errors"] += 1
+            for raw_act in activity_payload:
+                norm = _lofty_normalize_activity(raw_act, lead_id)
+                act_id = norm["id"] or _stable_hash_id(
+                    norm["subtype"], norm["title"], norm["timestamp"]
+                )
+                lead_events.append(
+                    {
+                        **base_record,
+                        "source_record_id": f"{record_id}:activity:{act_id}",
+                        "type": "lofty_activity",
+                        "subtype": norm["subtype"],
+                        "title": norm["title"],
+                        "summary": norm["summary"],
+                        "address": norm["address"],
+                        "timestamp": norm["timestamp"] or timestamp,
+                    }
+                )
+            enrichment_summary["activities"] += len(activity_payload)
+
+            try:
+                notes_payload = _lofty_get_notes(lead_id, env_values)
+            except Exception:  # noqa: BLE001
+                notes_payload = []
+                enrichment_summary["errors"] += 1
+            for raw_note in notes_payload:
+                norm = _lofty_normalize_note(raw_note, lead_id)
+                note_id = norm["id"] or _stable_hash_id(
+                    norm["title"], norm["summary"], norm["timestamp"]
+                )
+                lead_events.append(
+                    {
+                        **base_record,
+                        "source_record_id": f"{record_id}:note:{note_id}",
+                        "type": "lofty_note",
+                        "title": norm["title"] or "Note",
+                        "summary": norm["summary"],
+                        "author": norm["author"],
+                        "timestamp": norm["timestamp"] or timestamp,
+                    }
+                )
+            enrichment_summary["notes"] += len(notes_payload)
+
+            try:
+                tasks_payload = _lofty_get_tasks(lead_id, env_values)
+            except Exception:  # noqa: BLE001
+                tasks_payload = []
+                enrichment_summary["errors"] += 1
+            tasks_payload = [t for t in tasks_payload if not t.get("deleteFlag")]
+            for raw_task in tasks_payload:
+                norm = _lofty_normalize_task(raw_task, lead_id)
+                task_id = norm["id"] or _stable_hash_id(
+                    norm["title"], norm["summary"], norm["dueAt"], norm["timestamp"]
+                )
+                lead_events.append(
+                    {
+                        **base_record,
+                        "source_record_id": f"{record_id}:task:{task_id}",
+                        "type": "lofty_task",
+                        "title": norm["title"],
+                        "summary": norm["summary"],
+                        "status": norm["status"],
+                        "task_subtype": norm["type"],
+                        "assignedUser": norm["assignedUser"],
+                        "dueAt": norm["dueAt"],
+                        "timestamp": norm["timestamp"] or timestamp,
+                    }
+                )
+            enrichment_summary["tasks"] += len(tasks_payload)
+
         heat_score, heat_label = _heat_score_for_record(base_record)
         if heat_label in {"hot", "warm"}:
             task_records.append(
@@ -3180,16 +3980,20 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                 }
             )
 
-    _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
-    _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
-    _replace_jsonl(source_dir / "messages.jsonl", [])
-    _replace_jsonl(source_dir / "message-days.jsonl", [])
-    _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
-    preserved_tasks = [
-        r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
-        if str(r.get("task_type") or "").lower() != "lead_follow_up"
-    ]
-    _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks + task_records)
+    # Atomic multi-file rewrite — readers holding _snapshot_reader_lock
+    # see either the pre-sync snapshot or the post-sync snapshot, never
+    # a torn one. Codex audit P1 (2026-05-05).
+    with _snapshot_writer_lock(source_dir):
+        preserved_tasks = [
+            r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
+            if str(r.get("task_type") or "").lower() != "lead_follow_up"
+        ]
+        _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
+        _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
+        _replace_jsonl(source_dir / "messages.jsonl", [])
+        _replace_jsonl(source_dir / "message-days.jsonl", [])
+        _replace_jsonl(source_dir / "lead-events.jsonl", lead_events)
+        _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks + task_records)
     _write_json(
         source_dir / "source.json",
         {
@@ -3210,6 +4014,7 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                 "conversations": len(conversation_records),
                 "lead_events": len(lead_events),
                 "tasks": len(task_records),
+                "enrichment": dict(enrichment_summary),
             },
         },
     )
@@ -3232,15 +4037,46 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                 "conversations": len(conversation_records),
                 "lead_events": len(lead_events),
                 "tasks": len(task_records),
+                "enrichment": dict(enrichment_summary),
             },
         },
     )
     if errors:
         _write_json(artifacts_dir / "last-sync-errors.json", {"checked_at": now, "errors": errors})
+
+    # Continuous ingest into operational.db so DB-primary readers see
+    # tonight's Lofty data without a manual ``elevate migrate-data`` rerun.
+    # Codex audit P0 (2026-05-05): JSONL-only sync left the DB stale.
+    try:
+        _writethrough_to_operational_db(source_dir)
+    except Exception as exc:  # noqa: BLE001
+        # Never let the DB writethrough fail the sync; legacy JSONL is
+        # still the canonical store under DB shadow-read mode.
+        if errors is not None:
+            errors.append(f"db writethrough: {exc}")
+        _write_json(
+            artifacts_dir / "last-db-writethrough-error.json",
+            {"checked_at": now, "error": str(exc)},
+        )
+
     view = connector_view(source_root, "crm")
     if view is None:
         raise RuntimeError("Lofty CRM sync finished but could not be read")
     return view
+
+
+def _writethrough_to_operational_db(source_dir: Path) -> dict[str, Any]:
+    """Replay the just-written JSONL snapshot through the operational DB
+    walker so DB-primary readers see fresh Lofty data without a manual
+    ``elevate migrate-data`` rerun. Idempotent — every helper underneath
+    ``walk_jsonl_source`` is keyed on source_key / event_hash / etc."""
+    from elevate_cli.data import connect as _data_connect
+    from elevate_cli.data.migrate import BackfillStats, walk_jsonl_source
+
+    stats = BackfillStats()
+    with _data_connect() as conn:
+        walk_jsonl_source(source_dir, conn=conn, stats=stats, dry_run=False)
+    return stats.to_dict()
 
 
 def scaffold_composio_social_source(config: dict[str, Any] | None = None) -> JsonRecord:

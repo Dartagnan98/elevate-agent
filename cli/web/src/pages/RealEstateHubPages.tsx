@@ -66,7 +66,6 @@ import {
   Target,
   Trash2,
   TrendingDown,
-  Trophy,
   Award,
   ThumbsUp,
   ThumbsDown,
@@ -78,8 +77,10 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
+  AdminDeal,
   AgentHubMemoryNode,
   AgentHubSnapshot,
+  BuyerWatchlistEntry,
   ComposioConnectedAccount,
   ComposioStatus,
   CronJob,
@@ -106,6 +107,7 @@ import { X as CloseIcon, StickyNote } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const MemoryConstellation = lazy(() =>
   import("@/components/MemoryConstellation").then((m) => ({ default: m.MemoryConstellation })),
 );
@@ -472,14 +474,14 @@ function ActionBoard({
           <Badge variant={actions.length ? "warning" : "success"}>{actions.length}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="divide-y divide-border/40">
         {actions.length ? (
           actions.slice(0, 8).map((action) => {
             const Icon = action.icon;
             return (
               <div
                 key={action.id}
-                className="flex items-start gap-3 rounded-2xl border border-border/55 bg-background/35 px-3 py-3"
+                className="flex items-start gap-3 py-3 first:pt-0 last:pb-0"
               >
                 <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/20">
                   <Icon className="h-4 w-4" />
@@ -508,7 +510,7 @@ function ActionBoard({
             );
           })
         ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm text-muted-foreground">
+          <div className="py-10 text-sm text-muted-foreground">
             {empty}
           </div>
         )}
@@ -767,11 +769,40 @@ function ClientInboxPreview({
   );
 }
 
+const FOLLOWUP_CHANNELS = new Set([
+  "email",
+  "gmail",
+  "sms",
+  "imessage",
+  "messenger",
+  "facebook",
+  "instagram",
+  "instagram_dm",
+  "whatsapp",
+  "telegram",
+]);
+
+function isFollowUpThread(thread: SourceInboxThread): boolean {
+  const channel = (thread.channel || "").toLowerCase();
+  if (!FOLLOWUP_CHANNELS.has(channel)) return false;
+  // First outreach must have happened — at least one outbound from us.
+  if ((thread.outboundCount ?? 0) < 1) return false;
+  // Ball is in our court: last message came in.
+  return thread.direction === "inbound";
+}
+
 function leadThreadBuckets(threads: SourceInboxThread[]) {
   const hot = threads.filter((thread) => thread.heatLabel === "hot").slice(0, 10);
   const followUp = threads
-    .filter((thread) => thread.heatLabel !== "hot" && (thread.direction === "inbound" || thread.heatLabel === "warm"))
-    .slice(0, 10);
+    .filter(isFollowUpThread)
+    .sort((a, b) => {
+      const heatDiff = (b.heatScore ?? 0) - (a.heatScore ?? 0);
+      if (heatDiff !== 0) return heatDiff;
+      const aTime = a.latestAt ? Date.parse(a.latestAt) : 0;
+      const bTime = b.latestAt ? Date.parse(b.latestAt) : 0;
+      return bTime - aTime;
+    })
+    .slice(0, 12);
   const placed = new Set<string>([...hot, ...followUp].map((t) => t.id));
   const remaining = threads.filter((thread) => !placed.has(thread.id));
   const watch: SourceInboxThread[] = [];
@@ -975,15 +1006,114 @@ const LeadBoardRow = memo(function LeadBoardRow({
   const heat = heatStyles(thread.heatLabel);
   const wait = inboundWaitMinutes(thread);
 
-  return (
-    <div
-      className={cn(
-        "group transition-colors",
-        variant === "card"
-          ? "rounded-xl border border-border bg-card px-3 py-3 hover:bg-card/80"
-          : "px-3 py-3 hover:bg-card/40",
+  const isList = variant === "list";
+
+  const metaRow = (
+    <div className="font-mono-ui mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-muted-foreground">
+      <span>{thread.sourceLabel}</span>
+      <span aria-hidden>·</span>
+      <span>{thread.channel}</span>
+      <span aria-hidden>·</span>
+      <span>{inbound ? "in" : "out"}</span>
+      <span aria-hidden>·</span>
+      <span>{threadWhen(thread)}</span>
+      {thread.messageCount > 1 && (
+        <>
+          <span aria-hidden>·</span>
+          <span>{thread.messageCount} msgs</span>
+        </>
       )}
-    >
+      {inbound && wait != null && wait >= 5 && (
+        <span
+          className={cn(
+            "rounded-full border px-1.5 py-0.5",
+            wait >= 60
+              ? "border-destructive/45 bg-destructive/10 text-destructive"
+              : wait >= 30
+                ? "border-warning/45 bg-warning/10 text-warning"
+                : "border-border bg-card text-foreground/70",
+          )}
+        >
+          waited {formatMinutes(wait)}
+        </span>
+      )}
+    </div>
+  );
+
+  const headerRow = (
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+        {thread.personName}
+      </div>
+      <span
+        className={cn(
+          "font-mono-ui inline-flex items-center rounded-full border px-2 py-0.5 text-[0.7rem] font-semibold",
+          heat.pill,
+        )}
+      >
+        {thread.heatScore}
+      </span>
+    </div>
+  );
+
+  const previewText = (
+    <p className="mt-1 line-clamp-2 text-xs leading-5 text-foreground/75">
+      {thread.latestText}
+    </p>
+  );
+
+  if (isList) {
+    return (
+      <div className="group flex items-start gap-3 px-3 py-3 transition-colors first:pt-3 last:pb-3 hover:bg-foreground/[0.02]">
+        <span
+          aria-label={heat.label}
+          role="img"
+          className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", heat.dot)}
+        />
+        <div className="min-w-0 flex-1">
+          {headerRow}
+          {previewText}
+          {metaRow}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11 w-11 p-0 text-foreground/60 hover:text-foreground sm:h-9 sm:w-9"
+            onClick={() => void mark("archive")}
+            aria-label={`Remove ${thread.personName} from list`}
+            title="Remove"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11 w-11 p-0 text-foreground/60 hover:text-foreground sm:h-9 sm:w-9"
+            onClick={() => void mark("done")}
+            aria-label={`Mark ${thread.personName} done`}
+            title="Mark done"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+          </Button>
+          {showOpenThread && (
+            <Button
+              size="sm"
+              className="h-11 px-3 sm:h-9"
+              onClick={() => void openInChat()}
+              aria-label={`Open thread with ${thread.personName}`}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Open
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group rounded-xl border border-border bg-card px-3 py-3 transition-colors hover:bg-card/80">
       <div className="flex items-start gap-3">
         <span
           aria-label={heat.label}
@@ -991,51 +1121,9 @@ const LeadBoardRow = memo(function LeadBoardRow({
           className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", heat.dot)}
         />
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-              {thread.personName}
-            </div>
-            <span
-              className={cn(
-                "font-mono-ui inline-flex items-center rounded-full border px-2 py-0.5 text-[0.7rem] font-semibold",
-                heat.pill,
-              )}
-            >
-              {thread.heatScore}
-            </span>
-          </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-foreground/75">
-            {thread.latestText}
-          </p>
-          <div className="font-mono-ui mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-muted-foreground">
-            <span>{thread.sourceLabel}</span>
-            <span aria-hidden>·</span>
-            <span>{thread.channel}</span>
-            <span aria-hidden>·</span>
-            <span>{inbound ? "in" : "out"}</span>
-            <span aria-hidden>·</span>
-            <span>{threadWhen(thread)}</span>
-            {thread.messageCount > 1 && (
-              <>
-                <span aria-hidden>·</span>
-                <span>{thread.messageCount} msgs</span>
-              </>
-            )}
-            {inbound && wait != null && wait >= 5 && (
-              <span
-                className={cn(
-                  "rounded-full border px-1.5 py-0.5",
-                  wait >= 60
-                    ? "border-destructive/45 bg-destructive/10 text-destructive"
-                    : wait >= 30
-                      ? "border-warning/45 bg-warning/10 text-warning"
-                      : "border-border bg-card text-foreground/70",
-                )}
-              >
-                waited {formatMinutes(wait)}
-              </span>
-            )}
-          </div>
+          {headerRow}
+          {previewText}
+          {metaRow}
         </div>
       </div>
       <div className="mt-3 flex flex-wrap justify-end gap-1.5">
@@ -1237,10 +1325,11 @@ function DraftMessagesBoard({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const drafts = allDrafts.filter((d) => !dismissedIds.has(d.id));
-  const visibleDrafts = drafts.slice(0, pageSize);
+  const visibleDrafts = showAll ? drafts : drafts.slice(0, pageSize);
   const selectedVisible = visibleDrafts.filter((d) => selectedIds.has(d.id));
   const allVisibleSelected = visibleDrafts.length > 0 && selectedVisible.length === visibleDrafts.length;
 
@@ -1587,17 +1676,19 @@ function DraftMessagesBoard({
               {selectedVisible.length} selected · {visibleDrafts.length} shown
               {drafts.length > visibleDrafts.length ? ` of ${drafts.length}` : ""}
             </span>
+            {drafts.length > pageSize && (
+              <button
+                type="button"
+                onClick={() => setShowAll((v) => !v)}
+                className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-foreground hover:bg-card/70"
+              >
+                {showAll ? `Show first ${pageSize}` : `Show all ${drafts.length}`}
+              </button>
+            )}
           </div>
         )}
       </CardHeader>
-      <CardContent
-        className={cn(
-          "relative",
-          density === "compact"
-            ? "grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3"
-            : "space-y-3",
-        )}
-      >
+      <CardContent className="relative divide-y divide-border/40">
         {visibleDrafts.length ? (
           visibleDrafts.map((draft) => {
             const isEditing = editingId === draft.id;
@@ -1614,11 +1705,18 @@ function DraftMessagesBoard({
                 }}
                 onMouseEnter={() => keyboard && setFocusedId(draft.id)}
                 className={cn(
-                  "group rounded-xl border bg-card px-3 py-2.5 transition-colors hover:bg-card/80",
-                  isFocused ? "border-primary/40 ring-2 ring-primary/30" : "border-border",
-                  isSelected && "border-primary/50 bg-primary/5",
+                  "group relative py-3 transition-colors first:pt-0 last:pb-0",
+                  isFocused && "bg-primary/[0.06]",
+                  isSelected && !isFocused && "bg-primary/[0.04]",
+                  !isFocused && !isSelected && "hover:bg-foreground/[0.02]",
                 )}
               >
+                {isFocused && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-y-0 left-0 w-0.5 rounded-full bg-primary"
+                  />
+                )}
                 <div className="flex w-full min-w-0 items-start gap-2">
                   <button
                     type="button"
@@ -1786,7 +1884,7 @@ function DraftMessagesBoard({
             );
           })
         ) : (
-          <div className="col-span-full px-4 py-10 text-center">
+          <div className="px-4 py-10 text-center">
             <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
               Inbox empty
             </h4>
@@ -1795,7 +1893,7 @@ function DraftMessagesBoard({
         )}
         {selectedVisible.length > 0 && (
           <div
-            className="sticky bottom-3 left-0 right-0 z-20 col-span-full mx-auto flex w-fit max-w-full items-center gap-2 rounded-full border border-border bg-card px-3 py-2 shadow-[0_18px_48px_color-mix(in_srgb,var(--background-base)_55%,transparent)]"
+            className="sticky bottom-3 left-0 right-0 z-20 mx-auto mt-3 flex w-fit max-w-full items-center gap-2 rounded-full border border-border bg-card px-3 py-2 shadow-[0_18px_48px_color-mix(in_srgb,var(--background-base)_55%,transparent)]"
             role="region"
             aria-label="Bulk actions"
           >
@@ -1991,7 +2089,7 @@ function ThreadDrawer({
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-50 flex justify-end bg-black/55 backdrop-blur-sm animate-[fade-in_120ms_ease-out]"
+      className="fixed inset-0 z-50 flex justify-end bg-black/60 animate-[fade-in_120ms_ease-out]"
     >
       <div
         className="flex h-full w-full max-w-[1100px] flex-col border-l border-border bg-background shadow-[0_24px_90px_rgba(0,0,0,0.32)]"
@@ -2152,15 +2250,17 @@ function ThreadContextSidebar({
   const meta = context.meta;
   const lead = context.lead;
   const activity = context.activity ?? [];
+  const notes = context.notes ?? [];
+  const tasks = context.tasks ?? [];
   const sectionLabel =
     "font-mono-ui flex items-center gap-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-foreground/70";
-  const sectionShell =
-    "rounded-2xl border border-border bg-background px-3.5 py-3.5";
+  const sectionClass = "py-5 first:pt-0 last:pb-0";
   const displayScore = meta?.score ?? lead?.score ?? null;
   const scoreLabel = meta?.label ?? (lead?.stage || lead?.leadSource || null);
+  const hasContact = Boolean(lead && (lead.emails.length > 0 || lead.phones.length > 0));
   return (
-    <div className="space-y-3.5">
-      <section className={sectionShell}>
+    <div className="divide-y divide-border/40">
+      <section className={sectionClass}>
         <h4 className={sectionLabel}>Lead score</h4>
         {displayScore !== null ? (
           <>
@@ -2228,8 +2328,8 @@ function ThreadContextSidebar({
         )}
       </section>
 
-      {lead && (lead.emails.length > 0 || lead.phones.length > 0) && (
-        <section className={sectionShell}>
+      {hasContact && lead && (
+        <section className={sectionClass}>
           <h4 className={sectionLabel}>Contact</h4>
           <div className="mt-2 space-y-1">
             {lead.phones.slice(0, 3).map((phone) => (
@@ -2246,55 +2346,136 @@ function ThreadContextSidebar({
         </section>
       )}
 
-      <section className={sectionShell}>
+      <section className={sectionClass}>
         <h4 className={sectionLabel}>
           <StickyNote className="h-3 w-3" />
           Notes
+          {notes.length > 0 && (
+            <span className="font-mono-ui text-[0.62rem] font-medium text-muted-foreground/70">
+              {notes.length}
+            </span>
+          )}
         </h4>
-        <p className="mt-2 text-[0.8rem] leading-[1.5] text-muted-foreground">
-          {lead?.summary || "No notes yet."}
-        </p>
-      </section>
-
-      <section className={sectionShell}>
-        <h4 className={sectionLabel}>
-          <Activity className="h-3 w-3" />
-          Property activity
-        </h4>
-        {activity.length === 0 ? (
+        {notes.length === 0 ? (
           <p className="mt-2 text-[0.8rem] leading-[1.5] text-muted-foreground">
-            No activity logged yet.
+            {lead?.summary || "No notes yet."}
           </p>
         ) : (
-          <ul className="mt-2.5 space-y-2">
-            {activity.slice(0, 6).map((event) => (
-              <li key={event.id} className="rounded-xl border-b border-border/40 px-3 py-2 last:border-b-0">
-                <div className="font-mono-ui flex items-center justify-between text-[0.66rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                  <span>{event.type.replace(/_/g, " ")}</span>
-                  {event.timestamp && (
-                    <span className="text-muted-foreground/80">{fmtMessageTimestamp(event.timestamp)}</span>
+          <ul className="mt-2 space-y-2.5">
+            {notes.slice(0, 8).map((note) => (
+              <li key={note.id} className="rounded-md border border-border/40 bg-card/40 px-3 py-2">
+                <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.62rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+                  <span>{note.author || "note"}</span>
+                  {note.timestamp && (
+                    <span className="text-muted-foreground/70">{fmtMessageTimestamp(note.timestamp)}</span>
                   )}
                 </div>
-                {(event.title || event.summary) && (
-                  <p className="mt-1.5 line-clamp-2 text-[0.8rem] leading-[1.45] text-foreground">
-                    {event.title || event.summary}
-                  </p>
-                )}
+                <p className="mt-1 whitespace-pre-line text-[0.8rem] leading-[1.5] text-foreground">
+                  {note.summary}
+                </p>
               </li>
             ))}
           </ul>
         )}
       </section>
 
-      <section className={sectionShell}>
+      {tasks.length > 0 && (
+        <section className={sectionClass}>
+          <h4 className={sectionLabel}>
+            <CheckSquare className="h-3 w-3" />
+            Tasks
+            <span className="font-mono-ui text-[0.62rem] font-medium text-muted-foreground/70">
+              {tasks.length}
+            </span>
+          </h4>
+          <ul className="mt-2 space-y-1.5">
+            {tasks.slice(0, 6).map((task) => (
+              <li key={task.id} className="flex items-start gap-2">
+                <span
+                  className={cn(
+                    "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                    task.status === "done"
+                      ? "bg-success"
+                      : task.status === "in_progress"
+                        ? "bg-primary"
+                        : "bg-muted-foreground/60"
+                  )}
+                  aria-hidden
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[0.8rem] leading-[1.4] text-foreground">
+                    {task.title}
+                  </div>
+                  {(task.dueAt || task.status) && (
+                    <div className="font-mono-ui mt-0.5 flex items-center gap-1.5 text-[0.62rem] uppercase tracking-[0.1em] text-muted-foreground">
+                      <span>{task.status.replace(/_/g, " ")}</span>
+                      {task.dueAt && (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span>due {fmtMessageTimestamp(task.dueAt)}</span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className={sectionClass}>
+        <h4 className={sectionLabel}>
+          <Activity className="h-3 w-3" />
+          Property activity
+          {activity.length > 0 && (
+            <span className="font-mono-ui text-[0.62rem] font-medium text-muted-foreground/70">
+              {activity.length}
+            </span>
+          )}
+        </h4>
+        {activity.length === 0 ? (
+          <p className="mt-2 text-[0.8rem] leading-[1.5] text-muted-foreground">
+            No activity logged yet.
+          </p>
+        ) : (
+          <ul className="mt-2 divide-y divide-border/30">
+            {activity.slice(0, 8).map((event) => {
+              const label = (event.subtype || event.type).replace(/_/g, " ");
+              return (
+                <li key={event.id} className="py-2.5 first:pt-0 last:pb-0">
+                  <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.66rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                    <span>{label}</span>
+                    {event.timestamp && (
+                      <span className="text-muted-foreground/80">{fmtMessageTimestamp(event.timestamp)}</span>
+                    )}
+                  </div>
+                  {(event.title || event.summary) && (
+                    <p className="mt-1 line-clamp-2 text-[0.8rem] leading-[1.45] text-foreground">
+                      {event.title || event.summary}
+                    </p>
+                  )}
+                  {event.address && (
+                    <p className="font-mono-ui mt-0.5 text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/80">
+                      {event.address}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      <section className={sectionClass}>
         <h4 className={sectionLabel}>Send history</h4>
         {sends.length === 0 ? (
           <p className="mt-2 text-[0.8rem] text-muted-foreground">No prior sends.</p>
         ) : (
-          <ul className="mt-2.5 space-y-2">
+          <ul className="mt-2 divide-y divide-border/30">
             {sends.slice(0, 8).map((send) => (
-              <li key={send.id} className="rounded-xl border-b border-border/40 px-3 py-2.5 last:border-b-0">
-                <div className="font-mono-ui flex items-center justify-between text-[0.66rem] font-semibold uppercase tracking-[0.08em]">
+              <li key={send.id} className="py-2.5 first:pt-0 last:pb-0">
+                <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.66rem] font-semibold uppercase tracking-[0.08em]">
                   <span className="text-foreground/75">{send.channel ?? "send"}</span>
                   <span
                     className={cn(
@@ -2308,13 +2489,25 @@ function ThreadContextSidebar({
                     {send.status ?? "unknown"}
                   </span>
                 </div>
-                {send.payload?.text && (
-                  <p className="mt-1.5 line-clamp-3 text-[0.8rem] leading-[1.45] text-foreground">
-                    {String(send.payload.text)}
-                  </p>
-                )}
+                {(() => {
+                  // Codex audit P2 (2026-05-05): older outreach_db rows
+                  // store the body at payload.draft_text; future
+                  // operational.db rows may put it at the top level.
+                  // Fall back through every shape we've shipped so the
+                  // history doesn't render blank.
+                  const body =
+                    (send.payload?.text as string | undefined) ||
+                    (send.payload?.draft_text as string | undefined) ||
+                    ((send as { draftText?: string }).draftText) ||
+                    ((send as { text?: string }).text);
+                  return body ? (
+                    <p className="mt-1 line-clamp-3 text-[0.8rem] leading-[1.45] text-foreground">
+                      {String(body)}
+                    </p>
+                  ) : null;
+                })()}
                 {send.createdAt && (
-                  <div className="font-mono-ui mt-1.5 text-[0.65rem] uppercase tracking-[0.08em] text-muted-foreground/80">
+                  <div className="font-mono-ui mt-1 text-[0.65rem] uppercase tracking-[0.08em] text-muted-foreground/80">
                     {fmtMessageTimestamp(send.createdAt)}
                   </div>
                 )}
@@ -2352,6 +2545,227 @@ function HotLeadsList({
       {hot.map((thread) => (
         <LeadBoardRow key={thread.id} data={data} thread={thread} showOpenThread variant="list" />
       ))}
+    </div>
+  );
+}
+
+function LeadPipelineTabs({
+  data,
+  threads,
+  buyers,
+}: {
+  data: HubData;
+  threads: SourceInboxThread[];
+  buyers: BuyerWatchlistEntry[];
+}) {
+  const followUpCount = leadThreadBuckets(threads).followUp.length;
+  const buyerCount = buyers.length;
+  const defaultTab = followUpCount > 0 || buyerCount === 0 ? "follow-ups" : "buyers";
+
+  return (
+    <div className="rounded-2xl border border-border bg-card">
+      <Tabs defaultValue={defaultTab}>
+        {(active, setActive) => (
+          <>
+            <div className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
+              <TabsList>
+                <TabsTrigger
+                  active={active === "follow-ups"}
+                  value="follow-ups"
+                  onClick={() => setActive("follow-ups")}
+                >
+                  <span>Follow-ups</span>
+                  <span
+                    className={cn(
+                      "font-mono-ui ml-2 rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
+                      active === "follow-ups"
+                        ? "bg-foreground/10 text-foreground"
+                        : "bg-foreground/5 text-muted-foreground",
+                    )}
+                  >
+                    {followUpCount}
+                  </span>
+                </TabsTrigger>
+                <TabsTrigger
+                  active={active === "buyers"}
+                  value="buyers"
+                  onClick={() => setActive("buyers")}
+                >
+                  <span>Buyer searches</span>
+                  <span
+                    className={cn(
+                      "font-mono-ui ml-2 rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
+                      active === "buyers"
+                        ? "bg-foreground/10 text-foreground"
+                        : "bg-foreground/5 text-muted-foreground",
+                    )}
+                  >
+                    {buyerCount}
+                  </span>
+                </TabsTrigger>
+              </TabsList>
+              <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+                {active === "follow-ups"
+                  ? "Replies waiting on you, hottest first."
+                  : "MLS buyers actively shopping."}
+              </span>
+            </div>
+            <div>
+              {active === "follow-ups" ? (
+                <FollowUpThreadsList data={data} threads={threads} />
+              ) : (
+                <PrivateSearchBuyersList buyers={buyers} />
+              )}
+            </div>
+          </>
+        )}
+      </Tabs>
+    </div>
+  );
+}
+
+function FollowUpThreadsList({
+  data,
+  threads,
+}: {
+  data: HubData;
+  threads: SourceInboxThread[];
+}) {
+  const followUps = leadThreadBuckets(threads).followUp.slice(0, 8);
+  if (!followUps.length) {
+    return (
+      <div className="px-4 py-8 text-center">
+        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+          Inbox zero on replies
+        </h4>
+        <p className="mt-2 text-sm leading-6 text-foreground/75">
+          People who replied to your outreach across email, SMS, Messenger, IG and WhatsApp surface here, hottest first.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="divide-y divide-border/40">
+      {followUps.map((thread) => (
+        <LeadBoardRow key={thread.id} data={data} thread={thread} showOpenThread variant="list" />
+      ))}
+    </div>
+  );
+}
+
+function PrivateSearchBuyersList({ buyers }: { buyers: BuyerWatchlistEntry[] }) {
+  if (!buyers.length) {
+    return (
+      <div className="px-4 py-8 text-center">
+        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+          No active buyer searches yet
+        </h4>
+        <p className="mt-2 text-sm leading-6 text-foreground/75">
+          Run the MLS analyzer to score buyers actively searching the board. Results land here ranked by score and recency.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="divide-y divide-border/40">
+      {buyers.map((buyer) => (
+        <BuyerWatchlistRow key={buyer.id} buyer={buyer} />
+      ))}
+    </div>
+  );
+}
+
+function BuyerWatchlistRow({ buyer }: { buyer: BuyerWatchlistEntry }) {
+  const score = typeof buyer.score === "number" ? buyer.score : null;
+  const tier = (buyer.tier ?? "").toUpperCase();
+  const days = typeof buyer.days === "number" ? buyer.days : null;
+  const searches = (buyer.searches ?? []).filter(Boolean);
+  const tone =
+    tier === "HOT"
+      ? "border-destructive/45 bg-destructive/10 text-destructive"
+      : tier === "WARM"
+        ? "border-warning/45 bg-warning/10 text-warning"
+        : "border-border bg-card text-foreground/70";
+  const dot =
+    tier === "HOT"
+      ? "bg-destructive"
+      : tier === "WARM"
+        ? "bg-warning"
+        : "bg-foreground/40";
+
+  return (
+    <div className="group flex items-start gap-3 px-3 py-3 transition-colors first:pt-3 last:pb-3 hover:bg-foreground/[0.02]">
+      <span aria-hidden="true" className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", dot)} />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+            {buyer.name || "Unnamed buyer"}
+          </div>
+          {score !== null && (
+            <span
+              className={cn(
+                "font-mono-ui inline-flex items-center rounded-full border px-2 py-0.5 text-[0.7rem] font-semibold",
+                tone,
+              )}
+            >
+              {score}
+            </span>
+          )}
+        </div>
+        {searches.length > 0 && (
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-foreground/75">
+            {searches.join(" · ")}
+          </p>
+        )}
+        <div className="font-mono-ui mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-muted-foreground">
+          {tier && <span>{tier.toLowerCase()}</span>}
+          {tier && (days != null || buyer.lastActivity) && <span aria-hidden>·</span>}
+          {days != null ? (
+            <span>{days === 0 ? "today" : `${days}d ago`}</span>
+          ) : buyer.lastActivity ? (
+            <span>{buyer.lastActivity}</span>
+          ) : null}
+          {buyer.email && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="inline-flex items-center gap-1">
+                <Mail className="h-3 w-3" />
+                <span className="truncate">{buyer.email}</span>
+              </span>
+            </>
+          )}
+          {buyer.phone && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="inline-flex items-center gap-1">
+                <Phone className="h-3 w-3" />
+                {buyer.phone}
+              </span>
+            </>
+          )}
+          {buyer.sourceLabel && (
+            <>
+              <span aria-hidden>·</span>
+              <span>{buyer.sourceLabel}</span>
+            </>
+          )}
+        </div>
+      </div>
+      {buyer.profileUrl && (
+        <a
+          href={buyer.profileUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open MLS profile for ${buyer.name}`}
+          className={cn(
+            buttonVariants({ size: "sm", variant: "outline" }),
+            "h-11 shrink-0 px-3 sm:h-9",
+          )}
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          Profile
+        </a>
+      )}
     </div>
   );
 }
@@ -2490,12 +2904,12 @@ function RecentSessions({
           <Badge variant="outline">{sessions.length}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="divide-y divide-border/40">
         {sessions.length ? (
           sessions.slice(0, 6).map((session) => (
             <div
               key={session.id}
-              className="flex items-center gap-3 rounded-2xl border border-border/55 bg-background/35 px-3 py-2.5"
+              className="flex items-center gap-3 py-3 first:pt-0 last:pb-0"
             >
               <span
                 className={cn(
@@ -2517,7 +2931,7 @@ function RecentSessions({
             </div>
           ))
         ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
+          <div className="py-8 text-sm text-muted-foreground">
             {empty}
           </div>
         )}
@@ -2543,12 +2957,12 @@ function TimedTasks({
           <Badge variant="outline">{jobs.length}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="divide-y divide-border/40">
         {jobs.length ? (
           jobs.slice(0, 6).map((job) => (
             <div
               key={job.id}
-              className="grid gap-2 rounded-2xl border border-border/55 bg-background/35 px-3 py-2.5"
+              className="grid gap-1.5 py-3 first:pt-0 last:pb-0"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -2569,7 +2983,7 @@ function TimedTasks({
             </div>
           ))
         ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
+          <div className="py-8 text-sm text-muted-foreground">
             {empty}
           </div>
         )}
@@ -2581,12 +2995,26 @@ function TimedTasks({
 function WorkflowStrip({
   items,
 }: {
-  items: Array<{ icon: ComponentType<{ className?: string }>; label: string; value: string | number }>;
+  items: Array<{
+    icon?: ComponentType<{ className?: string }>;
+    label: string;
+    value: string | number;
+  }>;
 }) {
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      {items.map((item) => (
-        <HubMetric key={item.label} icon={item.icon} label={item.label} value={item.value} />
+    <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3 rounded-xl border border-border bg-card px-5 py-4">
+      {items.map((item, i) => (
+        <div key={item.label} className="flex items-baseline gap-2">
+          {i > 0 && (
+            <span aria-hidden="true" className="hidden text-border sm:inline-block">·</span>
+          )}
+          <span className="text-xl font-semibold tabular-nums text-foreground">
+            {item.value}
+          </span>
+          <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+            {item.label}
+          </span>
+        </div>
       ))}
     </div>
   );
@@ -2689,55 +3117,72 @@ function LeadFilterBar({
   pulse?: ResponsePulse;
   threads: number;
 }) {
-  const stats: Array<{ label: string; value: number | string; tone: "warning" | "default" | "muted" | "destructive" }> = [
-    { label: "Drafts to approve", value: drafts, tone: drafts > 0 ? "warning" : "muted" },
-    { label: "Hot leads", value: hot, tone: hot > 0 ? "default" : "muted" },
-    { label: "Open threads", value: threads, tone: "default" },
-    { label: "Follow-ups scheduled", value: followUps, tone: "muted" },
+  type Stat = {
+    label: string;
+    value: number | string;
+    tone: "warning" | "default" | "muted" | "destructive";
+    emphasis?: "primary" | "secondary";
+  };
+  const queueStats: Stat[] = [
+    { label: "Drafts to approve", value: drafts, tone: drafts > 0 ? "warning" : "muted", emphasis: "primary" },
+    { label: "Hot leads", value: hot, tone: hot > 0 ? "default" : "muted", emphasis: "primary" },
+    { label: "Open threads", value: threads, tone: "default", emphasis: "primary" },
+    { label: "Follow-ups scheduled", value: followUps, tone: "muted", emphasis: "primary" },
   ];
+  const slaStats: Stat[] = [];
   if (pulse) {
-    stats.push({
+    slaStats.push({
       label: "Unanswered",
       value: pulse.unanswered,
       tone: pulse.breached30 > 0 ? "destructive" : pulse.unanswered > 0 ? "warning" : "muted",
+      emphasis: "secondary",
     });
-    stats.push({
+    slaStats.push({
       label: "Median wait",
       value: formatMinutes(pulse.median),
       tone: (pulse.median ?? 0) >= 30 ? "destructive" : (pulse.median ?? 0) >= 5 ? "warning" : "muted",
+      emphasis: "secondary",
     });
-    stats.push({
+    slaStats.push({
       label: "Longest wait",
       value: formatMinutes(pulse.longest),
       tone: (pulse.longest ?? 0) >= 60 ? "destructive" : (pulse.longest ?? 0) >= 30 ? "warning" : "muted",
+      emphasis: "secondary",
     });
   }
 
+  const renderStat = (stat: Stat) => (
+    <div key={stat.label} className="flex items-baseline gap-1.5">
+      <span
+        className={cn(
+          "font-semibold tabular-nums leading-none",
+          stat.emphasis === "primary" ? "text-lg" : "text-sm",
+          stat.tone === "warning" && "text-warning",
+          stat.tone === "destructive" && "text-destructive",
+          stat.tone === "default" && "text-foreground",
+          stat.tone === "muted" && "text-muted-foreground",
+        )}
+      >
+        {stat.value}
+      </span>
+      <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.12em] text-muted-foreground">
+        {stat.label}
+      </span>
+    </div>
+  );
+
   return (
-    <div className="flex flex-col gap-2.5 rounded-2xl border border-border bg-card px-3.5 py-2.5">
-      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
-        {stats.map((stat) => (
-          <div key={stat.label} className="flex items-baseline gap-1.5">
-            <span
-              className={cn(
-                "text-base font-semibold tabular-nums leading-none",
-                stat.tone === "warning" && "text-warning",
-                stat.tone === "destructive" && "text-destructive",
-                stat.tone === "default" && "text-foreground",
-                stat.tone === "muted" && "text-muted-foreground",
-              )}
-            >
-              {stat.value}
-            </span>
-            <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.12em] text-muted-foreground">
-              {stat.label}
-            </span>
-          </div>
-        ))}
+    <div className="rounded-2xl border border-border bg-card">
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 px-4 py-3">
+        {queueStats.map(renderStat)}
+        {slaStats.length > 0 && (
+          <span aria-hidden="true" className="hidden h-4 self-center border-l border-border/60 sm:inline-block" />
+        )}
+        {slaStats.map(renderStat)}
       </div>
       {options.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1 border-t border-border/55 pt-2">
-          <span className="font-mono-ui mr-0.5 inline-flex items-center gap-1 text-[0.66rem] uppercase tracking-[0.14em] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/40 px-4 py-2.5">
+          <span className="font-mono-ui mr-1 inline-flex items-center gap-1 text-[0.66rem] uppercase tracking-[0.14em] text-muted-foreground">
             <Filter className="h-3 w-3" />
             Filter
           </span>
@@ -2841,7 +3286,7 @@ function CollapsibleSection({
   );
 }
 
-type AgentLaneId = "new-outreach" | "hot-leads-watcher" | "follow-ups";
+type AgentLaneId = "new-outreach" | "hot-leads-watcher" | "follow-ups" | "private-searches";
 
 type AgentLaneDef = {
   id: AgentLaneId;
@@ -2892,6 +3337,25 @@ const AGENT_LANES: AgentLaneDef[] = [
     prompt:
       "Run the outreach skill in nurture mode. For every lead with an open thread whose last outbound was 3+ days ago without a reply (or whose CRM stage is in nurture), draft a context-aware follow-up on the same channel they were last contacted. Use the relationship history, last touch, and CRM stage to pick the angle. Queue every draft for approval. Do not send.",
   },
+  {
+    id: "private-searches",
+    name: "Private Searches",
+    tagline: "Nightly MLS PCS scrape → score → watchlist → CRM sync.",
+    icon: Filter,
+    schedule: "0 3 * * *",
+    scheduleLabel: "Daily · 3:00am",
+    matchKeywords: [
+      "private search",
+      "private searches",
+      "pcs",
+      "xposure",
+      "saved search",
+      "watchlist",
+    ],
+    cronName: "Private Searches",
+    prompt:
+      "Run the PCS pipeline: (1) scrape every registered buyer with a Private Client Search from Xposure MLS, push deltas to the CRM tagged xposure-pcs; (2) score each buyer HOT (active ≤30d) / WARM (≤90d) / cold; (3) for HOT buyers, pull their saved-search criteria (areas, beds, property type) and update the CRM stage + tag; (4) build a branded watchlist PDF with cover + per-lead cards (score, last active, areas, beds, call script). Stage results in the source dir. Do not send any messages.",
+  },
 ];
 
 function laneCronJob(lane: AgentLaneDef, jobs: CronJob[]): CronJob | undefined {
@@ -2928,8 +3392,43 @@ function OutreachLanesGrid({
   cronJobs: CronJob[];
   onChanged: () => Promise<void>;
 }) {
+  // Idempotently install the default lanes the first time this view
+  // renders. Server-side ``ensure-lanes`` skips any lane whose name
+  // already exists, so re-mounting is a pure no-op. localStorage gate
+  // means we don't hit the endpoint on every navigation; the UI still
+  // converges if a lane was deleted (clear the flag from devtools).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const FLAG = "elevate.lanes.defaults_installed_v1";
+    if (window.localStorage.getItem(FLAG) === "1") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await api.ensureLaneCronJobs(
+          AGENT_LANES.map((lane) => ({
+            name: lane.cronName,
+            schedule: lane.schedule,
+            prompt: lane.prompt,
+            deliver: "local",
+          })),
+        );
+        if (!cancelled) {
+          window.localStorage.setItem(FLAG, "1");
+          await onChanged();
+        }
+      } catch {
+        // Best-effort install — if the endpoint is unavailable, the
+        // legacy "Start" button on each card still works.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
-    <div className="flex flex-col gap-2">
+    <div className="divide-y divide-border/40">
       {AGENT_LANES.map((lane) => (
         <AgentLaneStripRow
           key={lane.id}
@@ -2997,7 +3496,7 @@ function AgentLaneStripRow({
   };
 
   return (
-    <div className="grid grid-cols-1 items-center gap-3 rounded-2xl border border-border bg-card px-3 py-2.5 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1.4fr)_auto]">
+    <div className="grid grid-cols-1 items-center gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1.4fr)_auto]">
       <div className="flex items-center gap-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
           <Icon className="h-4 w-4" />
@@ -3205,8 +3704,8 @@ function ComposioChannelStrip() {
   if (!status.hasKey) return null;
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
+    <div className="space-y-2.5">
+      <div className="flex items-center justify-between gap-2">
         <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
           Composio {status.valid ? `· ${connections.length} connected` : "· key invalid"}
         </h4>
@@ -3218,13 +3717,13 @@ function ComposioChannelStrip() {
         </Link>
       </div>
       {!status.valid ? (
-        <div className="rounded-2xl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+        <p className="text-xs leading-5 text-warning">
           Composio rejected the saved key. Update it in Config to import these channels.
-        </div>
+        </p>
       ) : connections.length === 0 ? (
-        <div className="rounded-2xl border border-border bg-card px-3 py-2 text-xs text-foreground/70">
+        <p className="text-xs leading-5 text-muted-foreground">
           No Composio accounts linked yet. Connect Instagram, Gmail, Twilio, or any other app from the Config page.
-        </div>
+        </p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {connections.map((conn, idx) => (
@@ -3321,28 +3820,23 @@ function ChannelsPanel({
           </Link>
         </div>
       </CardHeader>
-      <CardContent className="flex flex-col gap-4">
+      <CardContent className="flex flex-col gap-7">
         {live.length > 0 && (
-          <div className="space-y-2">
-            <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-              Live
-            </h4>
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-              {live.map((source) => (
-                <LiveChannelCard
-                  key={source.id}
-                  source={source}
-                  threads={threadsBySource.get(source.id) ?? []}
-                />
-              ))}
-            </div>
+          <div className="divide-y divide-border/40">
+            {live.map((source) => (
+              <LiveChannelCard
+                key={source.id}
+                source={source}
+                threads={threadsBySource.get(source.id) ?? []}
+              />
+            ))}
           </div>
         )}
 
         <ComposioChannelStrip />
 
         {available.length > 0 && (
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
               Available — connect to expand the inbox
             </h4>
@@ -3392,37 +3886,42 @@ function LiveChannelCard({
     <Link
       to="/config#composio"
       aria-label={`Configure ${source.label} channel — ${stateLabel}, ${compactCount(state.uncontacted)} uncontacted, ${compactCount(state.contacted)} contacted, ${compactCount(totalRecords)} records`}
-      className="group block rounded-2xl border border-border/55 bg-card p-3 transition-colors hover:border-border hover:bg-card/80"
+      className="group flex items-start gap-3 py-3 transition-colors first:pt-0 last:pb-0 hover:bg-foreground/[0.02]"
     >
-      <div className="flex items-center gap-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
-          <Icon className="h-3.5 w-3.5" />
-        </span>
-        <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-          {source.label}
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
+        <Icon className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="truncate text-sm font-semibold text-foreground">{source.label}</span>
+          <span
+            className={cn(
+              "font-mono-ui inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em]",
+              tone === "success" && "bg-success/12 text-success ring-1 ring-success/25",
+              tone === "warning" && "bg-warning/12 text-warning ring-1 ring-warning/25",
+              tone === "destructive" && "bg-destructive/12 text-destructive ring-1 ring-destructive/25",
+              tone === "default" && "bg-primary/12 text-primary ring-1 ring-primary/25",
+            )}
+          >
+            {stateLabel}
+          </span>
         </div>
-        <span
-          className={cn(
-            "font-mono-ui inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em]",
-            tone === "success" && "bg-success/12 text-success ring-1 ring-success/25",
-            tone === "warning" && "bg-warning/12 text-warning ring-1 ring-warning/25",
-            tone === "destructive" && "bg-destructive/12 text-destructive ring-1 ring-destructive/25",
-            tone === "default" && "bg-primary/12 text-primary ring-1 ring-primary/25",
-          )}
-        >
-          {stateLabel}
-        </span>
+        {source.nextOperatorStep && !source.connected && (
+          <p className="mt-1 line-clamp-2 text-[0.72rem] leading-4 text-muted-foreground">
+            {source.nextOperatorStep}
+          </p>
+        )}
       </div>
-      <div className="font-mono-ui mt-2.5 text-[0.72rem] tabular-nums text-muted-foreground">
-        <span className="text-warning">{compactCount(state.uncontacted)}</span> uncontacted ·{" "}
-        <span className="text-success">{compactCount(state.contacted)}</span> contacted ·{" "}
-        <span className="text-foreground">{compactCount(totalRecords)}</span> records
+      <div className="font-mono-ui shrink-0 self-center text-right text-[0.72rem] tabular-nums leading-tight text-muted-foreground">
+        <div>
+          <span className="text-warning">{compactCount(state.uncontacted)}</span> uncontacted
+        </div>
+        <div className="mt-0.5">
+          <span className="text-success">{compactCount(state.contacted)}</span> contacted
+          <span className="text-muted-foreground/60"> · </span>
+          <span className="text-foreground/85">{compactCount(totalRecords)}</span> records
+        </div>
       </div>
-      {source.nextOperatorStep && !source.connected && (
-        <p className="mt-2 line-clamp-2 text-[0.72rem] leading-4 text-muted-foreground">
-          {source.nextOperatorStep}
-        </p>
-      )}
     </Link>
   );
 }
@@ -4140,7 +4639,7 @@ export function RealEstateLeadsPage() {
       icon={Inbox}
       title="Today's sales moves."
     >
-      <div className="flex w-full flex-col gap-4">
+      <div className="flex w-full flex-col gap-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <LeadsTabBar active={tab} onChange={setTab} />
           {tab === "templates" && (
@@ -4213,6 +4712,12 @@ export function RealEstateLeadsPage() {
               <HotLeadsList data={data} threads={threads} />
             </CollapsibleSection>
 
+            <LeadPipelineTabs
+              data={data}
+              threads={threads}
+              buyers={data.sourceInbox?.privateSearchBuyers ?? []}
+            />
+
             <CollapsibleSection
               title="Recently skipped"
               count={(data.sourceInbox?.skippedDrafts ?? []).length}
@@ -4236,7 +4741,7 @@ export function RealEstateLeadsPage() {
 
         <CollapsibleSection
           title="Outreach lanes"
-          description="New Outreach, Hot Leads Watcher, Follow-ups."
+          description="New Outreach, Hot Leads Watcher, Follow-ups, Private Searches."
         >
           <OutreachLanesGrid cronJobs={data.cronJobs} onChanged={refresh} />
         </CollapsibleSection>
@@ -4269,6 +4774,1576 @@ export function RealEstateLeadsPage() {
       </div>
     </HubShell>
     </ThreadDrawerProvider>
+  );
+}
+
+// ─── Skyleigh Admin Hub kanban ───────────────────────────────────────────────
+// Spec: docs/plans/skyleigh-admin-hub-kanban.md
+// Cards open into a side panel with collapsible per-stage checklists.
+
+const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+
+type AdminSide = "listing" | "buyer";
+type AdminStageNumber = (typeof ADMIN_STAGE_NUMBERS)[number];
+
+type AdminStageLabel = {
+  title: string;
+  subtitle: string;
+};
+
+type AdminColumn = {
+  stage: AdminStageNumber;
+  stageNumber: string;
+  stageLabel?: string;
+  labels: Record<AdminSide, AdminStageLabel>;
+};
+
+type AdminChecklistItem = { id: string; label: string };
+
+type AdminEnumField =
+  | "signing_authority"
+  | "fintrac_form_type"
+  | "listing_track"
+  | "property_subtype"
+  | "estate_status"
+  | "transaction_type"
+  | "listing_type";
+
+type AdminToggleField =
+  | "pep"
+  | "tenanted"
+  | "poa_signing"
+  | "corporate"
+  | "has_suite"
+  | "multiple_offers"
+  | "family_member"
+  | "dual_rep"
+  | "unrepresented_other_side"
+  | "lockbox"
+  | "delayed_offer"
+  | "sale_of_buyers_property";
+
+type AdminConditionField = AdminEnumField | AdminToggleField;
+type AdminConditionValue = string | boolean | null;
+type AdminCompletedByStage = Partial<Record<AdminStageNumber, Record<string, boolean>>>;
+
+type AdminCard = {
+  id: string;
+  side: AdminSide;
+  stage: AdminStageNumber;
+  client: string;
+  contactInitials: string;
+  property?: string;
+  nextLabel?: string;
+  nextDate?: string;
+  daysOut?: number;
+  pinnedTop25?: boolean;
+  completedByStage?: AdminCompletedByStage;
+  conditions?: Partial<Record<AdminConditionField, AdminConditionValue>>;
+};
+
+const ADMIN_SIDE_LABELS: Record<AdminSide, { title: string; description: string }> = {
+  listing: {
+    title: "Listing Admin",
+    description: "CMA through closing gift",
+  },
+  buyer: {
+    title: "Buyer Admin",
+    description: "Walkthrough through one-week follow-up",
+  },
+};
+
+const ADMIN_COLUMNS: AdminColumn[] = [
+  {
+    stage: 0,
+    stageNumber: "S0",
+    stageLabel: "Commitment",
+    labels: {
+      listing: { title: "CMA", subtitle: "Pricing call" },
+      buyer: { title: "Intake", subtitle: "Profile + budget" },
+    },
+  },
+  {
+    stage: 1,
+    stageNumber: "S1",
+    stageLabel: "Intake",
+    labels: {
+      listing: { title: "Listing Intake", subtitle: "Names + dates" },
+      buyer: { title: "Search Setup", subtitle: "Criteria + MLS" },
+    },
+  },
+  {
+    stage: 2,
+    stageNumber: "S2",
+    stageLabel: "Package",
+    labels: {
+      listing: { title: "Paperwork", subtitle: "Title + forms" },
+      buyer: { title: "Tours", subtitle: "Route + notes" },
+    },
+  },
+  {
+    stage: 3,
+    stageNumber: "S3",
+    stageLabel: "Prep",
+    labels: {
+      listing: { title: "Pre-Launch", subtitle: "MLC + signing" },
+      buyer: { title: "Follow-Up", subtitle: "Feedback + fit" },
+    },
+  },
+  {
+    stage: 4,
+    stageNumber: "S4",
+    stageLabel: "Live",
+    labels: {
+      listing: { title: "Marketing", subtitle: "MLS + socials" },
+      buyer: { title: "Offer Prep", subtitle: "Comps + CPS" },
+    },
+  },
+  {
+    stage: 5,
+    stageNumber: "S5",
+    stageLabel: "Active",
+    labels: {
+      listing: { title: "Showings", subtitle: "Updates + OH" },
+      buyer: { title: "Accepted", subtitle: "Lender + docs" },
+    },
+  },
+  {
+    stage: 6,
+    stageNumber: "S6",
+    stageLabel: "Contract",
+    labels: {
+      listing: { title: "Offer", subtitle: "Summary + terms" },
+      buyer: { title: "Conditions", subtitle: "Inspection + strata" },
+    },
+  },
+  {
+    stage: 7,
+    stageNumber: "S7",
+    stageLabel: "Subjects",
+    labels: {
+      listing: { title: "Subjects", subtitle: "Deposit + lawyer" },
+      buyer: { title: "Subjects Off", subtitle: "Deposit + dates" },
+    },
+  },
+  {
+    stage: 8,
+    stageNumber: "S8",
+    stageLabel: "Closing",
+    labels: {
+      listing: { title: "Closing", subtitle: "Keys + possession" },
+      buyer: { title: "Closing", subtitle: "Lawyer + walkthrough" },
+    },
+  },
+  {
+    stage: 9,
+    stageNumber: "S9",
+    stageLabel: "Post-Close",
+    labels: {
+      listing: { title: "Gift + Nurture", subtitle: "Review + referral" },
+      buyer: { title: "Possession", subtitle: "Gift + follow-up" },
+    },
+  },
+];
+
+// Per-stage checklist catalog. Card state (completedByStage) overlays this.
+const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminChecklistItem[]>> = {
+  listing: {
+    0: [
+    { id: "draft-cma-followup", label: "Draft CMA follow-up message" },
+    { id: "pricing-recap", label: "Send pricing recap to seller" },
+    { id: "track-objections", label: "Track seller objections + questions" },
+    { id: "missing-info-list", label: "Identify info needed before listing paperwork" },
+    { id: "listing-intake-prep", label: "Prepare listing intake request" },
+    ],
+    1: [
+    { id: "intake-legal-names", label: "Collect legal names + address" },
+    { id: "intake-price-commission", label: "Confirm listing price + commission + dates" },
+    { id: "intake-included-excluded", label: "Document included/excluded items + possession" },
+    ],
+    2: [
+    { id: "pull-title", label: "Pull title" },
+    { id: "organize-photos", label: "Organize photos / floorplan / video schedule" },
+    ],
+    3: [
+    { id: "fill-mlc", label: "Fill MLC + required forms" },
+    { id: "digisign-send", label: "Send DigiSign envelope" },
+    { id: "track-signatures", label: "Confirm all signatures received" },
+    ],
+    4: [
+    { id: "mls-remarks", label: "Draft MLS remarks + public description" },
+    { id: "feature-sheet", label: "Feature sheet copy" },
+    { id: "social-posts", label: "Social posts queued" },
+    { id: "email-blast", label: "Email blast sent" },
+    ],
+    5: [
+    { id: "open-house", label: "Open house scheduled" },
+    { id: "showingtime-digest", label: "Weekly ShowingTime + market digest sent" },
+    ],
+    6: [
+    { id: "offer-summary", label: "Offer summary prepared" },
+    { id: "subject-deadline", label: "Subject removal deadline tracked" },
+    { id: "inspection-timing", label: "Inspection scheduled" },
+    ],
+    7: [
+    { id: "deposit-confirmed", label: "Deposit landed in trust" },
+    { id: "lawyer-engaged", label: "Lawyer / conveyancer engaged" },
+    { id: "skyslope-docs", label: "SkySlope missing-doc list cleared" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
+    ],
+    8: [
+    { id: "completion-checklist", label: "Completion checklist complete" },
+    { id: "key-handoff", label: "Key handoff coordinated" },
+    ],
+    9: [
+    { id: "closing-gift", label: "Closing gift ordered + sent" },
+    { id: "thank-you", label: "Thank-you / review / referral drafts queued" },
+    { id: "anniversary", label: "Anniversary reminder added" },
+    { id: "past-client-nurture", label: "Moved into past-client nurture" },
+    ],
+  },
+  buyer: {
+    0: [
+    { id: "buyer-profile", label: "Buyer profile (budget, financing, areas, beds, must-haves)" },
+    { id: "search-criteria", label: "MLS / Lofty search filter built" },
+    ],
+    1: [
+    { id: "shortlist", label: "Property shortlist + ranked-fit" },
+    { id: "showing-route", label: "Showing route + itinerary" },
+    { id: "preview-notes", label: "Preview notes per property" },
+    ],
+    2: [
+    { id: "followup-draft", label: "Per-showing follow-up draft" },
+    { id: "feedback-summary", label: "Feedback summary (liked / disliked / dealbreakers)" },
+    ],
+    3: [
+    { id: "criteria-update", label: "Buyer criteria updated" },
+    { id: "comp-pull", label: "Comparable sales pulled" },
+    { id: "cps-checklist", label: "CPS input checklist + offer strategy" },
+    ],
+    4: [
+    { id: "lender-paperwork", label: "Lender paperwork sent" },
+    { id: "accepted-offer-checklist", label: "Accepted-offer checklist run" },
+    { id: "doc-list", label: "Doc list (CPS, addenda, disclosures, deposit receipt)" },
+    ],
+    5: [
+    { id: "inspection-booked", label: "Inspection booked" },
+    { id: "insurance-deadline", label: "Insurance deadline tracked" },
+    { id: "strata-review", label: "Strata review (if applicable)" },
+    ],
+    6: [
+    { id: "deposit-due", label: "Deposit due date tracked" },
+    { id: "lawyer-info", label: "Lawyer / conveyancer info captured" },
+    { id: "skyslope-docs", label: "SkySlope missing-doc list cleared" },
+    ],
+    7: [
+    { id: "subjects-removed", label: "All subjects removed" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
+    ],
+    8: [
+    { id: "lawyer-final-docs", label: "Final docs forwarded to lawyer" },
+    { id: "completion-checklist", label: "Completion checklist complete" },
+    { id: "final-walkthrough", label: "Final walkthrough scheduled" },
+    ],
+    9: [
+    { id: "utility-reminder", label: "Utility / change-of-address reminder sent" },
+    { id: "key-handoff", label: "Key handoff coordinated" },
+    { id: "closing-gift", label: "Closing gift sent" },
+    { id: "thank-you", label: "Thank-you / review / referral drafts queued" },
+    { id: "one-week-followup", label: "One-week-after follow-up scheduled" },
+    { id: "anniversary", label: "Anniversary reminder added" },
+    ],
+  },
+};
+
+const ADMIN_ENUM_CONDITIONS: Array<{
+  field: AdminEnumField;
+  label: string;
+  options: Array<{ value: string; label: string }>;
+}> = [
+  {
+    field: "signing_authority",
+    label: "Signing authority",
+    options: [
+      { value: "seller", label: "Seller" },
+      { value: "buyer", label: "Buyer" },
+      { value: "both", label: "Both clients" },
+      { value: "poa", label: "Power of attorney" },
+      { value: "corporate", label: "Corporate signer" },
+      { value: "estate_executor", label: "Estate executor" },
+    ],
+  },
+  {
+    field: "fintrac_form_type",
+    label: "FINTRAC form type",
+    options: [
+      { value: "individual", label: "Individual" },
+      { value: "corporation", label: "Corporation" },
+      { value: "estate", label: "Estate" },
+      { value: "poa", label: "Power of attorney" },
+      { value: "third_party", label: "Third party" },
+    ],
+  },
+  {
+    field: "listing_track",
+    label: "Listing track",
+    options: [
+      { value: "standard", label: "Standard" },
+      { value: "rush", label: "Rush" },
+      { value: "pre_market", label: "Pre-market" },
+      { value: "relist", label: "Relist" },
+    ],
+  },
+  {
+    field: "property_subtype",
+    label: "Property subtype",
+    options: [
+      { value: "detached", label: "Detached" },
+      { value: "townhouse", label: "Townhouse" },
+      { value: "condo", label: "Condo" },
+      { value: "strata", label: "Strata" },
+      { value: "acreage", label: "Acreage" },
+      { value: "land", label: "Land" },
+      { value: "multifamily", label: "Multifamily" },
+    ],
+  },
+  {
+    field: "estate_status",
+    label: "Estate status",
+    options: [
+      { value: "none", label: "None" },
+      { value: "estate_sale", label: "Estate sale" },
+      { value: "probate_pending", label: "Probate pending" },
+      { value: "probate_granted", label: "Probate granted" },
+    ],
+  },
+  {
+    field: "transaction_type",
+    label: "Transaction type",
+    options: [
+      { value: "residential", label: "Residential" },
+      { value: "commercial", label: "Commercial" },
+      { value: "referral", label: "Referral" },
+      { value: "assignment", label: "Assignment" },
+    ],
+  },
+  {
+    field: "listing_type",
+    label: "Listing type",
+    options: [
+      { value: "mls", label: "MLS" },
+      { value: "exclusive", label: "Exclusive" },
+      { value: "coming_soon", label: "Coming soon" },
+      { value: "mere_posting", label: "Mere posting" },
+    ],
+  },
+];
+
+const ADMIN_TOGGLE_CONDITIONS: Array<{ field: AdminToggleField; label: string }> = [
+  { field: "pep", label: "PEP" },
+  { field: "tenanted", label: "Tenanted" },
+  { field: "poa_signing", label: "POA signing" },
+  { field: "corporate", label: "Corporate" },
+  { field: "has_suite", label: "Has suite" },
+  { field: "multiple_offers", label: "Multiple offers" },
+  { field: "family_member", label: "Family member" },
+  { field: "dual_rep", label: "Dual representation" },
+  { field: "unrepresented_other_side", label: "Unrepresented other side" },
+  { field: "lockbox", label: "Lockbox" },
+  { field: "delayed_offer", label: "Delayed offer" },
+  { field: "sale_of_buyers_property", label: "Sale of buyer's property" },
+];
+
+const ADMIN_CONDITION_FIELD_SET = new Set<string>([
+  ...ADMIN_ENUM_CONDITIONS.map((item) => item.field),
+  ...ADMIN_TOGGLE_CONDITIONS.map((item) => item.field),
+]);
+
+const ADMIN_DEAL_CONDITION_API_KEYS: Record<AdminConditionField, keyof AdminDeal> = {
+  signing_authority: "signingAuthority",
+  fintrac_form_type: "fintracFormType",
+  listing_track: "listingTrack",
+  property_subtype: "propertySubtype",
+  estate_status: "estateStatus",
+  transaction_type: "transactionType",
+  listing_type: "listingType",
+  pep: "pep",
+  tenanted: "tenanted",
+  poa_signing: "poaSigning",
+  corporate: "corporate",
+  has_suite: "hasSuite",
+  multiple_offers: "multipleOffers",
+  family_member: "familyMember",
+  dual_rep: "dualRep",
+  unrepresented_other_side: "unrepresentedOtherSide",
+  lockbox: "lockbox",
+  delayed_offer: "delayedOffer",
+  sale_of_buyers_property: "saleOfBuyersProperty",
+};
+
+function isAdminConditionField(field: string): field is AdminConditionField {
+  return ADMIN_CONDITION_FIELD_SET.has(field);
+}
+
+function isAdminSide(value: unknown): value is AdminSide {
+  return value === "listing" || value === "buyer";
+}
+
+function toAdminStage(value: unknown): AdminStageNumber {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (Number.isInteger(numeric) && ADMIN_STAGE_NUMBERS.includes(numeric as AdminStageNumber)) {
+    return numeric as AdminStageNumber;
+  }
+  return 0;
+}
+
+function adminStageDefinition(stage: AdminStageNumber): AdminColumn {
+  return ADMIN_COLUMNS.find((column) => column.stage === stage) ?? ADMIN_COLUMNS[0];
+}
+
+function adminStageLabel(side: AdminSide, stage: AdminStageNumber): AdminStageLabel {
+  return adminStageDefinition(stage).labels[side];
+}
+
+function adminStageChecklist(side: AdminSide, stage: AdminStageNumber): AdminChecklistItem[] {
+  return ADMIN_STAGE_CHECKLISTS[side][stage];
+}
+
+function adminNextStage(card: AdminCard): AdminStageNumber | null {
+  if (card.stage >= 9) return null;
+  return (card.stage + 1) as AdminStageNumber;
+}
+
+function getStageProgress(card: AdminCard, stage: AdminStageNumber): { done: number; total: number; nextItem?: string } {
+  const items = adminStageChecklist(card.side, stage);
+  const completed = card.completedByStage?.[stage] ?? {};
+  let done = 0;
+  let nextItem: string | undefined;
+  for (const item of items) {
+    if (completed[item.id]) done++;
+    else if (!nextItem) nextItem = item.label;
+  }
+  return { done, total: items.length, nextItem };
+}
+
+function getCardProgress(card: AdminCard): { done: number; total: number; nextItem?: string } {
+  return getStageProgress(card, card.stage);
+}
+
+function adminChecklistStageForItem(side: AdminSide, itemId: string): AdminStageNumber | null {
+  for (const stage of ADMIN_STAGE_NUMBERS) {
+    if (adminStageChecklist(side, stage).some((item) => item.id === itemId)) {
+      return stage;
+    }
+  }
+  return null;
+}
+
+function initialsFromTitle(title: string): string {
+  const words = title
+    .replace(/[^a-z0-9\s&]/gi, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const initials = words
+    .slice(0, 2)
+    .map((word) => word.slice(0, 1).toUpperCase())
+    .join("");
+  return initials || "AD";
+}
+
+function adminConditionValueFromDeal(deal: AdminDeal, field: AdminConditionField): AdminConditionValue {
+  const value = deal[ADMIN_DEAL_CONDITION_API_KEYS[field]];
+  if (typeof value === "string" || typeof value === "boolean" || value == null) {
+    return value;
+  }
+  return String(value);
+}
+
+function adminConditionsFromDeal(deal: AdminDeal): Partial<Record<AdminConditionField, AdminConditionValue>> {
+  const conditions: Partial<Record<AdminConditionField, AdminConditionValue>> = {};
+  for (const field of ADMIN_CONDITION_FIELD_SET) {
+    if (isAdminConditionField(field)) {
+      conditions[field] = adminConditionValueFromDeal(deal, field);
+    }
+  }
+  return conditions;
+}
+
+function completedStagesFromDeal(deal: AdminDeal, side: AdminSide): AdminCompletedByStage {
+  const completed: AdminCompletedByStage = {};
+  const extraToggles = deal.extraToggles ?? {};
+  for (const stage of ADMIN_STAGE_NUMBERS) {
+    const stageCompleted: Record<string, boolean> = {};
+    for (const item of adminStageChecklist(side, stage)) {
+      if (extraToggles[item.id] === true) {
+        stageCompleted[item.id] = true;
+      }
+    }
+    if (Object.keys(stageCompleted).length > 0) {
+      completed[stage] = stageCompleted;
+    }
+  }
+  return completed;
+}
+
+function adminCardFromDeal(deal: AdminDeal): AdminCard {
+  const side = isAdminSide(deal.side) ? deal.side : "listing";
+  const stage = toAdminStage(deal.currentStage);
+  const stageLabel = adminStageLabel(side, stage);
+  const property = deal.listingAddress || (deal.province ? `${deal.province} deal` : undefined);
+  return {
+    id: deal.id,
+    side,
+    stage,
+    client: deal.title || "Untitled deal",
+    contactInitials: initialsFromTitle(deal.title || "Admin deal"),
+    property,
+    nextLabel: stageLabel.title,
+    pinnedTop25: deal.extraToggles?.pinnedTop25 === true || deal.extraToggles?.top25 === true,
+    completedByStage: completedStagesFromDeal(deal, side),
+    conditions: adminConditionsFromDeal(deal),
+  };
+}
+
+function applyLocalDealField(card: AdminCard, field: string, value: AdminConditionValue): AdminCard {
+  if (isAdminConditionField(field)) {
+    return {
+      ...card,
+      conditions: {
+        ...(card.conditions ?? {}),
+        [field]: value,
+      },
+    };
+  }
+
+  const stage = adminChecklistStageForItem(card.side, field);
+  if (stage == null) return card;
+
+  const currentStageState = card.completedByStage?.[stage] ?? {};
+  const nextStageState = { ...currentStageState };
+  if (value === true) nextStageState[field] = true;
+  else delete nextStageState[field];
+
+  return {
+    ...card,
+    completedByStage: {
+      ...(card.completedByStage ?? {}),
+      [stage]: nextStageState,
+    },
+  };
+}
+
+function replaceCardFromDeal(cards: AdminCard[], deal: AdminDeal): AdminCard[] {
+  const nextCard = adminCardFromDeal(deal);
+  return cards.map((card) => (card.id === nextCard.id ? nextCard : card));
+}
+
+function isApiNotFound(error: unknown): boolean {
+  return error instanceof Error && /^404\b/.test(error.message);
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+// Dev fallback cards. Anonymized visual scaffolding used only when the Admin Deals API errors.
+const ADMIN_CARDS_SEED: AdminCard[] = [
+  {
+    id: "c1", side: "listing", stage: 0, client: "Riverside Drive seller", contactInitials: "RD",
+    property: "Riverside Dr · CMA delivered", nextLabel: "Pricing call", daysOut: 1, pinnedTop25: true,
+    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true } },
+    conditions: { signing_authority: "seller", listing_track: "standard", listing_type: "mls" },
+  },
+  {
+    id: "c2", side: "listing", stage: 3, client: "Lewis Creek seller", contactInitials: "LC",
+    property: "Lewis Creek Rd · Listing prep", nextLabel: "MLC sign", daysOut: 3, pinnedTop25: true,
+    completedByStage: {
+      0: { "draft-cma-followup": true, "pricing-recap": true, "track-objections": true, "missing-info-list": true, "listing-intake-prep": true },
+      1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
+      2: { "pull-title": true },
+    },
+    conditions: { signing_authority: "seller", property_subtype: "detached", lockbox: true },
+  },
+  {
+    id: "c3", side: "listing", stage: 5, client: "Clifford Ave seller", contactInitials: "CA",
+    property: "Clifford Ave · Live on MLS", nextLabel: "Weekly update", daysOut: 2,
+    completedByStage: {
+      0: { "draft-cma-followup": true, "pricing-recap": true, "track-objections": true, "missing-info-list": true, "listing-intake-prep": true },
+      1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
+      2: { "pull-title": true, "organize-photos": true },
+      3: { "fill-mlc": true, "digisign-send": true, "track-signatures": true },
+      4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true, "email-blast": true },
+    },
+    conditions: { listing_track: "standard", property_subtype: "townhouse", delayed_offer: true },
+  },
+  {
+    id: "c4", side: "listing", stage: 7, client: "Birch Bay seller", contactInitials: "BB",
+    property: "Birch Bay · Accepted offer", nextLabel: "Subject removal", daysOut: 4, pinnedTop25: true,
+    completedByStage: {
+      6: { "offer-summary": true, "subject-deadline": true, "inspection-timing": true },
+      7: { "deposit-confirmed": true },
+    },
+    conditions: { multiple_offers: true, transaction_type: "residential", fintrac_form_type: "individual" },
+  },
+  {
+    id: "c5", side: "listing", stage: 9, client: "Maple Ridge seller", contactInitials: "MR",
+    property: "Maple Ridge · Subjects off", nextLabel: "Possession", daysOut: 8,
+    completedByStage: {
+      8: { "completion-checklist": true, "key-handoff": true },
+      9: { "closing-gift": true, "thank-you": true, "anniversary": true, "past-client-nurture": true },
+    },
+    conditions: { listing_type: "mls", estate_status: "none" },
+  },
+  {
+    id: "b1", side: "buyer", stage: 1, client: "Tessa & Ryan", contactInitials: "TR",
+    property: "Looking N. Kamloops · 3bd", nextLabel: "Showing route", daysOut: 2,
+    completedByStage: { 0: { "buyer-profile": true, "search-criteria": true }, 1: { shortlist: true } },
+    conditions: { transaction_type: "residential" },
+  },
+  {
+    id: "b2", side: "buyer", stage: 3, client: "Nadia P", contactInitials: "NP",
+    property: "Saw 4 props · interested in #2", nextLabel: "Offer prep", daysOut: 1, pinnedTop25: true,
+    completedByStage: {
+      0: { "buyer-profile": true, "search-criteria": true },
+      1: { shortlist: true, "showing-route": true, "preview-notes": true },
+      2: { "followup-draft": true, "feedback-summary": true },
+      3: { "criteria-update": true, "comp-pull": true },
+    },
+    conditions: { sale_of_buyers_property: true, property_subtype: "detached" },
+  },
+  {
+    id: "b3", side: "buyer", stage: 5, client: "Henson family", contactInitials: "HF",
+    property: "Westsyde · Accepted offer", nextLabel: "Inspection", daysOut: 3, pinnedTop25: true,
+    completedByStage: {
+      4: { "lender-paperwork": true, "accepted-offer-checklist": true, "doc-list": true },
+      5: { "inspection-booked": true },
+    },
+    conditions: { fintrac_form_type: "individual", dual_rep: false },
+  },
+  {
+    id: "b4", side: "buyer", stage: 7, client: "Marisol C", contactInitials: "MC",
+    property: "Brock · Subjects clearing", nextLabel: "Subjects off", daysOut: 1,
+    completedByStage: { 7: { "subjects-removed": true, "deposit-received": true, "completion-locked": true } },
+    conditions: { property_subtype: "condo", unrepresented_other_side: true },
+  },
+  {
+    id: "b5", side: "buyer", stage: 9, client: "Eli & Jordan", contactInitials: "EJ",
+    property: "Aberdeen · Possession Fri", nextLabel: "Key handoff", daysOut: 5,
+    completedByStage: {
+      8: { "completion-checklist": true, "final-walkthrough": true },
+      9: { "utility-reminder": true, "key-handoff": true, "closing-gift": true, "thank-you": true },
+    },
+    conditions: { transaction_type: "residential", lockbox: true },
+  },
+];
+
+function useAdminDeals(): {
+  deals: AdminCard[];
+  loading: boolean;
+  error: string | null;
+  usingDevFallback: boolean;
+  refresh: () => Promise<void>;
+  moveDeal: (dealId: string, toStage: AdminStageNumber) => Promise<void>;
+  setDealToggle: (dealId: string, field: string, value: AdminConditionValue) => Promise<void>;
+} {
+  const [deals, setDeals] = useState<AdminCard[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [usingDevFallback, setUsingDevFallback] = useState(false);
+
+  const loadDeals = useCallback(async () => {
+    const response = await api.getAdminDeals({ limit: 200 });
+    return response.items.map(adminCardFromDeal);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      const nextDeals = await loadDeals();
+      setDeals(nextDeals);
+      setUsingDevFallback(false);
+    } catch (err) {
+      setError(errorMessage(err, "Admin deals failed"));
+      setDeals(ADMIN_CARDS_SEED);
+      setUsingDevFallback(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [loadDeals]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    loadDeals()
+      .then((nextDeals) => {
+        if (cancelled) return;
+        setDeals(nextDeals);
+        setUsingDevFallback(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(errorMessage(err, "Admin deals failed"));
+        setDeals(ADMIN_CARDS_SEED);
+        setUsingDevFallback(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadDeals]);
+
+  const moveDeal = useCallback(
+    async (dealId: string, toStage: AdminStageNumber) => {
+      setDeals((prev) =>
+        prev.map((card) => (card.id === dealId ? { ...card, stage: toStage, nextLabel: adminStageLabel(card.side, toStage).title } : card)),
+      );
+      try {
+        const updated = await api.moveAdminDeal(dealId, toStage);
+        setDeals((prev) => replaceCardFromDeal(prev, updated));
+      } catch (err) {
+        if (isApiNotFound(err)) {
+          console.warn("POST /api/admin/deals/:id/move returned 404; keeping optimistic local stage update.");
+          return;
+        }
+        setError(errorMessage(err, "Move deal failed"));
+        await refresh();
+      }
+    },
+    [refresh],
+  );
+
+  const setDealToggle = useCallback(
+    async (dealId: string, field: string, value: AdminConditionValue) => {
+      setDeals((prev) =>
+        prev.map((card) => (card.id === dealId ? applyLocalDealField(card, field, value) : card)),
+      );
+      try {
+        const updated = await api.setAdminDealToggle(dealId, field, value);
+        setDeals((prev) => replaceCardFromDeal(prev, updated));
+      } catch (err) {
+        if (isApiNotFound(err)) {
+          console.warn("POST /api/admin/deals/:id/toggle returned 404; keeping optimistic local toggle update.");
+          return;
+        }
+        setError(errorMessage(err, "Set deal toggle failed"));
+        await refresh();
+      }
+    },
+    [refresh],
+  );
+
+  return { deals, loading, error, usingDevFallback, refresh, moveDeal, setDealToggle };
+}
+
+function dueLabel(days?: number): { text: string; tone: "muted" | "warn" | "danger" | "ok" } {
+  if (days == null) return { text: "—", tone: "muted" };
+  if (days < 0) return { text: `${-days}d overdue`, tone: "danger" };
+  if (days === 0) return { text: "today", tone: "warn" };
+  if (days === 1) return { text: "tomorrow", tone: "warn" };
+  if (days <= 3) return { text: `in ${days}d`, tone: "warn" };
+  return { text: `in ${days}d`, tone: "ok" };
+}
+
+const AdminKanbanCard = memo(function AdminKanbanCard({
+  card,
+  onSelect,
+  onDragStart,
+}: {
+  card: AdminCard;
+  onSelect?: (id: string) => void;
+  onDragStart?: (id: string) => void;
+}) {
+  const due = dueLabel(card.daysOut);
+  const { done, total, nextItem } = getCardProgress(card);
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  return (
+    <button
+      type="button"
+      draggable
+      onClick={() => onSelect?.(card.id)}
+      onDragStart={(event) => {
+        event.dataTransfer.setData("text/plain", card.id);
+        event.dataTransfer.effectAllowed = "move";
+        onDragStart?.(card.id);
+      }}
+      className="w-full text-left rounded-xl border border-border/60 bg-background/40 p-3 hover:border-border hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors cursor-grab active:cursor-grabbing"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+            {card.contactInitials}
+          </div>
+          <div className="truncate text-[0.92rem] font-semibold leading-tight text-foreground">
+            {card.client}
+          </div>
+        </div>
+        {card.pinnedTop25 && (
+          <span title="TOP 25" className="inline-flex h-5 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 text-[0.6rem] font-semibold uppercase tracking-wider text-warning">
+            <Flame className="h-2.5 w-2.5" />
+            Top
+          </span>
+        )}
+      </div>
+      {card.property && (
+        <div className="mt-1.5 flex items-start gap-1.5 text-[0.72rem] text-muted-foreground">
+          <Building2 className="mt-[2px] h-3 w-3 shrink-0" />
+          <span className="truncate">{card.property}</span>
+        </div>
+      )}
+      {card.nextLabel && (
+        <div className="mt-2 flex items-center gap-1.5 text-[0.72rem]">
+          <CalendarClock className="h-3 w-3 text-muted-foreground" />
+          <span className="text-foreground">{card.nextLabel}</span>
+          <span
+            className={cn(
+              "ml-auto font-mono-ui text-[0.66rem]",
+              due.tone === "danger" && "text-destructive",
+              due.tone === "warn" && "text-warning",
+              due.tone === "ok" && "text-muted-foreground",
+              due.tone === "muted" && "text-muted-foreground",
+            )}
+          >
+            {due.text}
+          </span>
+        </div>
+      )}
+      <div className="mt-2">
+        <div className="flex items-center justify-between text-[0.66rem] text-muted-foreground">
+          <span>
+            {done}/{total} done
+          </span>
+          <span>{pct}%</span>
+        </div>
+        <div
+          role="progressbar"
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label="Stage checklist progress"
+          className="mt-1 h-1 w-full overflow-hidden rounded-full bg-border/50"
+        >
+          <div className="h-full bg-primary/70" style={{ width: `${pct}%` }} />
+        </div>
+        {nextItem && (
+          <div className="mt-1.5 truncate text-[0.7rem] text-muted-foreground">
+            <span className="font-mono-ui mr-1 uppercase tracking-wider text-[0.6rem]">Next</span>
+            {nextItem}
+          </div>
+        )}
+      </div>
+    </button>
+  );
+});
+
+function AdminKanbanColumn(props: {
+  side: AdminSide;
+  stage: AdminStageNumber;
+  cards: AdminCard[];
+  onCardSelect: (id: string) => void;
+  onCardDragStart: (id: string) => void;
+  onCardDrop: (stage: AdminStageNumber) => void;
+}) {
+  const { side, stage, cards, onCardSelect, onCardDragStart, onCardDrop } = props;
+  const column = adminStageDefinition(stage);
+  const label = column.labels[side];
+  const [isDragOver, setIsDragOver] = useState(false);
+  return (
+    <div
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (!isDragOver) setIsDragOver(true);
+      }}
+      onDragLeave={() => setIsDragOver(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setIsDragOver(false);
+        onCardDrop(stage);
+      }}
+      className={cn(
+        "flex h-full min-w-[12rem] flex-col rounded-2xl border bg-card/30 transition-colors",
+        isDragOver ? "border-primary/60 bg-primary/5" : "border-border/60",
+      )}
+    >
+      <div className="border-b border-border/60 px-3 py-2">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-mono-ui text-[0.58rem] uppercase tracking-[0.14em] text-primary">
+              {column.stageNumber}
+            </div>
+            <div className="truncate text-[0.82rem] font-semibold text-foreground">{label.title}</div>
+          </div>
+          <span className="font-mono-ui text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+            {cards.length}
+          </span>
+        </div>
+        <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+          {label.subtitle}
+        </div>
+      </div>
+      <div className="flex flex-col gap-2 p-2">
+        {cards.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border/40 bg-background/20 px-3 py-4 text-center text-[0.7rem] text-muted-foreground">
+            empty
+          </div>
+        ) : (
+          cards.map((card) => (
+            <AdminKanbanCard
+              key={card.id}
+              card={card}
+              onSelect={onCardSelect}
+              onDragStart={onCardDragStart}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminKanbanSwimlane({
+  side,
+  title,
+  icon: Icon,
+  description,
+  cardsByStage,
+  totalCount,
+  onCardSelect,
+  onCardDragStart,
+  onCardDrop,
+}: {
+  side: AdminSide;
+  title: string;
+  icon: ComponentType<{ className?: string }>;
+  description: string;
+  cardsByStage: Record<AdminStageNumber, AdminCard[]>;
+  totalCount: number;
+  onCardSelect: (id: string) => void;
+  onCardDragStart: (id: string) => void;
+  onCardDrop: (side: AdminSide, stage: AdminStageNumber) => void;
+}) {
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="flex items-baseline justify-between gap-3 px-1">
+        <div className="flex items-center gap-2">
+          <Icon className="h-4 w-4 text-primary" />
+          <h2 className="text-[0.95rem] font-semibold text-foreground">{title}</h2>
+          <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+            {totalCount} active
+          </span>
+        </div>
+        <span className="text-[0.72rem] text-muted-foreground hidden sm:inline">{description}</span>
+      </div>
+      <div
+        className="grid gap-2 overflow-x-auto pb-1"
+        style={{ gridTemplateColumns: `repeat(${ADMIN_STAGE_NUMBERS.length}, minmax(12rem, 1fr))` }}
+      >
+        {ADMIN_STAGE_NUMBERS.map((stage) => (
+          <AdminKanbanColumn
+            key={`${side}-${stage}`}
+            side={side}
+            stage={stage}
+            cards={cardsByStage[stage] ?? []}
+            onCardSelect={onCardSelect}
+            onCardDragStart={onCardDragStart}
+            onCardDrop={(targetStage) => onCardDrop(side, targetStage)}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AdminTop25Strip({
+  cards,
+  devFallback,
+  onCardSelect,
+  onCardDragStart,
+}: {
+  cards: AdminCard[];
+  devFallback: boolean;
+  onCardSelect: (id: string) => void;
+  onCardDragStart: (id: string) => void;
+}) {
+  const pinned = cards.filter((c) => c.pinnedTop25);
+  return (
+    <section className="rounded-2xl border border-warning/35 bg-warning/5 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Flame className="h-4 w-4 text-warning" />
+          <h2 className="text-[0.95rem] font-semibold text-foreground">TOP 25</h2>
+          <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+            {pinned.length} pinned · {Math.max(0, 25 - pinned.length)} slots open
+          </span>
+          {devFallback && (
+            <span className="rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono-ui text-[0.58rem] uppercase tracking-[0.14em] text-warning">
+              dev-fallback
+            </span>
+          )}
+        </div>
+        <span className="text-[0.72rem] text-muted-foreground hidden sm:inline">
+          Skyleigh's focus list - pinned cards still live in their stage column.
+        </span>
+      </div>
+      {pinned.length === 0 ? (
+        <div className="mt-2 rounded-xl border border-dashed border-border/40 bg-background/20 px-3 py-4 text-center text-[0.72rem] text-muted-foreground">
+          No clients pinned. Pin from any card to add to TOP 25.
+          {devFallback && (
+            <span className="ml-2 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono-ui text-[0.58rem] uppercase tracking-[0.14em] text-warning">
+              dev-fallback
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+          {pinned.map((card) => (
+            <div key={card.id} className="min-w-[14rem] max-w-[14rem]">
+              <AdminKanbanCard card={card} onSelect={onCardSelect} onDragStart={onCardDragStart} />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AdminCardStageSection({
+  card,
+  stage,
+  isCurrent,
+  isPast,
+  expanded,
+  onToggleExpand,
+  onToggleItem,
+}: {
+  card: AdminCard;
+  stage: AdminStageNumber;
+  isCurrent: boolean;
+  isPast: boolean;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  onToggleItem: (itemId: string, completed: boolean) => void;
+}) {
+  const column = adminStageDefinition(stage);
+  const label = column.labels[card.side];
+  const items = adminStageChecklist(card.side, stage);
+  const completed = card.completedByStage?.[stage] ?? {};
+  const done = items.reduce((n, item) => n + (completed[item.id] ? 1 : 0), 0);
+  const total = items.length;
+  const allDone = total > 0 && done === total;
+
+  return (
+    <div
+      className={cn(
+        "rounded-xl border bg-background/30",
+        isCurrent ? "border-primary/50" : "border-border/50",
+      )}
+    >
+      <button
+        type="button"
+        onClick={onToggleExpand}
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left focus:outline-none focus:ring-2 focus:ring-primary/30 rounded-xl"
+      >
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center">
+          {isPast && allDone ? (
+            <CheckCircle2 className="h-5 w-5 text-primary/80" />
+          ) : isCurrent ? (
+            <span className="inline-flex h-2.5 w-2.5 rounded-full bg-primary" />
+          ) : (
+            <span className="inline-flex h-2.5 w-2.5 rounded-full border border-border" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "text-[0.86rem] font-semibold leading-tight",
+                isCurrent ? "text-foreground" : isPast ? "text-foreground/85" : "text-muted-foreground",
+              )}
+            >
+              {label.title}
+            </span>
+            {isCurrent && (
+              <span className="font-mono-ui text-[0.58rem] uppercase tracking-[0.14em] text-primary">
+                current
+              </span>
+            )}
+          </div>
+          <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+            {column.stageNumber} · {column.stageLabel ?? label.subtitle}
+          </div>
+        </div>
+        <span
+          className={cn(
+            "font-mono-ui text-[0.66rem] tabular-nums",
+            allDone ? "text-primary" : "text-muted-foreground",
+          )}
+        >
+          {done}/{total}
+        </span>
+        <ChevronDown
+          className={cn(
+            "h-4 w-4 text-muted-foreground transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+      </button>
+      {expanded && (
+        <div className="border-t border-border/50 px-3 py-2.5">
+          {items.length === 0 ? (
+            <div className="text-[0.72rem] text-muted-foreground">No checklist items defined for this stage.</div>
+          ) : (
+            <ul className="flex flex-col gap-1.5">
+              {items.map((item) => {
+                const isDone = !!completed[item.id];
+                return (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      onClick={() => onToggleItem(item.id, !isDone)}
+                      className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    >
+                      {isDone ? (
+                        <CheckSquare className="mt-[1px] h-4 w-4 shrink-0 text-primary" />
+                      ) : (
+                        <SquareIcon className="mt-[1px] h-4 w-4 shrink-0 text-muted-foreground" />
+                      )}
+                      <span
+                        className={cn(
+                          "text-[0.82rem] leading-snug",
+                          isDone ? "text-muted-foreground line-through decoration-muted-foreground/50" : "text-foreground",
+                        )}
+                      >
+                        {item.label}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminCardConditionsSection({
+  card,
+  onConditionChange,
+}: {
+  card: AdminCard;
+  onConditionChange: (field: AdminConditionField, value: AdminConditionValue) => void;
+}) {
+  const conditions = card.conditions ?? {};
+  return (
+    <section className="mt-4">
+      <h3 className="text-[0.86rem] font-semibold text-foreground">Conditions</h3>
+      <div className="mt-2 space-y-4">
+        <div>
+          <div className="font-mono-ui mb-1.5 text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+            Enums
+          </div>
+          <div className="divide-y divide-border/40">
+            {ADMIN_ENUM_CONDITIONS.map((condition) => {
+              const current = conditions[condition.field];
+              const value = typeof current === "string" ? current : "";
+              const hasCustomValue = value !== "" && !condition.options.some((option) => option.value === value);
+              return (
+                <label
+                  key={condition.field}
+                  className="flex items-center justify-between gap-3 py-2"
+                >
+                  <span className="min-w-0 flex-1 text-[0.78rem] font-medium text-foreground">
+                    {condition.label}
+                  </span>
+                  <select
+                    value={value}
+                    onChange={(event) => onConditionChange(condition.field, event.currentTarget.value || null)}
+                    className="h-10 max-w-[12rem] rounded-md border border-border/60 bg-background px-2 text-[0.78rem] text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  >
+                    <option value="">Not set</option>
+                    {hasCustomValue && <option value={value}>{value}</option>}
+                    {condition.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="font-mono-ui mb-1.5 text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+            Yes / No
+          </div>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            {ADMIN_TOGGLE_CONDITIONS.map((condition) => {
+              const current = conditions[condition.field];
+              const checked = current === true;
+              const label = current == null ? "Unset" : checked ? "Yes" : "No";
+              return (
+                <button
+                  key={condition.field}
+                  type="button"
+                  aria-pressed={checked}
+                  onClick={() => onConditionChange(condition.field, !checked)}
+                  className="flex min-h-11 items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                >
+                  {checked ? (
+                    <CheckSquare className="h-4 w-4 shrink-0 text-primary" />
+                  ) : (
+                    <SquareIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="min-w-0 flex-1 text-[0.78rem] leading-tight text-foreground">
+                    {condition.label}
+                  </span>
+                  <span className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AdminCardDetailPanel({
+  card,
+  onClose,
+  onToggleItem,
+  onConditionChange,
+  onMoveToNext,
+}: {
+  card: AdminCard;
+  onClose: () => void;
+  onToggleItem: (stage: AdminStageNumber, itemId: string, completed: boolean) => void;
+  onConditionChange: (field: AdminConditionField, value: AdminConditionValue) => void;
+  onMoveToNext: () => void;
+}) {
+  const nextStage = adminNextStage(card);
+  const currentProgress = getCardProgress(card);
+  const currentComplete = currentProgress.total > 0 && currentProgress.done === currentProgress.total;
+  const currentStage = adminStageDefinition(card.stage);
+  const currentLabel = currentStage.labels[card.side];
+  const nextLabel = nextStage == null ? null : adminStageLabel(card.side, nextStage);
+
+  const [expanded, setExpanded] = useState<Set<AdminStageNumber>>(() => new Set([card.stage]));
+  const titleId = useId();
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    setExpanded((prev) => (prev.has(card.stage) ? prev : new Set([...prev, card.stage])));
+  }, [card.stage]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Focus trap + restore focus on close.
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const root = dialogRef.current;
+    if (!root) return;
+
+    const focusableSelector =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const getFocusables = () =>
+      Array.from(root.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+        (el) => !el.hasAttribute("inert") && el.offsetParent !== null,
+      );
+
+    queueMicrotask(() => {
+      const focusables = getFocusables();
+      focusables[0]?.focus();
+    });
+
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const focusables = getFocusables();
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    root.addEventListener("keydown", onKey);
+    return () => {
+      root.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus?.();
+    };
+  }, []);
+
+  const toggleSection = (stage: AdminStageNumber) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(stage)) next.delete(stage);
+      else next.add(stage);
+      return next;
+    });
+  };
+
+  const due = dueLabel(card.daysOut);
+  const laneLabel = ADMIN_SIDE_LABELS[card.side].title;
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 grid grid-cols-1 sm:grid-cols-[1fr_min(28rem,100%)]">
+      <button
+        type="button"
+        aria-label="Close detail"
+        onClick={onClose}
+        className="hidden bg-background/60 backdrop-blur-sm sm:block"
+      />
+      <aside
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="flex h-full flex-col border-l border-border/60 bg-card shadow-xl"
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 font-mono-ui text-[0.6rem] uppercase tracking-[0.16em] text-muted-foreground">
+              <span>{laneLabel} admin</span>
+              <span>·</span>
+              <span className="text-primary">{currentStage.stageNumber}</span>
+              <span>·</span>
+              <span className="text-primary">{currentLabel.title}</span>
+              {card.pinnedTop25 && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-warning">
+                  <Flame className="h-2.5 w-2.5" />
+                  Top
+                </span>
+              )}
+            </div>
+            <h2 id={titleId} className="mt-0.5 text-[1rem] font-semibold leading-tight text-foreground">
+              {card.client}
+            </h2>
+            {card.property && (
+              <div className="mt-1 flex items-start gap-1.5 text-[0.78rem] text-muted-foreground">
+                <Building2 className="mt-[2px] h-3.5 w-3.5 shrink-0" />
+                <span>{card.property}</span>
+              </div>
+            )}
+            {card.nextLabel && (
+              <div className="mt-1 flex items-center gap-1.5 text-[0.78rem]">
+                <CalendarClock className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="text-foreground">{card.nextLabel}</span>
+                <span
+                  className={cn(
+                    "font-mono-ui text-[0.68rem]",
+                    due.tone === "danger" && "text-destructive",
+                    due.tone === "warn" && "text-warning",
+                    due.tone === "ok" && "text-muted-foreground",
+                    due.tone === "muted" && "text-muted-foreground",
+                  )}
+                >
+                  · {due.text}
+                </span>
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-background/60 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+            aria-label="Close"
+          >
+            <CloseIcon className="h-4 w-4" />
+          </button>
+        </header>
+
+        {currentComplete && nextStage != null && nextLabel && (
+          <div className="border-b border-border/60 bg-primary/5 px-4 py-2.5">
+            <div className="flex items-center gap-2 text-[0.78rem]">
+              <CheckCircle2 className="h-4 w-4 text-primary" />
+              <span className="text-foreground">
+                All {currentStage.stageNumber} items done - move to {nextLabel.title}?
+              </span>
+              <button
+                type="button"
+                onClick={onMoveToNext}
+                className="ml-auto inline-flex min-h-11 items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 font-mono-ui text-[0.66rem] uppercase tracking-wider text-primary hover:bg-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/30"
+              >
+                Move card →
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          <div className="flex flex-col gap-2">
+            {ADMIN_STAGE_NUMBERS.map((stage) => (
+                <AdminCardStageSection
+                  key={`${card.side}-${stage}`}
+                  card={card}
+                  stage={stage}
+                  isCurrent={stage === card.stage}
+                  isPast={stage < card.stage}
+                  expanded={expanded.has(stage)}
+                  onToggleExpand={() => toggleSection(stage)}
+                  onToggleItem={(itemId, completed) => onToggleItem(stage, itemId, completed)}
+                />
+            ))}
+          </div>
+          <AdminCardConditionsSection card={card} onConditionChange={onConditionChange} />
+        </div>
+      </aside>
+    </div>,
+    document.body,
+  );
+}
+
+function AdminKanbanBoard() {
+  const adminDeals = useAdminDeals();
+  const cards = adminDeals.deals;
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const draggingIdRef = useRef<string | null>(null);
+
+  const selectedCard = cards.find((c) => c.id === selectedCardId) ?? null;
+
+  const buckets = useMemo(() => {
+    const empty = (): Record<AdminStageNumber, AdminCard[]> => ({
+      0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: [], 9: [],
+    });
+    const byStage: Record<AdminSide, Record<AdminStageNumber, AdminCard[]>> = {
+      listing: empty(),
+      buyer: empty(),
+    };
+    const counts: Record<AdminSide, number> = { listing: 0, buyer: 0 };
+    for (const card of cards) {
+      byStage[card.side][card.stage].push(card);
+      counts[card.side] += 1;
+    }
+    return { byStage, counts };
+  }, [cards]);
+
+  const handleMoveToNext = useCallback(
+    (cardId: string) => {
+      const card = cards.find((candidate) => candidate.id === cardId);
+      const nextStage = card ? adminNextStage(card) : null;
+      if (nextStage != null) void adminDeals.moveDeal(cardId, nextStage);
+    },
+    [adminDeals, cards],
+  );
+
+  const handleToggleItem = useCallback(
+    (cardId: string, itemId: string, completed: boolean) => {
+      void adminDeals.setDealToggle(cardId, itemId, completed);
+    },
+    [adminDeals],
+  );
+
+  const handleConditionChange = useCallback(
+    (cardId: string, field: AdminConditionField, value: AdminConditionValue) => {
+      void adminDeals.setDealToggle(cardId, field, value);
+    },
+    [adminDeals],
+  );
+
+  const handleCardDragStart = useCallback((cardId: string) => {
+    draggingIdRef.current = cardId;
+  }, []);
+
+  const handleCardDrop = useCallback(
+    (targetSide: AdminSide, targetStage: AdminStageNumber) => {
+      const draggedId = draggingIdRef.current;
+      draggingIdRef.current = null;
+      if (!draggedId) return;
+      const card = cards.find((candidate) => candidate.id === draggedId);
+      if (!card) return;
+      if (card.side !== targetSide) return; // cross-side moves not supported
+      if (card.stage === targetStage) return;
+      void adminDeals.moveDeal(draggedId, targetStage);
+    },
+    [adminDeals, cards],
+  );
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-border/50 bg-card/30 px-3 py-2">
+        <div role="status" aria-live="polite" className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+            {cards.length} admin deals
+          </span>
+          {adminDeals.loading && (
+            <span className="inline-flex items-center gap-1 font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              loading
+            </span>
+          )}
+          {adminDeals.usingDevFallback && (
+            <span className="rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono-ui text-[0.58rem] uppercase tracking-[0.14em] text-warning">
+              dev-fallback
+            </span>
+          )}
+          {adminDeals.error && (
+            <span className="truncate text-[0.72rem] text-warning">{adminDeals.error}</span>
+          )}
+        </div>
+        <Button variant="outline" size="sm" onClick={() => void adminDeals.refresh()} disabled={adminDeals.loading}>
+          <RefreshCw className={cn("h-3.5 w-3.5", adminDeals.loading && "animate-spin")} />
+          Refresh
+        </Button>
+      </div>
+      <AdminTop25Strip
+        cards={cards}
+        devFallback={adminDeals.usingDevFallback}
+        onCardSelect={setSelectedCardId}
+        onCardDragStart={handleCardDragStart}
+      />
+      <AdminKanbanSwimlane
+        side="listing"
+        title={ADMIN_SIDE_LABELS.listing.title}
+        icon={Home}
+        description={ADMIN_SIDE_LABELS.listing.description}
+        cardsByStage={buckets.byStage.listing}
+        totalCount={buckets.counts.listing}
+        onCardSelect={setSelectedCardId}
+        onCardDragStart={handleCardDragStart}
+        onCardDrop={handleCardDrop}
+      />
+      <AdminKanbanSwimlane
+        side="buyer"
+        title={ADMIN_SIDE_LABELS.buyer.title}
+        icon={Users}
+        description={ADMIN_SIDE_LABELS.buyer.description}
+        cardsByStage={buckets.byStage.buyer}
+        totalCount={buckets.counts.buyer}
+        onCardSelect={setSelectedCardId}
+        onCardDragStart={handleCardDragStart}
+        onCardDrop={handleCardDrop}
+      />
+      {selectedCard && (
+        <AdminCardDetailPanel
+          card={selectedCard}
+          onClose={() => setSelectedCardId(null)}
+          onToggleItem={(_stage, itemId, completed) => handleToggleItem(selectedCard.id, itemId, completed)}
+          onConditionChange={(field, value) => handleConditionChange(selectedCard.id, field, value)}
+          onMoveToNext={() => handleMoveToNext(selectedCard.id)}
+        />
+      )}
+    </div>
   );
 }
 
@@ -4355,6 +6430,15 @@ export function RealEstateAdminPage() {
           },
         ]}
       />
+      <div className="flex flex-wrap items-center gap-2">
+        <Link to="/admin/templates" className="inline-flex">
+          <Button variant="outline" size="sm">
+            <FileCheck2 className="h-3.5 w-3.5" />
+            Templates
+          </Button>
+        </Link>
+      </div>
+      <AdminKanbanBoard />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
         <ActionBoard
           actions={actions}
@@ -4367,73 +6451,6 @@ export function RealEstateAdminPage() {
         title="Admin work"
         sessions={sessions}
         empty="No admin-specific sessions found yet. CMA, seller updates, MLC, DigiSign, WebForms, and listing/deal cron work will land here."
-      />
-    </HubShell>
-  );
-}
-
-export function RealEstateAdsPage() {
-  const data = useRealEstateHubData();
-  useHubHeader("Ads", data);
-  const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, ["ads", "paid", "campaign", "email", "copy", "mailjet", "listing ad", "audience"]),
-  );
-  const jobs = data.cronJobs.filter((job) =>
-    jobMatches(job, ["ads", "paid", "campaign", "email", "mailjet", "market stats", "listing ad"]),
-  );
-  const activeSessions = sessions.filter((session) => session.is_active);
-  const actions = [
-    ...approvalCueActions(sessions, jobs, "Ads"),
-    ...jobs
-      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
-      .slice(0, 5)
-      .map((job) => jobAction(job, "Campaign check", CalendarClock)),
-    ...sessions
-      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
-      .slice(0, 5)
-      .map((session) => sessionAction(session, "Ads work", Target)),
-  ];
-
-  return (
-    <HubShell
-      data={data}
-      eyebrow="Ads Studio"
-      hero="A lightweight paid-media board for campaign checks, launch prep, creative review, and approvals. Full ad account views can come later."
-      icon={Target}
-      title="Ads shows paid-media work waiting on the operator."
-    >
-      <WorkflowStrip
-        items={[
-          {
-            icon: Target,
-            label: "Ad sessions",
-            value: sessions.length,
-          },
-          { icon: CalendarClock, label: "Campaign schedules", value: jobs.length },
-          {
-            icon: Activity,
-            label: "Active work",
-            value: activeSessions.length,
-          },
-          {
-            icon: Megaphone,
-            label: "Review gates",
-            value: approvalCueCount(sessions, jobs),
-          },
-        ]}
-      />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ActionBoard
-          actions={actions}
-          title="Ads action board"
-          empty="No paid-media actions are waiting yet. Campaign schedules and ad sessions will appear here."
-        />
-        <TimedTasks jobs={jobs} empty="No ad schedules yet." title="Campaign schedules" />
-      </div>
-      <RecentSessions
-        title="Ad work"
-        sessions={sessions}
-        empty="No ad-specific sessions found yet."
       />
     </HubShell>
   );
@@ -4589,7 +6606,7 @@ function IdeaCard({
   });
 
   const grounded = idea.grounded_in || {};
-  const chipTone = "bg-background/40 text-foreground/80 border-border/60";
+  const chipTone = "bg-background text-foreground border-border";
   const groundedChips = [
     grounded.metric ? { label: "metric", text: grounded.metric, tone: chipTone } : null,
     grounded.trend ? { label: "trend", text: grounded.trend, tone: chipTone } : null,
@@ -4597,7 +6614,7 @@ function IdeaCard({
   ].filter((x): x is { label: string; text: string; tone: string } => !!x);
 
   return (
-    <div className="rounded-xl bg-background/30 p-4 space-y-3">
+    <div className="space-y-3 border-b border-border/40 pb-5 last:border-b-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-2">
         <span className={cn("h-2 w-2 rounded-full", platformDot(idea.platform))} />
         <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
@@ -4674,13 +6691,13 @@ function IdeaCard({
       )}
 
       {idea.reasoning && !editing && (
-        <p className="text-[0.7rem] italic leading-4 text-muted-foreground/80">
+        <p className="text-[0.75rem] italic leading-5 text-muted-foreground">
           {idea.reasoning}
         </p>
       )}
 
       <div className="flex items-center justify-between gap-2 pt-1">
-        <div className="text-[0.65rem] text-muted-foreground/70">
+        <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
           {idea.timestamp ? isoTimeAgo(idea.timestamp) : ""}
         </div>
         <div className="flex items-center gap-1.5">
@@ -4880,6 +6897,17 @@ export function RealEstateSocialMediaPage() {
     }
   }, [refresh, lookbackDays]);
 
+  const summaryStats: Array<{ label: string; value: string | number }> = [
+    { label: "Posts", value: totals?.post_count ?? 0 },
+    { label: "Reach", value: formatCompact(totals?.reach) },
+    ...(avgEngagement != null
+      ? [{ label: "Avg engagement", value: formatPct(avgEngagement, 2) }]
+      : []),
+    ...(avgHook != null
+      ? [{ label: "Avg hook rate", value: formatPct(avgHook, 2) }]
+      : []),
+  ];
+
   return (
     <HubShell
       data={data}
@@ -4887,18 +6915,7 @@ export function RealEstateSocialMediaPage() {
       icon={Megaphone}
       title="Social Media · weekly content engine"
     >
-      <WorkflowStrip
-        items={[
-          { icon: Megaphone, label: "Posts (30d)", value: totals?.post_count ?? 0 },
-          { icon: Activity, label: "Reach (30d)", value: formatCompact(totals?.reach) },
-          ...(avgEngagement != null
-            ? [{ icon: ThumbsUp, label: "Avg engagement", value: formatPct(avgEngagement, 2) }]
-            : []),
-          ...(avgHook != null
-            ? [{ icon: Sparkles, label: "Avg hook rate", value: formatPct(avgHook, 2) }]
-            : []),
-        ]}
-      />
+      <WorkflowStrip items={summaryStats} />
 
       {socialError && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -4941,14 +6958,19 @@ export function RealEstateSocialMediaPage() {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-5">
           {loadingSocial && !ideas.length ? (
-            <div className="flex items-center justify-center py-8 text-muted-foreground">
+            <div className="flex items-center justify-center py-12 text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
             </div>
           ) : ideas.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-8 text-sm text-muted-foreground text-center">
-              No ideas waiting. The engine queues 5–10 every Monday morning.
+            <div className="rounded-2xl border border-dashed border-border bg-background/25 px-6 py-12 text-center">
+              <div className="mx-auto max-w-sm space-y-1.5">
+                <h3 className="text-sm font-semibold text-foreground">No ideas waiting</h3>
+                <p className="text-sm text-muted-foreground">
+                  The engine queues 5–10 every Monday morning.
+                </p>
+              </div>
             </div>
           ) : (
             ideas.map((idea) => (
@@ -5004,27 +7026,34 @@ export function RealEstateSocialMediaPage() {
       )}
 
       <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <CardTitle className="flex items-center gap-2">
-              <Activity className="h-4 w-4" />
-              Your posts
-              <Badge variant="outline">{filteredPosts.length}</Badge>
-            </CardTitle>
-            <div className="flex items-center gap-2">
-              <label className="font-mono-ui flex items-center gap-1.5 text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+        <CardHeader className="space-y-1">
+          <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <Activity className="h-4 w-4" />
+                Your posts
+              </CardTitle>
+              <p className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                {recentPosts.length === 0
+                  ? "Nothing pulled yet"
+                  : `${recentPosts.length} pulled · last ${lookbackDays} days`}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="font-mono-ui flex items-center gap-1.5 text-[0.7rem] uppercase tracking-wider text-muted-foreground">
                 <span>Lookback</span>
                 <select
                   value={lookbackDays}
                   onChange={(e) => setLookbackDays(Number(e.target.value))}
                   disabled={refreshing !== null}
-                  className="font-mono-ui min-h-[44px] rounded-md border border-border bg-background px-2 text-[0.7rem] uppercase tracking-wider text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  aria-label="Lookback period"
+                  className="font-mono-ui min-h-[44px] rounded-md border border-border bg-background px-2 text-[0.75rem] uppercase tracking-wider text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 >
-                  <option value={30}>30d</option>
-                  <option value={90}>90d</option>
-                  <option value={180}>180d</option>
-                  <option value={365}>1y</option>
-                  <option value={730}>2y</option>
+                  <option value={30}>30 days</option>
+                  <option value={90}>90 days</option>
+                  <option value={180}>180 days</option>
+                  <option value={365}>1 year</option>
+                  <option value={730}>2 years</option>
                 </select>
               </label>
               <Button
@@ -5032,29 +7061,37 @@ export function RealEstateSocialMediaPage() {
                 size="sm"
                 onClick={handleRefreshAll}
                 disabled={refreshing !== null}
-                className="font-mono-ui min-h-[44px] px-4 text-[0.7rem] uppercase tracking-wider"
+                className="font-mono-ui min-h-[44px] px-4 text-[0.75rem] uppercase tracking-wider"
               >
                 {refreshing ? "pulling…" : "refresh from platforms"}
               </Button>
             </div>
           </div>
-          {recentPosts.length > 0 && (
-            <PlatformTablist
-              tabs={[
-                { label: "all", count: recentPosts.length },
-                ...Object.entries(platformCounts)
-                  .sort(([, a], [, b]) => b - a)
-                  .map(([p, c]) => ({ label: p, count: c })),
-              ]}
-              active={platformFilter}
-              onChange={setPlatformFilter}
-              idPrefix={tabIdPrefix}
-              panelId={panelId}
-            />
-          )}
         </CardHeader>
-        <CardContent className="space-y-5">
-          <div id={panelId} role="tabpanel" aria-labelledby={activeTabId} tabIndex={0} className="focus:outline-none">
+        <CardContent className="space-y-8">
+          {recentPosts.length > 0 && (
+            <div className="border-b border-border/40 pb-4">
+              <PlatformTablist
+                tabs={[
+                  { label: "all", count: recentPosts.length },
+                  ...Object.entries(platformCounts)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([p, c]) => ({ label: p, count: c })),
+                ]}
+                active={platformFilter}
+                onChange={setPlatformFilter}
+                idPrefix={tabIdPrefix}
+                panelId={panelId}
+              />
+            </div>
+          )}
+          <div
+            id={panelId}
+            role="tabpanel"
+            aria-labelledby={activeTabId}
+            tabIndex={0}
+            className="space-y-10 focus:outline-none"
+          >
             {platformFilter === "youtube" ? (
               <YouTubeTabView posts={recentPosts} onSelect={setSelectedPost} />
             ) : (
@@ -5064,14 +7101,35 @@ export function RealEstateSocialMediaPage() {
                   <PlatformRankingsBlock posts={filteredPosts} onSelect={setSelectedPost} />
                 )}
                 {filteredPosts.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-10 text-sm text-muted-foreground text-center">
-                    {recentPosts.length === 0
-                      ? "No posts pulled yet. Click \"refresh from platforms\" above to pull live from every connected account."
-                      : `No ${platformFilter} posts.`}
+                  <div className="rounded-2xl border border-dashed border-border bg-background/25 px-6 py-16 text-center">
+                    <div className="mx-auto max-w-md space-y-2">
+                      <h3 className="text-base font-semibold text-foreground">
+                        {recentPosts.length === 0 ? "No posts pulled yet" : "Nothing here"}
+                      </h3>
+                      <p className="text-sm text-muted-foreground">
+                        {recentPosts.length === 0
+                          ? "Click refresh from platforms above to pull live from every connected account."
+                          : `No ${platformFilter} posts in the last ${lookbackDays} days. Connect ${platformFilter} or extend the lookback.`}
+                      </p>
+                    </div>
                   </div>
                 ) : (
-                  <>
-                    <div className="grid gap-3 items-start grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
+                  <section className="space-y-4" aria-labelledby="all-posts-heading">
+                    <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                      <h3
+                        id="all-posts-heading"
+                        className="font-mono-ui text-[0.75rem] uppercase tracking-wider text-foreground"
+                      >
+                        All posts
+                      </h3>
+                      <span
+                        className="font-mono-ui text-[0.7rem] uppercase tracking-wider tabular-nums text-muted-foreground"
+                        aria-live="polite"
+                      >
+                        {Math.min(postLimit, filteredPosts.length)} of {filteredPosts.length}
+                      </span>
+                    </header>
+                    <div className="grid gap-4 items-start grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
                       {(() => {
                         const topKeys = new Set(
                           platformFilter === "all"
@@ -5093,18 +7151,26 @@ export function RealEstateSocialMediaPage() {
                       })()}
                     </div>
                     {filteredPosts.length > postLimit && (
-                      <div className="flex justify-center pt-4">
+                      <div className="mt-2 flex flex-wrap justify-center gap-2 border-t border-border/40 pt-6">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={() => setPostLimit((n) => n + 100)}
-                          className="font-mono-ui min-h-[44px] px-4 text-[0.7rem] uppercase tracking-wider"
+                          className="font-mono-ui min-h-[44px] px-4 text-[0.75rem] uppercase tracking-wider"
                         >
-                          Show more ({filteredPosts.length - postLimit} remaining)
+                          Show 100 more ({filteredPosts.length - postLimit} remaining)
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setPostLimit(filteredPosts.length)}
+                          className="font-mono-ui min-h-[44px] px-4 text-[0.75rem] uppercase tracking-wider"
+                        >
+                          Show all ({filteredPosts.length})
                         </Button>
                       </div>
                     )}
-                  </>
+                  </section>
                 )}
               </>
             )}
@@ -5209,10 +7275,9 @@ function YouTubeTabView({
       {videos.length > 0 && (
         <section aria-labelledby="yt-rankings-heading" className="space-y-3">
           <div className="flex items-center gap-2">
-            <Trophy aria-hidden="true" className="h-4 w-4 text-warning" />
             <h3
               id="yt-rankings-heading"
-              className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground/80"
+              className="font-mono-ui text-[0.75rem] uppercase tracking-wider text-foreground"
             >
               Rankings
             </h3>
@@ -5316,14 +7381,14 @@ function RankPanel({
     <div className="rounded-xl bg-background/30 p-3 space-y-2">
       <div
         className={cn(
-          "font-mono-ui text-[0.65rem] uppercase tracking-wider",
-          tone === "muted" ? "text-muted-foreground" : "text-foreground/80",
+          "font-mono-ui text-[0.7rem] uppercase tracking-wider",
+          tone === "muted" ? "text-muted-foreground" : "text-foreground",
         )}
       >
         {title}
       </div>
       {rows.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/40 bg-background/20 px-2 py-3 text-center text-[0.7rem] text-muted-foreground">
+        <div className="rounded-lg border border-dashed border-border/40 bg-background/20 px-2 py-3 text-center text-[0.75rem] text-muted-foreground">
           No data yet
         </div>
       ) : (
@@ -5333,15 +7398,16 @@ function RankPanel({
               <button
                 type="button"
                 onClick={() => onSelect(row)}
+                aria-label={`Rank ${idx + 1}: ${row.caption || "untitled"}, ${formatValue(row)}`}
                 className="group flex min-h-[44px] w-full items-center gap-2 rounded-lg border border-border/40 bg-background/30 px-2.5 py-2 text-left transition hover:border-primary/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
               >
-                <span className="font-mono-ui w-4 text-center text-[0.65rem] text-muted-foreground">
+                <span className="font-mono-ui w-4 text-center text-[0.7rem] text-muted-foreground">
                   {idx + 1}
                 </span>
-                <span className="flex-1 truncate text-xs text-foreground/85 group-hover:text-foreground">
+                <span className="flex-1 truncate text-[0.8rem] text-foreground">
                   {row.caption || "(untitled)"}
                 </span>
-                <span className="font-mono-ui text-[0.7rem] tabular-nums text-foreground/90">
+                <span className="font-mono-ui text-[0.75rem] tabular-nums text-foreground">
                   {formatValue(row)}
                 </span>
               </button>
@@ -5532,15 +7598,12 @@ function PlatformRankingsBlock({
 
   return (
     <section aria-labelledby="rankings-heading" className="space-y-3">
-      <div className="flex items-center gap-2">
-        <Trophy aria-hidden="true" className="h-4 w-4 text-warning" />
-        <h3
-          id="rankings-heading"
-          className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground/80"
-        >
-          Rankings
-        </h3>
-      </div>
+      <h3
+        id="rankings-heading"
+        className="font-mono-ui text-[0.75rem] uppercase tracking-wider text-foreground"
+      >
+        Rankings
+      </h3>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {panels.map((panel) => (
           <RankPanel
@@ -5611,6 +7674,9 @@ function YouTubeVideoCard({
             src={thumb}
             alt={caption ? caption.slice(0, 100) : ""}
             loading="lazy"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
             className="absolute inset-0 h-full w-full object-cover"
           />
         ) : (
@@ -5618,28 +7684,31 @@ function YouTubeVideoCard({
             <Video className="h-8 w-8" />
           </div>
         )}
-        <div className="absolute top-1.5 left-1.5 flex items-center gap-1 rounded-full bg-background/85 backdrop-blur px-2 py-0.5">
+        <div className="absolute top-1.5 left-1.5 flex items-center gap-1 rounded-full bg-card border border-border/60 px-2 py-0.5">
           <span className={cn("h-1.5 w-1.5 rounded-full", platformDot("youtube"))} />
-          <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider">
+          <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground">
             {isShort ? "short" : "video"}
           </span>
         </div>
         {duration && (
-          <div className="absolute bottom-1.5 right-1.5 rounded bg-background/85 backdrop-blur px-1.5 py-0.5 font-mono-ui text-[0.6rem] tabular-nums">
+          <div className="absolute bottom-1.5 right-1.5 rounded bg-card border border-border/60 px-1.5 py-0.5 font-mono-ui text-[0.7rem] tabular-nums text-foreground">
             {formatIsoDuration(duration)}
           </div>
         )}
         {engagement > 0 && (
-          <div className="absolute top-1.5 right-1.5 rounded bg-primary/90 px-1.5 py-0.5 font-mono-ui text-[0.6rem] uppercase tracking-wider text-primary-foreground">
-            ER {(engagement * 100).toFixed(2)}%
+          <div
+            className="absolute top-1.5 right-1.5 rounded bg-primary px-1.5 py-0.5 font-mono-ui text-[0.7rem] uppercase tracking-wider text-primary-foreground"
+            aria-label={`Engagement ${(engagement * 100).toFixed(2)} percent`}
+          >
+            {(engagement * 100).toFixed(2)}% eng
           </div>
         )}
       </div>
       <div className="flex flex-col gap-2 p-3">
-        <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-foreground/90 group-hover:text-foreground">
+        <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-foreground">
           {caption || "(untitled)"}
         </h3>
-        <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+        <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
           {row.posted_at ? isoTimeAgo(row.posted_at) : "—"}
         </div>
         <div className="grid grid-cols-3 gap-1.5 pt-1">
@@ -5648,11 +7717,11 @@ function YouTubeVideoCard({
           <YouTubeMetricCell label="comments" value={formatCompact(comments)} />
         </div>
         {extraChips.length > 0 && (
-          <div className="font-mono-ui flex flex-wrap gap-x-2 gap-y-0.5 pt-1 text-[0.62rem] text-muted-foreground">
+          <div className="font-mono-ui flex flex-wrap gap-x-2 gap-y-0.5 pt-1 text-[0.7rem] text-muted-foreground">
             {extraChips.map((chip, i) => (
               <span key={`${chip.label}-${i}`} className="whitespace-nowrap">
                 {chip.value}
-                <span className="ml-0.5 text-muted-foreground/55">{chip.label}</span>
+                <span className="ml-0.5 text-muted-foreground">{chip.label}</span>
               </span>
             ))}
           </div>
@@ -5665,10 +7734,10 @@ function YouTubeVideoCard({
 function YouTubeMetricCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-border/40 bg-background/40 px-2 py-1">
-      <div className="font-mono-ui text-[0.55rem] uppercase tracking-wider text-muted-foreground">
+      <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
-      <div className="text-sm font-semibold tabular-nums text-foreground/90">{value}</div>
+      <div className="text-sm font-semibold tabular-nums text-foreground">{value}</div>
     </div>
   );
 }
@@ -5741,17 +7810,17 @@ const PlatformTab = forwardRef<HTMLButtonElement, {
       onClick={onClick}
       onKeyDown={onKeyDown}
       className={cn(
-        "inline-flex min-h-[44px] items-center gap-1.5 rounded-full border px-3 py-2 font-mono-ui text-[0.65rem] uppercase tracking-wider transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
+        "inline-flex min-h-[44px] items-center gap-1.5 rounded-full border px-3 py-2 font-mono-ui text-[0.75rem] uppercase tracking-wider transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
         active
           ? "border-primary bg-primary/10 text-primary"
-          : "border-border/60 bg-background/20 text-muted-foreground hover:border-border hover:text-foreground",
+          : "border-border bg-background text-muted-foreground hover:border-foreground hover:text-foreground",
       )}
     >
       {label !== "all" && (
         <span aria-hidden="true" className={cn("h-1.5 w-1.5 rounded-full", platformDot(label))} />
       )}
       <span>{label}</span>
-      <span className="text-foreground/60">{count}</span>
+      <span className="text-muted-foreground">{count}</span>
     </button>
   );
 });
@@ -5845,9 +7914,26 @@ function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClose: () =
     };
   }, [onClose]);
 
+  const headingText = caption
+    ? caption.split("\n")[0].slice(0, 120)
+    : `${row.platform || "Post"} detail`;
+  const platformLabel = (row.platform || "").toString();
+  const isFbLandscape = platformLabel.toLowerCase() === "facebook";
+  const [linkCopied, setLinkCopied] = useState(false);
+  const handleCopyLink = useCallback(async () => {
+    if (!row.permalink) return;
+    try {
+      await navigator.clipboard.writeText(row.permalink);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 1600);
+    } catch {
+      // clipboard blocked; ignore
+    }
+  }, [row.permalink]);
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-background/85 p-4"
       onClick={onClose}
     >
       <div
@@ -5859,23 +7945,28 @@ function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClose: () =
         className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-border bg-card shadow-2xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
-        <span id={titleId} className="sr-only">
-          {caption ? caption.slice(0, 120) : `${row.platform} post detail`}
-        </span>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close post detail"
-          className="absolute right-3 top-3 z-10 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full bg-background/80 px-3 font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+          className="absolute right-3 top-3 z-10 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full bg-background px-3 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
         >
           close
         </button>
         <div className="grid gap-0 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-          <div className="relative aspect-[9/16] bg-background/40 md:aspect-auto md:min-h-[480px]">
+          <div
+            className={cn(
+              "relative bg-background/40 md:aspect-auto md:min-h-[480px]",
+              isFbLandscape ? "aspect-[4/5]" : "aspect-[9/16]",
+            )}
+          >
             {thumb ? (
               <img
                 src={thumb}
                 alt={caption ? caption.slice(0, 100) : ""}
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).style.display = "none";
+                }}
                 className="absolute inset-0 h-full w-full object-cover"
               />
             ) : (
@@ -5886,83 +7977,98 @@ function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClose: () =
                 <Activity className="h-8 w-8" />
               </div>
             )}
-            <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-background/85 backdrop-blur px-2.5 py-1">
+            <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-card border border-border/60 px-2.5 py-1">
               <span
                 aria-hidden="true"
                 className={cn("h-2 w-2 rounded-full", platformDot(row.platform))}
               />
-              <span className="font-mono-ui text-[0.65rem] uppercase tracking-wider">{row.platform}</span>
+              <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground">
+                {platformLabel || "post"}
+              </span>
             </div>
           </div>
           <div className="space-y-4 p-5">
             <div>
-              {page && (
-                <div className="font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                  {page}
-                </div>
-              )}
-              <div className="mt-1 flex items-center justify-between gap-3">
-                <span className="font-mono-ui text-xs text-muted-foreground">
+              <h2
+                id={titleId}
+                className="text-base font-semibold leading-snug text-foreground"
+              >
+                {headingText}
+              </h2>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                {page && <span>{page}</span>}
+                <span>
                   {row.posted_at ? new Date(row.posted_at).toLocaleString() : "—"}
                 </span>
-                {row.permalink && (
+              </div>
+              {row.permalink && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
                   <a
                     href={row.permalink}
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label="Open original post in new tab"
-                    className="font-mono-ui inline-flex min-h-[44px] items-center px-3 text-[0.65rem] uppercase tracking-wider text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                    className="font-mono-ui inline-flex min-h-[44px] items-center px-3 text-[0.7rem] uppercase tracking-wider text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                   >
                     open ↗
                   </a>
-                )}
-              </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyLink}
+                    aria-label="Copy post link to clipboard"
+                    aria-live="polite"
+                    className="font-mono-ui inline-flex min-h-[44px] items-center rounded-md border border-border bg-background px-3 text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  >
+                    {linkCopied ? "copied" : "copy link"}
+                  </button>
+                </div>
+              )}
             </div>
-            {caption && (
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/85">
+            {caption && caption !== headingText && (
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
                 {caption}
               </p>
             )}
             {(engagementRate != null || hookRate != null || holdRate != null) && (
-              <div className="grid grid-cols-3 gap-2">
-                <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
-                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
-                    Engagement
-                  </div>
-                  <div className="mt-0.5 text-sm font-semibold tabular-nums text-primary">
-                    {engagementRate != null ? `${(engagementRate * 100).toFixed(2)}%` : "—"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
-                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
-                    Hook rate
-                  </div>
-                  <div className="mt-0.5 text-sm font-semibold tabular-nums text-primary">
-                    {hookRate != null ? `${(hookRate * 100).toFixed(1)}%` : "—"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
-                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
-                    Hold rate
-                  </div>
-                  <div className="mt-0.5 text-sm font-semibold tabular-nums text-primary">
-                    {holdRate != null ? `${(holdRate * 100).toFixed(1)}%` : "—"}
-                  </div>
-                </div>
+              <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-t border-border pt-3 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                {engagementRate != null && (
+                  <span>
+                    <span className="text-base font-semibold tabular-nums text-foreground">
+                      {(engagementRate * 100).toFixed(2)}%
+                    </span>{" "}
+                    engagement
+                  </span>
+                )}
+                {hookRate != null && (
+                  <span>
+                    <span className="text-base font-semibold tabular-nums text-foreground">
+                      {(hookRate * 100).toFixed(1)}%
+                    </span>{" "}
+                    hook
+                  </span>
+                )}
+                {holdRate != null && (
+                  <span>
+                    <span className="text-base font-semibold tabular-nums text-foreground">
+                      {(holdRate * 100).toFixed(1)}%
+                    </span>{" "}
+                    hold
+                  </span>
+                )}
               </div>
             )}
             {metricEntries.length > 0 ? (
               <div>
-                <div className="mb-2 font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                <div className="mb-2 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
                   Metrics
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   {metricEntries.map(([k, v]) => (
                     <div key={k} className="rounded-lg border border-border/40 bg-background/30 px-3 py-2">
-                      <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+                      <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
                         {prettifyMetricKey(k)}
                       </div>
-                      <div className="mt-0.5 text-sm font-medium tabular-nums">
+                      <div className="mt-0.5 text-sm font-medium tabular-nums text-foreground">
                         {formatMetricValue(k, v)}
                       </div>
                     </div>
@@ -6046,11 +8152,24 @@ function RealVideoCard({
     }
   };
 
+  const platform = (row.platform || "").toLowerCase();
+  const mediaType = (row.media_type || "").toUpperCase();
+  // Vertical for Reels/Shorts/TikTok; square for static FB/IG photo posts.
+  const isVertical =
+    platform === "tiktok" ||
+    mediaType === "REEL" ||
+    mediaType === "REELS" ||
+    mediaType === "VIDEO" ||
+    mediaType === "SHORT" ||
+    mediaType === "STORY";
+  const aspectClass = isVertical ? "aspect-[9/16]" : "aspect-square";
+
   const Inner = (
     <div className="space-y-2">
       <div
         className={cn(
-          "relative aspect-[9/16] overflow-hidden rounded-xl bg-background/40 border transition",
+          "relative overflow-hidden rounded-xl bg-background/40 border transition",
+          aspectClass,
           highlight ? "border-primary" : "border-border/40 group-hover:border-border",
         )}
       >
@@ -6059,6 +8178,9 @@ function RealVideoCard({
             src={thumb}
             alt={caption ? caption.slice(0, 100) : ""}
             loading="lazy"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
             className="absolute inset-0 h-full w-full object-cover"
           />
         ) : (
@@ -6069,18 +8191,18 @@ function RealVideoCard({
         <span
           aria-hidden="true"
           className={cn(
-            "absolute top-2 left-2 h-2 w-2 rounded-full ring-2 ring-background/80",
+            "absolute top-2 left-2 h-2 w-2 rounded-full ring-2 ring-background",
             platformDot(row.platform),
           )}
           title={row.platform}
         />
       </div>
       <div className="space-y-1">
-        <p className="line-clamp-2 text-[0.78rem] leading-snug text-foreground">
+        <p className="line-clamp-2 text-[0.8rem] leading-snug text-foreground">
           {captionDisplay}
         </p>
         {topMetrics.length > 0 && (
-          <div className="flex items-baseline gap-3 text-[0.7rem] text-muted-foreground">
+          <div className="flex items-baseline gap-3 text-[0.72rem] text-muted-foreground">
             {topMetrics.map(([label, value]) => (
               <span key={label} className="whitespace-nowrap">
                 <span className="font-medium tabular-nums text-foreground">
@@ -6091,12 +8213,12 @@ function RealVideoCard({
             ))}
           </div>
         )}
-        <div className="flex items-center justify-between text-[0.65rem] text-muted-foreground/80">
+        <div className="flex items-center justify-between text-[0.7rem] text-muted-foreground">
           <span className="font-mono-ui uppercase tracking-wider">
             {row.posted_at ? isoTimeAgo(row.posted_at) : "—"}
           </span>
           {primaryRate && (
-            <span className="font-mono-ui tabular-nums uppercase tracking-wider text-foreground/70">
+            <span className="font-mono-ui tabular-nums uppercase tracking-wider text-foreground">
               {(primaryRate.value * 100).toFixed(1)}% {primaryRate.label}
             </span>
           )}
@@ -6138,52 +8260,69 @@ function PlatformBlockCard({
 }) {
   const { totals, averages, top_posts, post_count } = block;
   return (
-    <div className="rounded-xl bg-background/30 p-4 space-y-3">
-      <div className="flex items-center justify-between">
+    <div className="space-y-4">
+      <div className="flex items-baseline justify-between gap-3">
         <div className="flex items-center gap-2">
-          <span className={cn("h-2 w-2 rounded-full", platformDot(platform))} />
-          <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider">{platform}</span>
+          <span aria-hidden="true" className={cn("h-2 w-2 rounded-full", platformDot(platform))} />
+          <span className="font-mono-ui text-[0.8rem] uppercase tracking-wider text-foreground">
+            {platform}
+          </span>
         </div>
-        <span className="text-[0.7rem] text-muted-foreground">{post_count} posts</span>
+        <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+          {post_count} posts
+        </span>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-center">
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
         <div>
-          <div className="font-mono-ui text-sm font-semibold">{formatCompact(totals?.reach)}</div>
-          <div className="text-[0.6rem] text-muted-foreground uppercase tracking-wider">Reach</div>
+          <div className="text-base font-semibold tabular-nums text-foreground">
+            {formatCompact(totals?.reach)}
+          </div>
+          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+            Reach
+          </div>
         </div>
         <div>
-          <div className="font-mono-ui text-sm font-semibold">{formatPct(averages?.engagement_rate, 2)}</div>
-          <div className="text-[0.6rem] text-muted-foreground uppercase tracking-wider">Eng</div>
+          <div className="text-base font-semibold tabular-nums text-foreground">
+            {formatPct(averages?.engagement_rate, 2)}
+          </div>
+          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+            Engagement
+          </div>
         </div>
         <div>
-          <div className="font-mono-ui text-sm font-semibold">
+          <div className="text-base font-semibold tabular-nums text-foreground">
             {formatPct(averages?.hook_rate ?? averages?.hold_rate, 2)}
           </div>
-          <div className="text-[0.6rem] text-muted-foreground uppercase tracking-wider">
+          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
             {averages?.hook_rate != null ? "Hook" : "Hold"}
           </div>
         </div>
       </div>
 
       {top_posts && top_posts.length > 0 && (
-        <div className="space-y-1.5">
-          <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">Top performers</div>
-          {top_posts.slice(0, 3).map((p) => (
-            <a
-              key={p.post_id}
-              href={p.permalink ?? "#"}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 rounded-lg border border-border/40 bg-background/30 px-2 py-1.5 text-xs hover:border-primary/40"
-            >
-              <span className="flex-1 truncate">{p.caption || "(no caption)"}</span>
-              <span className="font-mono-ui text-[0.65rem] text-muted-foreground">
-                {formatPct(p.derived?.engagement_rate, 1)}
-              </span>
-              {p.permalink && <ExternalLink className="h-3 w-3 text-muted-foreground" />}
-            </a>
-          ))}
+        <div className="space-y-1">
+          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+            Top performers
+          </div>
+          <ul className="space-y-0.5">
+            {top_posts.slice(0, 3).map((p) => (
+              <li key={p.post_id}>
+                <a
+                  href={p.permalink ?? "#"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 px-1 py-1 text-[0.8rem] text-foreground hover:text-primary"
+                >
+                  <span className="flex-1 truncate">{p.caption || "(no caption)"}</span>
+                  <span className="font-mono-ui text-[0.7rem] tabular-nums text-muted-foreground">
+                    {formatPct(p.derived?.engagement_rate, 1)}
+                  </span>
+                  {p.permalink && <ExternalLink className="h-3 w-3 text-muted-foreground" />}
+                </a>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>
@@ -6249,7 +8388,7 @@ export function RealEstateMemoryPage() {
         ]}
       />
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <Card className="bg-[#1e1e1d] p-0">
+        <Card className="overflow-hidden bg-card/72 p-0">
           <CardHeader>
             <div className="flex items-center justify-between gap-3">
               <CardTitle>Knowledge graph</CardTitle>
