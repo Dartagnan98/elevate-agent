@@ -25,9 +25,11 @@ CANADIAN_PROVINCE_LABELS = {
     "nu": "Nunavut",
     "on": "Ontario",
     "pe": "Prince Edward Island",
+    "pei": "Prince Edward Island",
     "qc": "Quebec",
     "sk": "Saskatchewan",
     "yt": "Yukon",
+    "yk": "Yukon",
 }
 
 

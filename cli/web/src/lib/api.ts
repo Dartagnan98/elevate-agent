@@ -466,6 +466,12 @@ export const api = {
 
   // Admin Hub deals
   getAdminJurisdiction: () => fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction"),
+  setAdminJurisdiction: (body: AdminJurisdictionUpdateRequest) =>
+    fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   getAdminProvinceGuides: (province?: string) => {
     const tail = province ? `?province=${encodeURIComponent(province)}` : "";
     return fetchJSON<AdminProvinceGuidesResponse | AdminProvinceGuide>(`/api/admin/province-guides${tail}`);
@@ -1219,6 +1225,13 @@ export interface AdminJurisdiction {
   province: string;
   market: string;
   packageKey: string;
+}
+
+export interface AdminJurisdictionUpdateRequest {
+  country?: string;
+  province?: string;
+  market?: string;
+  packageKey?: string;
 }
 
 export interface AdminDealsResponse {

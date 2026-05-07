@@ -82,6 +82,7 @@ import type {
   AdminDealCreateRequest,
   AdminDealSide,
   AdminDealTask,
+  AdminProvinceGuideCoverage,
   DealAttachmentCreateRequest,
   DealContactCreateRequest,
   DealContext,
@@ -5606,6 +5607,22 @@ const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 type AdminSide = "listing" | "buyer";
 type AdminStageNumber = (typeof ADMIN_STAGE_NUMBERS)[number];
 
+const CANADIAN_PROVINCES: Array<{ code: string; label: string }> = [
+  { code: "AB", label: "Alberta" },
+  { code: "BC", label: "British Columbia" },
+  { code: "MB", label: "Manitoba" },
+  { code: "NB", label: "New Brunswick" },
+  { code: "NL", label: "Newfoundland and Labrador" },
+  { code: "NS", label: "Nova Scotia" },
+  { code: "NT", label: "Northwest Territories" },
+  { code: "NU", label: "Nunavut" },
+  { code: "ON", label: "Ontario" },
+  { code: "PEI", label: "Prince Edward Island" },
+  { code: "QC", label: "Quebec" },
+  { code: "SK", label: "Saskatchewan" },
+  { code: "YK", label: "Yukon" },
+];
+
 type AdminStageLabel = {
   title: string;
   subtitle: string;
@@ -7791,6 +7808,8 @@ function NewDealDialog({
   const [title, setTitle] = useState("");
   const [side, setSide] = useState<AdminSide>("listing");
   const [stage, setStage] = useState<AdminStageNumber>(0);
+  const [province, setProvince] = useState("");
+  const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
   const [contactId, setContactId] = useState<string | null>(null);
   const [contactQuery, setContactQuery] = useState("");
   const [contacts, setContacts] = useState<AdminContact[]>([]);
@@ -7848,6 +7867,31 @@ function NewDealDialog({
 
   useEffect(() => {
     let cancelled = false;
+    api
+      .getAdminJurisdiction()
+      .then((jurisdiction) => {
+        if (cancelled) return;
+        setProvince(jurisdiction.province || "");
+      })
+      .catch(() => {});
+    api
+      .getAdminProvinceGuides()
+      .then((guides) => {
+        if (cancelled) return;
+        if ("items" in guides) {
+          setProvinceCoverage(guides.items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setProvinceCoverage([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     setContactsLoading(true);
     setContactsError(null);
     api
@@ -7867,6 +7911,12 @@ function NewDealDialog({
       cancelled = true;
     };
   }, []);
+
+  const provinceCoverageByCode = useMemo(() => {
+    return new Map(provinceCoverage.map((item) => [item.province, item]));
+  }, [provinceCoverage]);
+
+  const selectedProvinceCoverage = provinceCoverageByCode.get(province);
 
   const filteredContacts = useMemo(() => {
     const q = contactQuery.trim().toLowerCase();
@@ -7914,7 +7964,7 @@ function NewDealDialog({
     }
   };
 
-  const canSubmit = title.trim().length > 0 && !submitting;
+  const canSubmit = title.trim().length > 0 && province.trim().length > 0 && !submitting;
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -7952,7 +8002,7 @@ function NewDealDialog({
       stage,
       client: cleanTitle,
       contactInitials: initialsFromTitle(cleanTitle),
-      property: cleanAddress || undefined,
+      property: cleanAddress || `${province} deal`,
       nextLabel: stageLabel.title,
       pinnedTop25: false,
       completedByStage: {},
@@ -7961,6 +8011,7 @@ function NewDealDialog({
     const request: AdminDealCreateRequest = {
       title: cleanTitle,
       side,
+      province,
       currentStage: stage,
       primaryContactId: contactId,
       listingAddress: side === "listing" ? cleanAddress || null : null,
@@ -8042,6 +8093,46 @@ function NewDealDialog({
                 );
               })}
             </div>
+          </div>
+
+          <div>
+            <label htmlFor={`${titleId}-province`} className="font-mono-ui block text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+              Province / territory <span className="text-destructive">*</span>
+            </label>
+            <select
+              id={`${titleId}-province`}
+              value={province}
+              onChange={(e) => setProvince(e.target.value)}
+              required
+              className="mt-1.5 h-11 w-full rounded-lg border border-border/60 bg-background px-3 text-[0.88rem] text-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+            >
+              <option value="">Select province</option>
+              {CANADIAN_PROVINCES.map(({ code, label }) => {
+                const coverage = provinceCoverageByCode.get(code);
+                const suffix = coverage?.hasTransactionGuide ? " - full guide" : coverage ? " - reference" : "";
+                return (
+                  <option key={code} value={code}>
+                    {label}
+                    {suffix}
+                  </option>
+                );
+              })}
+            </select>
+            {selectedProvinceCoverage && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span className="font-mono-ui rounded border border-border/50 bg-background/40 px-1.5 py-0.5 text-[0.58rem] uppercase tracking-[0.12em] text-muted-foreground">
+                  {selectedProvinceCoverage.hasTransactionGuide ? "full guide" : "reference"}
+                </span>
+                <span className="font-mono-ui rounded border border-border/50 bg-background/40 px-1.5 py-0.5 text-[0.58rem] uppercase tracking-[0.12em] text-muted-foreground">
+                  {selectedProvinceCoverage.referencePages} pages
+                </span>
+                {selectedProvinceCoverage.forms > 0 && (
+                  <span className="font-mono-ui rounded border border-border/50 bg-background/40 px-1.5 py-0.5 text-[0.58rem] uppercase tracking-[0.12em] text-muted-foreground">
+                    {selectedProvinceCoverage.forms} forms
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           <div>

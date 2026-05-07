@@ -126,6 +126,34 @@ def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_valu
     assert context.json()["dealFlow"]["packageKey"] == "ca.ab"
     assert context.json()["dealFlow"]["localOverrides"]["provinceLabel"] == "Alberta"
 
+
+def test_admin_jurisdiction_update_sets_default_flow_for_new_deals(client):
+    updated = client.put("/api/admin/jurisdiction", json={"province": "ON", "market": "Toronto"})
+    assert updated.status_code == 200, updated.text
+    assert updated.json() == {
+        "country": "CA",
+        "province": "ON",
+        "market": "Toronto",
+        "packageKey": "ca.on",
+    }
+
+    created = client.post("/api/admin/deals", json={"title": "Toronto seller", "side": "listing"})
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["province"] == "ON"
+    assert body["market"] == "Toronto"
+
+    context = client.get(f"/api/deals/{body['id']}/context")
+    assert context.status_code == 200, context.text
+    assert context.json()["dealFlow"]["packageKey"] == "ca.on"
+    assert context.json()["dealFlow"]["localOverrides"]["provinceLabel"] == "Ontario"
+
+    pei = client.put("/api/admin/jurisdiction", json={"province": "PEI", "market": ""})
+    assert pei.status_code == 200, pei.text
+    assert pei.json()["packageKey"] == "ca.pei"
+    assert pei.json()["province"] == "PEI"
+
+
 def test_get_deals_filters_by_side(client):
     listing = _create(title="Listing deal", side="listing")
     buyer = _create(title="Buyer deal", side="buyer")

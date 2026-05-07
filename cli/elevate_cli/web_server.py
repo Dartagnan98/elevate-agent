@@ -2972,6 +2972,14 @@ class _DealCreateBody(BaseModel):
     fields: Optional[Dict[str, Any]] = None
 
 
+class _AdminJurisdictionBody(BaseModel):
+    country: Optional[str] = None
+    province: Optional[str] = None
+    market: Optional[str] = None
+    packageKey: Optional[str] = None
+    package_key: Optional[str] = None
+
+
 class _DealMoveBody(BaseModel):
     toStage: int
 
@@ -3315,6 +3323,52 @@ async def post_admin_signal_graduate(signal_id: str, body: _SignalGraduateBody):
 async def get_admin_jurisdiction():
     """Return the configured admin deal-flow package. No UI switching."""
     return _admin_jurisdiction_config()
+
+
+@app.put("/api/admin/jurisdiction")
+async def put_admin_jurisdiction(body: _AdminJurisdictionBody):
+    """Persist the workspace default province/package for Admin Hub deals."""
+    try:
+        from elevate_cli.admin_deal_flow import package_key_from_jurisdiction
+
+        config = load_config()
+        real_estate = dict(config.get("real_estate") or {})
+        country = _clean_admin_jurisdiction_value(
+            body.country if body.country is not None else real_estate.get("country"),
+            "CA",
+        ).upper()
+        province = _clean_admin_jurisdiction_value(
+            body.province if body.province is not None else real_estate.get("province"),
+            "",
+        ).upper()
+        market = _clean_admin_jurisdiction_value(
+            body.market if body.market is not None else real_estate.get("market"),
+            "",
+        )
+        explicit_package = body.packageKey or body.package_key
+        package_key = package_key_from_jurisdiction(
+            country=country,
+            province=province,
+            package_key=explicit_package,
+        )
+        real_estate.update(
+            {
+                "country": country,
+                "province": province,
+                "market": market,
+                "package_key": package_key,
+            }
+        )
+        config["real_estate"] = real_estate
+        save_config(config)
+        return _admin_jurisdiction_config()
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/admin/jurisdiction failed")
+        raise HTTPException(status_code=500, detail=f"Update jurisdiction failed: {exc}")
 
 
 @app.get("/api/admin/province-guides")
