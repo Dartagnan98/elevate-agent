@@ -350,12 +350,13 @@ DEFAULT_CONFIG = {
     "credential_pool_strategies": {},
     "toolsets": ["elevate-cli"],
     "real_estate": {
-        # Admin deal flow jurisdiction. This is deployment/client config, not a visible admin-board switcher.
-        # The configured package determines forms, checklists, MLS/board overlays, and automation defaults.
+        # Admin deal-flow package defaults. Leave these blank until a client
+        # package is explicitly selected or stamped on a deal.
         "country": "CA",
-        "province": "BC",
-        "board": "AOIR",
-        "market": "Kamloops",
+        "province": "",
+        "board": "",
+        "market": "",
+        "package_key": "generic.real-estate",
     },
     "goals": {
         # Max autonomous continuation turns for /goal before pausing.

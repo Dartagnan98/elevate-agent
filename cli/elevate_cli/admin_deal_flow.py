@@ -1,4 +1,4 @@
-"""Small Admin deal-flow resolver for the active real-estate package.
+"""Small Admin deal-flow resolver for real-estate admin packages.
 
 This is intentionally not a generic rules engine.  It gives the active
 deployment package one place to define stage names, checklist gates, forms,
@@ -8,10 +8,12 @@ the dashboard and skills can consume.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Mapping
 
 
-DEFAULT_PACKAGE_KEY = "ca.bc.aoir.kamloops"
+DEFAULT_PACKAGE_KEY = "generic.real-estate"
+KAMLOOPS_PACKAGE_KEY = "ca.bc.aoir.kamloops"
 
 
 def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: list[tuple[str, str]] | None = None, docs: list[tuple[str, str]] | None = None, forms: list[tuple[str, str]] | None = None, triggers: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
@@ -27,7 +29,7 @@ def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: l
 
 
 _KAMLOOPS: dict[str, Any] = {
-    "packageKey": DEFAULT_PACKAGE_KEY,
+    "packageKey": KAMLOOPS_PACKAGE_KEY,
     "country": "CA",
     "province": "BC",
     "board": "AOIR",
@@ -168,6 +170,60 @@ _KAMLOOPS: dict[str, Any] = {
 }
 
 
+def _generic_package() -> dict[str, Any]:
+    package = deepcopy(_KAMLOOPS)
+    package.update(
+        {
+            "packageKey": DEFAULT_PACKAGE_KEY,
+            "country": "",
+            "province": "",
+            "board": "",
+            "market": "",
+            "localOverrides": {
+                "mlsBoard": "",
+                "marketLabel": "Configured market",
+                "defaultCurrency": "CAD",
+                "preferredShowingSource": "Configured showing source",
+            },
+        }
+    )
+    pre_launch = package["listing"]["stages"][3]
+    pre_launch["subtitle"] = "Forms + signing"
+    pre_launch["checklist"] = [
+        {"id": "fill-listing-forms", "label": "Fill listing agreement + required forms", "required": True},
+        {"id": "digisign-send", "label": "Send signing envelope", "required": True},
+        {"id": "track-signatures", "label": "Confirm all signatures received", "required": True},
+    ]
+    pre_launch["requiredDocs"] = [
+        {"kind": "listing_agreement_pdf", "label": "Listing agreement PDF"},
+        {"kind": "signed_envelope", "label": "Signed listing envelope"},
+    ]
+    pre_launch["forms"] = [
+        {"code": "LISTING_AGREEMENT", "name": "Listing agreement"},
+        {"code": "ID_VERIFICATION", "name": "Identity verification form"},
+    ]
+    pre_launch["automationTriggers"] = [
+        {"id": "listing-paperwork", "label": "Run listing paperwork workflow", "skill": "listing-paperwork"},
+        {"id": "digisign-sync", "label": "Sync signing status", "skill": "digisign"},
+    ]
+
+    showings = package["listing"]["stages"][5]
+    showings["checklist"] = [
+        {"id": "open-house", "label": "Open house scheduled", "required": True},
+        {"id": "showing-digest", "label": "Weekly showing + market digest sent", "required": True},
+    ]
+    showings["automationTriggers"] = [
+        {"id": "showing-digest", "label": "Attach showing digest", "skill": "showing-digest"}
+    ]
+    return package
+
+
+_PACKAGES: dict[str, dict[str, Any]] = {
+    DEFAULT_PACKAGE_KEY: _generic_package(),
+    KAMLOOPS_PACKAGE_KEY: _KAMLOOPS,
+}
+
+
 _CONDITION_ADDITIONS: dict[str, list[dict[str, Any]]] = {
     "propertySubtype:strata": [
         {"stage": 6, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
@@ -193,12 +249,41 @@ _CONDITION_ADDITIONS: dict[str, list[dict[str, Any]]] = {
 }
 
 
+def _slug(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "-")
+
+
+def package_key_from_jurisdiction(
+    *,
+    country: Any = None,
+    province: Any = None,
+    board: Any = None,
+    market: Any = None,
+    package_key: Any = None,
+) -> str:
+    explicit = _slug(package_key)
+    if explicit:
+        return explicit if explicit in _PACKAGES else DEFAULT_PACKAGE_KEY
+    province_slug = _slug(province)
+    board_slug = _slug(board)
+    market_slug = _slug(market)
+    if not (province_slug and board_slug and market_slug):
+        return DEFAULT_PACKAGE_KEY
+    country_slug = _slug(country) or "ca"
+    candidate = ".".join(part for part in (country_slug, province_slug, board_slug, market_slug) if part)
+    return candidate if candidate in _PACKAGES else DEFAULT_PACKAGE_KEY
+
+
 def package_key_from_deal(deal: Mapping[str, Any]) -> str:
-    country = str(deal.get("country") or "ca").strip().lower()
-    province = str(deal.get("province") or "bc").strip().lower()
-    board = str(deal.get("board") or "aoir").strip().lower()
-    market = str(deal.get("market") or "kamloops").strip().lower().replace(" ", "-")
-    return ".".join(part for part in (country, province, board, market) if part)
+    extra = deal.get("extraToggles") if isinstance(deal.get("extraToggles"), Mapping) else {}
+    explicit = deal.get("packageKey") or deal.get("package_key") or extra.get("packageKey") or extra.get("package_key")
+    return package_key_from_jurisdiction(
+        country=deal.get("country"),
+        province=deal.get("province"),
+        board=deal.get("board"),
+        market=deal.get("market"),
+        package_key=explicit,
+    )
 
 
 def resolve_admin_deal_flow(
@@ -209,10 +294,12 @@ def resolve_admin_deal_flow(
     conditions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve package rules for the current side/stage."""
-    package = _KAMLOOPS if package_key == DEFAULT_PACKAGE_KEY else _KAMLOOPS
+    resolved_key = _slug(package_key) or DEFAULT_PACKAGE_KEY
+    package = _PACKAGES.get(resolved_key, _PACKAGES[DEFAULT_PACKAGE_KEY])
     side_key = side if side in {"listing", "buyer"} else "listing"
-    stage_index = min(9, max(0, int(stage)))
     stages = package[side_key]["stages"]
+    last_stage = len(stages) - 1
+    stage_index = min(last_stage, max(0, int(stage)))
     current = stages[stage_index]
     additions = _condition_checklist_additions(conditions or {}, stage_index)
     checklist = [*current["checklist"], *additions]
@@ -222,8 +309,8 @@ def resolve_admin_deal_flow(
         "stage": stage_index,
         "stageName": current["title"],
         "stageSubtitle": current["subtitle"],
-        "nextStage": stage_index + 1 if stage_index < 9 else None,
-        "nextStageName": stages[stage_index + 1]["title"] if stage_index < 9 else None,
+        "nextStage": stage_index + 1 if stage_index < last_stage else None,
+        "nextStageName": stages[stage_index + 1]["title"] if stage_index < last_stage else None,
         "checklistItems": checklist,
         "requiredFields": current["requiredFields"],
         "requiredForms": current["forms"],

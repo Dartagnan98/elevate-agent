@@ -68,8 +68,8 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
     assert body["side"] == "listing"
     assert body["status"] == "active"
     assert body["province"] == "BC"
-    assert body["board"] == "AOIR"
-    assert body["market"] == "Kamloops"
+    assert body["board"] is None
+    assert body["market"] is None
     assert body["currentStage"] == 1
     assert body["listingAddress"] == "123 Main St"
     assert body["loftyContactId"] == "lofty-123"
@@ -86,30 +86,31 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
 
 
 
-def test_admin_jurisdiction_is_configured_and_not_switched_from_board(client):
+def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_values(client):
     resp = client.get("/api/admin/jurisdiction")
     assert resp.status_code == 200, resp.text
     jurisdiction = resp.json()
     assert jurisdiction == {
         "country": "CA",
-        "province": "BC",
-        "board": "AOIR",
-        "market": "Kamloops",
-        "packageKey": "ca.bc.aoir.kamloops",
+        "province": "",
+        "board": "",
+        "market": "",
+        "packageKey": "generic.real-estate",
     }
 
     created = client.post(
         "/api/admin/deals",
-        json={"title": "Wrong province request", "side": "listing", "province": "AB", "board": "CREB", "market": "Calgary"},
+        json={"title": "Calgary request", "side": "listing", "province": "AB", "board": "CREB", "market": "Calgary"},
     )
     assert created.status_code == 200, created.text
     body = created.json()
-    assert body["province"] == "BC"
-    assert body["board"] == "AOIR"
-    assert body["market"] == "Kamloops"
+    assert body["province"] == "AB"
+    assert body["board"] == "CREB"
+    assert body["market"] == "Calgary"
 
     switched = client.get("/api/admin/deals?province=AB")
-    assert switched.status_code == 400
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["count"] == 1
 
 def test_get_deals_filters_by_side(client):
     listing = _create(title="Listing deal", side="listing")
@@ -252,7 +253,7 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["primaryContact"]["displayName"] == "Seller One"
     assert body["conditions"]["property_subtype"] == "strata"
     assert body["checklist"]["draft-cma-followup"] is True
-    assert body["dealFlow"]["packageKey"] == "ca.bc.aoir.kamloops"
+    assert body["dealFlow"]["packageKey"] == "generic.real-estate"
     assert body["dealFlow"]["gate"]["stageName"] == "CMA"
     assert body["dealFlow"]["gate"]["canAdvance"] is False
     assert body["coContacts"][0]["role"] == "lawyer"

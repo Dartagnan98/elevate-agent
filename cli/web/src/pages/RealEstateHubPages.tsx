@@ -6234,7 +6234,7 @@ const ADMIN_CARDS_SEED: AdminCard[] = [
     completedByStage: {},
     conditions: { property_subtype: "condo" } },
   { id: "b2", side: "buyer", stage: 1, client: "Tessa & Ryan", contactInitials: "TR",
-    property: "Looking N. Kamloops · 3bd", nextLabel: "Showing route", daysOut: 2, pinnedTop25: true,
+    property: "North market · 3bd", nextLabel: "Showing route", daysOut: 2, pinnedTop25: true,
     completedByStage: { 0: { "buyer-profile": true, "search-criteria": true }, 1: { shortlist: true } },
     conditions: { transaction_type: "residential" } },
   { id: "b2b", side: "buyer", stage: 1, client: "Carlita M", contactInitials: "CM",

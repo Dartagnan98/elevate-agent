@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS deals (
                                  CHECK (current_stage BETWEEN 0 AND 9),
     status                   TEXT NOT NULL DEFAULT 'active'
                                  CHECK (status IN ('active','closed','archived')),
-    province                 TEXT NOT NULL DEFAULT 'BC',
+    province                 TEXT NOT NULL DEFAULT '',
     primary_contact_id       TEXT,
     lofty_contact_id         TEXT,
     listing_address          TEXT,

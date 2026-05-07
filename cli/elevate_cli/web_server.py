@@ -2932,7 +2932,7 @@ class _TemplateEditBody(BaseModel):
 class _DealCreateBody(BaseModel):
     title: str
     side: str
-    # Province/board/market are stamped from real_estate config. Kept optional for old clients, ignored by the API.
+    # Optional package selectors. If omitted, the configured deal-flow defaults are used.
     province: Optional[str] = None
     board: Optional[str] = None
     market: Optional[str] = None
@@ -3036,20 +3036,20 @@ def _clean_admin_jurisdiction_value(value: Any, default: str = "") -> str:
 
 
 def _admin_jurisdiction_config() -> Dict[str, str]:
-    """Return the configured Admin Hub jurisdiction package.
+    """Return the configured Admin Hub deal-flow package defaults."""
+    from elevate_cli.admin_deal_flow import package_key_from_jurisdiction
 
-    This is deployment/client configuration, not an operator-facing board switcher.
-    Province is the legal base; board/market is the local MLS/flow overlay.
-    """
     real_estate = (load_config().get("real_estate") or {})
     country = _clean_admin_jurisdiction_value(real_estate.get("country"), "CA").upper()
-    province = _clean_admin_jurisdiction_value(real_estate.get("province"), "BC").upper()
-    board = _clean_admin_jurisdiction_value(real_estate.get("board"), "AOIR")
-    market = _clean_admin_jurisdiction_value(real_estate.get("market"), "Kamloops")
-    package_key = ".".join(
-        part.lower().replace(" ", "-")
-        for part in (country, province, board, market)
-        if part
+    province = _clean_admin_jurisdiction_value(real_estate.get("province"), "").upper()
+    board = _clean_admin_jurisdiction_value(real_estate.get("board"), "")
+    market = _clean_admin_jurisdiction_value(real_estate.get("market"), "")
+    package_key = package_key_from_jurisdiction(
+        country=country,
+        province=province,
+        board=board,
+        market=market,
+        package_key=real_estate.get("package_key") or real_estate.get("packageKey"),
     )
     return {
         "country": country,
@@ -3286,23 +3286,17 @@ async def get_admin_deals(
     try:
         from elevate_cli.data import connect, list_deals
 
-        jurisdiction = _admin_jurisdiction_config()
-        # Back-compat: province query may narrow to the configured province only; it is not a UI switcher.
-        requested_province = (province or jurisdiction["province"]).strip().upper()
-        if requested_province != jurisdiction["province"]:
-            raise HTTPException(status_code=400, detail="admin province is configured for this deployment")
-
         with connect() as conn:
             rows = list_deals(
                 conn,
                 side=side or None,
                 current_stage=current_stage,
                 status=status or None,
-                province=jurisdiction["province"],
+                province=province.strip().upper() if province and province.strip() else None,
                 limit=limit,
                 offset=offset,
             )
-            return {"items": rows, "count": len(rows), "jurisdiction": jurisdiction}
+            return {"items": rows, "count": len(rows), "jurisdiction": _admin_jurisdiction_config()}
     except HTTPException:
         raise
     except PermissionError as exc:
@@ -3323,15 +3317,18 @@ async def post_admin_deal(body: _DealCreateBody):
         from elevate_cli.data import connect, create_deal
 
         jurisdiction = _admin_jurisdiction_config()
+        province = body.province if body.province is not None else jurisdiction["province"]
+        board = body.board if body.board is not None else jurisdiction["board"]
+        market = body.market if body.market is not None else jurisdiction["market"]
         with connect() as conn:
             return create_deal(
                 conn,
                 title=body.title,
                 side=body.side,
                 actor=_WEB_ACTOR,
-                province=jurisdiction["province"],
-                board=jurisdiction["board"] or None,
-                market=jurisdiction["market"] or None,
+                province=(province or "").strip().upper(),
+                board=(board or "").strip() or None,
+                market=(market or "").strip() or None,
                 current_stage=body.currentStage,
                 primary_contact_id=body.primaryContactId,
                 lofty_contact_id=body.loftyContactId,
