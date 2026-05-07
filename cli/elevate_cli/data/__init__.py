@@ -131,16 +131,21 @@ from elevate_cli.data.deals import (
     set_deal_toggle,
 )
 from elevate_cli.data.dispatch import (
+    approve_action_run,
     create_action,
     delete_action,
+    dispatch_action_run_to_cron,
+    drain_queued_action_runs,
     evaluate as evaluate_dispatch,
     get_action,
     list_action_runs,
     list_actions,
     list_conditional_docs,
     queue_action_run,
+    record_date_trigger_firing,
     update_action,
     upsert_conditional_doc,
+    verify_action_run_token,
 )
 from elevate_cli.data.workflow_import import (
     import_listing_workflow_csv,
@@ -198,9 +203,11 @@ __all__ = [
     "set_deal_dates", "set_deal_fields", "set_deal_money",
     "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)
-    "create_action", "delete_action", "evaluate_dispatch", "get_action",
-    "list_action_runs", "list_actions", "list_conditional_docs",
-    "queue_action_run", "update_action", "upsert_conditional_doc",
+    "approve_action_run", "create_action", "delete_action",
+    "dispatch_action_run_to_cron", "drain_queued_action_runs",
+    "evaluate_dispatch", "get_action", "list_action_runs", "list_actions",
+    "list_conditional_docs", "queue_action_run", "record_date_trigger_firing",
+    "update_action", "upsert_conditional_doc", "verify_action_run_token",
     # workflow bootstrap import
     "import_listing_workflow_csv", "parse_listing_workflow_csv",
     # picker / attribution / gaps

@@ -16,6 +16,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -74,6 +75,8 @@ app = FastAPI(title="Elevate", version=__version__)
 # ---------------------------------------------------------------------------
 _SESSION_TOKEN = secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Elevate-Session-Token"
+_RUN_TOKEN_HEADER_NAME = "X-Elevate-Run-Token"
+_RUN_RESULT_PATH_RE = re.compile(r"^/api/deals/([^/]+)/runs/([^/]+)/result$")
 
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``elevate dashboard --tui``
 # or ELEVATE_DASHBOARD_TUI=1.  Set from :func:`start_server`.
@@ -129,6 +132,32 @@ def _has_valid_session_token(request: Request) -> bool:
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {_SESSION_TOKEN}"
     return hmac.compare_digest(auth.encode(), expected.encode())
+
+
+def _has_valid_run_token(request: Request) -> bool:
+    match = _RUN_RESULT_PATH_RE.match(request.url.path)
+    if not match:
+        return False
+    deal_id, run_id = match.groups()
+    token = request.headers.get(_RUN_TOKEN_HEADER_NAME, "").strip()
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+    if not token:
+        return False
+    try:
+        from elevate_cli.data import connect, verify_action_run_token
+
+        with connect() as conn:
+            return verify_action_run_token(
+                conn,
+                deal_id=deal_id,
+                run_id=run_id,
+                token=token,
+            )
+    except Exception:
+        return False
 
 
 def _require_token(request: Request) -> None:
@@ -227,7 +256,7 @@ async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
-        if not _has_valid_session_token(request):
+        if not (_has_valid_session_token(request) or _has_valid_run_token(request)):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
@@ -2981,6 +3010,8 @@ class _RunResultArtifact(BaseModel):
 
 class _RunResultBody(BaseModel):
     status: str
+    idempotency_key: Optional[str] = None
+    idempotencyKey: Optional[str] = None
     artifacts: List[_RunResultArtifact] = []
     next_tasks: List[Dict[str, Any]] = []
     nextTasks: List[Dict[str, Any]] = []
@@ -3000,6 +3031,11 @@ class _AdminTaskRunBody(BaseModel):
     skill: str
     title: Optional[str] = None
     sourceTaskId: Optional[str] = None
+    runNow: bool = True
+
+
+class _ActionRunApproveBody(BaseModel):
+    approved: bool = True
     runNow: bool = True
 
 
@@ -3554,12 +3590,14 @@ async def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
         next_tasks = body.next_tasks or body.nextTasks
         checklist_updates = body.checklist_updates or body.checklistUpdates
         human_prompt = body.human_prompt or body.humanPrompt
+        idempotency_key = body.idempotency_key or body.idempotencyKey
         with connect() as conn:
             return record_run_result(
                 conn,
                 deal_id,
                 run_id,
                 status=body.status,
+                idempotency_key=idempotency_key,
                 artifacts=artifacts,
                 next_tasks=next_tasks,
                 checklist_updates=checklist_updates,
@@ -3732,6 +3770,49 @@ async def get_admin_action_runs(
     except Exception as exc:
         _log.exception("GET /api/admin/action-runs failed")
         raise HTTPException(status_code=500, detail=f"Admin runs failed: {exc}")
+
+
+@app.post("/api/admin/action-runs/drain")
+async def post_admin_action_runs_drain(limit: int = 50):
+    """Drain queued Admin action runs into cron."""
+    try:
+        from elevate_cli.data import connect, drain_queued_action_runs
+
+        with connect() as conn:
+            rows = drain_queued_action_runs(
+                conn,
+                limit=max(1, min(200, int(limit))),
+                actor=_WEB_ACTOR,
+            )
+        return {"items": rows, "count": len(rows)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/action-runs/drain failed")
+        raise HTTPException(status_code=500, detail=f"Drain action runs failed: {exc}")
+
+
+@app.post("/api/admin/action-runs/{run_id}/approve")
+async def post_admin_action_run_approve(run_id: str, body: _ActionRunApproveBody):
+    """Approve or cancel a human-gated Admin action run."""
+    try:
+        from elevate_cli.data import approve_action_run, connect
+
+        with connect() as conn:
+            return approve_action_run(
+                conn,
+                run_id,
+                approved=body.approved,
+                actor=_WEB_ACTOR,
+                create_cron_job=body.runNow,
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/action-runs/%s/approve failed", run_id)
+        raise HTTPException(status_code=500, detail=f"Approve action run failed: {exc}")
 
 
 @app.get("/api/admin/tasks")

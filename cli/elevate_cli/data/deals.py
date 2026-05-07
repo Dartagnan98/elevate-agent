@@ -808,6 +808,18 @@ def add_deal_attachment(
         raise ValueError("attachment kind is required")
     if not file_path or not file_path.strip():
         raise ValueError("file_path is required")
+    kind_clean = kind.strip()
+    file_path_clean = file_path.strip()
+    if source_run_id:
+        existing = conn.execute(
+            """
+            SELECT * FROM deal_attachments
+            WHERE deal_id=? AND source_run_id=? AND kind=? AND file_path=?
+            """,
+            (deal_id, source_run_id, kind_clean, file_path_clean),
+        ).fetchone()
+        if existing is not None:
+            return _row_to_deal_attachment(existing)
     aid = new_id()
     now = now_iso()
     conn.execute(
@@ -817,7 +829,7 @@ def add_deal_attachment(
             source_run_id, source_snapshot_id, created_at
         ) VALUES (?,?,?,?,?,?,?,?)
         """,
-        (aid, deal_id, kind.strip(), file_path.strip(), summary, source_run_id, source_snapshot_id, now),
+        (aid, deal_id, kind_clean, file_path_clean, summary, source_run_id, source_snapshot_id, now),
     )
     row = conn.execute("SELECT * FROM deal_attachments WHERE id=?", (aid,)).fetchone()
     _insert_deal_event(
@@ -825,7 +837,7 @@ def add_deal_attachment(
         deal_id=deal_id,
         kind="attachment_added",
         actor=actor,
-        payload={"kind": kind.strip(), "filePath": file_path.strip(), "sourceRunId": source_run_id},
+        payload={"kind": kind_clean, "filePath": file_path_clean, "sourceRunId": source_run_id},
         created_at=now,
     )
     return _row_to_deal_attachment(row)
@@ -851,22 +863,27 @@ def list_deal_attachments(
 
 
 def _row_to_action_run(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys()
     return {
         "id": row["id"],
         "registryId": row["registry_id"],
         "dealId": row["deal_id"],
         "dealEventId": row["deal_event_id"],
         "cronJobId": row["cron_job_id"],
-        "harnessRunId": row["harness_run_id"],
+        "harnessRunId": row["harness_run_id"] if "harness_run_id" in keys else None,
         "status": row["status"],
         "outputPath": row["output_path"],
         "errorMessage": row["error_message"],
         "payload": _decode_json(row["payload_json"]),
+        "humanPrompt": _decode_json(row["human_prompt_json"]) if "human_prompt_json" in keys else None,
+        "result": _decode_json(row["result_json"]) if "result_json" in keys else None,
+        "resultIdempotencyKey": row["result_idempotency_key"] if "result_idempotency_key" in keys else None,
         "createdAt": row["created_at"],
+        "startedAt": row["started_at"] if "started_at" in keys else None,
         "updatedAt": row["updated_at"],
         "completedAt": row["completed_at"],
-        "skill": row["skill"] if "skill" in row.keys() else None,
-        "registryName": row["name"] if "name" in row.keys() else None,
+        "skill": row["skill"] if "skill" in keys else None,
+        "registryName": row["name"] if "name" in keys else None,
     }
 
 
@@ -1163,6 +1180,7 @@ def record_run_result(
     run_id: str,
     *,
     status: str,
+    idempotency_key: str | None = None,
     artifacts: Sequence[Mapping[str, Any]] | None = None,
     next_tasks: Sequence[Mapping[str, Any]] | None = None,
     checklist_updates: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None = None,
@@ -1184,18 +1202,28 @@ def record_run_result(
         raise ValueError(f"invalid run status {status!r}")
     now = now_iso()
     completed_at = now if normalized_status in {"succeeded", "completed", "failed", "skipped", "cancelled"} else None
+    prior_key = row["result_idempotency_key"] if "result_idempotency_key" in row.keys() else None
+    prior_result = row["result_json"] if "result_json" in row.keys() else None
+    if prior_key:
+        if idempotency_key and prior_key == idempotency_key:
+            return _row_to_action_run(row)
+        raise ValueError("action run result has already been recorded")
+    if prior_result and row["status"] in {"succeeded", "completed", "failed", "skipped", "cancelled"}:
+        raise ValueError("action run result has already been recorded")
     payload = _decode_json(row["payload_json"]) or {}
     if not isinstance(payload, dict):
         payload = {"prior": payload}
-    payload["result"] = {
+    result_payload = {
         "status": status,
         "artifacts": [dict(item) for item in (artifacts or [])],
         "nextTasks": [dict(item) for item in (next_tasks or [])],
         "checklistUpdates": checklist_updates,
         "humanPrompt": dict(human_prompt) if human_prompt else None,
         "error": error,
+        "idempotencyKey": idempotency_key,
         "recordedAt": now,
     }
+    payload["result"] = result_payload
     output_path = row["output_path"]
     for artifact in artifacts or []:
         attachment = add_deal_attachment(
@@ -1241,10 +1269,23 @@ def record_run_result(
     conn.execute(
         """
         UPDATE admin_action_runs
-        SET status=?, output_path=?, error_message=?, payload_json=?, updated_at=?, completed_at=?
+        SET status=?, output_path=?, error_message=?, payload_json=?,
+            result_idempotency_key=?, result_json=?, human_prompt_json=?,
+            updated_at=?, completed_at=?
         WHERE id=?
         """,
-        (normalized_status, output_path, error, _encode_json(payload), now, completed_at, run_id),
+        (
+            normalized_status,
+            output_path,
+            error,
+            _encode_json(payload),
+            idempotency_key,
+            _encode_json(result_payload),
+            _encode_json(dict(human_prompt)) if human_prompt else None,
+            now,
+            completed_at,
+            run_id,
+        ),
     )
     _insert_deal_event(
         conn,

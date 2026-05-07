@@ -13,7 +13,16 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from elevate_cli.data import connect, create_action, create_deal, evaluate_dispatch, list_action_runs, list_deal_events, upsert_contact
+from elevate_cli.data import (
+    connect,
+    create_action,
+    create_deal,
+    evaluate_dispatch,
+    list_action_runs,
+    list_deal_attachments,
+    list_deal_events,
+    upsert_contact,
+)
 from elevate_cli.data.connection import _reset_schema_cache
 
 
@@ -347,6 +356,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
         f"/api/deals/{deal['id']}/runs/{run_id}/result",
         json={
             "status": "completed",
+            "idempotencyKey": "run-result-test",
             "artifacts": [
                 {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
             ],
@@ -359,6 +369,20 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     assert body["status"] == "succeeded"
     assert body["outputPath"] == "/tmp/context-cma.pdf"
 
+    replay = client.post(
+        f"/api/deals/{deal['id']}/runs/{run_id}/result",
+        json={
+            "status": "completed",
+            "idempotencyKey": "run-result-test",
+            "artifacts": [
+                {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
+            ],
+            "next_tasks": [{"skill": "cma:pdf", "args": {"deal_id": deal["id"]}}],
+            "checklist_updates": [{"id": "pricing-recap", "completed": True}],
+        },
+    )
+    assert replay.status_code == 200, replay.text
+
     context = client.get(f"/api/deals/{deal['id']}/context").json()
     assert context["attachments"][0]["sourceRunId"] == run_id
     assert context["checklist"]["draft-cma-followup"] is True
@@ -366,7 +390,9 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     assert any(run["payload"].get("result", {}).get("nextTasks") for run in context["priorRuns"])
     with connect() as conn:
         queued = list_action_runs(conn, deal_id=deal["id"])
+        attachments = list_deal_attachments(conn, deal["id"])
     assert any(run["payload"].get("trigger") == "next_task" for run in queued)
+    assert len([item for item in attachments if item["sourceRunId"] == run_id]) == 1
 
 
 def test_admin_deals_requires_session_token():

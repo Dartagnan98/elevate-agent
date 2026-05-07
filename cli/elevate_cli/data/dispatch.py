@@ -15,15 +15,17 @@ Architecture (per ``docs/plans/skyleigh-admin-hub-codex-review-B-dispatch.md``):
 
 The dispatcher is a **producer** of action-run rows + cron jobs. It is NOT a
 second skill runner — skills run via ``cron.jobs.create_job(...)`` and the
-existing scheduler. By default :func:`evaluate` only persists a queued run
-row; a separate worker drains those rows and creates cron jobs. Callers that
-need an immediate, blocking run (e.g. a manual button click) can pass
-``create_cron_jobs=True``.
+existing scheduler. A run row is created first, then immediate callers may
+drain it into cron with ``create_cron_jobs=True``. Deferred callers can use
+``drain_queued_action_runs`` later.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 from typing import Any, Mapping
 
@@ -51,6 +53,8 @@ _VALID_RUN_STATUSES = {
     "waiting_human",
     "waiting_external",
 }
+def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    return row[key] if key in row.keys() else default
 
 
 def _decode_json(value: str | None) -> Any:
@@ -108,11 +112,16 @@ def _row_to_run(row: sqlite3.Row) -> dict[str, Any]:
         "dealId": row["deal_id"],
         "dealEventId": row["deal_event_id"],
         "cronJobId": row["cron_job_id"],
+        "harnessRunId": _row_value(row, "harness_run_id"),
         "status": row["status"],
         "outputPath": row["output_path"],
         "errorMessage": row["error_message"],
         "payload": _decode_json(row["payload_json"]),
+        "humanPrompt": _decode_json(_row_value(row, "human_prompt_json")),
+        "result": _decode_json(_row_value(row, "result_json")),
+        "resultIdempotencyKey": _row_value(row, "result_idempotency_key"),
         "createdAt": row["created_at"],
+        "startedAt": _row_value(row, "started_at"),
         "updatedAt": row["updated_at"],
         "completedAt": row["completed_at"],
     }
@@ -411,15 +420,18 @@ def _insert_run(
     deal_id: str,
     deal_event_id: str | None,
     payload: Mapping[str, Any] | None,
-    cron_job_id: str | None = None,
+    status: str = "queued",
+    human_prompt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if status not in _VALID_RUN_STATUSES:
+        raise ValueError(f"invalid run status {status!r}")
     rid = new_id()
     now = now_iso()
     conn.execute(
         """
         INSERT INTO admin_action_runs(
-            id, registry_id, deal_id, deal_event_id, cron_job_id,
-            status, payload_json, created_at, updated_at
+            id, registry_id, deal_id, deal_event_id,
+            status, payload_json, human_prompt_json, created_at, updated_at
         ) VALUES (?,?,?,?,?,?,?,?,?)
         """,
         (
@@ -427,9 +439,9 @@ def _insert_run(
             registry_id,
             deal_id,
             deal_event_id,
-            cron_job_id,
-            "queued",
+            status,
             _encode_json(dict(payload)) if payload else None,
+            _encode_json(dict(human_prompt)) if human_prompt else None,
             now,
             now,
         ),
@@ -437,6 +449,190 @@ def _insert_run(
     row = conn.execute(
         "SELECT * FROM admin_action_runs WHERE id=?", (rid,)
     ).fetchone()
+    return _row_to_run(row)
+
+
+def _hash_callback_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _new_callback_token() -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    return token, _hash_callback_token(token)
+
+
+def verify_action_run_token(
+    conn: sqlite3.Connection,
+    *,
+    deal_id: str,
+    run_id: str,
+    token: str,
+) -> bool:
+    """Return True when ``token`` is the callback token for one run."""
+    if not token:
+        return False
+    row = conn.execute(
+        "SELECT callback_token_hash FROM admin_action_runs WHERE id=? AND deal_id=?",
+        (run_id, deal_id),
+    ).fetchone()
+    if row is None or not row["callback_token_hash"]:
+        return False
+    return hmac.compare_digest(_hash_callback_token(token), row["callback_token_hash"])
+
+
+def _run_lookup(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT r.*, a.name, a.skill, a.skill_args_json, a.approval_required,
+               d.side, d.current_stage, d.province
+        FROM admin_action_runs r
+        JOIN admin_action_registry a ON a.id = r.registry_id
+        JOIN deals d ON d.id = r.deal_id
+        WHERE r.id=?
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"action run {run_id!r} not found")
+    return row
+
+
+def _row_to_spawn_action(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["registry_id"],
+        "name": row["name"],
+        "skill": row["skill"],
+        "skillArgs": _decode_json(row["skill_args_json"]) or {},
+    }
+
+
+def _row_to_spawn_deal(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["deal_id"],
+        "side": row["side"],
+        "currentStage": row["current_stage"],
+        "province": row["province"],
+    }
+
+
+def dispatch_action_run_to_cron(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    actor: str = "system",
+) -> dict[str, Any]:
+    """Move one queued run into cron and mark it running.
+
+    This is the explicit queued-run drain primitive. It regenerates the
+    per-run callback token immediately before cron creation so stale queued
+    runs can be retried without storing a plaintext token in SQLite.
+    """
+    row = _run_lookup(conn, run_id)
+    if row["status"] != "queued":
+        return _row_to_run(row)
+
+    token, token_hash = _new_callback_token()
+    now = now_iso()
+    conn.execute(
+        """
+        UPDATE admin_action_runs
+        SET callback_token_hash=?, updated_at=?
+        WHERE id=?
+        """,
+        (token_hash, now, run_id),
+    )
+    payload = _decode_json(row["payload_json"]) or {}
+    if not isinstance(payload, dict):
+        payload = {"prior": payload}
+    cron_job_id = _spawn_cron_job(
+        action=_row_to_spawn_action(row),
+        deal=_row_to_spawn_deal(row),
+        run_id=run_id,
+        callback_token=token,
+        actor=actor,
+        payload=payload,
+    )
+    if cron_job_id:
+        conn.execute(
+            """
+            UPDATE admin_action_runs
+            SET cron_job_id=?, status='running', started_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (cron_job_id, now, now, run_id),
+        )
+    row = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
+    return _row_to_run(row)
+
+
+def drain_queued_action_runs(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    actor: str = "system",
+) -> list[dict[str, Any]]:
+    """Dispatch queued Admin action runs into cron."""
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    rows = conn.execute(
+        """
+        SELECT r.id
+        FROM admin_action_runs r
+        JOIN admin_action_registry a ON a.id = r.registry_id
+        WHERE r.status='queued'
+          AND r.cron_job_id IS NULL
+          AND a.approval_required=0
+        ORDER BY r.created_at ASC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dispatch_action_run_to_cron(conn, row["id"], actor=actor) for row in rows]
+
+
+def approve_action_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    approved: bool = True,
+    actor: str = "human",
+    create_cron_job: bool = True,
+) -> dict[str, Any]:
+    """Approve or cancel a human-gated run."""
+    row = _run_lookup(conn, run_id)
+    if row["status"] != "waiting_human":
+        raise ValueError("only waiting_human runs can be approved")
+    now = now_iso()
+    prompt = _decode_json(_row_value(row, "human_prompt_json")) or {}
+    if not isinstance(prompt, dict):
+        prompt = {"prompt": prompt}
+    prompt["decision"] = {
+        "approved": bool(approved),
+        "actor": actor,
+        "decidedAt": now,
+    }
+    if not approved:
+        conn.execute(
+            """
+            UPDATE admin_action_runs
+            SET status='cancelled', human_prompt_json=?, updated_at=?, completed_at=?
+            WHERE id=?
+            """,
+            (_encode_json(prompt), now, now, run_id),
+        )
+        row = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
+        return _row_to_run(row)
+    conn.execute(
+        """
+        UPDATE admin_action_runs
+        SET status='queued', human_prompt_json=?, updated_at=?
+        WHERE id=?
+        """,
+        (_encode_json(prompt), now, run_id),
+    )
+    if create_cron_job:
+        return dispatch_action_run_to_cron(conn, run_id, actor=actor)
+    row = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
     return _row_to_run(row)
 
 
@@ -480,16 +676,21 @@ def queue_action_run(
         "registryName": action["name"],
         **(dict(payload) if payload else {}),
     }
-    cron_job_id: str | None = None
     if create_cron_job:
-        cron_job_id = _spawn_cron_job(action=action, deal=deal, actor=actor, payload=run_payload)
+        run = _insert_run(
+            conn,
+            registry_id=action["id"],
+            deal_id=deal_id,
+            deal_event_id=None,
+            payload=run_payload,
+        )
+        return dispatch_action_run_to_cron(conn, run["id"], actor=actor)
     return _insert_run(
         conn,
         registry_id=action["id"],
         deal_id=deal_id,
         deal_event_id=None,
         payload=run_payload,
-        cron_job_id=cron_job_id,
     )
 
 
@@ -633,14 +834,18 @@ def evaluate(
         if not _condition_matches(action["condition"], deal):
             continue
 
-        cron_job_id: str | None = None
-        if create_cron_jobs and not action.get("approvalRequired"):
-            cron_job_id = _spawn_cron_job(
-                action=action,
-                deal=deal,
-                actor=actor,
-                payload=base_payload,
-            )
+        initial_status = "waiting_human" if action.get("approvalRequired") else "queued"
+        human_prompt = None
+        if initial_status == "waiting_human":
+            human_prompt = {
+                "title": f"Approve {action['name']}",
+                "message": "This automation requires approval before the skill runs.",
+                "actionId": action["id"],
+                "actionName": action["name"],
+                "skill": action["skill"],
+                "dealId": deal_id,
+                "trigger": trigger,
+            }
 
         run = _insert_run(
             conn,
@@ -648,8 +853,11 @@ def evaluate(
             deal_id=deal_id,
             deal_event_id=deal_event_id,
             payload={**base_payload, "registryName": action["name"]},
-            cron_job_id=cron_job_id,
+            status=initial_status,
+            human_prompt=human_prompt,
         )
+        if create_cron_jobs and initial_status == "queued":
+            run = dispatch_action_run_to_cron(conn, run["id"], actor=actor)
         runs.append(run)
 
     return runs
@@ -659,6 +867,8 @@ def _spawn_cron_job(
     *,
     action: Mapping[str, Any],
     deal: Mapping[str, Any],
+    run_id: str,
+    callback_token: str,
     actor: str,
     payload: Mapping[str, Any],
 ) -> str | None:
@@ -676,7 +886,13 @@ def _spawn_cron_job(
         prompt_lines = [
             f"Admin Hub action: {action.get('name')}",
             f"Deal: {deal.get('id')} ({deal.get('side')}, stage {deal.get('currentStage')})",
+            f"Action run ID: {run_id}",
             f"Trigger: {payload.get('trigger')}",
+            "",
+            "When the skill is done, write the result back to the deal file:",
+            f"POST /api/deals/{deal.get('id')}/runs/{run_id}/result",
+            f"Header: X-Elevate-Run-Token: {callback_token}",
+            "Use a stable idempotencyKey when retrying the same result.",
         ]
         if skill_args:
             prompt_lines.append(f"Skill args: {json.dumps(skill_args, default=str)}")
@@ -688,7 +904,12 @@ def _spawn_cron_job(
             repeat=1,
             deliver="local",
             skills=[action["skill"]],
-            origin={"source": "admin_hub", "actor": actor, "deal_id": deal.get("id")},
+            origin={
+                "source": "admin_hub",
+                "actor": actor,
+                "deal_id": deal.get("id"),
+                "run_id": run_id,
+            },
         )
         return job.get("id") if isinstance(job, dict) else None
     except Exception:
@@ -764,3 +985,46 @@ def upsert_conditional_doc(
             "SELECT * FROM conditional_docs WHERE id=?", (did,)
         ).fetchone()
     return _row_to_doc(row)
+
+
+# --- Date trigger ledger ----------------------------------------------
+
+
+def record_date_trigger_firing(
+    conn: sqlite3.Connection,
+    *,
+    deal_id: str,
+    registry_id: str,
+    field_key: str,
+    target_date: str,
+    offset_days: int = 0,
+    run_id: str | None = None,
+    actor: str = "system",
+) -> dict[str, Any]:
+    """Record one date-relative firing and return whether it was new."""
+    if not deal_id or not registry_id or not field_key or not target_date:
+        raise ValueError("deal_id, registry_id, field_key, and target_date are required")
+    existing = conn.execute(
+        """
+        SELECT * FROM admin_date_trigger_firings
+        WHERE deal_id=? AND registry_id=? AND field_key=? AND offset_days=? AND target_date=?
+        """,
+        (deal_id, registry_id, field_key, int(offset_days), target_date),
+    ).fetchone()
+    if existing is not None:
+        return {**dict(existing), "created": False}
+    fid = new_id()
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO admin_date_trigger_firings(
+            id, deal_id, registry_id, run_id, field_key,
+            offset_days, target_date, fired_at, actor
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (fid, deal_id, registry_id, run_id, field_key, int(offset_days), target_date, now, actor),
+    )
+    row = conn.execute(
+        "SELECT * FROM admin_date_trigger_firings WHERE id=?", (fid,)
+    ).fetchone()
+    return {**dict(row), "created": True}

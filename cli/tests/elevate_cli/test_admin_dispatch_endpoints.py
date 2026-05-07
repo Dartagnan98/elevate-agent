@@ -6,6 +6,8 @@ into ``data.deals`` (move_deal_stage, set_deal_toggle).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,6 +17,7 @@ from elevate_cli.data import (
     create_deal,
     list_action_runs,
     move_deal_stage,
+    record_date_trigger_firing,
     set_deal_toggle,
 )
 from elevate_cli.data.connection import _reset_schema_cache
@@ -201,8 +204,9 @@ def test_move_deal_stage_creates_action_run_via_hook():
     run = runs[0]
     assert run["registryId"] == action["id"]
     assert run["dealId"] == deal["id"]
-    assert run["status"] == "queued"
+    assert run["status"] == "running"
     assert run["cronJobId"]
+    assert run["startedAt"]
     assert run["payload"]["toStage"] == 5
     assert run["payload"]["registryName"] == "just_listed entry"
 
@@ -233,11 +237,12 @@ def test_toggle_change_creates_action_run_via_hook():
 
     assert len(runs) == 1
     assert runs[0]["cronJobId"]
+    assert runs[0]["status"] == "running"
     assert runs[0]["payload"]["fieldKey"] == "multiple_offers"
     assert runs[0]["payload"]["fieldNew"] is True
 
 
-def test_approval_required_action_does_not_spawn_cron_job():
+def test_approval_required_action_does_not_spawn_cron_job(client):
     deal = _new_listing_deal()
     with connect() as conn:
         create_action(
@@ -258,7 +263,46 @@ def test_approval_required_action_does_not_spawn_cron_job():
 
     assert len(runs) == 1
     assert runs[0]["cronJobId"] is None
+    assert runs[0]["status"] == "waiting_human"
+    assert runs[0]["humanPrompt"]["skill"] == "marketing"
     assert runs[0]["payload"]["registryName"] == "approval gated entry"
+
+    approved = client.post(f"/api/admin/action-runs/{runs[0]['id']}/approve", json={"approved": True})
+    assert approved.status_code == 200, approved.text
+    body = approved.json()
+    assert body["status"] == "running"
+    assert body["cronJobId"]
+
+
+def test_run_result_accepts_per_run_service_token_without_session(client):
+    deal = _new_listing_deal()
+    with connect() as conn:
+        create_action(
+            conn,
+            name="tokened entry",
+            trigger="stage_entry",
+            skill="marketing",
+            side="listing",
+            to_stage=5,
+        )
+        move_deal_stage(conn, deal["id"], to_stage=5, actor="human:test")
+        run = list_action_runs(conn, deal_id=deal["id"])[0]
+
+    from cron.jobs import load_jobs
+    from elevate_cli.web_server import app
+
+    job = next(job for job in load_jobs() if job["id"] == run["cronJobId"])
+    match = re.search(r"X-Elevate-Run-Token: (\S+)", job["prompt"])
+    assert match, job["prompt"]
+
+    unauthed = TestClient(app)
+    resp = unauthed.post(
+        f"/api/deals/{deal['id']}/runs/{run['id']}/result",
+        headers={"X-Elevate-Run-Token": match.group(1)},
+        json={"status": "completed", "idempotencyKey": "service-token-test"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "succeeded"
 
 
 def test_evaluate_skips_when_action_disabled():
@@ -303,3 +347,37 @@ def test_evaluate_respects_province_filter():
         runs = list_action_runs(conn, deal_id=deal["id"])
 
     assert runs == []
+
+
+def test_date_trigger_firing_ledger_is_unique():
+    deal = _new_listing_deal()
+    with connect() as conn:
+        action = create_action(
+            conn,
+            name="subject reminder",
+            trigger="time_offset",
+            skill="seller-updates",
+            side="listing",
+        )
+        first = record_date_trigger_firing(
+            conn,
+            deal_id=deal["id"],
+            registry_id=action["id"],
+            field_key="subjectRemovalDate",
+            offset_days=-2,
+            target_date="2026-06-01",
+            actor="test",
+        )
+        second = record_date_trigger_firing(
+            conn,
+            deal_id=deal["id"],
+            registry_id=action["id"],
+            field_key="subjectRemovalDate",
+            offset_days=-2,
+            target_date="2026-06-01",
+            actor="test",
+        )
+
+    assert first["created"] is True
+    assert second["created"] is False
+    assert second["id"] == first["id"]

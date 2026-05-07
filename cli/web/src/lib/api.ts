@@ -536,6 +536,16 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  approveAdminActionRun: (runId: string, body: { approved?: boolean; runNow?: boolean } = {}) =>
+    fetchJSON<AdminActionRun>(`/api/admin/action-runs/${encodeURIComponent(runId)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  drainAdminActionRuns: (limit = 50) =>
+    fetchJSON<{ items: AdminActionRun[]; count: number }>(`/api/admin/action-runs/drain?limit=${encodeURIComponent(String(limit))}`, {
+      method: "POST",
+    }),
   getAdminDealTasks: (
     params: { status?: "open" | "done" | "all"; limit?: number; offset?: number } = {},
   ) => {
@@ -986,7 +996,11 @@ export interface AdminActionRun {
   outputPath: string | null;
   errorMessage: string | null;
   payload: Record<string, unknown> | null;
+  humanPrompt?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+  resultIdempotencyKey?: string | null;
   createdAt: string;
+  startedAt?: string | null;
   updatedAt: string;
   completedAt: string | null;
   skill?: string | null;
@@ -1039,6 +1053,8 @@ export interface DealRunResultArtifact {
 
 export interface DealRunResultRequest {
   status: string;
+  idempotency_key?: string | null;
+  idempotencyKey?: string | null;
   artifacts?: DealRunResultArtifact[];
   next_tasks?: Array<Record<string, unknown>>;
   nextTasks?: Array<Record<string, unknown>>;
