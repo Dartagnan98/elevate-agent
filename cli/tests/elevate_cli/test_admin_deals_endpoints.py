@@ -193,24 +193,24 @@ def test_move_deal_endpoint_persists_stage_and_event(client):
 
 
 def test_current_workflow_stage_complete_toggle_advances_deal(client):
-    deal = _create(title="Auto move me", current_stage=5)
+    deal = _create(title="Auto move me", current_stage=4)
 
     resp = client.post(
         f"/api/admin/deals/{deal['id']}/toggle",
-        json={"field": "workflow_stage_5_complete", "value": True},
+        json={"field": "workflow_stage_4_complete", "value": True},
     )
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["currentStage"] == 6
-    assert body["extraToggles"]["workflow_stage_5_complete"] is True
+    assert body["currentStage"] == 5
+    assert body["extraToggles"]["workflow_stage_4_complete"] is True
 
     with connect() as conn:
         events = list_deal_events(conn, deal["id"])
-    assert any(event["kind"] == "toggle_change" and event["fieldName"] == "workflow_stage_5_complete" for event in events)
+    assert any(event["kind"] == "toggle_change" and event["fieldName"] == "workflow_stage_4_complete" for event in events)
     transition = next(event for event in events if event["kind"] == "stage_transition")
-    assert transition["fromStage"] == 5
-    assert transition["toStage"] == 6
+    assert transition["fromStage"] == 4
+    assert transition["toStage"] == 5
 
 
 def test_non_current_workflow_stage_complete_does_not_jump_deal(client):
@@ -226,6 +226,51 @@ def test_non_current_workflow_stage_complete_does_not_jump_deal(client):
     with connect() as conn:
         events = list_deal_events(conn, deal["id"])
     assert not any(event["kind"] == "stage_transition" for event in events)
+
+
+def test_listing_live_stage_complete_does_not_move_without_accepted_offer(client):
+    deal = _create(title="Still active listing", current_stage=5)
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/toggle",
+        json={"field": "workflow_stage_5_complete", "value": True},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["currentStage"] == 5
+    with connect() as conn:
+        events = list_deal_events(conn, deal["id"])
+    assert not any(event["kind"] == "stage_transition" for event in events)
+
+
+def test_accepted_offer_signal_advances_live_listing(client):
+    deal = _create(title="Offer accepted", current_stage=5)
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/toggle",
+        json={"field": "workflow_accepted_offer_date", "value": "2026-05-06"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["currentStage"] == 6
+    with connect() as conn:
+        events = list_deal_events(conn, deal["id"])
+    transition = next(event for event in events if event["kind"] == "stage_transition")
+    assert transition["fromStage"] == 5
+    assert transition["toStage"] == 6
+
+
+def test_accepted_offer_detail_field_advances_live_listing(client):
+    deal = _create(title="Offer accepted detail", current_stage=5)
+
+    resp = client.post(
+        f"/api/deals/{deal['id']}/fields",
+        json={"fields": {"offerAcceptedAt": "2026-05-06"}},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["currentStage"] == 6
+    assert resp.json()["offerAcceptedAt"] == "2026-05-06"
 
 
 def test_toggle_deal_endpoint_persists_named_and_checklist_fields(client):

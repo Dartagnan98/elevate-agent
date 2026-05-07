@@ -66,6 +66,16 @@ _FIELD_API_NAMES = {
     "sale_of_buyers_property": "saleOfBuyersProperty",
 }
 _WORKFLOW_STAGE_COMPLETE_RE = re.compile(r"^workflow_stage_(\d+)_complete$")
+_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {
+    1: 2,
+    2: 3,
+    3: 4,
+    4: 5,
+    6: 7,
+    7: 8,
+    8: 9,
+}
+_WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
 
 
 def _decode_json(value: str | None) -> Any:
@@ -542,7 +552,7 @@ def set_deal_toggle(
             ),
         ),
     )
-    _maybe_advance_from_stage_complete(conn, deal_id, field=field, value=new_value, actor=actor)
+    _maybe_advance_from_workflow_signal(conn, deal_id, field=field, value=new_value, actor=actor)
     return get_deal(conn, deal_id)  # type: ignore[return-value]
 
 
@@ -566,7 +576,7 @@ def _is_completion_value(value: Any) -> bool:
     return False
 
 
-def _maybe_advance_from_stage_complete(
+def _maybe_advance_from_workflow_signal(
     conn: sqlite3.Connection,
     deal_id: str,
     *,
@@ -574,15 +584,39 @@ def _maybe_advance_from_stage_complete(
     value: Any,
     actor: str,
 ) -> dict[str, Any] | None:
+    if field in _WORKFLOW_ACCEPTED_OFFER_FIELDS and _present_signal(value):
+        return _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
     completed_stage = _workflow_stage_complete_stage(field)
-    if completed_stage is None or completed_stage >= 9 or not _is_completion_value(value):
+    if completed_stage is None or not _is_completion_value(value):
         return None
+    next_stage = _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO.get(completed_stage)
+    if next_stage is None:
+        return None
+    return _move_if_current_stage(conn, deal_id, current_stage=completed_stage, to_stage=next_stage, actor=actor)
+
+
+def _move_if_current_stage(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    current_stage: int,
+    to_stage: int,
+    actor: str,
+) -> dict[str, Any] | None:
     deal = get_deal(conn, deal_id)
     if deal is None:
         raise LookupError(f"deal {deal_id!r} not found")
-    if int(deal.get("currentStage") or 0) != completed_stage:
+    if int(deal.get("currentStage") or 0) != current_stage:
         return None
-    return move_deal_stage(conn, deal_id, to_stage=completed_stage + 1, actor=actor)
+    return move_deal_stage(conn, deal_id, to_stage=to_stage, actor=actor)
+
+
+def _present_signal(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
 
 
 def _dispatch_safely(
@@ -745,6 +779,8 @@ def set_deal_fields(
         payload={"fields": updates},
         created_at=now,
     )
+    if _present_signal(updates.get("offer_accepted_at")):
+        _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
     return get_deal(conn, deal_id)  # type: ignore[return-value]
 
 
