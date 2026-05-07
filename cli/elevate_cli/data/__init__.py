@@ -151,6 +151,15 @@ from elevate_cli.data.workflow_import import (
     import_listing_workflow_csv,
     parse_listing_workflow_csv,
 )
+from elevate_cli.data.province_guides import (
+    condition_docs_for_conditions,
+    import_exp_agent_centre,
+    list_province_checklists,
+    list_province_forms,
+    list_province_reference_pages,
+    province_coverage,
+    province_guide_summary,
+)
 
 
 __all__ = [
@@ -210,6 +219,11 @@ __all__ = [
     "update_action", "upsert_conditional_doc", "verify_action_run_token",
     # workflow bootstrap import
     "import_listing_workflow_csv", "parse_listing_workflow_csv",
+    # province guide reference store
+    "condition_docs_for_conditions", "import_exp_agent_centre",
+    "list_province_checklists", "list_province_forms",
+    "list_province_reference_pages", "province_coverage",
+    "province_guide_summary",
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
     "eligible_templates", "pick_template",

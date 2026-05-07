@@ -18,6 +18,7 @@ from elevate_cli.data import (
     create_action,
     create_deal,
     evaluate_dispatch,
+    import_exp_agent_centre,
     list_action_runs,
     list_deal_attachments,
     list_deal_events,
@@ -271,6 +272,59 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["dealFlow"]["gate"]["canAdvance"] is False
     assert body["coContacts"][0]["role"] == "lawyer"
     assert body["attachments"][0]["kind"] == "cma_report"
+
+
+def test_province_guide_import_feeds_deal_context_and_conditional_docs(client, tmp_path):
+    root = tmp_path / "exp-agent-centre"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    pages.joinpath("bc-listings-sales.md").write_text(
+        "---\nurl: https://example.test/bc-listings-sales\ntitle: BC Listings & Sales\n---\n"
+        "# BC Listings & Sales\n\n## Transactions\n- Transaction Guide\n",
+        encoding="utf-8",
+    )
+    guide = root / "transaction-guide-bc"
+    forms = guide / "forms"
+    forms.mkdir(parents=True)
+    guide.joinpath("common-forms.md").write_text(
+        "---\nurl: https://example.test/forms\ntitle: Common Forms\n---\n# Common Forms\n",
+        encoding="utf-8",
+    )
+    forms.joinpath("inventory.json").write_text(
+        '{"MLC":{"name":"Multiple Listing Contract","category":"Listing","code":"MLC","pageCount":9,"annotationCount":32}}',
+        encoding="utf-8",
+    )
+
+    with connect() as conn:
+        imported = import_exp_agent_centre(conn, root=root)
+        deal = create_deal(
+            conn,
+            title="Strata offer",
+            side="listing",
+            actor="human:test",
+            province="BC",
+            current_stage=6,
+            fields={"property_subtype": "strata"},
+        )
+
+    assert imported["pages"] == 1
+    assert imported["checklists"] == 1
+    assert imported["forms"] == 1
+    assert imported["conditionalDocs"] == 4
+
+    coverage = client.get("/api/admin/province-guides")
+    assert coverage.status_code == 200, coverage.text
+    assert coverage.json()["items"][0]["province"] == "BC"
+    assert coverage.json()["items"][0]["hasTransactionGuide"] is True
+
+    context = client.get(f"/api/deals/{deal['id']}/context")
+    assert context.status_code == 200, context.text
+    body = context.json()
+    assert body["provinceGuide"]["coverage"]["forms"] == 1
+    assert body["provinceGuide"]["forms"][0]["code"] == "MLC"
+    assert body["conditionalDocs"][0]["docCode"] == "strata_docs"
+    assert any(item["kind"] == "strata_docs" for item in body["dealFlow"]["requiredDocs"])
+    assert any(item["kind"] == "strata_docs" for item in body["dealFlow"]["gate"]["missingDocs"])
 
 
 def test_advance_endpoint_blocks_until_package_gate_is_clear(client):

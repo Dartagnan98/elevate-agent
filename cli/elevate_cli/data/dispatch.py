@@ -131,6 +131,8 @@ def _row_to_doc(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "province": row["province"],
+        "side": _row_value(row, "side"),
+        "stage": _row_value(row, "stage"),
         "fieldKey": row["field_key"],
         "fieldValue": row["field_value"],
         "docCode": row["doc_code"],
@@ -923,6 +925,8 @@ def list_conditional_docs(
     conn: sqlite3.Connection,
     *,
     province: str | None = None,
+    side: str | None = None,
+    stage: int | None = None,
     field_key: str | None = None,
     field_value: Any = None,
 ) -> list[dict[str, Any]]:
@@ -931,13 +935,19 @@ def list_conditional_docs(
     if province is not None:
         sql += " AND province = ?"
         params.append(province)
+    if side is not None:
+        sql += " AND (side IS NULL OR side = ?)"
+        params.append(side)
+    if stage is not None:
+        sql += " AND (stage IS NULL OR stage = ?)"
+        params.append(int(stage))
     if field_key is not None:
         sql += " AND field_key = ?"
         params.append(field_key)
     if field_value is not None:
         sql += " AND field_value = ?"
         params.append(str(field_value))
-    sql += " ORDER BY province, field_key, field_value"
+    sql += " ORDER BY province, side, stage, field_key, field_value"
     return [_row_to_doc(r) for r in conn.execute(sql, params).fetchall()]
 
 
@@ -950,6 +960,8 @@ def upsert_conditional_doc(
     doc_code: str,
     doc_name: str,
     notes: str | None = None,
+    side: str | None = None,
+    stage: int | None = None,
 ) -> dict[str, Any]:
     if not province or not field_key or not doc_code:
         raise ValueError("province, field_key, and doc_code are required")
@@ -964,8 +976,8 @@ def upsert_conditional_doc(
     now = now_iso()
     if existing:
         conn.execute(
-            "UPDATE conditional_docs SET doc_name=?, notes=? WHERE id=?",
-            (doc_name, notes, existing["id"]),
+            "UPDATE conditional_docs SET doc_name=?, notes=?, side=?, stage=? WHERE id=?",
+            (doc_name, notes, side, stage, existing["id"]),
         )
         row = conn.execute(
             "SELECT * FROM conditional_docs WHERE id=?", (existing["id"],)
@@ -976,10 +988,10 @@ def upsert_conditional_doc(
             """
             INSERT INTO conditional_docs(
                 id, province, field_key, field_value,
-                doc_code, doc_name, notes, created_at
-            ) VALUES (?,?,?,?,?,?,?,?)
+                doc_code, doc_name, notes, created_at, side, stage
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
-            (did, province, field_key, field_value_str, doc_code, doc_name, notes, now),
+            (did, province, field_key, field_value_str, doc_code, doc_name, notes, now, side, stage),
         )
         row = conn.execute(
             "SELECT * FROM conditional_docs WHERE id=?", (did,)

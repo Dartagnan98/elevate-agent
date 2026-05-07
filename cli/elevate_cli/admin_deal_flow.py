@@ -339,6 +339,7 @@ def resolve_admin_deal_flow(
     side: str,
     stage: int,
     conditions: Mapping[str, Any] | None = None,
+    condition_docs: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Resolve package rules for the current side/stage."""
     resolved_key = _slug(package_key) or DEFAULT_PACKAGE_KEY
@@ -348,7 +349,11 @@ def resolve_admin_deal_flow(
     last_stage = len(stages) - 1
     stage_index = min(last_stage, max(0, int(stage)))
     current = stages[stage_index]
-    additions = _condition_checklist_additions(conditions or {}, stage_index)
+    additions = _condition_checklist_additions(
+        conditions or {},
+        stage_index,
+        condition_docs=condition_docs,
+    )
     checklist = [*current["checklist"], *additions]
     return {
         "packageKey": package["packageKey"],
@@ -381,6 +386,7 @@ def resolve_deal_phase(
     attachments: list[Mapping[str, Any]] | None,
     prior_runs: list[Mapping[str, Any]] | None,
     conditions: Mapping[str, Any] | None = None,
+    condition_docs: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return resolved package rules plus gate state for the deal's phase."""
     package_key = package_key_from_deal(deal)
@@ -389,6 +395,7 @@ def resolve_deal_phase(
         side=str(deal.get("side") or "listing"),
         stage=int(deal.get("currentStage") or 0),
         conditions=conditions,
+        condition_docs=condition_docs,
     )
     done = checklist or {}
     attachment_kinds = {str(item.get("kind") or "") for item in (attachments or [])}
@@ -432,11 +439,38 @@ def resolve_deal_phase(
     return flow
 
 
-def _condition_checklist_additions(conditions: Mapping[str, Any], stage: int) -> list[dict[str, Any]]:
+def _condition_checklist_additions(
+    conditions: Mapping[str, Any],
+    stage: int,
+    *,
+    condition_docs: list[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     additions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for doc in condition_docs or []:
+        doc_stage = doc.get("stage")
+        if doc_stage is not None and int(doc_stage) != stage:
+            continue
+        doc_kind = str(doc.get("docCode") or doc.get("doc_code") or "").strip()
+        if not doc_kind or doc_kind in seen:
+            continue
+        seen.add(doc_kind)
+        label = str(doc.get("docName") or doc.get("doc_name") or doc_kind)
+        additions.append(
+            {
+                "id": f"{doc_kind}-review",
+                "label": label,
+                "required": True,
+                "docKind": doc_kind,
+                "source": "sqlite:conditional_docs",
+            }
+        )
     for key, value in conditions.items():
         normalized = f"{key}:{str(value).lower() if isinstance(value, bool) else value}"
         for item in _CONDITION_ADDITIONS.get(normalized, []):
+            if item.get("docKind") in seen:
+                continue
+            seen.add(str(item.get("docKind") or item["id"]))
             if int(item["stage"]) == stage:
                 additions.append({"id": item["id"], "label": item["label"], "required": True, "docKind": item.get("docKind")})
     return additions

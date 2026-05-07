@@ -466,6 +466,16 @@ export const api = {
 
   // Admin Hub deals
   getAdminJurisdiction: () => fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction"),
+  getAdminProvinceGuides: (province?: string) => {
+    const tail = province ? `?province=${encodeURIComponent(province)}` : "";
+    return fetchJSON<AdminProvinceGuidesResponse | AdminProvinceGuide>(`/api/admin/province-guides${tail}`);
+  },
+  importAdminProvinceGuides: (root?: string | null) =>
+    fetchJSON<AdminProvinceGuideImportResult>("/api/admin/province-guides/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(root ? { root } : {}),
+    }),
   getAdminDeals: (
     params: {
       side?: AdminDealSide;
@@ -1124,11 +1134,84 @@ export interface DealContext {
   primaryContact: AdminContact | null;
   coContacts: DealContact[];
   conditions: Record<string, AdminDealToggleValue>;
+  conditionalDocs?: ProvinceConditionalDoc[];
   checklist: Record<string, unknown>;
   attachments: DealAttachment[];
   priorRuns: AdminActionRun[];
   dealFlow?: DealFlowResolution;
+  provinceGuide?: AdminProvinceGuide;
   events: Array<Record<string, unknown>>;
+}
+
+export interface ProvinceConditionalDoc {
+  id: string;
+  province: string;
+  side?: string | null;
+  stage?: number | null;
+  fieldKey: string;
+  fieldValue: string;
+  docCode: string;
+  docName: string;
+  notes?: string | null;
+}
+
+export interface AdminProvinceGuidePage {
+  province: string;
+  slug: string;
+  pageType?: string;
+  title: string;
+  sourceUrl?: string | null;
+  sourcePath?: string | null;
+}
+
+export interface AdminProvinceGuideForm {
+  province: string;
+  code: string;
+  name: string;
+  category?: string | null;
+  pageCount?: number | null;
+  annotationCount?: number | null;
+  localImagePaths?: string[];
+}
+
+export interface AdminProvinceGuide {
+  province: string;
+  provinceLabel: string;
+  coverage: {
+    referencePages: number;
+    checklists: number;
+    forms: number;
+    pageTypes?: Record<string, number>;
+    hasTransactionGuide: boolean;
+  };
+  pages: AdminProvinceGuidePage[];
+  checklists: AdminProvinceGuidePage[];
+  forms: AdminProvinceGuideForm[];
+}
+
+export interface AdminProvinceGuideCoverage {
+  province: string;
+  provinceLabel: string;
+  referencePages: number;
+  listingsSalesPages: number;
+  checklists: number;
+  forms: number;
+  hasTransactionGuide: boolean;
+}
+
+export interface AdminProvinceGuidesResponse {
+  items: AdminProvinceGuideCoverage[];
+}
+
+export interface AdminProvinceGuideImportResult {
+  ok: boolean;
+  root: string;
+  error?: string;
+  pages: number;
+  checklists: number;
+  forms: number;
+  conditionalDocs: number;
+  provinces: string[];
 }
 
 export interface AdminJurisdiction {

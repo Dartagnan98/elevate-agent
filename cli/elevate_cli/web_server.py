@@ -3034,6 +3034,10 @@ class _AdminTaskRunBody(BaseModel):
     runNow: bool = True
 
 
+class _ProvinceGuideImportBody(BaseModel):
+    root: Optional[str] = None
+
+
 class _ActionRunApproveBody(BaseModel):
     approved: bool = True
     runNow: bool = True
@@ -3311,6 +3315,43 @@ async def post_admin_signal_graduate(signal_id: str, body: _SignalGraduateBody):
 async def get_admin_jurisdiction():
     """Return the configured admin deal-flow package. No UI switching."""
     return _admin_jurisdiction_config()
+
+
+@app.get("/api/admin/province-guides")
+async def get_admin_province_guides(province: Optional[str] = None):
+    """Return SQLite-backed province guide coverage/reference material."""
+    try:
+        from elevate_cli.data import connect, province_coverage, province_guide_summary
+
+        with connect() as conn:
+            if province and province.strip():
+                return province_guide_summary(conn, province.strip().upper())
+            return {"items": province_coverage(conn)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/province-guides failed")
+        raise HTTPException(status_code=500, detail=f"Province guides failed: {exc}")
+
+
+@app.post("/api/admin/province-guides/import")
+async def post_admin_province_guides_import(body: Optional[_ProvinceGuideImportBody] = None):
+    """Import local eXp Agent Centre scrape output into SQLite."""
+    try:
+        from elevate_cli.data import connect, import_exp_agent_centre
+
+        root = body.root.strip() if body and body.root and body.root.strip() else None
+        with connect() as conn:
+            return import_exp_agent_centre(conn, root=root)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/province-guides/import failed")
+        raise HTTPException(status_code=500, detail=f"Province guide import failed: {exc}")
 
 
 @app.get("/api/admin/deals")
