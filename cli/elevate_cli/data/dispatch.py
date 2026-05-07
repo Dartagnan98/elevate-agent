@@ -517,6 +517,94 @@ def _row_to_spawn_deal(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _non_empty_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    return {
+        str(key): item
+        for key, item in (value or {}).items()
+        if item not in (None, "", [], {})
+    }
+
+
+def _agent_run_context_for_prompt(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
+    """Build the compact SQLite context injected into Admin skill runs."""
+    try:
+        from elevate_cli.data.deals import get_deal_context
+
+        context = get_deal_context(conn, deal_id)
+        deal = context.get("deal") or {}
+        primary = context.get("primaryContact") or {}
+        flow = context.get("dealFlow") or {}
+        gate = flow.get("gate") or {}
+        province_guide = context.get("provinceGuide") or {}
+        return {
+            "source": "sqlite:deal_context",
+            "deal": {
+                "id": deal.get("id"),
+                "title": deal.get("title"),
+                "side": deal.get("side"),
+                "currentStage": deal.get("currentStage"),
+                "province": deal.get("province"),
+                "market": deal.get("market"),
+                "listingAddress": deal.get("listingAddress"),
+                "status": deal.get("status"),
+            },
+            "primaryContact": _non_empty_mapping(
+                {
+                    "id": primary.get("id"),
+                    "displayName": primary.get("displayName"),
+                    "email": primary.get("primaryEmail"),
+                    "phone": primary.get("primaryPhone"),
+                    "type": primary.get("type"),
+                    "stage": primary.get("stage"),
+                }
+            ),
+            "conditions": _non_empty_mapping(context.get("conditions") or {}),
+            "dealFlow": {
+                "packageKey": flow.get("packageKey"),
+                "stage": flow.get("stage"),
+                "stageName": flow.get("stageName"),
+                "stageSubtitle": flow.get("stageSubtitle"),
+                "checklistItems": flow.get("checklistItems") or [],
+                "requiredFields": flow.get("requiredFields") or [],
+                "requiredDocs": flow.get("requiredDocs") or [],
+                "requiredForms": flow.get("requiredForms") or [],
+                "automationTriggers": flow.get("automationTriggers") or [],
+                "gate": {
+                    "canAdvance": gate.get("canAdvance"),
+                    "missingChecklist": gate.get("missingChecklist") or [],
+                    "missingFields": gate.get("missingFields") or [],
+                    "missingDocs": gate.get("missingDocs") or [],
+                    "blockingRuns": gate.get("blockingRuns") or [],
+                },
+            },
+            "conditionalDocs": context.get("conditionalDocs") or [],
+            "provinceGuide": {
+                "province": province_guide.get("province"),
+                "provinceLabel": province_guide.get("provinceLabel"),
+                "coverage": province_guide.get("coverage") or {},
+                "forms": province_guide.get("forms") or [],
+            },
+            "agentGuideMemory": context.get("agentGuideMemory") or {},
+            "attachments": [
+                _non_empty_mapping(
+                    {
+                        "id": item.get("id"),
+                        "kind": item.get("kind"),
+                        "filePath": item.get("filePath"),
+                        "summary": item.get("summary"),
+                    }
+                )
+                for item in (context.get("attachments") or [])
+            ],
+        }
+    except Exception as exc:
+        return {
+            "source": "sqlite:deal_context",
+            "deal": {"id": deal_id},
+            "contextError": str(exc),
+        }
+
+
 def dispatch_action_run_to_cron(
     conn: sqlite3.Connection,
     run_id: str,
@@ -546,6 +634,7 @@ def dispatch_action_run_to_cron(
     payload = _decode_json(row["payload_json"]) or {}
     if not isinstance(payload, dict):
         payload = {"prior": payload}
+    agent_context = _agent_run_context_for_prompt(conn, str(row["deal_id"]))
     cron_job_id = _spawn_cron_job(
         action=_row_to_spawn_action(row),
         deal=_row_to_spawn_deal(row),
@@ -553,6 +642,7 @@ def dispatch_action_run_to_cron(
         callback_token=token,
         actor=actor,
         payload=payload,
+        agent_context=agent_context,
     )
     if cron_job_id:
         conn.execute(
@@ -873,6 +963,7 @@ def _spawn_cron_job(
     callback_token: str,
     actor: str,
     payload: Mapping[str, Any],
+    agent_context: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Hand the action off to ``cron.jobs.create_job`` and return its id.
 
@@ -898,6 +989,16 @@ def _spawn_cron_job(
         ]
         if skill_args:
             prompt_lines.append(f"Skill args: {json.dumps(skill_args, default=str)}")
+        if agent_context:
+            prompt_lines.extend(
+                [
+                    "",
+                    "Injected source-of-truth context from SQLite. Treat this as the run's working memory.",
+                    "Use agentGuideMemory for province guide/reference/checklist/form material.",
+                    "Use sourcePath values when the full local guide file is needed.",
+                    json.dumps(agent_context, indent=2, default=str),
+                ]
+            )
         prompt = "\n".join(prompt_lines)
         job = cron_jobs.create_job(
             prompt=prompt,

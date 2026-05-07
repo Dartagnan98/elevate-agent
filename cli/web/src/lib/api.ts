@@ -1146,6 +1146,7 @@ export interface DealContext {
   priorRuns: AdminActionRun[];
   dealFlow?: DealFlowResolution;
   provinceGuide?: AdminProvinceGuide;
+  agentGuideMemory?: Record<string, unknown>;
   events: Array<Record<string, unknown>>;
 }
 

@@ -350,6 +350,9 @@ def test_province_guide_import_feeds_deal_context_and_conditional_docs(client, t
     body = context.json()
     assert body["provinceGuide"]["coverage"]["forms"] == 1
     assert body["provinceGuide"]["forms"][0]["code"] == "MLC"
+    assert body["agentGuideMemory"]["coverage"]["forms"] == 1
+    assert body["agentGuideMemory"]["referencePages"][0]["title"] == "BC Listings & Sales"
+    assert "Transaction Guide" in body["agentGuideMemory"]["referencePages"][0]["excerpt"]
     assert body["conditionalDocs"][0]["docCode"] == "strata_docs"
     assert any(item["kind"] == "strata_docs" for item in body["dealFlow"]["requiredDocs"])
     assert any(item["kind"] == "strata_docs" for item in body["dealFlow"]["gate"]["missingDocs"])

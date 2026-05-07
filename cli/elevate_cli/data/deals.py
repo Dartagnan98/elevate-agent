@@ -920,7 +920,11 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
     checklist = deal.get("extraToggles") or {}
     attachments = list_deal_attachments(conn, deal_id)
     prior_runs = list_deal_action_runs(conn, deal_id)
-    from elevate_cli.data.province_guides import condition_docs_for_conditions, province_guide_summary
+    from elevate_cli.data.province_guides import (
+        condition_docs_for_conditions,
+        province_agent_memory,
+        province_guide_summary,
+    )
     condition_docs = condition_docs_for_conditions(
         conn,
         province=str(deal.get("province") or ""),
@@ -929,6 +933,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
         stage=int(deal.get("currentStage") or 0),
     )
     province_guide = province_guide_summary(conn, str(deal.get("province") or ""))
+    agent_guide_memory = province_agent_memory(conn, str(deal.get("province") or ""))
     from elevate_cli.admin_deal_flow import resolve_deal_phase
 
     deal_flow = resolve_deal_phase(
@@ -950,6 +955,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
         "priorRuns": prior_runs,
         "dealFlow": deal_flow,
         "provinceGuide": province_guide,
+        "agentGuideMemory": agent_guide_memory,
         "events": list_deal_events(conn, deal_id, limit=50),
     }
 

@@ -15,6 +15,7 @@ from elevate_cli.data import (
     connect,
     create_action,
     create_deal,
+    import_exp_agent_centre,
     list_action_runs,
     move_deal_stage,
     record_date_trigger_firing,
@@ -303,6 +304,60 @@ def test_run_result_accepts_per_run_service_token_without_session(client):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "succeeded"
+
+
+def test_dispatched_run_prompt_injects_deal_flow_and_province_memory(tmp_path):
+    root = tmp_path / "exp-agent-centre"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    pages.joinpath("bc-listings-sales.md").write_text(
+        "---\nurl: https://example.test/bc-listings-sales\ntitle: BC Listings & Sales\n---\n"
+        "# BC Listings & Sales\n\n## Transactions\n- Transaction Guide\n",
+        encoding="utf-8",
+    )
+    guide = root / "transaction-guide-bc"
+    forms = guide / "forms"
+    forms.mkdir(parents=True)
+    guide.joinpath("common-forms.md").write_text(
+        "---\nurl: https://example.test/forms\ntitle: Common Forms\n---\n# Common Forms\n",
+        encoding="utf-8",
+    )
+    forms.joinpath("inventory.json").write_text(
+        '{"MLC":{"name":"Multiple Listing Contract","category":"Listing","code":"MLC","pageCount":9,"annotationCount":32}}',
+        encoding="utf-8",
+    )
+
+    with connect() as conn:
+        import_exp_agent_centre(conn, root=root)
+        deal = create_deal(
+            conn,
+            title="Memory-backed listing",
+            side="listing",
+            actor="human:test",
+            province="BC",
+            current_stage=4,
+        )
+        create_action(
+            conn,
+            name="launch seller update",
+            trigger="stage_entry",
+            skill="seller-updates",
+            side="listing",
+            to_stage=5,
+        )
+        move_deal_stage(conn, deal["id"], to_stage=5, actor="human:test")
+        run = list_action_runs(conn, deal_id=deal["id"])[0]
+
+    from cron.jobs import load_jobs
+
+    job = next(job for job in load_jobs() if job["id"] == run["cronJobId"])
+    prompt = job["prompt"]
+    assert "Injected source-of-truth context from SQLite" in prompt
+    assert "agentGuideMemory" in prompt
+    assert "BC Listings & Sales" in prompt
+    assert "Transaction Guide" in prompt
+    assert "Multiple Listing Contract" in prompt
+    assert '"packageKey": "ca.bc"' in prompt
 
 
 def test_evaluate_skips_when_action_disabled():

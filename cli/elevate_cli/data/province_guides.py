@@ -25,6 +25,8 @@ PROVINCE_LABELS = {
     "NB": "New Brunswick",
     "NL": "Newfoundland and Labrador",
     "NS": "Nova Scotia",
+    "NT": "Northwest Territories",
+    "NU": "Nunavut",
     "ON": "Ontario",
     "PEI": "Prince Edward Island",
     "QC": "Quebec",
@@ -560,6 +562,105 @@ def list_province_forms(
         params.append(category)
     sql += " ORDER BY province, category, name, code"
     return [_row_to_form(row) for row in conn.execute(sql, params).fetchall()]
+
+
+_AGENT_PAGE_PRIORITY = {
+    "listings_sales": 0,
+    "deposit_instructions": 1,
+    "boards": 2,
+    "landing": 3,
+    "events_training": 4,
+    "other": 5,
+}
+
+
+def _compact_markdown(value: str | None, *, limit: int = 900) -> str:
+    text = str(value or "")
+    text = _GUIDE_FRONTMATTER_RE.sub("", text).strip()
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^[#>*`\-]+\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def province_agent_memory(
+    conn: sqlite3.Connection,
+    province: str,
+    *,
+    max_reference_pages: int = 8,
+    max_checklists: int = 10,
+    max_forms: int = 40,
+    excerpt_chars: int = 900,
+) -> dict[str, Any]:
+    """Return compact province guide material safe to inject into skill prompts.
+
+    The full markdown/PDF-derived corpus stays in SQLite.  This shape gives an
+    admin skill immediate working memory plus source paths for deeper local
+    reads when it needs the full guide.
+    """
+    province = (province or "").upper()
+    page_rows = list_province_reference_pages(conn, province=province)
+    checklist_rows = list_province_checklists(conn, province=province)
+    form_rows = list_province_forms(conn, province=province)
+
+    page_rows = sorted(
+        page_rows,
+        key=lambda row: (
+            _AGENT_PAGE_PRIORITY.get(str(row.get("pageType") or "other"), 99),
+            str(row.get("slug") or ""),
+        ),
+    )
+
+    return {
+        "source": "sqlite:province_guides",
+        "province": province,
+        "provinceLabel": PROVINCE_LABELS.get(province, province),
+        "coverage": {
+            "referencePages": len(page_rows),
+            "checklists": len(checklist_rows),
+            "forms": len(form_rows),
+            "hasTransactionGuide": bool(checklist_rows or form_rows),
+        },
+        "referencePages": [
+            {
+                "slug": row["slug"],
+                "pageType": row["pageType"],
+                "title": row["title"],
+                "sourcePath": row["sourcePath"],
+                "excerpt": _compact_markdown(row.get("content"), limit=excerpt_chars),
+            }
+            for row in page_rows[:max_reference_pages]
+        ],
+        "checklists": [
+            {
+                "slug": row["slug"],
+                "title": row["title"],
+                "sourcePath": row["sourcePath"],
+                "excerpt": _compact_markdown(row.get("content"), limit=excerpt_chars),
+            }
+            for row in checklist_rows[:max_checklists]
+        ],
+        "forms": [
+            {
+                "code": row["code"],
+                "name": row["name"],
+                "category": row["category"],
+                "pageCount": row["pageCount"],
+                "annotationCount": row["annotationCount"],
+                "sourcePath": row["sourcePath"],
+            }
+            for row in form_rows[:max_forms]
+        ],
+        "truncated": {
+            "referencePages": max(0, len(page_rows) - max_reference_pages),
+            "checklists": max(0, len(checklist_rows) - max_checklists),
+            "forms": max(0, len(form_rows) - max_forms),
+        },
+    }
 
 
 def condition_docs_for_conditions(

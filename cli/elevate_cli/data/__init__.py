@@ -157,6 +157,7 @@ from elevate_cli.data.province_guides import (
     list_province_checklists,
     list_province_forms,
     list_province_reference_pages,
+    province_agent_memory,
     province_coverage,
     province_guide_summary,
 )
@@ -222,7 +223,7 @@ __all__ = [
     # province guide reference store
     "condition_docs_for_conditions", "import_exp_agent_centre",
     "list_province_checklists", "list_province_forms",
-    "list_province_reference_pages", "province_coverage",
+    "list_province_reference_pages", "province_agent_memory", "province_coverage",
     "province_guide_summary",
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
