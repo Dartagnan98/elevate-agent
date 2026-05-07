@@ -536,6 +536,22 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getAdminDealTasks: (
+    params: { status?: "open" | "done" | "all"; limit?: number; offset?: number } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.status) qs.set("status", params.status);
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    if (params.offset != null) qs.set("offset", String(params.offset));
+    const tail = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<AdminDealTasksResponse>(`/api/admin/tasks${tail}`);
+  },
+  runAdminDealTask: (body: AdminDealTaskRunRequest) =>
+    fetchJSON<AdminActionRun>("/api/admin/tasks/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   getAdminContacts: (
     params: { tab?: string; type?: string; limit?: number; offset?: number } = {},
   ) => {
@@ -971,6 +987,41 @@ export interface AdminActionRun {
   completedAt: string | null;
   skill?: string | null;
   registryName?: string | null;
+}
+
+export interface AdminDealTask {
+  id: string;
+  type: "action_run" | "ai_action" | "checklist" | "field" | "document" | string;
+  source: string;
+  title: string;
+  description: string | null;
+  status: string;
+  dealId: string;
+  dealTitle: string;
+  side: AdminDealSide;
+  currentStage: number;
+  stageName: string;
+  packageKey: string;
+  skill: string | null;
+  canRunWithAi: boolean;
+  runId: string | null;
+  field: string | null;
+  kind: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface AdminDealTasksResponse {
+  items: AdminDealTask[];
+  count: number;
+}
+
+export interface AdminDealTaskRunRequest {
+  dealId: string;
+  skill: string;
+  title?: string | null;
+  sourceTaskId?: string | null;
+  runNow?: boolean;
 }
 
 export interface DealRunResultArtifact {

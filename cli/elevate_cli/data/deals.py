@@ -909,6 +909,203 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
     }
 
 
+_OPEN_TASK_RUN_STATUSES = {"queued", "running", "waiting_human", "waiting_external", "failed"}
+_DONE_TASK_RUN_STATUSES = {"succeeded", "completed", "cancelled", "skipped"}
+
+
+def _deal_task_common(
+    deal: Mapping[str, Any],
+    flow: Mapping[str, Any],
+    *,
+    task_id: str,
+    task_type: str,
+    source: str,
+    title: str,
+    status: str,
+    description: str | None = None,
+    skill: str | None = None,
+    can_run_with_ai: bool = False,
+    run_id: str | None = None,
+    field: str | None = None,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "type": task_type,
+        "source": source,
+        "title": title,
+        "description": description,
+        "status": status,
+        "dealId": deal.get("id"),
+        "dealTitle": deal.get("title"),
+        "side": deal.get("side"),
+        "currentStage": deal.get("currentStage"),
+        "stageName": flow.get("stageName"),
+        "packageKey": flow.get("packageKey"),
+        "skill": skill,
+        "canRunWithAi": bool(can_run_with_ai),
+        "runId": run_id,
+        "field": field,
+        "kind": kind,
+        "createdAt": deal.get("createdAt"),
+        "updatedAt": deal.get("updatedAt"),
+    }
+
+
+def list_deal_tasks(
+    conn: sqlite3.Connection,
+    *,
+    status: str = "open",
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Return task-board rows derived from active Admin deal phase gates.
+
+    The deal file remains the source of truth.  This function projects current
+    phase work, missing docs/fields, and AI-capable action triggers into a
+    task-list shape for the `/tasks` page.
+    """
+    if status not in {"open", "done", "all"}:
+        raise ValueError("status must be one of: open, done, all")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+
+    tasks: list[dict[str, Any]] = []
+    for deal in list_deals(conn, status="active", limit=max(200, limit + offset), offset=0):
+        context = get_deal_context(conn, str(deal["id"]))
+        flow = context.get("dealFlow") or {}
+        gate = flow.get("gate") or {}
+        active_run_skills: set[str] = set()
+
+        for run in context.get("priorRuns") or []:
+            run_status = str(run.get("status") or "queued")
+            if status == "open" and run_status in _DONE_TASK_RUN_STATUSES:
+                continue
+            if status == "done" and run_status not in _DONE_TASK_RUN_STATUSES:
+                continue
+            payload = run.get("payload") if isinstance(run.get("payload"), Mapping) else {}
+            title = (
+                run.get("registryName")
+                or payload.get("registryName")
+                or run.get("skill")
+                or "Admin action"
+            )
+            skill = run.get("skill")
+            if run_status in _OPEN_TASK_RUN_STATUSES and skill:
+                active_run_skills.add(str(skill))
+            tasks.append(
+                _deal_task_common(
+                    deal,
+                    flow,
+                    task_id=f"run:{run.get('id')}",
+                    task_type="action_run",
+                    source="admin_action_run",
+                    title=str(title),
+                    description=str(payload.get("trigger") or "Skill run") if payload else "Skill run",
+                    status=run_status,
+                    skill=str(skill) if skill else None,
+                    can_run_with_ai=bool(skill),
+                    run_id=str(run.get("id")),
+                )
+            )
+
+        if status == "done":
+            continue
+
+        for trigger in flow.get("automationTriggers") or []:
+            skill = str(trigger.get("skill") or "").strip()
+            if skill and skill in active_run_skills:
+                continue
+            trigger_id = str(trigger.get("id") or skill or trigger.get("label") or "ai-action")
+            tasks.append(
+                _deal_task_common(
+                    deal,
+                    flow,
+                    task_id=f"ai:{deal['id']}:{gate.get('stage')}:{trigger_id}",
+                    task_type="ai_action",
+                    source="phase_trigger",
+                    title=str(trigger.get("label") or "Run AI action"),
+                    description="Available from this deal phase",
+                    status="available",
+                    skill=skill or None,
+                    can_run_with_ai=True,
+                )
+            )
+
+        for item in gate.get("missingChecklist") or []:
+            item_id = str(item.get("id") or item.get("label") or "checklist")
+            tasks.append(
+                _deal_task_common(
+                    deal,
+                    flow,
+                    task_id=f"checklist:{deal['id']}:{gate.get('stage')}:{item_id}",
+                    task_type="checklist",
+                    source="phase_gate",
+                    title=str(item.get("label") or item_id),
+                    description="Required before this deal can advance",
+                    status="open",
+                )
+            )
+
+        for item in gate.get("missingFields") or []:
+            field = str(item.get("field") or "")
+            tasks.append(
+                _deal_task_common(
+                    deal,
+                    flow,
+                    task_id=f"field:{deal['id']}:{field}",
+                    task_type="field",
+                    source="phase_gate",
+                    title=f"Update {item.get('label') or field}",
+                    description="Missing source-of-truth field",
+                    status="open",
+                    field=field or None,
+                )
+            )
+
+        for item in gate.get("missingDocs") or []:
+            kind = str(item.get("kind") or "")
+            tasks.append(
+                _deal_task_common(
+                    deal,
+                    flow,
+                    task_id=f"doc:{deal['id']}:{kind}",
+                    task_type="document",
+                    source="phase_gate",
+                    title=f"Attach {item.get('label') or kind}",
+                    description="Missing source-of-truth document",
+                    status="open",
+                    kind=kind or None,
+                )
+            )
+
+    status_rank = {
+        "waiting_human": 0,
+        "failed": 1,
+        "running": 2,
+        "queued": 3,
+        "available": 4,
+        "open": 5,
+        "waiting_external": 6,
+        "succeeded": 8,
+        "completed": 8,
+        "cancelled": 9,
+        "skipped": 9,
+    }
+    tasks.sort(
+        key=lambda item: (
+            status_rank.get(str(item.get("status")), 7),
+            str(item.get("side") or ""),
+            int(item.get("currentStage") or 0),
+            str(item.get("dealTitle") or ""),
+            str(item.get("title") or ""),
+        )
+    )
+    return tasks[offset: offset + limit]
+
+
 _ARTIFACT_CHECKLIST_HINTS = {
     "cma_report": "draft-cma-followup",
     "title_search": "pull-title",

@@ -284,6 +284,39 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     assert body["dealFlow"]["stageName"] == "Listing Intake"
 
 
+def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
+    deal = _create(title="Task Deal", side="listing", current_stage=0)
+
+    resp = client.get("/api/admin/tasks")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    tasks = [item for item in body["items"] if item["dealId"] == deal["id"]]
+    assert tasks
+    assert any(item["type"] == "ai_action" and item["skill"] == "cma" for item in tasks)
+    assert any(item["type"] == "checklist" and item["status"] == "open" for item in tasks)
+    assert any(item["type"] == "document" and item["kind"] == "cma_report" for item in tasks)
+    assert {item["packageKey"] for item in tasks} == {"generic.real-estate"}
+    assert {item["stageName"] for item in tasks} == {"CMA"}
+
+    ai_task = next(item for item in tasks if item["type"] == "ai_action")
+    queued = client.post(
+        "/api/admin/tasks/run",
+        json={
+            "dealId": deal["id"],
+            "skill": ai_task["skill"],
+            "title": ai_task["title"],
+            "sourceTaskId": ai_task["id"],
+            "runNow": False,
+        },
+    )
+    assert queued.status_code == 200, queued.text
+    run = queued.json()
+    assert run["dealId"] == deal["id"]
+    assert run["status"] == "queued"
+    assert run["payload"]["trigger"] == "task_board"
+    assert run["payload"]["sourceTaskId"] == ai_task["id"]
+
+
 def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     deal = _create(title="Run result deal", current_stage=1)
     with connect() as conn:

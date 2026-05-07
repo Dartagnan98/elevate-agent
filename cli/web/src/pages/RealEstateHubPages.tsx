@@ -81,6 +81,7 @@ import type {
   AdminDeal,
   AdminDealCreateRequest,
   AdminDealSide,
+  AdminDealTask,
   DealAttachmentCreateRequest,
   DealContactCreateRequest,
   DealContext,
@@ -123,6 +124,7 @@ import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 
 type HubData = {
   cronJobs: CronJob[];
+  dealTasks: AdminDealTask[];
   error: string | null;
   loading: boolean;
   refresh: () => Promise<void>;
@@ -138,18 +140,20 @@ function useRealEstateHubData(): HubData {
   const [sourceInbox, setSourceInbox] = useState<SourceInboxResponse | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
+  const [dealTasks, setDealTasks] = useState<AdminDealTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [hubResult, statusResult, sessionsResult, cronResult, sourceInboxResult] =
+    const [hubResult, statusResult, sessionsResult, cronResult, sourceInboxResult, dealTasksResult] =
       await Promise.allSettled([
         api.getAgentHub(),
         api.getStatus(),
         api.getSessions(36),
         api.getCronJobs(),
         api.getSourceInbox(200),
+        api.getAdminDealTasks({ status: "open", limit: 200 }),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -162,6 +166,11 @@ function useRealEstateHubData(): HubData {
       setSourceInbox(sourceInboxResult.value);
     } else {
       setSourceInbox(null);
+    }
+    if (dealTasksResult.status === "fulfilled") {
+      setDealTasks(dealTasksResult.value.items);
+    } else {
+      setDealTasks([]);
     }
 
     const failed = [
@@ -191,7 +200,7 @@ function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
-  return { cronJobs, error, loading, refresh, sourceInbox, sessions, snapshot, status };
+  return { cronJobs, dealTasks, error, loading, refresh, sourceInbox, sessions, snapshot, status };
 }
 
 function useHubHeader(title: string, data: HubData) {
@@ -3654,6 +3663,102 @@ function TimedTasks({
           <div className="py-8 text-sm text-muted-foreground">
             {empty}
           </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function AdminDealTasks({
+  empty = "No transaction tasks need attention.",
+  onChanged,
+  tasks,
+  title = "Transaction tasks",
+}: {
+  empty?: string;
+  onChanged?: () => Promise<void> | void;
+  tasks: AdminDealTask[];
+  title?: string;
+}) {
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
+  const runTask = async (task: AdminDealTask) => {
+    if (!task.canRunWithAi || !task.skill || runningTaskId) return;
+    setRunningTaskId(task.id);
+    try {
+      await api.runAdminDealTask({
+        dealId: task.dealId,
+        skill: task.skill,
+        title: task.title,
+        sourceTaskId: task.id,
+        runNow: true,
+      });
+      await onChanged?.();
+    } finally {
+      setRunningTaskId(null);
+    }
+  };
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle>{title}</CardTitle>
+          <Badge variant={tasks.length ? "warning" : "outline"}>{tasks.length}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="divide-y divide-border/40">
+        {tasks.length ? (
+          tasks.slice(0, 10).map((task) => (
+            <div key={task.id} className="grid gap-2 py-3 first:pt-0 last:pb-0">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <span className="truncate text-sm font-medium text-foreground">{task.title}</span>
+                    {task.canRunWithAi && (
+                      <Badge variant="success" className="gap-1">
+                        <Bot className="h-3 w-3" />
+                        AI
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-[0.72rem] text-muted-foreground">
+                    <span>{task.dealTitle}</span>
+                    <span>{task.side}</span>
+                    <span>{task.stageName || `Stage ${task.currentStage + 1}`}</span>
+                    {task.skill && <span>{task.skill}</span>}
+                  </div>
+                </div>
+                <Badge variant={adminRunStatusVariant(task.status)}>{task.status.replace(/_/g, " ")}</Badge>
+              </div>
+              {task.description && (
+                <div className="text-[0.76rem] leading-5 text-muted-foreground">{task.description}</div>
+              )}
+              <div className="flex flex-wrap justify-end gap-2">
+                {task.canRunWithAi && task.skill && task.status === "available" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={runningTaskId !== null}
+                    onClick={() => void runTask(task)}
+                  >
+                    {runningTaskId === task.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" />
+                    )}
+                    Run AI
+                  </Button>
+                )}
+                <Link
+                  to="/admin"
+                  className="inline-flex h-9 items-center rounded-md px-2 font-mono-ui text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-primary hover:text-primary/80"
+                >
+                  Open deal
+                </Link>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="py-8 text-sm text-muted-foreground">{empty}</div>
         )}
       </CardContent>
     </Card>
@@ -10419,6 +10524,7 @@ export function RealEstateTasksPage() {
   const activeSessions = data.sessions.filter((session) => session.is_active);
   const enabledJobs = data.cronJobs.filter((job) => job.enabled);
   const erroredJobs = data.cronJobs.filter((job) => job.last_error);
+  const aiDealTasks = data.dealTasks.filter((task) => task.canRunWithAi);
 
   return (
     <HubShell
@@ -10431,17 +10537,26 @@ export function RealEstateTasksPage() {
       <WorkflowStrip
         items={[
           { icon: Activity, label: "Active sessions", value: activeSessions.length },
+          { icon: CheckSquare, label: "Deal tasks", value: data.dealTasks.length },
+          { icon: Bot, label: "AI-ready", value: aiDealTasks.length },
           { icon: CalendarClock, label: "Enabled tasks", value: enabledJobs.length },
-          { icon: Clock, label: "Paused tasks", value: data.cronJobs.filter((job) => !job.enabled).length },
           { icon: FileCheck2, label: "Task errors", value: erroredJobs.length },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <TimedTasks jobs={data.cronJobs} empty="No timed tasks have been created yet." title="All timed tasks" />
+        <AdminDealTasks tasks={data.dealTasks} onChanged={data.refresh} />
         <RecentSessions
           title="Active sessions"
           sessions={activeSessions}
           empty="No sessions are active right now."
+        />
+      </div>
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <TimedTasks jobs={data.cronJobs} empty="No timed tasks have been created yet." title="All timed tasks" />
+        <RecentSessions
+          title="Recent sessions"
+          sessions={data.sessions.filter((session) => !session.is_active).slice(0, 6)}
+          empty="No recent sessions."
         />
       </div>
     </HubShell>

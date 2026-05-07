@@ -121,6 +121,7 @@ from elevate_cli.data.deals import (
     list_deal_attachments,
     list_deal_contacts,
     list_deal_events,
+    list_deal_tasks,
     list_deals,
     move_deal_stage,
     record_run_result,
@@ -189,7 +190,7 @@ __all__ = [
     "add_deal_attachment", "add_deal_contact", "create_deal",
     "get_deal", "get_deal_context", "list_deal_action_runs",
     "list_deal_attachments", "list_deal_contacts", "list_deal_events",
-    "list_deals", "move_deal_stage", "record_run_result",
+    "list_deal_tasks", "list_deals", "move_deal_stage", "record_run_result",
     "set_deal_dates", "set_deal_fields", "set_deal_money",
     "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)

@@ -2995,6 +2995,14 @@ class _DealAdvanceBody(BaseModel):
     force: bool = False
 
 
+class _AdminTaskRunBody(BaseModel):
+    dealId: str
+    skill: str
+    title: Optional[str] = None
+    sourceTaskId: Optional[str] = None
+    runNow: bool = True
+
+
 class _AdminActionCreateBody(BaseModel):
     name: str
     trigger: str
@@ -3714,7 +3722,6 @@ async def get_admin_action_runs(
                 deal_id=deal_id or None,
                 registry_id=registry_id or None,
                 status=status or None,
-                province=province or None,
                 limit=limit,
                 offset=offset,
             )
@@ -3726,6 +3733,68 @@ async def get_admin_action_runs(
     except Exception as exc:
         _log.exception("GET /api/admin/action-runs failed")
         raise HTTPException(status_code=500, detail=f"Admin runs failed: {exc}")
+
+
+@app.get("/api/admin/tasks")
+async def get_admin_tasks(
+    status: Optional[str] = "open",
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Project active deal phase gates and AI actions into the task board."""
+    try:
+        from elevate_cli.data import connect, list_deal_tasks
+
+        with connect() as conn:
+            rows = list_deal_tasks(
+                conn,
+                status=status or "open",
+                limit=limit,
+                offset=offset,
+            )
+            return {"items": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/tasks failed")
+        raise HTTPException(status_code=500, detail=f"Admin tasks failed: {exc}")
+
+
+@app.post("/api/admin/tasks/run")
+async def post_admin_task_run(body: _AdminTaskRunBody):
+    """Queue an AI-capable task from the task board against its deal file."""
+    if not body.dealId or not body.dealId.strip():
+        raise HTTPException(status_code=400, detail="dealId is required")
+    if not body.skill or not body.skill.strip():
+        raise HTTPException(status_code=400, detail="skill is required")
+    try:
+        from elevate_cli.data import connect, queue_action_run
+
+        with connect() as conn:
+            return queue_action_run(
+                conn,
+                deal_id=body.dealId,
+                skill=body.skill,
+                name=body.title or f"Task board: {body.skill}",
+                payload={
+                    "trigger": "task_board",
+                    "sourceTaskId": body.sourceTaskId,
+                    "taskTitle": body.title,
+                },
+                create_cron_job=body.runNow,
+                actor=_WEB_ACTOR,
+            )
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/tasks/run failed")
+        raise HTTPException(status_code=500, detail=f"Run admin task failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
