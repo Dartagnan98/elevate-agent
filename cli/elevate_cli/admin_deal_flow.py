@@ -8,6 +8,7 @@ the dashboard and skills can consume.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Mapping
 
@@ -31,6 +32,20 @@ CANADIAN_PROVINCE_LABELS = {
     "yt": "Yukon",
     "yk": "Yukon",
 }
+
+
+_WORKFLOW_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _workflow_key(label: str) -> str:
+    text = label.strip().lower().replace("✓", "")
+    text = text.replace("%", " pct ")
+    text = _WORKFLOW_NON_ALNUM_RE.sub("_", text).strip("_")
+    return f"workflow_{text or 'field'}"
+
+
+def _wf(label: str, source_label: str | None = None) -> tuple[str, str]:
+    return (_workflow_key(source_label or label), label)
 
 
 def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: list[tuple[str, str]] | None = None, docs: list[tuple[str, str]] | None = None, forms: list[tuple[str, str]] | None = None, triggers: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
@@ -58,113 +73,176 @@ _BC: dict[str, Any] = {
     "listing": {
         "stages": [
             _stage(
-                "CMA",
-                "Pricing call",
+                "CMA / Prospect",
+                "Appointment + valuation",
                 [
                     ("draft-cma-followup", "Draft CMA follow-up message"),
                     ("pricing-recap", "Send pricing recap to seller"),
                     ("missing-info-list", "Identify info needed before listing paperwork"),
                 ],
+                fields=[
+                    _wf("Client 1 name", "Client 1 Name"),
+                    _wf("Client 1 email", "Client 1 Email"),
+                    _wf("Lead source", "Lead Source"),
+                    _wf("CMA date requested", "CMA Date Requested"),
+                ],
                 docs=[("cma_report", "CMA report")],
                 triggers=[("cma-complete", "Run CMA skill", "cma")],
             ),
             _stage(
-                "Listing Intake",
-                "Names + dates",
+                "Listing Initiated",
+                "Price + go-live setup",
                 [
-                    ("intake-legal-names", "Collect legal names + address"),
-                    ("intake-price-commission", "Confirm listing price + commission + dates"),
-                    ("intake-included-excluded", "Document included/excluded items + possession"),
+                    _wf("Stage 1 complete", "Stage 1 Complete ✓"),
                 ],
                 fields=[
-                    ("listingAddress", "Listing address"),
+                    ("listingAddress", "Property address"),
                     ("signingAuthority", "Signing authority"),
                     ("listPrice", "List price"),
+                    ("commissionPct", "Commission rate"),
+                    ("listingDate", "Planned go-live date"),
+                    ("listingType", "Listing type"),
                 ],
             ),
             _stage(
-                "Paperwork",
-                "Title + forms",
+                "Documents Signed",
+                "MLC + brokerage file",
                 [
-                    ("pull-title", "Pull title"),
-                    ("organize-photos", "Organize photos / floorplan / video schedule"),
+                    _wf("Title ordered", "Title Ordered?"),
+                    _wf("Sign ordered", "Sign Ordered?"),
+                    _wf("Stage 2 complete", "Stage 2 Complete ✓"),
                 ],
-                docs=[("title_search", "Title search")],
+                fields=[
+                    _wf("Documents sent date", "Documents Sent Date"),
+                    _wf("Documents signed date", "Documents Signed Date"),
+                    _wf("SkySlope transaction URL", "SkySlope Transaction URL"),
+                ],
+                docs=[("title_search", "Title search"), ("signed_envelope", "Signed listing envelope")],
+                forms=[("MLC", "Multiple Listing Contract"), ("FINTRAC", "FINTRAC identity form"), ("PDS", "Property Disclosure Statement")],
+                triggers=[("mlc-prepare", "Prepare MLC package", "mlc"), ("digisign-sync", "Sync signing status", "digisign")],
             ),
             _stage(
-                "Pre-Launch",
-                "Forms + signing",
+                "Photos Ready",
+                "Photo capture + review",
                 [
-                    ("fill-listing-forms", "Fill listing agreement + required forms"),
-                    ("digisign-send", "Send signing envelope"),
-                    ("track-signatures", "Confirm all signatures received"),
+                    _wf("Photos in Drive", "Photos in Drive?"),
+                    _wf("Jeff photo review", "Jeff Photo Review ✓"),
+                    _wf("Stage 3 complete", "Stage 3 Complete ✓"),
                 ],
-                docs=[("listing_agreement_pdf", "Listing agreement PDF"), ("signed_envelope", "Signed listing envelope")],
-                forms=[("LISTING_AGREEMENT", "Listing agreement"), ("FINTRAC", "FINTRAC identity form")],
-                triggers=[("listing-paperwork", "Run listing paperwork workflow", "listing-paperwork"), ("digisign-sync", "Sync signing status", "digisign")],
+                fields=[
+                    _wf("Photo shoot date", "Photo Shoot Date"),
+                    _wf("AI: Garage / Carport"),
+                    _wf("AI: Suite Detected"),
+                    _wf("AI: AC / Heat Pump"),
+                    _wf("AI: Appliances Listed"),
+                    _wf("AI: Flooring Types"),
+                ],
+                docs=[("listing_photos", "Listing photos")],
             ),
             _stage(
-                "Marketing",
-                "MLS + socials",
+                "MLS Entry",
+                "Listing build + launch prep",
                 [
-                    ("mls-remarks", "Draft MLS remarks + public description"),
-                    ("feature-sheet", "Feature sheet copy"),
-                    ("social-posts", "Social posts queued"),
-                    ("email-blast", "Email blast sent"),
+                    _wf("eValue BC age verified", "eValue BC Age Verified"),
+                    _wf("Listing description approved", "Listing Description Approved"),
+                    _wf("Feature sheet uploaded", "Feature Sheet Uploaded"),
+                    _wf("AI-edited photos labelled", "AI-Edited Photos Labelled"),
+                    _wf("Stage 4 complete", "Stage 4 Complete ✓"),
                 ],
-                fields=[("mlsNumber", "MLS number")],
-                triggers=[("seller-update", "Generate seller launch update", "seller-updates")],
+                fields=[
+                    _wf("MLS input started date", "MLS Input Started Date"),
+                    _wf("Realtor tour scheduled", "Realtor Tour Scheduled"),
+                ],
+                docs=[("feature_sheet", "Feature sheet")],
+                triggers=[("property-context", "Research prior listing context", "property-lookup"), ("listing-copy", "Prepare listing copy and assets", "marketing")],
             ),
             _stage(
-                "Showings",
-                "Updates + OH",
+                "Listing Live / Marketing",
+                "MLS live + seller updates",
                 [
-                    ("open-house", "Open house scheduled"),
-                    ("showing-digest", "Weekly showing + market digest sent"),
+                    _wf("Just listed blast sent", "Just Listed Blast Sent"),
+                    _wf("Social posts published", "Social Posts Published"),
+                    _wf("Flodesk mailout sent", "Flodesk Mailout Sent"),
+                    _wf("Lofty text blast sent", "Lofty Text Blast Sent"),
+                    _wf("Stage 5 complete", "Stage 5 Complete ✓"),
                 ],
-                triggers=[("showing-digest", "Attach showing digest", "showing-digest")],
+                fields=[
+                    ("mlsNumber", "MLS number"),
+                    ("listingPublishedAt", "Live date"),
+                    _wf("Order sign up date", "Order Sign Up Date"),
+                    _wf("Coming soon posts date", "Coming Soon Posts Date"),
+                ],
+                triggers=[("marketing-live", "Run listing-live marketing", "marketing"), ("seller-showing-update", "Generate ShowingTime seller update", "seller-updates")],
             ),
             _stage(
-                "Offer",
-                "Summary + terms",
+                "Accepted Offer",
+                "Contract review + dates",
                 [
-                    ("offer-summary", "Offer summary prepared"),
-                    ("subject-deadline", "Subject removal deadline tracked"),
-                    ("inspection-timing", "Inspection scheduled"),
+                    _wf("Within-24hrs contract reviewed", "Within-24hrs Contract Reviewed ✓"),
+                    _wf("Accepted-offer checklist email sent", "Email Buyer: Accepted Offer Checklist Sent"),
+                    _wf("FINTRAC drivers/occupation/employer captured", "FINTRAC Drivers/Occupation/Employer Captured ✓"),
+                    _wf("Calendar dates added", "Calendar Dates Added ✓"),
+                    _wf("Moving checklist sent", "Moving Checklist Sent"),
+                    _wf("Stage 6 complete", "Stage 6 Complete ✓"),
                 ],
-                fields=[("offerDate", "Offer date"), ("subjectRemovalDate", "Subject removal date")],
+                fields=[
+                    ("offerDate", "Offer received date"),
+                    ("offerAcceptedAt", "Accepted offer date"),
+                    _wf("Title charges ordered date", "Title Charges Ordered Date"),
+                    ("depositInTrustAt", "Deposit ROF received date"),
+                    ("completionDate", "Completion date"),
+                ],
                 docs=[("offer_pdf", "Offer PDF")],
+                triggers=[("gmail-offer-docs", "Route accepted-offer PDFs", "gmail-doc-router")],
             ),
             _stage(
-                "Subjects",
-                "Deposit + lawyer",
+                "Subject Removal",
+                "Subjects + lawyer package",
                 [
-                    ("deposit-confirmed", "Deposit landed in trust"),
-                    ("lawyer-engaged", "Lawyer / conveyancer engaged"),
-                    ("completion-locked", "Completion + possession dates locked"),
+                    _wf("Subject removal form sent", "Subject Removal Form Sent"),
+                    _wf("Title charges verified", "Title Charges Verified"),
+                    _wf("BIR + PDS received", "BIR + PDS Received"),
+                    _wf("Lawyer info requested", "Lawyer Info Requested"),
+                    _wf("Stage 7 complete", "Stage 7 Complete ✓"),
                 ],
-                fields=[("depositDueDate", "Deposit due date"), ("completionDate", "Completion date"), ("possessionDate", "Possession date")],
-                docs=[("deposit_receipt", "Deposit receipt")],
+                fields=[
+                    ("subjectRemovalDate", "Subject removal date"),
+                    _wf("Order sold rider date", "Order Sold Rider Date"),
+                ],
+                docs=[("subject_removal_form", "Subject removal form"), ("deposit_receipt", "Deposit receipt")],
+                triggers=[("subject-removal-docs", "Sync subject-removal signing", "digisign"), ("subject-doc-router", "Route subject-removal PDFs", "gmail-doc-router")],
             ),
             _stage(
                 "Closing",
-                "Keys + possession",
+                "Conveyance + possession",
                 [
-                    ("completion-checklist", "Completion checklist complete"),
-                    ("key-handoff", "Key handoff coordinated"),
+                    _wf("Conveyancer package sent", "Conveyancer Package Sent"),
+                    _wf("Down payment to trust", "Down Payment to Trust"),
+                    _wf("Mortgage instructions received", "Mortgage Instructions Received"),
+                    _wf("Insurance binder confirmed", "Insurance Binder Confirmed"),
+                    _wf("Client signed at lawyer", "Client Signed @ Lawyer"),
+                    _wf("Funds released", "Funds Released"),
+                    _wf("Stage 8 complete", "Stage 8 Complete ✓"),
+                ],
+                fields=[
+                    ("possessionDate", "Possession date"),
+                    _wf("Sign down scheduled date", "Sign Down Scheduled Date"),
                 ],
                 triggers=[("gmail-doc-router", "Route inbound closing PDFs", "gmail-doc-router")],
             ),
             _stage(
-                "Gift + Nurture",
-                "Review + referral",
+                "Closed",
+                "Archive + nurture",
                 [
-                    ("closing-gift", "Closing gift ordered + sent"),
-                    ("thank-you", "Thank-you / review / referral drafts queued"),
-                    ("anniversary", "Anniversary reminder added"),
-                    ("past-client-nurture", "Moved into past-client nurture"),
+                    _wf("Commission submitted", "Commission Submitted"),
+                    _wf("SkySlope deal closed", "SkySlope Deal Closed"),
+                    _wf("Sold update sent", "Sold Update Sent"),
+                    _wf("Closing gift sent", "Closing Gift Sent"),
+                    _wf("Review requested", "Review Requested"),
+                    _wf("Stage 9 complete", "Stage 9 Complete ✓"),
                 ],
                 fields=[("anniversaryDate", "Anniversary date")],
+                triggers=[("sold-marketing", "Create sold update and nurture handoff", "marketing")],
             ),
         ],
     },
@@ -200,34 +278,6 @@ def _generic_package() -> dict[str, Any]:
             },
         }
     )
-    pre_launch = package["listing"]["stages"][3]
-    pre_launch["subtitle"] = "Forms + signing"
-    pre_launch["checklist"] = [
-        {"id": "fill-listing-forms", "label": "Fill listing agreement + required forms", "required": True},
-        {"id": "digisign-send", "label": "Send signing envelope", "required": True},
-        {"id": "track-signatures", "label": "Confirm all signatures received", "required": True},
-    ]
-    pre_launch["requiredDocs"] = [
-        {"kind": "listing_agreement_pdf", "label": "Listing agreement PDF"},
-        {"kind": "signed_envelope", "label": "Signed listing envelope"},
-    ]
-    pre_launch["forms"] = [
-        {"code": "LISTING_AGREEMENT", "name": "Listing agreement"},
-        {"code": "ID_VERIFICATION", "name": "Identity verification form"},
-    ]
-    pre_launch["automationTriggers"] = [
-        {"id": "listing-paperwork", "label": "Run listing paperwork workflow", "skill": "listing-paperwork"},
-        {"id": "digisign-sync", "label": "Sync signing status", "skill": "digisign"},
-    ]
-
-    showings = package["listing"]["stages"][5]
-    showings["checklist"] = [
-        {"id": "open-house", "label": "Open house scheduled", "required": True},
-        {"id": "showing-digest", "label": "Weekly showing + market digest sent", "required": True},
-    ]
-    showings["automationTriggers"] = [
-        {"id": "showing-digest", "label": "Attach showing digest", "skill": "showing-digest"}
-    ]
     return package
 
 
@@ -283,10 +333,10 @@ _CONDITION_ADDITIONS: dict[str, list[dict[str, Any]]] = {
         {"stage": 6, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
     ],
     "poaSigning:true": [
-        {"stage": 3, "id": "poa-review", "label": "POA authority reviewed", "docKind": "poa_authority"}
+        {"stage": 2, "id": "poa-review", "label": "POA authority reviewed", "docKind": "poa_authority"}
     ],
     "poa_signing:true": [
-        {"stage": 3, "id": "poa-review", "label": "POA authority reviewed", "docKind": "poa_authority"}
+        {"stage": 2, "id": "poa-review", "label": "POA authority reviewed", "docKind": "poa_authority"}
     ],
 }
 
@@ -407,7 +457,7 @@ def resolve_deal_phase(
     ]
     missing_fields = [
         item for item in flow["requiredFields"]
-        if not _present(deal.get(item["field"]))
+        if not _present(_deal_field_value(deal, done, str(item["field"])))
     ]
     missing_docs = [
         item for item in flow["requiredDocs"]
@@ -481,9 +531,22 @@ def _condition_checklist_additions(
 def _present(value: Any) -> bool:
     if value is None:
         return False
+    if value is False:
+        return False
     if isinstance(value, str):
         return bool(value.strip())
     return True
+
+
+def _deal_field_value(deal: Mapping[str, Any], checklist: Mapping[str, Any], field: str) -> Any:
+    if field in deal:
+        return deal.get(field)
+    if field in checklist:
+        return checklist.get(field)
+    extra = deal.get("extraToggles") if isinstance(deal.get("extraToggles"), Mapping) else {}
+    if field in extra:
+        return extra.get(field)
+    return None
 
 
 def _run_stage(run: Mapping[str, Any]) -> int | None:

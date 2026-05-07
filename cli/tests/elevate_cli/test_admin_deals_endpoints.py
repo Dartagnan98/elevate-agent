@@ -10,6 +10,9 @@ Covers the first deal endpoints:
 
 from __future__ import annotations
 
+import csv
+import io
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,6 +21,7 @@ from elevate_cli.data import (
     create_action,
     create_deal,
     evaluate_dispatch,
+    import_listing_workflow_csv,
     import_exp_agent_centre,
     list_action_runs,
     list_deal_attachments,
@@ -296,7 +300,7 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["conditions"]["property_subtype"] == "strata"
     assert body["checklist"]["draft-cma-followup"] is True
     assert body["dealFlow"]["packageKey"] == "ca.bc"
-    assert body["dealFlow"]["gate"]["stageName"] == "CMA"
+    assert body["dealFlow"]["gate"]["stageName"] == "CMA / Prospect"
     assert body["dealFlow"]["gate"]["canAdvance"] is False
     assert body["coContacts"][0]["role"] == "lawyer"
     assert body["attachments"][0]["kind"] == "cma_report"
@@ -370,6 +374,14 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     for item_id in ("draft-cma-followup", "pricing-recap", "missing-info-list"):
         ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": item_id, "value": True})
         assert ok.status_code == 200, ok.text
+    for field, value in {
+        "workflow_client_1_name": "Seller One",
+        "workflow_client_1_email": "seller@example.com",
+        "workflow_lead_source": "Referral",
+        "workflow_cma_date_requested": "2026-05-01",
+    }.items():
+        ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": field, "value": value})
+        assert ok.status_code == 200, ok.text
     attached = client.post(
         f"/api/deals/{deal['id']}/attachments",
         json={"kind": "cma_report", "filePath": "/tmp/gate-cma.pdf"},
@@ -380,7 +392,7 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     assert advanced.status_code == 200, advanced.text
     body = advanced.json()
     assert body["deal"]["currentStage"] == 1
-    assert body["dealFlow"]["stageName"] == "Listing Intake"
+    assert body["dealFlow"]["stageName"] == "Listing Initiated"
 
 
 def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
@@ -395,7 +407,7 @@ def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
     assert any(item["type"] == "checklist" and item["status"] == "open" for item in tasks)
     assert any(item["type"] == "document" and item["kind"] == "cma_report" for item in tasks)
     assert {item["packageKey"] for item in tasks} == {"generic.real-estate"}
-    assert {item["stageName"] for item in tasks} == {"CMA"}
+    assert {item["stageName"] for item in tasks} == {"CMA / Prospect"}
 
     ai_task = next(item for item in tasks if item["type"] == "ai_action")
     queued = client.post(
@@ -414,6 +426,108 @@ def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
     assert run["status"] == "queued"
     assert run["payload"]["trigger"] == "task_board"
     assert run["payload"]["sourceTaskId"] == ai_task["id"]
+
+
+def test_workflow_import_cells_drive_listing_phase_gate(client):
+    headers = [
+        "Row ID", "Property Address", "Date Created", "Current Stage",
+        "Google Drive Folder URL", "Signing Authority", "FINTRAC Form Type",
+        "Politically Exposed Person?", "Listing Track", "Property Sub-Type",
+        "Tenanted Property?", "Estate / Probate Status", "POA Signing?",
+        "Corporate Seller?", "Client 1 Name", "Client 1 Email", "Client 1 Phone",
+        "Client 2 Name", "Client 2 Email", "Client 2 Phone", "Lead Source",
+        "CMA Date Requested", "Lofty Contact URL", "Listing Price",
+        "Commission Rate (%)", "Planned Go-Live Date", "Open House Date",
+        "Listing Type", "Has Suite?", "Stage 1 Complete ✓", "Documents Sent Date",
+        "Documents Signed Date", "Title Ordered?", "Sign Ordered?",
+        "SkySlope Transaction URL", "Stage 2 Complete ✓", "Photo Shoot Date",
+        "Photos in Drive?", "AI: Garage / Carport", "AI: Suite Detected",
+        "AI: AC / Heat Pump", "AI: Appliances Listed", "AI: Flooring Types",
+        "Jeff Photo Review ✓", "Stage 3 Complete ✓", "eValue BC Age Verified",
+        "MLS Input Started Date", "Listing Description Approved",
+        "Feature Sheet Uploaded", "AI-Edited Photos Labelled",
+        "Realtor Tour Scheduled", "Stage 4 Complete ✓", "MLS Listing URL",
+        "Live Date (Actual)", "Order Sign Up Date", "Coming Soon Posts Date",
+        "Just Listed Blast Sent", "Social Posts Published", "Kijiji Posted",
+        "Kamloops Classifieds Posted", "Flodesk Mailout Sent",
+        "Lofty Text Blast Sent", "Stage 5 Complete ✓",
+    ]
+    row = {
+        "Row ID": "1",
+        "Property Address": "17-750 Cedar Drive, Vancouver, BC",
+        "Date Created": "2026-04-28",
+        "Current Stage": "Stage 5 — Listing Live",
+        "Google Drive Folder URL": "https://drive.example/folder",
+        "Signing Authority": "Individual",
+        "FINTRAC Form Type": "Standard",
+        "Politically Exposed Person?": "No",
+        "Listing Track": "MLS",
+        "Property Sub-Type": "Mobile",
+        "Tenanted Property?": "No",
+        "Estate / Probate Status": "None",
+        "POA Signing?": "No",
+        "Corporate Seller?": "No",
+        "Client 1 Name": "Jenna Hutchinson",
+        "Client 1 Email": "jenna@example.com",
+        "Lead Source": "Referral",
+        "CMA Date Requested": "2026-03-01",
+        "Lofty Contact URL": "https://app.lofty.com/contact/1145885890673237",
+        "Listing Price": "$179,900",
+        "Commission Rate (%)": "3.50%",
+        "Planned Go-Live Date": "2026-03-07",
+        "Listing Type": "Mobile",
+        "Has Suite?": "No",
+        "Stage 1 Complete ✓": "TRUE",
+        "Documents Sent Date": "2026-03-07",
+        "Documents Signed Date": "2026-03-07",
+        "Title Ordered?": "TRUE",
+        "Sign Ordered?": "TRUE",
+        "SkySlope Transaction URL": "https://skyslope.example/tx",
+        "Stage 2 Complete ✓": "TRUE",
+        "Photo Shoot Date": "2026-03-05",
+        "Photos in Drive?": "TRUE",
+        "Jeff Photo Review ✓": "TRUE",
+        "Stage 3 Complete ✓": "TRUE",
+        "eValue BC Age Verified": "TRUE",
+        "MLS Input Started Date": "2026-03-07",
+        "Listing Description Approved": "TRUE",
+        "Feature Sheet Uploaded": "TRUE",
+        "AI-Edited Photos Labelled": "TRUE",
+        "Stage 4 Complete ✓": "TRUE",
+        "MLS Listing URL": "https://interiorrealtors.xposureapp.com/portal/listings/10378203",
+        "Live Date (Actual)": "2026-03-07",
+        "Order Sign Up Date": "2026-03-07",
+        "Coming Soon Posts Date": "2026-03-05",
+        "Just Listed Blast Sent": "TRUE",
+        "Social Posts Published": "TRUE",
+        "Flodesk Mailout Sent": "TRUE",
+        "Lofty Text Blast Sent": "FALSE",
+        "Stage 5 Complete ✓": "TRUE",
+    }
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["IDENTIFIERS"] + [""] * (len(headers) - 1))
+    writer.writerow(headers)
+    writer.writerow(["instructions"] * len(headers))
+    writer.writerow([row.get(header, "") for header in headers])
+    csv_text = buf.getvalue()
+    with connect() as conn:
+        imported = import_listing_workflow_csv(conn, csv_text, province="BC")
+        context = conn.execute("SELECT id FROM deals").fetchone()
+        assert context is not None
+        deal_id = context["id"]
+
+    assert imported["created"] == 1
+    resp = client.get(f"/api/deals/{deal_id}/context")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    flow = body["dealFlow"]
+    assert flow["stageName"] == "Listing Live / Marketing"
+    checklist_ids = {item["id"] for item in flow["checklistItems"]}
+    assert "workflow_stage_5_complete" in checklist_ids
+    assert "workflow_just_listed_blast_sent" in checklist_ids
+    assert flow["gate"]["completedChecklist"] == 4
+    assert any(item["id"] == "workflow_lofty_text_blast_sent" for item in flow["gate"]["missingChecklist"])
 
 
 def test_run_result_callback_updates_run_and_attaches_artifacts(client):

@@ -1147,7 +1147,7 @@ Workflow rules:
 3. If the property address or appointment context is missing, draft or queue the next same-channel follow-up needed to get it. Do not fabricate missing details and do not create an Admin record yet.
 4. Once the appointment/property context is present, run the installed CMA skill workflow. Preserve CMA handoffs and generated artifacts.
 5. Only after the CMA outputs are complete, create or update the Elevate Sellers Admin/CMA record with sourceProfileId=${profile.id}, sourceAdminSide=listing, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
-6. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the listing card at Admin stage 0 (CMA) unless the CMA outcome clearly belongs in a later listing stage. This stage event is what lets the Admin action registry run next.
+6. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the listing card at Admin stage 0 (CMA / Prospect) unless the CMA outcome clearly belongs in a later listing stage. This stage event is what lets the Admin action registry run next.
 7. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into CMA/Admin.`;
   }
 
@@ -5697,7 +5697,7 @@ type AdminCard = {
 const ADMIN_SIDE_LABELS: Record<AdminSide, { title: string; description: string }> = {
   listing: {
     title: "Listing Admin",
-    description: "CMA through closing gift",
+    description: "CMA through closed file",
   },
   buyer: {
     title: "Buyer Admin",
@@ -5711,52 +5711,52 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S0",
     stageLabel: "Commitment",
     labels: {
-      listing: { title: "CMA", subtitle: "Pricing call" },
+      listing: { title: "CMA / Prospect", subtitle: "Appointment + valuation" },
       buyer: { title: "Intake", subtitle: "Profile + budget" },
     },
   },
   {
     stage: 1,
     stageNumber: "S1",
-    stageLabel: "Intake",
+    stageLabel: "Initiated",
     labels: {
-      listing: { title: "Listing Intake", subtitle: "Names + dates" },
+      listing: { title: "Listing Initiated", subtitle: "Price + go-live setup" },
       buyer: { title: "Search Setup", subtitle: "Criteria + MLS" },
     },
   },
   {
     stage: 2,
     stageNumber: "S2",
-    stageLabel: "Package",
+    stageLabel: "Docs",
     labels: {
-      listing: { title: "Paperwork", subtitle: "Title + forms" },
+      listing: { title: "Documents Signed", subtitle: "MLC + brokerage file" },
       buyer: { title: "Tours", subtitle: "Route + notes" },
     },
   },
   {
     stage: 3,
     stageNumber: "S3",
-    stageLabel: "Prep",
+    stageLabel: "Photos",
     labels: {
-      listing: { title: "Pre-Launch", subtitle: "MLC + signing" },
+      listing: { title: "Photos Ready", subtitle: "Photo capture + review" },
       buyer: { title: "Follow-Up", subtitle: "Feedback + fit" },
     },
   },
   {
     stage: 4,
     stageNumber: "S4",
-    stageLabel: "Live",
+    stageLabel: "MLS",
     labels: {
-      listing: { title: "Marketing", subtitle: "MLS + socials" },
+      listing: { title: "MLS Entry", subtitle: "Listing build + launch prep" },
       buyer: { title: "Offer Prep", subtitle: "Comps + CPS" },
     },
   },
   {
     stage: 5,
     stageNumber: "S5",
-    stageLabel: "Active",
+    stageLabel: "Live",
     labels: {
-      listing: { title: "Showings", subtitle: "Updates + OH" },
+      listing: { title: "Listing Live / Marketing", subtitle: "MLS live + seller updates" },
       buyer: { title: "Accepted", subtitle: "Lender + docs" },
     },
   },
@@ -5765,7 +5765,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S6",
     stageLabel: "Contract",
     labels: {
-      listing: { title: "Offer", subtitle: "Summary + terms" },
+      listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
       buyer: { title: "Conditions", subtitle: "Inspection + strata" },
     },
   },
@@ -5774,7 +5774,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S7",
     stageLabel: "Subjects",
     labels: {
-      listing: { title: "Subjects", subtitle: "Deposit + lawyer" },
+      listing: { title: "Subject Removal", subtitle: "Subjects + lawyer package" },
       buyer: { title: "Subjects Off", subtitle: "Deposit + dates" },
     },
   },
@@ -5783,16 +5783,16 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S8",
     stageLabel: "Closing",
     labels: {
-      listing: { title: "Closing", subtitle: "Keys + possession" },
+      listing: { title: "Closing", subtitle: "Conveyance + possession" },
       buyer: { title: "Closing", subtitle: "Lawyer + walkthrough" },
     },
   },
   {
     stage: 9,
     stageNumber: "S9",
-    stageLabel: "Post-Close",
+    stageLabel: "Closed",
     labels: {
-      listing: { title: "Gift + Nurture", subtitle: "Review + referral" },
+      listing: { title: "Closed", subtitle: "Archive + nurture" },
       buyer: { title: "Possession", subtitle: "Gift + follow-up" },
     },
   },
@@ -5804,54 +5804,66 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     0: [
     { id: "draft-cma-followup", label: "Draft CMA follow-up message" },
     { id: "pricing-recap", label: "Send pricing recap to seller" },
-    { id: "track-objections", label: "Track seller objections + questions" },
     { id: "missing-info-list", label: "Identify info needed before listing paperwork" },
-    { id: "listing-intake-prep", label: "Prepare listing intake request" },
     ],
     1: [
-    { id: "intake-legal-names", label: "Collect legal names + address" },
-    { id: "intake-price-commission", label: "Confirm listing price + commission + dates" },
-    { id: "intake-included-excluded", label: "Document included/excluded items + possession" },
+    { id: "workflow_stage_1_complete", label: "Stage 1 complete" },
     ],
     2: [
-    { id: "pull-title", label: "Pull title" },
-    { id: "organize-photos", label: "Organize photos / floorplan / video schedule" },
+    { id: "workflow_title_ordered", label: "Title ordered" },
+    { id: "workflow_sign_ordered", label: "Sign ordered" },
+    { id: "workflow_stage_2_complete", label: "Stage 2 complete" },
     ],
     3: [
-    { id: "fill-mlc", label: "Fill MLC + required forms" },
-    { id: "digisign-send", label: "Send DigiSign envelope" },
-    { id: "track-signatures", label: "Confirm all signatures received" },
+    { id: "workflow_photos_in_drive", label: "Photos in Drive" },
+    { id: "workflow_jeff_photo_review", label: "Photo review complete" },
+    { id: "workflow_stage_3_complete", label: "Stage 3 complete" },
     ],
     4: [
-    { id: "mls-remarks", label: "Draft MLS remarks + public description" },
-    { id: "feature-sheet", label: "Feature sheet copy" },
-    { id: "social-posts", label: "Social posts queued" },
-    { id: "email-blast", label: "Email blast sent" },
+    { id: "workflow_evalue_bc_age_verified", label: "eValue BC age verified" },
+    { id: "workflow_listing_description_approved", label: "Listing description approved" },
+    { id: "workflow_feature_sheet_uploaded", label: "Feature sheet uploaded" },
+    { id: "workflow_ai_edited_photos_labelled", label: "AI-edited photos labelled" },
+    { id: "workflow_stage_4_complete", label: "Stage 4 complete" },
     ],
     5: [
-    { id: "open-house", label: "Open house scheduled" },
-    { id: "showingtime-digest", label: "Weekly ShowingTime + market digest sent" },
+    { id: "workflow_just_listed_blast_sent", label: "Just listed blast sent" },
+    { id: "workflow_social_posts_published", label: "Social posts published" },
+    { id: "workflow_flodesk_mailout_sent", label: "Flodesk mailout sent" },
+    { id: "workflow_lofty_text_blast_sent", label: "Lofty text blast sent" },
+    { id: "workflow_stage_5_complete", label: "Stage 5 complete" },
     ],
     6: [
-    { id: "offer-summary", label: "Offer summary prepared" },
-    { id: "subject-deadline", label: "Subject removal deadline tracked" },
-    { id: "inspection-timing", label: "Inspection scheduled" },
+    { id: "workflow_within_24hrs_contract_reviewed", label: "Contract reviewed within 24 hours" },
+    { id: "workflow_email_buyer_accepted_offer_checklist_sent", label: "Accepted-offer checklist email sent" },
+    { id: "workflow_fintrac_drivers_occupation_employer_captured", label: "FINTRAC details captured" },
+    { id: "workflow_calendar_dates_added", label: "Calendar dates added" },
+    { id: "workflow_moving_checklist_sent", label: "Moving checklist sent" },
+    { id: "workflow_stage_6_complete", label: "Stage 6 complete" },
     ],
     7: [
-    { id: "deposit-confirmed", label: "Deposit landed in trust" },
-    { id: "lawyer-engaged", label: "Lawyer / conveyancer engaged" },
-    { id: "skyslope-docs", label: "SkySlope missing-doc list cleared" },
-    { id: "completion-locked", label: "Completion + possession dates locked" },
+    { id: "workflow_subject_removal_form_sent", label: "Subject removal form sent" },
+    { id: "workflow_title_charges_verified", label: "Title charges verified" },
+    { id: "workflow_bir_pds_received", label: "BIR + PDS received" },
+    { id: "workflow_lawyer_info_requested", label: "Lawyer info requested" },
+    { id: "workflow_stage_7_complete", label: "Stage 7 complete" },
     ],
     8: [
-    { id: "completion-checklist", label: "Completion checklist complete" },
-    { id: "key-handoff", label: "Key handoff coordinated" },
+    { id: "workflow_conveyancer_package_sent", label: "Conveyancer package sent" },
+    { id: "workflow_down_payment_to_trust", label: "Down payment to trust" },
+    { id: "workflow_mortgage_instructions_received", label: "Mortgage instructions received" },
+    { id: "workflow_insurance_binder_confirmed", label: "Insurance binder confirmed" },
+    { id: "workflow_client_signed_lawyer", label: "Client signed at lawyer" },
+    { id: "workflow_funds_released", label: "Funds released" },
+    { id: "workflow_stage_8_complete", label: "Stage 8 complete" },
     ],
     9: [
-    { id: "closing-gift", label: "Closing gift ordered + sent" },
-    { id: "thank-you", label: "Thank-you / review / referral drafts queued" },
-    { id: "anniversary", label: "Anniversary reminder added" },
-    { id: "past-client-nurture", label: "Moved into past-client nurture" },
+    { id: "workflow_commission_submitted", label: "Commission submitted" },
+    { id: "workflow_skyslope_deal_closed", label: "SkySlope deal closed" },
+    { id: "workflow_sold_update_sent", label: "Sold update sent" },
+    { id: "workflow_closing_gift_sent", label: "Closing gift sent" },
+    { id: "workflow_review_requested", label: "Review requested" },
+    { id: "workflow_stage_9_complete", label: "Stage 9 complete" },
     ],
   },
   buyer: {
