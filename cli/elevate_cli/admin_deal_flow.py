@@ -32,8 +32,6 @@ _BC: dict[str, Any] = {
     "packageKey": BC_PACKAGE_KEY,
     "country": "CA",
     "province": "BC",
-    "board": "",
-    "market": "",
     "localOverrides": {
         "provinceLabel": "British Columbia",
         "marketLabel": "BC",
@@ -177,8 +175,6 @@ def _generic_package() -> dict[str, Any]:
             "packageKey": DEFAULT_PACKAGE_KEY,
             "country": "",
             "province": "",
-            "board": "",
-            "market": "",
             "localOverrides": {
                 "mlsBoard": "",
                 "marketLabel": "Configured market",
@@ -268,8 +264,6 @@ def package_key_from_jurisdiction(
     *,
     country: Any = None,
     province: Any = None,
-    board: Any = None,
-    market: Any = None,
     package_key: Any = None,
 ) -> str:
     explicit = _slug(package_key)
@@ -289,8 +283,6 @@ def package_key_from_deal(deal: Mapping[str, Any]) -> str:
     return package_key_from_jurisdiction(
         country=deal.get("country"),
         province=deal.get("province"),
-        board=deal.get("board"),
-        market=deal.get("market"),
         package_key=explicit,
     )
 

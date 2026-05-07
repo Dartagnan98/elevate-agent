@@ -350,11 +350,10 @@ DEFAULT_CONFIG = {
     "credential_pool_strategies": {},
     "toolsets": ["elevate-cli"],
     "real_estate": {
-        # Admin deal-flow package defaults. Leave these blank until a client
-        # package is explicitly selected or stamped on a deal.
+        # Admin deal-flow package defaults. Province chooses the package;
+        # board/MLS membership belongs on individual deals if needed.
         "country": "CA",
         "province": "",
-        "board": "",
         "market": "",
         "package_key": "generic.real-estate",
     },

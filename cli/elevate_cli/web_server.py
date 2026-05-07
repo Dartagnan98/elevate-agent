@@ -3042,19 +3042,15 @@ def _admin_jurisdiction_config() -> Dict[str, str]:
     real_estate = (load_config().get("real_estate") or {})
     country = _clean_admin_jurisdiction_value(real_estate.get("country"), "CA").upper()
     province = _clean_admin_jurisdiction_value(real_estate.get("province"), "").upper()
-    board = _clean_admin_jurisdiction_value(real_estate.get("board"), "")
     market = _clean_admin_jurisdiction_value(real_estate.get("market"), "")
     package_key = package_key_from_jurisdiction(
         country=country,
         province=province,
-        board=board,
-        market=market,
         package_key=real_estate.get("package_key") or real_estate.get("packageKey"),
     )
     return {
         "country": country,
         "province": province,
-        "board": board,
         "market": market,
         "packageKey": package_key,
     }
@@ -3318,7 +3314,6 @@ async def post_admin_deal(body: _DealCreateBody):
 
         jurisdiction = _admin_jurisdiction_config()
         province = body.province if body.province is not None else jurisdiction["province"]
-        board = body.board if body.board is not None else jurisdiction["board"]
         market = body.market if body.market is not None else jurisdiction["market"]
         with connect() as conn:
             return create_deal(
@@ -3327,7 +3322,7 @@ async def post_admin_deal(body: _DealCreateBody):
                 side=body.side,
                 actor=_WEB_ACTOR,
                 province=(province or "").strip().upper(),
-                board=(board or "").strip() or None,
+                board=(body.board or "").strip() or None,
                 market=(market or "").strip() or None,
                 current_stage=body.currentStage,
                 primary_contact_id=body.primaryContactId,

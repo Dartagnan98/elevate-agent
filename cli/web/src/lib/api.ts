@@ -850,7 +850,7 @@ export type AdminDealToggleValue = string | boolean | null;
 export interface AdminDealCreateRequest {
   title: string;
   side: AdminDealSide;
-  // Ignored by the API; deal jurisdiction is stamped from server config.
+  // Province chooses the backend flow package. Board/market are optional deal metadata.
   province?: string;
   board?: string | null;
   market?: string | null;
@@ -1063,7 +1063,6 @@ export interface DealContext {
 export interface AdminJurisdiction {
   country: string;
   province: string;
-  board: string;
   market: string;
   packageKey: string;
 }

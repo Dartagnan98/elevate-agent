@@ -93,7 +93,6 @@ def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_valu
     assert jurisdiction == {
         "country": "CA",
         "province": "",
-        "board": "",
         "market": "",
         "packageKey": "generic.real-estate",
     }
