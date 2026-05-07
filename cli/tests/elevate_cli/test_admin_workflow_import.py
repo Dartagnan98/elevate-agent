@@ -4,9 +4,8 @@ import csv
 import io
 
 import pytest
-from fastapi.testclient import TestClient
 
-from elevate_cli.data import connect, import_listing_sheet_csv, list_deals
+from elevate_cli.data import connect, import_listing_workflow_csv, list_deals
 from elevate_cli.data.connection import _reset_schema_cache
 
 
@@ -15,16 +14,6 @@ def _fresh_schema_cache():
     _reset_schema_cache()
     yield
     _reset_schema_cache()
-
-
-@pytest.fixture
-def client():
-    from elevate_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
-
-    c = TestClient(app, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
-    yield c
-    if hasattr(app.state, "bound_host"):
-        del app.state.bound_host
 
 
 HEADERS = [
@@ -89,11 +78,11 @@ def _csv(rows: list[dict[str, str]]) -> str:
     return buf.getvalue()
 
 
-def test_import_listing_sheet_csv_types_rows_into_deals():
+def test_import_listing_workflow_csv_types_rows_into_deals():
     csv_text = _csv([
         {
             "Row ID": "1",
-            "Property Address": "17-750 Fortune Drive, Kamloops, BC",
+            "Property Address": "17-750 Cedar Drive, Vancouver, BC",
             "Date Created": "2026-04-28",
             "Current Stage": "Stage 5 - Listing Live",
             "Google Drive Folder URL": "https://drive.google.com/folder",
@@ -127,15 +116,16 @@ def test_import_listing_sheet_csv_types_rows_into_deals():
     ])
 
     with connect() as conn:
-        result = import_listing_sheet_csv(conn, csv_text, province="BC")
+        result = import_listing_workflow_csv(conn, csv_text, province="BC")
         deals = list_deals(conn, status=None)
 
     assert result["created"] == 1
     assert result["updated"] == 0
     assert len(deals) == 1
     deal = deals[0]
-    assert deal["sourceKey"].endswith(":204411937:1")
-    assert deal["title"] == "17-750 Fortune Drive, Kamloops, BC"
+    assert deal["sourceKey"] == "workflow:legacy_workflow_bootstrap:1"
+    assert deal["sourceLabel"] == "Legacy workflow bootstrap"
+    assert deal["title"] == "17-750 Cedar Drive, Vancouver, BC"
     assert deal["currentStage"] == 5
     assert deal["province"] == "BC"
     assert deal["loftyContactId"] == "1145885890673237"
@@ -146,16 +136,16 @@ def test_import_listing_sheet_csv_types_rows_into_deals():
     assert deal["listingDate"] == "2026-03-07"
     assert deal["listingPublishedAt"] == "2026-03-07"
     assert deal["mlsNumber"] == "10378203"
-    assert deal["extraToggles"]["sheet_stage_1_complete"] is True
-    assert deal["extraToggles"]["sheet_documents_sent_date"] == "2026-03-07"
-    assert deal["extraToggles"]["sheet_google_drive_folder_url"] == "https://drive.google.com/folder"
+    assert deal["extraToggles"]["workflow_stage_1_complete"] is True
+    assert deal["extraToggles"]["workflow_documents_sent_date"] == "2026-03-07"
+    assert deal["extraToggles"]["workflow_google_drive_folder_url"] == "https://drive.google.com/folder"
 
 
-def test_import_listing_sheet_csv_reimport_updates_same_source_row():
+def test_import_listing_workflow_csv_reimport_updates_same_source_row():
     first = _csv([
         {
             "Row ID": "7",
-            "Property Address": "610 Gleneagles Drive, Kamloops, BC",
+            "Property Address": "610 Maple Avenue, Vancouver, BC",
             "Current Stage": "Stage 5 - Listing Live",
             "Listing Price": "$674,900",
             "Stage 5 Complete ✓": "TRUE",
@@ -164,7 +154,7 @@ def test_import_listing_sheet_csv_reimport_updates_same_source_row():
     second = _csv([
         {
             "Row ID": "7",
-            "Property Address": "610 Gleneagles Drive, Kamloops, BC",
+            "Property Address": "610 Maple Avenue, Vancouver, BC",
             "Current Stage": "Stage 7 - Subject Removal Complete",
             "Listing Price": "$674,900",
             "Accepted Offer Date": "2026-04-08",
@@ -174,8 +164,8 @@ def test_import_listing_sheet_csv_reimport_updates_same_source_row():
     ])
 
     with connect() as conn:
-        import_listing_sheet_csv(conn, first, province="BC")
-        result = import_listing_sheet_csv(conn, second, province="BC")
+        import_listing_workflow_csv(conn, first, province="BC")
+        result = import_listing_workflow_csv(conn, second, province="BC")
         deals = list_deals(conn, status=None)
 
     assert result["created"] == 0
@@ -184,27 +174,4 @@ def test_import_listing_sheet_csv_reimport_updates_same_source_row():
     assert deals[0]["currentStage"] == 7
     assert deals[0]["offerAcceptedAt"] == "2026-04-08"
     assert deals[0]["subjectRemovalDate"] == "2026-04-26"
-    assert deals[0]["extraToggles"]["sheet_stage_7_complete"] is True
-
-
-def test_sheet_import_endpoint_accepts_csv_text(client):
-    csv_text = _csv([
-        {
-            "Row ID": "2",
-            "Property Address": "B11-7155 Dallas Drive, Kamloops, BC",
-            "Current Stage": "Stage 5 - Listing Live",
-            "Listing Price": "$349,900",
-            "Stage 5 Complete ✓": "TRUE",
-        }
-    ])
-
-    resp = client.post(
-        "/api/admin/deals/import-sheet",
-        json={"csvText": csv_text, "province": "BC"},
-    )
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["created"] == 1
-    assert body["count"] == 1
-    assert body["items"][0]["listPrice"] == 349900
+    assert deals[0]["extraToggles"]["workflow_stage_7_complete"] is True

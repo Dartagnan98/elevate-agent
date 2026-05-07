@@ -1003,7 +1003,6 @@ type ProfileWorkflowJobIds = Partial<Record<AdminDealSide, string>>;
 
 type ProfileActionBucketId = "active-conversation" | "push-admin" | "needs-verifier" | "follow-up" | "in-admin";
 
-const PROFILE_SKILL_WORKDIR = "/Users/dartagnanpatricio/.elevate/tmp/skyleigh-tools";
 const PROFILE_WORKFLOW_JOB_PREFIX = "Lead profile workflow";
 
 const PROFILE_ACTION_BUCKETS: Array<{
@@ -1136,7 +1135,7 @@ function profileSkillWorkflowPrompt(profile: SourceInboxProfile, side: AdminDeal
   const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
   const context = profileSkillWorkflowContext(profile, side);
   if (side === "listing") {
-    return `Run the Skyleigh seller CMA handoff for this lead profile.
+    return `Run the seller CMA handoff for this lead profile.
 
 Profile context:
 ${context}
@@ -1145,13 +1144,13 @@ Workflow rules:
 1. This is a skill-owned handoff, not a direct dashboard push to Sellers Admin.
 2. Confirm from the profile, thread history, or source records that there is enough seller appointment/property context to run the CMA.
 3. If the property address or appointment context is missing, draft or queue the next same-channel follow-up needed to get it. Do not fabricate missing details and do not create an Admin record yet.
-4. Once the appointment/property context is present, run the CMA skill workflow from ${PROFILE_SKILL_WORKDIR}. Preserve CMA handoffs and generated artifacts.
+4. Once the appointment/property context is present, run the installed CMA skill workflow. Preserve CMA handoffs and generated artifacts.
 5. Only after the CMA outputs are complete, create or update the Elevate Sellers Admin/CMA record with sourceProfileId=${profile.id}, sourceAdminSide=listing, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
 6. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the listing card at Admin stage 0 (CMA) unless the CMA outcome clearly belongs in a later listing stage. This stage event is what lets the Admin action registry run next.
 7. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into CMA/Admin.`;
   }
 
-  return `Run the Skyleigh buyer qualification handoff for this lead profile.
+  return `Run the buyer qualification handoff for this lead profile.
 
 Profile context:
 ${context}
@@ -1374,7 +1373,6 @@ function LeadProfilesWorkbench({
         deliver: "local",
         skills: [sideCopy.skill],
         tier: "orchestrator",
-        workdir: PROFILE_SKILL_WORKDIR,
       });
       await api.triggerCronJob(job.id);
       setQueuedWorkflowIds((prev) => ({
@@ -5600,8 +5598,7 @@ export function RealEstateLeadsPage() {
   );
 }
 
-// ─── Skyleigh Admin Hub kanban ───────────────────────────────────────────────
-// Spec: docs/plans/skyleigh-admin-hub-kanban.md
+// ─── Admin Hub kanban ────────────────────────────────────────────────────────
 // Cards open into a side panel with collapsible per-stage checklists.
 
 const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
@@ -6763,7 +6760,7 @@ function AdminTop25Strip({
           )}
         </div>
         <span className="text-[0.72rem] text-muted-foreground hidden sm:inline">
-          Skyleigh's focus list - pinned cards still live in their stage column.
+          Pinned clients still live in their stage column.
         </span>
       </div>
       {pinned.length === 0 ? (

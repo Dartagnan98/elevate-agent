@@ -109,7 +109,7 @@ const REAL_ESTATE_WORKFLOWS = [
       "mlc",
       "digisign",
       "webforms",
-      "skyleigh-vault",
+      "deal-vault",
     ],
   },
   {

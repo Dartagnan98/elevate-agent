@@ -14,6 +14,21 @@ from typing import Any, Mapping
 
 DEFAULT_PACKAGE_KEY = "generic.real-estate"
 BC_PACKAGE_KEY = "ca.bc"
+CANADIAN_PROVINCE_LABELS = {
+    "ab": "Alberta",
+    "bc": "British Columbia",
+    "mb": "Manitoba",
+    "nb": "New Brunswick",
+    "nl": "Newfoundland and Labrador",
+    "ns": "Nova Scotia",
+    "nt": "Northwest Territories",
+    "nu": "Nunavut",
+    "on": "Ontario",
+    "pe": "Prince Edward Island",
+    "qc": "Quebec",
+    "sk": "Saskatchewan",
+    "yt": "Yukon",
+}
 
 
 def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: list[tuple[str, str]] | None = None, docs: list[tuple[str, str]] | None = None, forms: list[tuple[str, str]] | None = None, triggers: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
@@ -220,6 +235,35 @@ _PACKAGES: dict[str, dict[str, Any]] = {
 }
 
 
+def _canadian_province_package(province_slug: str) -> dict[str, Any]:
+    province = province_slug.upper()
+    package = deepcopy(_BC)
+    package.update(
+        {
+            "packageKey": f"ca.{province_slug}",
+            "country": "CA",
+            "province": province,
+            "localOverrides": {
+                **package["localOverrides"],
+                "provinceLabel": CANADIAN_PROVINCE_LABELS.get(province_slug, province),
+                "marketLabel": province,
+                "defaultCurrency": "CAD",
+                "preferredShowingSource": "Configured showing source",
+            },
+        }
+    )
+    return package
+
+
+def _package_for_key(package_key: str) -> dict[str, Any]:
+    if package_key in _PACKAGES:
+        return _PACKAGES[package_key]
+    parts = package_key.split(".")
+    if len(parts) == 2 and parts[0] == "ca" and parts[1] in CANADIAN_PROVINCE_LABELS:
+        return _canadian_province_package(parts[1])
+    return _PACKAGES[DEFAULT_PACKAGE_KEY]
+
+
 _CONDITION_ADDITIONS: dict[str, list[dict[str, Any]]] = {
     "propertySubtype:strata": [
         {"stage": 6, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
@@ -253,6 +297,8 @@ def _known_or_default(package_key: str) -> str:
     if package_key in _PACKAGES:
         return package_key
     parts = package_key.split(".")
+    if len(parts) == 2 and parts[0] == "ca" and parts[1] in CANADIAN_PROVINCE_LABELS:
+        return package_key
     if len(parts) >= 2:
         province_key = ".".join(parts[:2])
         if province_key in _PACKAGES:
@@ -296,7 +342,7 @@ def resolve_admin_deal_flow(
 ) -> dict[str, Any]:
     """Resolve package rules for the current side/stage."""
     resolved_key = _slug(package_key) or DEFAULT_PACKAGE_KEY
-    package = _PACKAGES.get(resolved_key, _PACKAGES[DEFAULT_PACKAGE_KEY])
+    package = _package_for_key(resolved_key)
     side_key = side if side in {"listing", "buyer"} else "listing"
     stages = package[side_key]["stages"]
     last_stage = len(stages) - 1

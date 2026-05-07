@@ -111,6 +111,11 @@ def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_valu
     assert switched.status_code == 200, switched.text
     assert switched.json()["count"] == 1
 
+    context = client.get(f"/api/deals/{body['id']}/context")
+    assert context.status_code == 200, context.text
+    assert context.json()["dealFlow"]["packageKey"] == "ca.ab"
+    assert context.json()["dealFlow"]["localOverrides"]["provinceLabel"] == "Alberta"
+
 def test_get_deals_filters_by_side(client):
     listing = _create(title="Listing deal", side="listing")
     buyer = _create(title="Buyer deal", side="buyer")
@@ -324,7 +329,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
             conn,
             name="CMA on stage",
             trigger="stage_entry",
-            skill="skyleigh:cma-collect",
+            skill="cma:collect",
             side="listing",
             to_stage=1,
         )
@@ -345,7 +350,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
             "artifacts": [
                 {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
             ],
-            "next_tasks": [{"skill": "skyleigh:cma-pdf", "args": {"deal_id": deal["id"]}}],
+            "next_tasks": [{"skill": "cma:pdf", "args": {"deal_id": deal["id"]}}],
             "checklist_updates": [{"id": "pricing-recap", "completed": True}],
         },
     )

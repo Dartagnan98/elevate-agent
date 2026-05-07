@@ -1,15 +1,17 @@
-"""Import Skyleigh-style listing workflow sheets into Admin Hub deals.
+"""Convert legacy listing workflow grids into Admin Hub deals.
 
-The Google Sheet is treated as a typed source feed:
+This is not a live spreadsheet integration. It is a bootstrap helper for
+turning a one-time CSV export or pasted grid into SQLite-backed deal files.
+After import, SQLite is the source of truth.
 
 * ``Current Stage`` becomes ``deals.current_stage``.
 * Known yes/no columns become named toggles.
 * Known date/money columns become first-class deal fields.
 * Every non-empty source column is also preserved under ``extraToggles`` using
-  a ``sheet_`` key so the original row remains inspectable.
+  a ``workflow_`` key so the original row remains inspectable.
 
-The importer is idempotent. Rows are matched by
-``google_sheet:{sheet_id}:{gid}:{row_id}``, so repeated syncs update the same
+The importer is idempotent within a named bootstrap source. Rows are matched by
+``workflow:{source_id}:{row_id}``, so repeated local imports update the same
 deal instead of creating duplicates.
 """
 
@@ -20,7 +22,6 @@ import io
 import json
 import re
 import sqlite3
-import urllib.request
 from typing import Any, Mapping
 
 from elevate_cli.data._util import now_iso
@@ -39,8 +40,8 @@ from elevate_cli.data.deals import (
 )
 
 
-DEFAULT_LISTING_SHEET_ID = "1OQDduX6hqpEiErA8Q6Mx86vaKX5dQhHS5btPfxJMMrw"
-DEFAULT_LISTING_SHEET_GID = "204411937"
+DEFAULT_WORKFLOW_SOURCE_ID = "legacy_workflow_bootstrap"
+DEFAULT_WORKFLOW_SOURCE_LABEL = "Legacy workflow bootstrap"
 
 
 _STAGE_RE = re.compile(r"\bStage\s*(\d+)\b", re.IGNORECASE)
@@ -79,65 +80,26 @@ DETAIL_FIELD_COLUMNS = {
 }
 
 
-def google_sheet_csv_url(
-    *,
-    sheet_id: str = DEFAULT_LISTING_SHEET_ID,
-    gid: str = DEFAULT_LISTING_SHEET_GID,
-) -> str:
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
-
-def fetch_public_google_sheet_csv(
-    *,
-    sheet_id: str = DEFAULT_LISTING_SHEET_ID,
-    gid: str = DEFAULT_LISTING_SHEET_GID,
-    timeout: int = 20,
-) -> str:
-    """Fetch a public Google Sheet tab as CSV."""
-    req = urllib.request.Request(
-        google_sheet_csv_url(sheet_id=sheet_id, gid=gid),
-        headers={"User-Agent": "Elevate Admin Hub"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-provided public sheet id
-        body = resp.read()
-        return body.decode(resp.headers.get_content_charset() or "utf-8")
-
-
-def import_google_listing_sheet(
-    conn: sqlite3.Connection,
-    *,
-    sheet_id: str = DEFAULT_LISTING_SHEET_ID,
-    gid: str = DEFAULT_LISTING_SHEET_GID,
-    province: str = "BC",
-    actor: str = "sheet:google",
-) -> dict[str, Any]:
-    csv_text = fetch_public_google_sheet_csv(sheet_id=sheet_id, gid=gid)
-    return import_listing_sheet_csv(
-        conn,
-        csv_text,
-        sheet_id=sheet_id,
-        gid=gid,
-        province=province,
-        actor=actor,
-    )
-
-
-def import_listing_sheet_csv(
+def import_listing_workflow_csv(
     conn: sqlite3.Connection,
     csv_text: str,
     *,
-    sheet_id: str = DEFAULT_LISTING_SHEET_ID,
-    gid: str = DEFAULT_LISTING_SHEET_GID,
+    source_id: str = DEFAULT_WORKFLOW_SOURCE_ID,
+    source_label: str = DEFAULT_WORKFLOW_SOURCE_LABEL,
     province: str = "BC",
-    actor: str = "sheet:google",
+    actor: str = "workflow:bootstrap",
 ) -> dict[str, Any]:
-    """Parse and upsert all data rows from a listing workflow sheet CSV."""
-    parsed_rows = parse_listing_sheet_csv(csv_text, sheet_id=sheet_id, gid=gid)
+    """Parse and upsert all data rows from a listing workflow CSV."""
+    parsed_rows = parse_listing_workflow_csv(
+        csv_text,
+        source_id=source_id,
+        source_label=source_label,
+    )
     created = 0
     updated = 0
     items: list[dict[str, Any]] = []
     for row in parsed_rows:
-        deal, action = upsert_listing_sheet_row(
+        deal, action = upsert_listing_workflow_row(
             conn,
             row,
             province=province,
@@ -149,9 +111,9 @@ def import_listing_sheet_csv(
             updated += 1
         items.append(deal)
     return {
-        "source": "google_sheet",
-        "sheetId": sheet_id,
-        "gid": gid,
+        "source": "sqlite_workflow_bootstrap",
+        "sourceId": source_id,
+        "sourceLabel": source_label,
         "province": province,
         "count": len(items),
         "created": created,
@@ -160,11 +122,11 @@ def import_listing_sheet_csv(
     }
 
 
-def parse_listing_sheet_csv(
+def parse_listing_workflow_csv(
     csv_text: str,
     *,
-    sheet_id: str = DEFAULT_LISTING_SHEET_ID,
-    gid: str = DEFAULT_LISTING_SHEET_GID,
+    source_id: str = DEFAULT_WORKFLOW_SOURCE_ID,
+    source_label: str = DEFAULT_WORKFLOW_SOURCE_LABEL,
 ) -> list[dict[str, Any]]:
     rows = list(csv.reader(io.StringIO(csv_text)))
     if len(rows) < 3:
@@ -183,16 +145,22 @@ def parse_listing_sheet_csv(
         address = record.get("Property Address", "").strip()
         if not row_id and not address:
             continue
-        out.append(_normalize_source_row(record, sheet_id=sheet_id, gid=gid))
+        out.append(
+            _normalize_source_row(
+                record,
+                source_id=source_id,
+                source_label=source_label,
+            )
+        )
     return out
 
 
-def upsert_listing_sheet_row(
+def upsert_listing_workflow_row(
     conn: sqlite3.Connection,
     row: Mapping[str, Any],
     *,
     province: str = "BC",
-    actor: str = "sheet:google",
+    actor: str = "workflow:bootstrap",
 ) -> tuple[dict[str, Any], str]:
     """Create or update one deal from a parsed source row."""
     source_key = str(row["sourceKey"])
@@ -231,7 +199,7 @@ def upsert_listing_sheet_row(
         current_extra = {}
     preserved_extra = {
         key: value for key, value in current_extra.items()
-        if not str(key).startswith("sheet_")
+        if not str(key).startswith("workflow_")
     }
     merged_extra = {**preserved_extra, **extra}
 
@@ -275,7 +243,7 @@ def upsert_listing_sheet_row(
         deal_id=deal_id,
         kind="toggle_change",
         actor=actor,
-        field_name="sheet_import",
+        field_name="workflow_import",
         old_value={"stage": old_stage},
         new_value={"stage": new_stage, "sourceKey": source_key},
         payload={"sourceKey": source_key, "sourceRowId": row.get("sourceRowId")},
@@ -288,13 +256,13 @@ def upsert_listing_sheet_row(
 def _normalize_source_row(
     record: Mapping[str, str],
     *,
-    sheet_id: str,
-    gid: str,
+    source_id: str,
+    source_label: str,
 ) -> dict[str, Any]:
     row_id = str(record.get("Row ID") or "").strip()
     address = str(record.get("Property Address") or "").strip()
     source_key_id = row_id or _slug(address)
-    source_key = f"google_sheet:{sheet_id}:{gid}:{source_key_id}"
+    source_key = f"workflow:{_slug(source_id)}:{source_key_id}"
     stage = _parse_stage(record.get("Current Stage"))
     extra: dict[str, Any] = {}
     named: dict[str, Any] = {}
@@ -303,8 +271,8 @@ def _normalize_source_row(
     for label, raw_value in record.items():
         if raw_value == "":
             continue
-        source_key_name = f"sheet_{_slug(label)}"
-        extra[source_key_name] = _coerce_sheet_value(label, raw_value)
+        source_key_name = f"workflow_{_slug(label)}"
+        extra[source_key_name] = _coerce_workflow_value(label, raw_value)
 
         if label in NAMED_FIELD_COLUMNS:
             named[NAMED_FIELD_COLUMNS[label]] = _coerce_named_value(
@@ -326,7 +294,7 @@ def _normalize_source_row(
     return {
         "sourceKey": source_key,
         "sourceRowId": row_id or None,
-        "sourceLabel": "Google Sheet Active Listings",
+        "sourceLabel": source_label,
         "title": address or f"Listing row {row_id}",
         "listingAddress": address or None,
         "currentStage": stage,
@@ -352,7 +320,7 @@ def _slug(value: str) -> str:
     return text or "field"
 
 
-def _coerce_sheet_value(label: str, value: str) -> Any:
+def _coerce_workflow_value(label: str, value: str) -> Any:
     text = value.strip()
     bool_value = _parse_bool(text)
     if bool_value is not None:
@@ -417,7 +385,7 @@ def _extract_last_number(value: str | None) -> str | None:
     return matches[-1] if matches else None
 
 
-def deal_sheet_debug_json(row: Mapping[str, Any]) -> str:
+def deal_workflow_debug_json(row: Mapping[str, Any]) -> str:
     """Return a stable debug string for operator previews/tests."""
     public_row = {
         key: value for key, value in row.items()
@@ -427,13 +395,10 @@ def deal_sheet_debug_json(row: Mapping[str, Any]) -> str:
 
 
 __all__ = [
-    "DEFAULT_LISTING_SHEET_GID",
-    "DEFAULT_LISTING_SHEET_ID",
-    "deal_sheet_debug_json",
-    "fetch_public_google_sheet_csv",
-    "google_sheet_csv_url",
-    "import_google_listing_sheet",
-    "import_listing_sheet_csv",
-    "parse_listing_sheet_csv",
-    "upsert_listing_sheet_row",
+    "DEFAULT_WORKFLOW_SOURCE_ID",
+    "DEFAULT_WORKFLOW_SOURCE_LABEL",
+    "deal_workflow_debug_json",
+    "import_listing_workflow_csv",
+    "parse_listing_workflow_csv",
+    "upsert_listing_workflow_row",
 ]
