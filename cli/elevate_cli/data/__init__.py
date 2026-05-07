@@ -137,6 +137,7 @@ from elevate_cli.data.dispatch import (
     list_action_runs,
     list_actions,
     list_conditional_docs,
+    queue_action_run,
     update_action,
     upsert_conditional_doc,
 )
@@ -194,7 +195,7 @@ __all__ = [
     # dispatch (admin action registry / runs / conditional docs)
     "create_action", "delete_action", "evaluate_dispatch", "get_action",
     "list_action_runs", "list_actions", "list_conditional_docs",
-    "update_action", "upsert_conditional_doc",
+    "queue_action_run", "update_action", "upsert_conditional_doc",
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
     "eligible_templates", "pick_template",

@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from elevate_cli.data import connect, create_action, create_deal, evaluate_dispatch, list_deal_events, upsert_contact
+from elevate_cli.data import connect, create_action, create_deal, evaluate_dispatch, list_action_runs, list_deal_events, upsert_contact
 from elevate_cli.data.connection import _reset_schema_cache
 
 
@@ -252,8 +252,36 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["primaryContact"]["displayName"] == "Seller One"
     assert body["conditions"]["property_subtype"] == "strata"
     assert body["checklist"]["draft-cma-followup"] is True
+    assert body["dealFlow"]["packageKey"] == "ca.bc.aoir.kamloops"
+    assert body["dealFlow"]["gate"]["stageName"] == "CMA"
+    assert body["dealFlow"]["gate"]["canAdvance"] is False
     assert body["coContacts"][0]["role"] == "lawyer"
     assert body["attachments"][0]["kind"] == "cma_report"
+
+
+def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
+    deal = _create(title="Gate deal", current_stage=0)
+
+    blocked = client.post(f"/api/deals/{deal['id']}/advance", json={})
+    assert blocked.status_code == 409, blocked.text
+    detail = blocked.json()["detail"]
+    assert detail["message"] == "deal phase gate is blocked"
+    assert any(item["id"] == "draft-cma-followup" for item in detail["gate"]["missingChecklist"])
+
+    for item_id in ("draft-cma-followup", "pricing-recap", "missing-info-list"):
+        ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": item_id, "value": True})
+        assert ok.status_code == 200, ok.text
+    attached = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "cma_report", "filePath": "/tmp/gate-cma.pdf"},
+    )
+    assert attached.status_code == 200, attached.text
+
+    advanced = client.post(f"/api/deals/{deal['id']}/advance", json={})
+    assert advanced.status_code == 200, advanced.text
+    body = advanced.json()
+    assert body["deal"]["currentStage"] == 1
+    assert body["dealFlow"]["stageName"] == "Listing Intake"
 
 
 def test_run_result_callback_updates_run_and_attaches_artifacts(client):
@@ -285,6 +313,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
                 {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
             ],
             "next_tasks": [{"skill": "skyleigh:cma-pdf", "args": {"deal_id": deal["id"]}}],
+            "checklist_updates": [{"id": "pricing-recap", "completed": True}],
         },
     )
     assert resp.status_code == 200, resp.text
@@ -294,7 +323,12 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
 
     context = client.get(f"/api/deals/{deal['id']}/context").json()
     assert context["attachments"][0]["sourceRunId"] == run_id
-    assert context["priorRuns"][0]["payload"]["result"]["nextTasks"][0]["skill"] == "skyleigh:cma-pdf"
+    assert context["checklist"]["draft-cma-followup"] is True
+    assert context["checklist"]["pricing-recap"] is True
+    assert any(run["payload"].get("result", {}).get("nextTasks") for run in context["priorRuns"])
+    with connect() as conn:
+        queued = list_action_runs(conn, deal_id=deal["id"])
+    assert any(run["payload"].get("trigger") == "next_task" for run in queued)
 
 
 def test_admin_deals_requires_session_token():

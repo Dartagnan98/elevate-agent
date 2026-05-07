@@ -81,6 +81,8 @@ import type {
   AdminDeal,
   AdminDealCreateRequest,
   AdminDealSide,
+  DealAttachmentCreateRequest,
+  DealContactCreateRequest,
   DealContext,
   AgentHubMemoryNode,
   AgentHubSnapshot,
@@ -6324,8 +6326,8 @@ function useAdminDeals(): {
     try {
       const nextDeals = await loadDeals();
       if (nextDeals.length === 0) {
-        setDeals(ADMIN_CARDS_SEED);
-        setUsingDevFallback(true);
+        setDeals([]);
+        setUsingDevFallback(false);
       } else {
         setDeals(nextDeals);
         setUsingDevFallback(false);
@@ -6347,8 +6349,8 @@ function useAdminDeals(): {
       .then((nextDeals) => {
         if (cancelled) return;
         if (nextDeals.length === 0) {
-          setDeals(ADMIN_CARDS_SEED);
-          setUsingDevFallback(true);
+          setDeals([]);
+          setUsingDevFallback(false);
         } else {
           setDeals(nextDeals);
           setUsingDevFallback(false);
@@ -6959,16 +6961,43 @@ function AdminDealContextSection({
   context,
   loading,
   error,
+  busy,
+  onAdvance,
+  onUpdateFields,
+  onAddAttachment,
+  onAddContact,
+  onApproveRun,
 }: {
   context: DealContext | null;
   loading: boolean;
   error: string | null;
+  busy: boolean;
+  onAdvance: (force?: boolean) => Promise<void>;
+  onUpdateFields: (fields: Record<string, unknown>) => Promise<void>;
+  onAddAttachment: (body: DealAttachmentCreateRequest) => Promise<void>;
+  onAddContact: (body: DealContactCreateRequest) => Promise<void>;
+  onApproveRun: (runId: string) => Promise<void>;
 }) {
+  const [actionMode, setActionMode] = useState<"dates" | "doc" | "contact" | null>(null);
+  const [fieldDraft, setFieldDraft] = useState({
+    listingDate: "",
+    subjectRemovalDate: "",
+    depositDueDate: "",
+    completionDate: "",
+    possessionDate: "",
+    mlsNumber: "",
+    listPrice: "",
+  });
+  const [docDraft, setDocDraft] = useState({ kind: "cma_report", filePath: "", summary: "" });
+  const [contactDraft, setContactDraft] = useState({ role: "lawyer", contactId: "", notes: "" });
   const deal = context?.deal ?? null;
   const primary = context?.primaryContact ?? null;
   const coContacts = context?.coContacts ?? [];
   const attachments = context?.attachments ?? [];
   const priorRuns = context?.priorRuns ?? [];
+  const flow = context?.dealFlow ?? null;
+  const gate = flow?.gate ?? null;
+  const pendingHumanRuns = priorRuns.filter((run) => run.status === "waiting_human");
   const dateRows: Array<[string, string]> = deal
     ? ([
         ["Listing", deal.listingDate],
@@ -7026,6 +7055,72 @@ function AdminDealContextSection({
 
       {context && deal && (
         <div className="mt-3 space-y-3">
+          {gate && (
+            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                    Phase gate
+                  </div>
+                  <div className="mt-1 text-[0.86rem] font-medium text-foreground">
+                    {gate.stageName}
+                    {gate.nextStageName ? ` -> ${gate.nextStageName}` : ""}
+                  </div>
+                </div>
+                <Badge variant={gate.canAdvance ? "success" : "warning"}>
+                  {gate.canAdvance ? "ready" : "blocked"}
+                </Badge>
+              </div>
+              <div className="mt-2 grid gap-2 text-[0.74rem] sm:grid-cols-2">
+                <div>
+                  <span className="text-muted-foreground">Checklist: </span>
+                  <span className="text-foreground">
+                    {gate.completedChecklist}/{gate.totalChecklist}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Package: </span>
+                  <span className="text-foreground">{flow?.packageKey}</span>
+                </div>
+              </div>
+              {(gate.missingChecklist.length > 0 || gate.missingFields.length > 0 || gate.missingDocs.length > 0 || gate.blockingRuns.length > 0) && (
+                <div className="mt-2 space-y-1.5 text-[0.74rem]">
+                  {gate.missingChecklist.slice(0, 4).map((item) => (
+                    <div key={`check-${item.id}`} className="text-muted-foreground">
+                      Missing checklist: <span className="text-foreground">{item.label}</span>
+                    </div>
+                  ))}
+                  {gate.missingFields.slice(0, 4).map((item) => (
+                    <div key={`field-${item.field}`} className="text-muted-foreground">
+                      Missing field: <span className="text-foreground">{item.label}</span>
+                    </div>
+                  ))}
+                  {gate.missingDocs.slice(0, 4).map((item) => (
+                    <div key={`doc-${item.kind}`} className="text-muted-foreground">
+                      Missing doc: <span className="text-foreground">{item.label}</span>
+                    </div>
+                  ))}
+                  {gate.blockingRuns.slice(0, 4).map((run) => (
+                    <div key={`run-${run.id}`} className="text-muted-foreground">
+                      Waiting run: <span className="text-foreground">{run.label}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" disabled={!gate.canAdvance || busy} onClick={() => void onAdvance(false)}>
+                  {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  Advance phase
+                </Button>
+                {!gate.canAdvance && gate.nextStage != null && (
+                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void onAdvance(true)}>
+                    Force advance
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
               <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
@@ -7150,6 +7245,132 @@ function AdminDealContextSection({
               )}
             </div>
           </div>
+
+          <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+                Source actions
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <Button size="sm" variant={actionMode === "dates" ? "default" : "outline"} onClick={() => setActionMode(actionMode === "dates" ? null : "dates")}>
+                  <CalendarClock className="h-3.5 w-3.5" />
+                  Dates
+                </Button>
+                <Button size="sm" variant={actionMode === "doc" ? "default" : "outline"} onClick={() => setActionMode(actionMode === "doc" ? null : "doc")}>
+                  <FileText className="h-3.5 w-3.5" />
+                  Attach
+                </Button>
+                <Button size="sm" variant={actionMode === "contact" ? "default" : "outline"} onClick={() => setActionMode(actionMode === "contact" ? null : "contact")}>
+                  <Users className="h-3.5 w-3.5" />
+                  Co-contact
+                </Button>
+              </div>
+            </div>
+
+            {actionMode === "dates" && (
+              <form
+                className="mt-3 grid gap-2 sm:grid-cols-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const fields = Object.fromEntries(
+                    Object.entries(fieldDraft).filter(([, value]) => value.trim()),
+                  );
+                  void onUpdateFields(fields).then(() => {
+                    setFieldDraft({
+                      listingDate: "",
+                      subjectRemovalDate: "",
+                      depositDueDate: "",
+                      completionDate: "",
+                      possessionDate: "",
+                      mlsNumber: "",
+                      listPrice: "",
+                    });
+                    setActionMode(null);
+                  });
+                }}
+              >
+                {(["listingDate", "subjectRemovalDate", "depositDueDate", "completionDate", "possessionDate", "mlsNumber", "listPrice"] as const).map((field) => (
+                  <label key={field} className="text-[0.72rem] text-muted-foreground">
+                    {field}
+                    <input
+                      value={fieldDraft[field]}
+                      onChange={(event) => setFieldDraft((prev) => ({ ...prev, [field]: event.target.value }))}
+                      className="mt-1 h-10 w-full rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                  </label>
+                ))}
+                <div className="sm:col-span-2">
+                  <Button size="sm" type="submit" disabled={busy}>Update file fields</Button>
+                </div>
+              </form>
+            )}
+
+            {actionMode === "doc" && (
+              <form
+                className="mt-3 grid gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void onAddAttachment({
+                    kind: docDraft.kind,
+                    filePath: docDraft.filePath,
+                    summary: docDraft.summary || null,
+                  }).then(() => {
+                    setDocDraft({ kind: "cma_report", filePath: "", summary: "" });
+                    setActionMode(null);
+                  });
+                }}
+              >
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input value={docDraft.kind} onChange={(event) => setDocDraft((prev) => ({ ...prev, kind: event.target.value }))} placeholder="kind, e.g. cma_report" className="h-10 rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground" />
+                  <input value={docDraft.filePath} onChange={(event) => setDocDraft((prev) => ({ ...prev, filePath: event.target.value }))} placeholder="/path/to/file.pdf" className="h-10 rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground" />
+                </div>
+                <input value={docDraft.summary} onChange={(event) => setDocDraft((prev) => ({ ...prev, summary: event.target.value }))} placeholder="summary" className="h-10 rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground" />
+                <Button size="sm" type="submit" disabled={busy || !docDraft.kind.trim() || !docDraft.filePath.trim()}>Attach document</Button>
+              </form>
+            )}
+
+            {actionMode === "contact" && (
+              <form
+                className="mt-3 grid gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void onAddContact({
+                    role: contactDraft.role,
+                    contactId: contactDraft.contactId,
+                    notes: contactDraft.notes || null,
+                  }).then(() => {
+                    setContactDraft({ role: "lawyer", contactId: "", notes: "" });
+                    setActionMode(null);
+                  });
+                }}
+              >
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input value={contactDraft.role} onChange={(event) => setContactDraft((prev) => ({ ...prev, role: event.target.value }))} placeholder="role, e.g. lawyer" className="h-10 rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground" />
+                  <input value={contactDraft.contactId} onChange={(event) => setContactDraft((prev) => ({ ...prev, contactId: event.target.value }))} placeholder="contact id" className="h-10 rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground" />
+                </div>
+                <input value={contactDraft.notes} onChange={(event) => setContactDraft((prev) => ({ ...prev, notes: event.target.value }))} placeholder="notes" className="h-10 rounded-md border border-border/60 bg-background px-2 text-[0.8rem] text-foreground" />
+                <Button size="sm" type="submit" disabled={busy || !contactDraft.role.trim() || !contactDraft.contactId.trim()}>Add co-contact</Button>
+              </form>
+            )}
+          </div>
+
+          {pendingHumanRuns.length > 0 && (
+            <div className="rounded-lg border border-warning/35 bg-warning/10 px-3 py-2">
+              <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-warning">
+                Pending approvals
+              </div>
+              <div className="mt-2 space-y-2">
+                {pendingHumanRuns.map((run) => (
+                  <div key={run.id} className="flex items-center justify-between gap-2 text-[0.78rem]">
+                    <span className="min-w-0 truncate text-foreground">{run.registryName ?? run.skill ?? "Admin run"}</span>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => void onApproveRun(run.id)}>
+                      Approve
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </section>
@@ -7162,12 +7383,14 @@ function AdminCardDetailPanel({
   onToggleItem,
   onConditionChange,
   onMoveToNext,
+  onDealUpdated,
 }: {
   card: AdminCard;
   onClose: () => void;
   onToggleItem: (stage: AdminStageNumber, itemId: string, completed: boolean) => void;
   onConditionChange: (field: AdminConditionField, value: AdminConditionValue) => void;
   onMoveToNext: () => void;
+  onDealUpdated: (deal: AdminDeal) => void;
 }) {
   const nextStage = adminNextStage(card);
   const currentProgress = getCardProgress(card);
@@ -7180,6 +7403,7 @@ function AdminCardDetailPanel({
   const [dealContext, setDealContext] = useState<DealContext | null>(null);
   const [dealContextLoading, setDealContextLoading] = useState(false);
   const [dealContextError, setDealContextError] = useState<string | null>(null);
+  const [dealActionBusy, setDealActionBusy] = useState(false);
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
 
@@ -7214,6 +7438,39 @@ function AdminCardDetailPanel({
       active = false;
     };
   }, [card.id]);
+
+  const reloadDealContext = useCallback(async () => {
+    if (!isPersistedAdminDealId(card.id)) return null;
+    const context = await api.getDealContext(card.id);
+    setDealContext(context);
+    onDealUpdated(context.deal);
+    return context;
+  }, [card.id, onDealUpdated]);
+
+  const runDealAction = useCallback(
+    async (action: () => Promise<void>) => {
+      setDealActionBusy(true);
+      setDealContextError(null);
+      try {
+        await action();
+      } catch (err) {
+        setDealContextError(errorMessage(err, "Deal action failed"));
+      } finally {
+        setDealActionBusy(false);
+      }
+    },
+    [],
+  );
+
+  const handleAdvancePhase = useCallback(
+    (force = false) =>
+      runDealAction(async () => {
+        const context = await api.advanceDeal(card.id, force);
+        setDealContext(context);
+        onDealUpdated(context.deal);
+      }),
+    [card.id, onDealUpdated, runDealAction],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -7273,6 +7530,8 @@ function AdminCardDetailPanel({
 
   const due = dueLabel(card.daysOut);
   const laneLabel = ADMIN_SIDE_LABELS[card.side].title;
+  const phaseGate = dealContext?.dealFlow?.gate ?? null;
+  const showAdvancePrompt = nextStage != null && nextLabel && (phaseGate ? phaseGate.canAdvance : currentComplete);
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center sm:items-center sm:p-6">
@@ -7341,7 +7600,7 @@ function AdminCardDetailPanel({
           </button>
         </header>
 
-        {currentComplete && nextStage != null && nextLabel && (
+        {showAdvancePrompt && nextStage != null && nextLabel && (
           <div className="border-b border-border/60 bg-primary/5 px-4 py-2.5">
             <div className="flex items-center gap-2 text-[0.78rem]">
               <CheckCircle2 className="h-4 w-4 text-primary" />
@@ -7350,7 +7609,10 @@ function AdminCardDetailPanel({
               </span>
               <button
                 type="button"
-                onClick={onMoveToNext}
+                onClick={() => {
+                  if (phaseGate) void handleAdvancePhase(false);
+                  else onMoveToNext();
+                }}
                 className="ml-auto inline-flex min-h-11 items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 font-mono-ui text-[0.66rem] uppercase tracking-wider text-primary hover:bg-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/30"
               >
                 Move card →
@@ -7365,6 +7627,33 @@ function AdminCardDetailPanel({
             context={dealContext}
             loading={dealContextLoading}
             error={dealContextError}
+            busy={dealActionBusy}
+            onAdvance={handleAdvancePhase}
+            onUpdateFields={(fields) =>
+              runDealAction(async () => {
+                const deal = await api.updateDealFields(card.id, fields);
+                onDealUpdated(deal);
+                await reloadDealContext();
+              })
+            }
+            onAddAttachment={(body) =>
+              runDealAction(async () => {
+                await api.addDealAttachment(card.id, body);
+                await reloadDealContext();
+              })
+            }
+            onAddContact={(body) =>
+              runDealAction(async () => {
+                await api.addDealContact(card.id, body);
+                await reloadDealContext();
+              })
+            }
+            onApproveRun={(runId) =>
+              runDealAction(async () => {
+                await api.recordDealRunResult(card.id, runId, { status: "completed" });
+                await reloadDealContext();
+              })
+            }
           />
           <div className="flex flex-col gap-2">
             {ADMIN_STAGE_NUMBERS.map((stage) => (
@@ -8071,6 +8360,18 @@ function AdminKanbanBoard() {
         onCardSelect={setSelectedCardId}
         onCardDragStart={handleCardDragStart}
       />
+      {!adminDeals.loading && !adminDeals.error && cards.length === 0 && (
+        <div className="rounded-2xl border border-dashed border-border/60 bg-card/25 px-4 py-6 text-center">
+          <div className="text-[0.95rem] font-semibold text-foreground">No saved transaction files yet</div>
+          <div className="mx-auto mt-1 max-w-xl text-[0.78rem] leading-5 text-muted-foreground">
+            Create a real deal or push a qualified profile from Leads. The Admin board will stay empty until a saved source-of-truth deal exists.
+          </div>
+          <Button className="mt-3" size="sm" onClick={() => setShowNewDeal(true)}>
+            <Plus className="h-3.5 w-3.5" />
+            New deal
+          </Button>
+        </div>
+      )}
       <div role="tablist" aria-label="Deal side" className="flex items-center gap-1 border-b border-border/60">
         {(["listing", "buyer"] as AdminSide[]).map((side) => {
           const active = activeSide === side;
@@ -8120,6 +8421,7 @@ function AdminKanbanBoard() {
           onToggleItem={(_stage, itemId, completed) => handleToggleItem(selectedCard.id, itemId, completed)}
           onConditionChange={(field, value) => handleConditionChange(selectedCard.id, field, value)}
           onMoveToNext={() => handleMoveToNext(selectedCard.id)}
+          onDealUpdated={(deal) => adminDeals.replaceLocalDeal(selectedCard.id, deal)}
         />
       )}
       {showNewDeal && (

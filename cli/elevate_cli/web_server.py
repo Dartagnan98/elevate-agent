@@ -2984,9 +2984,15 @@ class _RunResultBody(BaseModel):
     artifacts: List[_RunResultArtifact] = []
     next_tasks: List[Dict[str, Any]] = []
     nextTasks: List[Dict[str, Any]] = []
+    checklist_updates: List[Dict[str, Any]] = []
+    checklistUpdates: List[Dict[str, Any]] = []
     human_prompt: Optional[Dict[str, Any]] = None
     humanPrompt: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+
+class _DealAdvanceBody(BaseModel):
+    force: bool = False
 
 
 class _AdminActionCreateBody(BaseModel):
@@ -3446,6 +3452,41 @@ async def post_deal_fields(deal_id: str, body: _DealFieldsBody):
         raise HTTPException(status_code=500, detail=f"Deal field update failed: {exc}")
 
 
+@app.post("/api/deals/{deal_id}/advance")
+async def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
+    """Advance a deal to the next package phase when its gate is clear."""
+    try:
+        from elevate_cli.data import connect, get_deal_context, move_deal_stage
+
+        with connect() as conn:
+            context = get_deal_context(conn, deal_id)
+            gate = ((context.get("dealFlow") or {}).get("gate") or {})
+            next_stage = gate.get("nextStage")
+            if next_stage is None:
+                raise HTTPException(status_code=400, detail="deal is already at the final stage")
+            if not body.force and not gate.get("canAdvance"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "deal phase gate is blocked",
+                        "gate": gate,
+                    },
+                )
+            move_deal_stage(conn, deal_id, to_stage=int(next_stage), actor=_WEB_ACTOR)
+            return get_deal_context(conn, deal_id)
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/deals/%s/advance failed", deal_id)
+        raise HTTPException(status_code=500, detail=f"Deal advance failed: {exc}")
+
+
 @app.post("/api/deals/{deal_id}/contacts")
 async def post_deal_contact(deal_id: str, body: _DealContactBody):
     """Attach a co-contact role (lawyer/lender/inspector/etc.) to a deal."""
@@ -3512,6 +3553,7 @@ async def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
 
         artifacts = [item.model_dump(exclude_none=True) for item in body.artifacts]
         next_tasks = body.next_tasks or body.nextTasks
+        checklist_updates = body.checklist_updates or body.checklistUpdates
         human_prompt = body.human_prompt or body.humanPrompt
         with connect() as conn:
             return record_run_result(
@@ -3521,6 +3563,7 @@ async def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
                 status=body.status,
                 artifacts=artifacts,
                 next_tasks=next_tasks,
+                checklist_updates=checklist_updates,
                 human_prompt=human_prompt,
                 error=body.error,
                 actor="skill:web-callback",

@@ -884,16 +884,61 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
             conn.execute("SELECT * FROM contacts WHERE id=?", (deal["primaryContactId"],)).fetchone()
         )
     conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
+    checklist = deal.get("extraToggles") or {}
+    attachments = list_deal_attachments(conn, deal_id)
+    prior_runs = list_deal_action_runs(conn, deal_id)
+    from elevate_cli.admin_deal_flow import resolve_deal_phase
+
+    deal_flow = resolve_deal_phase(
+        deal=deal,
+        checklist=checklist,
+        attachments=attachments,
+        prior_runs=prior_runs,
+        conditions=conditions,
+    )
     return {
         "deal": deal,
         "primaryContact": primary,
         "coContacts": list_deal_contacts(conn, deal_id),
         "conditions": conditions,
-        "checklist": deal.get("extraToggles") or {},
-        "attachments": list_deal_attachments(conn, deal_id),
-        "priorRuns": list_deal_action_runs(conn, deal_id),
+        "checklist": checklist,
+        "attachments": attachments,
+        "priorRuns": prior_runs,
+        "dealFlow": deal_flow,
         "events": list_deal_events(conn, deal_id, limit=50),
     }
+
+
+_ARTIFACT_CHECKLIST_HINTS = {
+    "cma_report": "draft-cma-followup",
+    "title_search": "pull-title",
+    "title_pdf": "pull-title",
+    "mlc_pdf": "fill-mlc",
+    "mlc_form": "fill-mlc",
+    "signed_envelope": "track-signatures",
+    "signed_docs": "track-signatures",
+    "listing_photos": "organize-photos",
+    "feature_sheet": "feature-sheet",
+    "showingtime_digest": "showingtime-digest",
+    "offer_pdf": "offer-summary",
+    "offer_summary": "offer-summary",
+    "deposit_receipt": "deposit-confirmed",
+    "inspection_report": "inspection-timing",
+    "strata_docs": "strata-docs-review",
+}
+
+
+def _explicit_checklist_updates(items: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None) -> dict[str, bool]:
+    if not items:
+        return {}
+    if isinstance(items, Mapping):
+        return {str(k): bool(v) for k, v in items.items()}
+    updates: dict[str, bool] = {}
+    for item in items:
+        key = item.get("id") or item.get("itemId") or item.get("field")
+        if key:
+            updates[str(key)] = bool(item.get("completed", True))
+    return updates
 
 
 def record_run_result(
@@ -904,6 +949,7 @@ def record_run_result(
     status: str,
     artifacts: Sequence[Mapping[str, Any]] | None = None,
     next_tasks: Sequence[Mapping[str, Any]] | None = None,
+    checklist_updates: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None = None,
     human_prompt: Mapping[str, Any] | None = None,
     error: str | None = None,
     actor: str = "skill",
@@ -929,6 +975,7 @@ def record_run_result(
         "status": status,
         "artifacts": [dict(item) for item in (artifacts or [])],
         "nextTasks": [dict(item) for item in (next_tasks or [])],
+        "checklistUpdates": checklist_updates,
         "humanPrompt": dict(human_prompt) if human_prompt else None,
         "error": error,
         "recordedAt": now,
@@ -947,6 +994,34 @@ def record_run_result(
         )
         if output_path is None:
             output_path = attachment["filePath"]
+    if normalized_status in {"succeeded", "completed"}:
+        updates = _explicit_checklist_updates(checklist_updates)
+        for artifact in artifacts or []:
+            hinted = _ARTIFACT_CHECKLIST_HINTS.get(str(artifact.get("kind") or ""))
+            if hinted:
+                updates.setdefault(hinted, True)
+        for field, value in updates.items():
+            set_deal_toggle(conn, deal_id, field=field, value=value, actor=actor)
+        if next_tasks:
+            from elevate_cli.data.dispatch import queue_action_run
+
+            for task in next_tasks:
+                skill = task.get("skill")
+                if not skill:
+                    continue
+                task_payload = {
+                    "sourceRunId": run_id,
+                    "nextTask": dict(task),
+                }
+                queue_action_run(
+                    conn,
+                    deal_id=deal_id,
+                    skill=str(skill),
+                    name=str(task.get("name") or f"Next task: {skill}"),
+                    payload=task_payload,
+                    create_cron_job=bool(task.get("runNow") or task.get("run_now")),
+                    actor=actor,
+                )
     conn.execute(
         """
         UPDATE admin_action_runs

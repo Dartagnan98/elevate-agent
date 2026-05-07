@@ -506,6 +506,12 @@ export const api = {
     }),
   getDealContext: (dealId: string) =>
     fetchJSON<DealContext>(`/api/deals/${encodeURIComponent(dealId)}/context`),
+  advanceDeal: (dealId: string, force = false) =>
+    fetchJSON<DealContext>(`/api/deals/${encodeURIComponent(dealId)}/advance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
+    }),
   updateDealFields: (dealId: string, fields: Record<string, unknown>) =>
     fetchJSON<AdminDeal>(`/api/deals/${encodeURIComponent(dealId)}/fields`, {
       method: "POST",
@@ -981,9 +987,65 @@ export interface DealRunResultRequest {
   artifacts?: DealRunResultArtifact[];
   next_tasks?: Array<Record<string, unknown>>;
   nextTasks?: Array<Record<string, unknown>>;
+  checklist_updates?: Array<Record<string, unknown>>;
+  checklistUpdates?: Array<Record<string, unknown>>;
   human_prompt?: Record<string, unknown> | null;
   humanPrompt?: Record<string, unknown> | null;
   error?: string | null;
+}
+
+export interface DealFlowChecklistItem {
+  id: string;
+  label: string;
+  required?: boolean;
+}
+
+export interface DealFlowFieldRequirement {
+  field: string;
+  label: string;
+}
+
+export interface DealFlowDocRequirement {
+  kind: string;
+  label: string;
+}
+
+export interface DealFlowRunBlocker {
+  id: string;
+  label: string;
+  status: string;
+  updatedAt?: string | null;
+}
+
+export interface DealPhaseGate {
+  stage: number;
+  stageName: string;
+  nextStage: number | null;
+  nextStageName: string | null;
+  canAdvance: boolean;
+  completedChecklist: number;
+  totalChecklist: number;
+  missingChecklist: DealFlowChecklistItem[];
+  missingFields: DealFlowFieldRequirement[];
+  missingDocs: DealFlowDocRequirement[];
+  blockingRuns: DealFlowRunBlocker[];
+}
+
+export interface DealFlowResolution {
+  packageKey: string;
+  side: AdminDealSide;
+  stage: number;
+  stageName: string;
+  stageSubtitle: string;
+  nextStage: number | null;
+  nextStageName: string | null;
+  checklistItems: DealFlowChecklistItem[];
+  requiredFields: DealFlowFieldRequirement[];
+  requiredDocs: DealFlowDocRequirement[];
+  requiredForms: Array<{ code: string; name: string }>;
+  automationTriggers: Array<{ id: string; label: string; skill: string }>;
+  localOverrides: Record<string, unknown>;
+  gate: DealPhaseGate;
 }
 
 export interface DealContext {
@@ -994,6 +1056,7 @@ export interface DealContext {
   checklist: Record<string, unknown>;
   attachments: DealAttachment[];
   priorRuns: AdminActionRun[];
+  dealFlow?: DealFlowResolution;
   events: Array<Record<string, unknown>>;
 }
 

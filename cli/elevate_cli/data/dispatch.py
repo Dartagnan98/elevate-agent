@@ -44,9 +44,12 @@ _VALID_RUN_STATUSES = {
     "queued",
     "running",
     "succeeded",
+    "completed",
     "failed",
     "skipped",
     "cancelled",
+    "waiting_human",
+    "waiting_external",
 }
 
 
@@ -435,6 +438,59 @@ def _insert_run(
         "SELECT * FROM admin_action_runs WHERE id=?", (rid,)
     ).fetchone()
     return _row_to_run(row)
+
+
+def queue_action_run(
+    conn: sqlite3.Connection,
+    *,
+    deal_id: str,
+    skill: str,
+    name: str | None = None,
+    payload: Mapping[str, Any] | None = None,
+    create_cron_job: bool = False,
+    actor: str = "system",
+) -> dict[str, Any]:
+    """Queue one ad-hoc Admin action run.
+
+    Skill callbacks use this for ``next_tasks``.  The row still references a
+    registry entry so the existing schema remains intact, but the registry row
+    is disabled and manual-only; it is not a durable automation rule.
+    """
+    if not skill or not skill.strip():
+        raise ValueError("skill is required")
+    deal_row = conn.execute("SELECT * FROM deals WHERE id=?", (deal_id,)).fetchone()
+    if deal_row is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    from elevate_cli.data.deals import _row_to_deal  # local import to avoid cycles
+
+    deal = _row_to_deal(deal_row)
+    action = create_action(
+        conn,
+        name=name or f"Next task: {skill.strip()}",
+        trigger="manual",
+        skill=skill.strip(),
+        side=deal["side"],
+        enabled=False,
+    )
+    run_payload = {
+        "trigger": "next_task",
+        "dealSide": deal["side"],
+        "currentStage": deal["currentStage"],
+        "province": deal["province"],
+        "registryName": action["name"],
+        **(dict(payload) if payload else {}),
+    }
+    cron_job_id: str | None = None
+    if create_cron_job:
+        cron_job_id = _spawn_cron_job(action=action, deal=deal, actor=actor, payload=run_payload)
+    return _insert_run(
+        conn,
+        registry_id=action["id"],
+        deal_id=deal_id,
+        deal_event_id=None,
+        payload=run_payload,
+        cron_job_id=cron_job_id,
+    )
 
 
 # --- Condition evaluator ----------------------------------------------
