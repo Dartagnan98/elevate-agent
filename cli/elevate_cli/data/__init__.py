@@ -142,6 +142,13 @@ from elevate_cli.data.dispatch import (
     update_action,
     upsert_conditional_doc,
 )
+from elevate_cli.data.sheet_import import (
+    fetch_public_google_sheet_csv,
+    google_sheet_csv_url,
+    import_google_listing_sheet,
+    import_listing_sheet_csv,
+    parse_listing_sheet_csv,
+)
 
 
 __all__ = [
@@ -197,6 +204,10 @@ __all__ = [
     "create_action", "delete_action", "evaluate_dispatch", "get_action",
     "list_action_runs", "list_actions", "list_conditional_docs",
     "queue_action_run", "update_action", "upsert_conditional_doc",
+    # sheet import
+    "fetch_public_google_sheet_csv", "google_sheet_csv_url",
+    "import_google_listing_sheet", "import_listing_sheet_csv",
+    "parse_listing_sheet_csv",
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
     "eligible_templates", "pick_template",

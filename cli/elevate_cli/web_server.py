@@ -3003,6 +3003,14 @@ class _AdminTaskRunBody(BaseModel):
     runNow: bool = True
 
 
+class _AdminSheetImportBody(BaseModel):
+    sheetId: str = "1OQDduX6hqpEiErA8Q6Mx86vaKX5dQhHS5btPfxJMMrw"
+    gid: str = "204411937"
+    province: str = "BC"
+    csvText: Optional[str] = None
+    dryRun: bool = False
+
+
 class _AdminActionCreateBody(BaseModel):
     name: str
     trigger: str
@@ -3402,6 +3410,69 @@ async def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
     except Exception as exc:
         _log.exception("POST /api/admin/deals/%s/toggle failed", deal_id)
         raise HTTPException(status_code=500, detail=f"Toggle deal failed: {exc}")
+
+
+@app.post("/api/admin/deals/import-sheet")
+async def post_admin_deals_import_sheet(body: _AdminSheetImportBody):
+    """Import a Skyleigh-style Google Sheet into Admin Hub deal files."""
+    try:
+        from elevate_cli.data import (
+            connect,
+            import_google_listing_sheet,
+            import_listing_sheet_csv,
+            parse_listing_sheet_csv,
+        )
+
+        sheet_id = (body.sheetId or "").strip()
+        gid = (body.gid or "").strip()
+        province = (body.province or "BC").strip().upper()
+        if not sheet_id:
+            raise HTTPException(status_code=400, detail="sheetId is required")
+        if not gid:
+            raise HTTPException(status_code=400, detail="gid is required")
+        if body.dryRun:
+            csv_text = body.csvText
+            if csv_text is None:
+                from elevate_cli.data.sheet_import import fetch_public_google_sheet_csv
+
+                csv_text = fetch_public_google_sheet_csv(sheet_id=sheet_id, gid=gid)
+            rows = parse_listing_sheet_csv(csv_text, sheet_id=sheet_id, gid=gid)
+            return {
+                "dryRun": True,
+                "sheetId": sheet_id,
+                "gid": gid,
+                "province": province,
+                "count": len(rows),
+                "items": rows,
+            }
+        with connect() as conn:
+            if body.csvText is not None:
+                return import_listing_sheet_csv(
+                    conn,
+                    body.csvText,
+                    sheet_id=sheet_id,
+                    gid=gid,
+                    province=province,
+                    actor=_WEB_ACTOR,
+                )
+            return import_google_listing_sheet(
+                conn,
+                sheet_id=sheet_id,
+                gid=gid,
+                province=province,
+                actor=_WEB_ACTOR,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/deals/import-sheet failed")
+        raise HTTPException(status_code=500, detail=f"Import sheet failed: {exc}")
 
 
 

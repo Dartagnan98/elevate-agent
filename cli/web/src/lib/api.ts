@@ -504,6 +504,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ field, value }),
     }),
+  importAdminDealsSheet: (body: AdminSheetImportRequest = {}) =>
+    fetchJSON<AdminSheetImportResponse>("/api/admin/deals/import-sheet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   getDealContext: (dealId: string) =>
     fetchJSON<DealContext>(`/api/deals/${encodeURIComponent(dealId)}/context`),
   advanceDeal: (dealId: string, force = false) =>
@@ -886,6 +892,10 @@ export interface AdminDeal {
   province: string | null;
   board?: string | null;
   market?: string | null;
+  sourceKey?: string | null;
+  sourceRowId?: string | null;
+  sourceLabel?: string | null;
+  sourceSyncedAt?: string | null;
   primaryContactId: string | null;
   loftyContactId: string | null;
   listingAddress: string | null;
@@ -1122,6 +1132,26 @@ export interface AdminDealsResponse {
   items: AdminDeal[];
   count: number;
   jurisdiction?: AdminJurisdiction;
+}
+
+export interface AdminSheetImportRequest {
+  sheetId?: string;
+  gid?: string;
+  province?: string;
+  csvText?: string | null;
+  dryRun?: boolean;
+}
+
+export interface AdminSheetImportResponse {
+  source?: string;
+  sheetId: string;
+  gid: string;
+  province: string;
+  count: number;
+  created?: number;
+  updated?: number;
+  dryRun?: boolean;
+  items: Array<AdminDeal | Record<string, unknown>>;
 }
 
 export interface AdminContact {

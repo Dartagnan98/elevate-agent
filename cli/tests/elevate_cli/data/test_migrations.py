@@ -35,10 +35,8 @@ def test_first_connect_applies_initial_migration():
             "SELECT version, name FROM _schema_migrations ORDER BY version"
         ).fetchall()
         assert [(r[0], r[1]) for r in rows] == [
-            ("0001", "0001_init.sql"),
-            ("0002", "0002_identity_conflicts_unique.sql"),
-            ("0003", "0003_admin_hub_deals.sql"),
-            ("0004", "0004_admin_dispatch.sql"),
+            (migration.version, migration.name)
+            for migration in migrations.discover()
         ]
 
 
@@ -88,7 +86,7 @@ def test_second_connect_is_noop():
     _reset_schema_cache()  # second open re-checks ledger
     with connect() as conn:
         applied = migrations.applied(conn)
-        assert list(applied) == ["0001", "0002", "0003", "0004"]
+        assert list(applied) == [migration.version for migration in migrations.discover()]
         c = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
         assert c == 1, "second open dropped data"
 

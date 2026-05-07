@@ -33,6 +33,16 @@ from typing import Iterable, NamedTuple
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _VERSION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
+_COMPATIBLE_PRIOR_HASHES = {
+    # 0003 shipped briefly with province defaulting to "BC" before the
+    # package work moved jurisdiction defaults into config. The table shape is
+    # compatible with the current migration, and later migrations add the
+    # source-of-truth columns. Normalize the ledger instead of blocking existing
+    # local operator DBs forever.
+    "0003": {
+        "bbc136276d60302d56289888ccb91b7fb8bc30547aba07587168c6d1912d573a",
+    },
+}
 
 
 class MigrationError(RuntimeError):
@@ -127,6 +137,13 @@ def run_pending(conn: sqlite3.Connection) -> list[str]:
         prior = seen.get(f.version)
         if prior is not None:
             if prior["sha256"] != f.sha256:
+                if prior["sha256"] in _COMPATIBLE_PRIOR_HASHES.get(f.version, set()):
+                    conn.execute(
+                        "UPDATE _schema_migrations SET name=?, sha256=? WHERE version=?",
+                        (f.name, f.sha256, f.version),
+                    )
+                    conn.commit()
+                    continue
                 raise MigrationDriftError(
                     f"migration {f.version} on disk differs from applied "
                     f"copy: stored sha256={prior['sha256']} but file is "
