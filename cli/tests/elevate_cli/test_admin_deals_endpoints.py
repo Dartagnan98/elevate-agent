@@ -192,6 +192,42 @@ def test_move_deal_endpoint_persists_stage_and_event(client):
     assert events[0]["toStage"] == 3
 
 
+def test_current_workflow_stage_complete_toggle_advances_deal(client):
+    deal = _create(title="Auto move me", current_stage=5)
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/toggle",
+        json={"field": "workflow_stage_5_complete", "value": True},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["currentStage"] == 6
+    assert body["extraToggles"]["workflow_stage_5_complete"] is True
+
+    with connect() as conn:
+        events = list_deal_events(conn, deal["id"])
+    assert any(event["kind"] == "toggle_change" and event["fieldName"] == "workflow_stage_5_complete" for event in events)
+    transition = next(event for event in events if event["kind"] == "stage_transition")
+    assert transition["fromStage"] == 5
+    assert transition["toStage"] == 6
+
+
+def test_non_current_workflow_stage_complete_does_not_jump_deal(client):
+    deal = _create(title="Stay put", current_stage=5)
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/toggle",
+        json={"field": "workflow_stage_4_complete", "value": True},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["currentStage"] == 5
+    with connect() as conn:
+        events = list_deal_events(conn, deal["id"])
+    assert not any(event["kind"] == "stage_transition" for event in events)
+
+
 def test_toggle_deal_endpoint_persists_named_and_checklist_fields(client):
     deal = _create(title="Toggle me")
 
@@ -592,6 +628,42 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
         attachments = list_deal_attachments(conn, deal["id"])
     assert any(run["payload"].get("trigger") == "next_task" for run in queued)
     assert len([item for item in attachments if item["sourceRunId"] == run_id]) == 1
+
+
+def test_run_result_stage_complete_update_advances_deal(client):
+    deal = _create(title="AI auto move", current_stage=1)
+    with connect() as conn:
+        create_action(
+            conn,
+            name="Listing initiated action",
+            trigger="stage_entry",
+            skill="mlc:intake",
+            side="listing",
+            to_stage=1,
+        )
+        runs = evaluate_dispatch(
+            conn,
+            deal_id=deal["id"],
+            trigger="stage_entry",
+            actor="human:test",
+            to_stage=1,
+        )
+    run_id = runs[0]["id"]
+
+    resp = client.post(
+        f"/api/deals/{deal['id']}/runs/{run_id}/result",
+        json={
+            "status": "completed",
+            "idempotencyKey": "stage-complete-auto-move",
+            "checklist_updates": [{"id": "workflow_stage_1_complete", "completed": True}],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    context = client.get(f"/api/deals/{deal['id']}/context")
+    assert context.status_code == 200, context.text
+    assert context.json()["deal"]["currentStage"] == 2
+    assert context.json()["checklist"]["workflow_stage_1_complete"] is True
 
 
 def test_admin_deals_requires_session_token():

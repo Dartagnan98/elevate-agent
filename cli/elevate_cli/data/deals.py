@@ -13,6 +13,7 @@ Public surface:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Mapping, Sequence
 
@@ -64,6 +65,7 @@ _FIELD_API_NAMES = {
     "delayed_offer": "delayedOffer",
     "sale_of_buyers_property": "saleOfBuyersProperty",
 }
+_WORKFLOW_STAGE_COMPLETE_RE = re.compile(r"^workflow_stage_(\d+)_complete$")
 
 
 def _decode_json(value: str | None) -> Any:
@@ -540,7 +542,47 @@ def set_deal_toggle(
             ),
         ),
     )
+    _maybe_advance_from_stage_complete(conn, deal_id, field=field, value=new_value, actor=actor)
     return get_deal(conn, deal_id)  # type: ignore[return-value]
+
+
+def _workflow_stage_complete_stage(field: str) -> int | None:
+    match = _WORKFLOW_STAGE_COMPLETE_RE.match(field)
+    if not match:
+        return None
+    try:
+        return _validate_stage(int(match.group(1)))
+    except ValueError:
+        return None
+
+
+def _is_completion_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
+    return False
+
+
+def _maybe_advance_from_stage_complete(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    field: str,
+    value: Any,
+    actor: str,
+) -> dict[str, Any] | None:
+    completed_stage = _workflow_stage_complete_stage(field)
+    if completed_stage is None or completed_stage >= 9 or not _is_completion_value(value):
+        return None
+    deal = get_deal(conn, deal_id)
+    if deal is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    if int(deal.get("currentStage") or 0) != completed_stage:
+        return None
+    return move_deal_stage(conn, deal_id, to_stage=completed_stage + 1, actor=actor)
 
 
 def _dispatch_safely(
