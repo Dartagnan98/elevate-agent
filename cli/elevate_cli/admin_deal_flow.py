@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 
 DEFAULT_PACKAGE_KEY = "generic.real-estate"
-KAMLOOPS_PACKAGE_KEY = "ca.bc.aoir.kamloops"
+BC_PACKAGE_KEY = "ca.bc"
 
 
 def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: list[tuple[str, str]] | None = None, docs: list[tuple[str, str]] | None = None, forms: list[tuple[str, str]] | None = None, triggers: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
@@ -28,17 +28,17 @@ def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: l
     }
 
 
-_KAMLOOPS: dict[str, Any] = {
-    "packageKey": KAMLOOPS_PACKAGE_KEY,
+_BC: dict[str, Any] = {
+    "packageKey": BC_PACKAGE_KEY,
     "country": "CA",
     "province": "BC",
-    "board": "AOIR",
-    "market": "Kamloops",
+    "board": "",
+    "market": "",
     "localOverrides": {
-        "mlsBoard": "AOIR",
-        "marketLabel": "Kamloops + Interior BC",
+        "provinceLabel": "British Columbia",
+        "marketLabel": "BC",
         "defaultCurrency": "CAD",
-        "preferredShowingSource": "ShowingTime",
+        "preferredShowingSource": "Configured showing source",
     },
     "listing": {
         "stages": [
@@ -78,15 +78,15 @@ _KAMLOOPS: dict[str, Any] = {
             ),
             _stage(
                 "Pre-Launch",
-                "MLC + signing",
+                "Forms + signing",
                 [
-                    ("fill-mlc", "Fill MLC + required forms"),
-                    ("digisign-send", "Send DigiSign envelope"),
+                    ("fill-listing-forms", "Fill listing agreement + required forms"),
+                    ("digisign-send", "Send signing envelope"),
                     ("track-signatures", "Confirm all signatures received"),
                 ],
-                docs=[("mlc_pdf", "MLC PDF"), ("signed_envelope", "Signed listing envelope")],
-                forms=[("MLC", "AOIR Multiple Listing Contract"), ("FINTRAC", "FINTRAC identity form")],
-                triggers=[("mlc-workflow", "Run MLC workflow", "mlc"), ("digisign-sync", "Sync DigiSign status", "digisign")],
+                docs=[("listing_agreement_pdf", "Listing agreement PDF"), ("signed_envelope", "Signed listing envelope")],
+                forms=[("LISTING_AGREEMENT", "Listing agreement"), ("FINTRAC", "FINTRAC identity form")],
+                triggers=[("listing-paperwork", "Run listing paperwork workflow", "listing-paperwork"), ("digisign-sync", "Sync signing status", "digisign")],
             ),
             _stage(
                 "Marketing",
@@ -105,9 +105,9 @@ _KAMLOOPS: dict[str, Any] = {
                 "Updates + OH",
                 [
                     ("open-house", "Open house scheduled"),
-                    ("showingtime-digest", "Weekly ShowingTime + market digest sent"),
+                    ("showing-digest", "Weekly showing + market digest sent"),
                 ],
-                triggers=[("showingtime-digest", "Attach ShowingTime digest", "showingtime")],
+                triggers=[("showing-digest", "Attach showing digest", "showing-digest")],
             ),
             _stage(
                 "Offer",
@@ -171,7 +171,7 @@ _KAMLOOPS: dict[str, Any] = {
 
 
 def _generic_package() -> dict[str, Any]:
-    package = deepcopy(_KAMLOOPS)
+    package = deepcopy(_BC)
     package.update(
         {
             "packageKey": DEFAULT_PACKAGE_KEY,
@@ -220,7 +220,7 @@ def _generic_package() -> dict[str, Any]:
 
 _PACKAGES: dict[str, dict[str, Any]] = {
     DEFAULT_PACKAGE_KEY: _generic_package(),
-    KAMLOOPS_PACKAGE_KEY: _KAMLOOPS,
+    BC_PACKAGE_KEY: _BC,
 }
 
 
@@ -253,6 +253,17 @@ def _slug(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "-")
 
 
+def _known_or_default(package_key: str) -> str:
+    if package_key in _PACKAGES:
+        return package_key
+    parts = package_key.split(".")
+    if len(parts) >= 2:
+        province_key = ".".join(parts[:2])
+        if province_key in _PACKAGES:
+            return province_key
+    return DEFAULT_PACKAGE_KEY
+
+
 def package_key_from_jurisdiction(
     *,
     country: Any = None,
@@ -263,15 +274,13 @@ def package_key_from_jurisdiction(
 ) -> str:
     explicit = _slug(package_key)
     if explicit:
-        return explicit if explicit in _PACKAGES else DEFAULT_PACKAGE_KEY
+        return _known_or_default(explicit)
     province_slug = _slug(province)
-    board_slug = _slug(board)
-    market_slug = _slug(market)
-    if not (province_slug and board_slug and market_slug):
+    if not province_slug:
         return DEFAULT_PACKAGE_KEY
     country_slug = _slug(country) or "ca"
-    candidate = ".".join(part for part in (country_slug, province_slug, board_slug, market_slug) if part)
-    return candidate if candidate in _PACKAGES else DEFAULT_PACKAGE_KEY
+    candidate = ".".join(part for part in (country_slug, province_slug) if part)
+    return _known_or_default(candidate)
 
 
 def package_key_from_deal(deal: Mapping[str, Any]) -> str:

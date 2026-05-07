@@ -253,7 +253,7 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["primaryContact"]["displayName"] == "Seller One"
     assert body["conditions"]["property_subtype"] == "strata"
     assert body["checklist"]["draft-cma-followup"] is True
-    assert body["dealFlow"]["packageKey"] == "generic.real-estate"
+    assert body["dealFlow"]["packageKey"] == "ca.bc"
     assert body["dealFlow"]["gate"]["stageName"] == "CMA"
     assert body["dealFlow"]["gate"]["canAdvance"] is False
     assert body["coContacts"][0]["role"] == "lawyer"
