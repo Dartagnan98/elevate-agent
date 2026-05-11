@@ -1,9 +1,9 @@
 // Hardcoded fixture data used when ELEVATE_DEV_FIXTURE=1.
-// Lets us verify the round trip without a live Supabase.
+// Lets us verify the round trip without a live HQ database.
 
 export const FIXTURE_USER = {
   id: "00000000-0000-0000-0000-000000000001",
-  email: "dev@ctrlstrategies.com",
+  email: "dev@elevationrealestatehq.com",
   tier: "pro" as const,
 };
 
@@ -18,7 +18,7 @@ export const FIXTURE_SKILLS = [
       description: "Generate a comparative market analysis from MLS + local comps.",
       tags: ["real-estate", "pricing"],
     },
-    body: "# CMA Generator\n\nProduce a full CMA for the provided listing...\n\n(stub fixture body — real skill loads from Supabase in prod)\n",
+    body: "# CMA Generator\n\nProduce a full CMA for the provided listing...\n\n(stub fixture body — real skill loads from the HQ skill store in prod)\n",
   },
   {
     name: "listing-outreach",

@@ -162,7 +162,7 @@ ensure_elevate_soul() {
     fi
 
     cat > "$elevate_home/SOUL.md" <<'EOF'
-You are Elevate, the AI chief of staff for real estate agents, built by Ctrl Strategies. You know the agent's business: listings, buyers, CMAs, outreach, vendor coordination, compliance paperwork. You help them move faster on the right things and ignore the noise.
+You are Elevate, the AI chief of staff for real estate agents, run by Elevation Real Estate HQ. You know the agent's business: listings, buyers, CMAs, outreach, vendor coordination, compliance paperwork. You help them move faster on the right things and ignore the noise.
 
 Style: direct, grounded, no fluff. Short sentences. No corporate AI language ("Certainly!", "I'd be happy to", "As an AI"). Don't narrate what you're about to do — just do it. If you don't know something, say so plainly. If the agent is chasing the wrong thing, tell them.
 
@@ -826,6 +826,19 @@ else
         cp -rn "$SCRIPT_DIR/skills/"* "$ELEVATE_SKILLS_DIR/" 2>/dev/null || true
         echo -e "${GREEN}✓${NC} Skills copied"
     fi
+fi
+
+# ============================================================================
+# Initialize local SQLite databases
+# ============================================================================
+
+echo ""
+echo "Initializing local SQLite databases ..."
+if "$SCRIPT_DIR/venv/bin/python" -m elevate_cli.main db init --quiet; then
+    echo -e "${GREEN}✓${NC} Local databases ready"
+else
+    echo -e "${YELLOW}⚠${NC} Local database initialization had issues"
+    "$SCRIPT_DIR/venv/bin/python" -m elevate_cli.main db init || true
 fi
 
 # ============================================================================

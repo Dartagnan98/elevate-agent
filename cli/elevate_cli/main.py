@@ -2935,10 +2935,10 @@ def _model_flow_named_custom(config, provider_info):
     print()
 
     print("Fetching available models...")
-    models = fetch_api_models(
-        api_key, base_url, timeout=8.0,
-        api_mode=api_mode or None,
-    )
+    fetch_kwargs = {"timeout": 8.0}
+    if api_mode:
+        fetch_kwargs["api_mode"] = api_mode
+    models = fetch_api_models(api_key, base_url, **fetch_kwargs)
 
     if models:
         default_idx = 0
@@ -4504,6 +4504,13 @@ def cmd_doctor(args):
     run_doctor(args)
 
 
+def cmd_db(args):
+    """Initialize or inspect local Elevate SQLite databases."""
+    from elevate_cli.local_databases import cmd_db as _cmd_db
+
+    return _cmd_db(args)
+
+
 def cmd_harness(args):
     """Show or stress-test the Elevate harness posture."""
     from elevate_cli.harness import cmd_harness as _cmd_harness
@@ -4717,8 +4724,8 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
 def _update_via_zip(args):
     """Update Elevate by downloading a ZIP archive.
 
-    Used on Windows when git file I/O is broken (antivirus, NTFS filter
-    drivers causing 'Invalid argument' errors on file creation).
+    Used for archive-based installs and as a fallback when git file I/O is
+    broken.
     """
     import tempfile
     import zipfile
@@ -4727,7 +4734,7 @@ def _update_via_zip(args):
     branch = "main"
     zip_url = os.getenv(
         "ELEVATE_REPO_ARCHIVE_URL",
-        f"https://github.com/ctrlstrategies/elevate/archive/refs/heads/{branch}.zip",
+        f"https://github.com/Dartagnan98/elevate-agent/archive/refs/heads/{branch}.zip",
     )
 
     print("→ Downloading latest version...")
@@ -4761,13 +4768,29 @@ def _update_via_zip(args):
                     extracted = candidate
                     break
 
-        # Copy updated files over existing installation, preserving venv/node_modules/.git
+        source_root = extracted
+        nested_cli_root = os.path.join(extracted, "cli")
+        if not (
+            os.path.isfile(os.path.join(source_root, "pyproject.toml"))
+            and os.path.isdir(os.path.join(source_root, "elevate_cli"))
+        ):
+            if (
+                os.path.isfile(os.path.join(nested_cli_root, "pyproject.toml"))
+                and os.path.isdir(os.path.join(nested_cli_root, "elevate_cli"))
+            ):
+                source_root = nested_cli_root
+            else:
+                raise RuntimeError(
+                    "Downloaded archive does not contain the Elevate CLI project"
+                )
+
+        # Copy updated files over existing installation, preserving local runtime dirs.
         preserve = {"venv", "node_modules", ".git", ".env"}
         update_count = 0
-        for item in os.listdir(extracted):
+        for item in os.listdir(source_root):
             if item in preserve:
                 continue
-            src = os.path.join(extracted, item)
+            src = os.path.join(source_root, item)
             dst = os.path.join(str(PROJECT_ROOT), item)
             if os.path.isdir(src):
                 if os.path.exists(dst):
@@ -4777,7 +4800,7 @@ def _update_via_zip(args):
                 shutil.copy2(src, dst)
             update_count += 1
 
-        print(f"✓ Updated {update_count} items from ZIP")
+        print(f"✓ Updated {update_count} items from archive")
 
         # Cleanup
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -5078,13 +5101,13 @@ def _restore_stashed_changes(
 
 OFFICIAL_REPO_URL = os.getenv(
     "ELEVATE_OFFICIAL_REPO_URL",
-    "https://github.com/ctrlstrategies/elevate.git",
+    "https://github.com/Dartagnan98/elevate-agent.git",
 )
 OFFICIAL_REPO_URLS = {
     OFFICIAL_REPO_URL,
     OFFICIAL_REPO_URL[:-4] if OFFICIAL_REPO_URL.endswith(".git") else OFFICIAL_REPO_URL,
-    "git@github.com:ctrlstrategies/elevate.git",
-    "git@github.com:ctrlstrategies/elevate",
+    "git@github.com:Dartagnan98/elevate-agent.git",
+    "git@github.com:Dartagnan98/elevate-agent",
 }
 SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 
@@ -5671,20 +5694,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
     print("▲ Updating Elevate...")
     print()
 
-    # Try git-based update first, fall back to ZIP download on Windows
-    # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
-    use_zip_update = False
+    # Try git-based update first. Archive-installed copies use the same
+    # one-shot download path as the installer.
     git_root = _find_git_worktree_root(PROJECT_ROOT)
 
     if git_root is None:
-        if sys.platform == "win32":
-            use_zip_update = True
-        else:
-            print("✗ Not a git repository. Please reinstall:")
-            print(
-                "  git clone YOUR_ELEVATE_REPO_URL elevate && cd elevate/cli && ./setup-elevate.sh"
-            )
-            sys.exit(1)
+        print("→ This install is not a Git checkout; using archive update.")
+        _update_via_zip(args)
+        return
 
     # On Windows, git can fail with "unable to write loose object file: Invalid argument"
     # due to filesystem atomicity issues. Set the recommended workaround.
@@ -5718,11 +5735,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print("⚠ Updating from fork:")
         print(f"  {origin_url}")
         print()
-
-    if use_zip_update:
-        # ZIP-based update for Windows when git is broken
-        _update_via_zip(args)
-        return
 
     # Fetch and pull
     try:
@@ -7428,15 +7440,43 @@ For more help on a command:
     )
     logout_parser.set_defaults(func=cmd_logout)
 
-    # --- Elevate subscription (CTRL Strategies skill library) ---
+    # --- Elevate activation (Elevation Real Estate HQ skill library) ---
     from elevate_cli import license as elevate_license  # local import to avoid httpx at startup
+
+    activate_parser = subparsers.add_parser(
+        "activate",
+        help="One-shot activation: login, sync paid packs, and unlock dashboards",
+    )
+    activate_parser.add_argument("--email", default=None)
+    activate_parser.add_argument("--password", default=None)
+    activate_parser.add_argument(
+        "--backend-url",
+        default=None,
+        help="Elevation HQ API origin for license and paid skill activation",
+    )
+    activate_parser.add_argument(
+        "--skip-skill-sync",
+        action="store_true",
+        help="Only sync license and dashboard entitlements",
+    )
+    activate_parser.set_defaults(func=elevate_license.cmd_activate)
 
     subscribe_parser = subparsers.add_parser(
         "subscribe",
-        help="Log in to your Elevate subscription (unlocks skill library)",
+        help="Alias for `elevate activate`",
     )
     subscribe_parser.add_argument("--email", default=None)
     subscribe_parser.add_argument("--password", default=None)
+    subscribe_parser.add_argument(
+        "--backend-url",
+        default=None,
+        help="Elevation HQ API origin for license and paid skill activation",
+    )
+    subscribe_parser.add_argument(
+        "--skip-skill-sync",
+        action="store_true",
+        help="Only sync license and dashboard entitlements",
+    )
     subscribe_parser.set_defaults(func=elevate_license.cmd_subscribe)
 
     license_parser = subparsers.add_parser(
@@ -7477,7 +7517,7 @@ For more help on a command:
 
     access_profile = access_sub.add_parser(
         "profile",
-        help="Set profile: standalone, exp, or skyleigh_downline",
+        help="Set profile: standalone, exp, or team_pack",
     )
     access_profile.add_argument("profile", choices=elevate_access.PROFILE_CHOICES)
 
@@ -7847,6 +7887,33 @@ For more help on a command:
         "--fix", action="store_true", help="Attempt to fix issues automatically"
     )
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    # local database bootstrap
+    db_parser = subparsers.add_parser(
+        "db",
+        help="Initialize local SQLite databases",
+        description=(
+            "Create and migrate Elevate's local SQLite stores under ~/.elevate. "
+            "No cloud database is required."
+        ),
+    )
+    db_subparsers = db_parser.add_subparsers(dest="db_action")
+    db_init_parser = db_subparsers.add_parser(
+        "init",
+        help="Create state.db, operational.db, and memory_store.db",
+    )
+    db_init_parser.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Skip memory_store.db initialization",
+    )
+    db_init_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Only set the exit code",
+    )
+    db_init_parser.set_defaults(func=cmd_db, db_action="init")
+    db_parser.set_defaults(func=cmd_db, db_action="init", no_memory=False, quiet=False)
 
     # =========================================================================
     # parity-report + migrate-data commands (data module — Sprint 1D/1E)
@@ -9514,7 +9581,9 @@ Examples:
 
     # Execute the command
     if hasattr(args, "func"):
-        args.func(args)
+        result = args.func(args)
+        if isinstance(result, int):
+            sys.exit(result)
     else:
         parser.print_help()
 

@@ -30,7 +30,7 @@ The following is the complete skill definition that Elevate loads when this skil
 
 # Elevate
 
-Elevate is an open-source AI agent framework by Ctrl Strategies that runs in your terminal, messaging platforms, and IDEs. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Elevate works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
+Elevate is an open-source AI agent framework by Elevation Real Estate HQ that runs in your terminal, messaging platforms, and IDEs. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Elevate works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
 
 What makes Elevate different:
 
@@ -45,13 +45,13 @@ People use Elevate for software development, research, system administration, da
 
 **This skill helps you work with Elevate effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
 
-**Docs:** https://elevate.ctrlstrategies.com/docs/
+**Docs:** https://github.com/Dartagnan98/elevate-agent/docs/
 
 ## Quick Start
 
 ```bash
 # Install
-curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 
 # Interactive chat (default)
 elevate
@@ -167,7 +167,7 @@ elevate gateway setup        Configure platforms
 
 Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, BlueBubbles (iMessage), Weixin (WeChat), API Server, Webhooks. Open WebUI connects via the API Server adapter.
 
-Platform docs: https://elevate.ctrlstrategies.com/docs/user-guide/messaging/
+Platform docs: https://github.com/Dartagnan98/elevate-agent/docs/user-guide/messaging/
 
 ### Sessions
 
@@ -356,7 +356,7 @@ Edit with `elevate config edit` or `elevate config set section.key value`.
 | `delegation` | `model`, `provider`, `base_url`, `api_key`, `max_iterations` (50), `reasoning_effort` |
 | `checkpoints` | `enabled`, `max_snapshots` (50) |
 
-Full config reference: https://elevate.ctrlstrategies.com/docs/user-guide/configuration
+Full config reference: https://github.com/Dartagnan98/elevate-agent/docs/user-guide/configuration
 
 ### Providers
 
@@ -387,7 +387,7 @@ Full config reference: https://elevate.ctrlstrategies.com/docs/user-guide/config
 | Custom endpoint | Config | `model.base_url` + `model.api_key` in config.yaml |
 | GitHub Copilot ACP | External | `COPILOT_CLI_PATH` or Copilot CLI |
 
-Full provider docs: https://elevate.ctrlstrategies.com/docs/integrations/providers
+Full provider docs: https://github.com/Dartagnan98/elevate-agent/docs/integrations/providers
 
 ### Toolsets
 
@@ -594,18 +594,18 @@ elevate config set auxiliary.vision.model <model_name>
 
 | Looking for... | Location |
 |----------------|----------|
-| Config options | `elevate config edit` or [Configuration docs](https://elevate.ctrlstrategies.com/docs/user-guide/configuration) |
-| Available tools | `elevate tools list` or [Tools reference](https://elevate.ctrlstrategies.com/docs/reference/tools-reference) |
-| Slash commands | `/help` in session or [Slash commands reference](https://elevate.ctrlstrategies.com/docs/reference/slash-commands) |
-| Skills catalog | `elevate skills browse` or [Skills catalog](https://elevate.ctrlstrategies.com/docs/reference/skills-catalog) |
-| Provider setup | `elevate model` or [Providers guide](https://elevate.ctrlstrategies.com/docs/integrations/providers) |
-| Platform setup | `elevate gateway setup` or [Messaging docs](https://elevate.ctrlstrategies.com/docs/user-guide/messaging/) |
-| MCP servers | `elevate mcp list` or [MCP guide](https://elevate.ctrlstrategies.com/docs/user-guide/features/mcp) |
-| Profiles | `elevate profile list` or [Profiles docs](https://elevate.ctrlstrategies.com/docs/user-guide/profiles) |
-| Cron jobs | `elevate cron list` or [Cron docs](https://elevate.ctrlstrategies.com/docs/user-guide/features/cron) |
-| Memory | `elevate memory status` or [Memory docs](https://elevate.ctrlstrategies.com/docs/user-guide/features/memory) |
-| Env variables | `elevate config env-path` or [Env vars reference](https://elevate.ctrlstrategies.com/docs/reference/environment-variables) |
-| CLI commands | `elevate --help` or [CLI reference](https://elevate.ctrlstrategies.com/docs/reference/cli-commands) |
+| Config options | `elevate config edit` or [Configuration docs](https://github.com/Dartagnan98/elevate-agent/docs/user-guide/configuration) |
+| Available tools | `elevate tools list` or [Tools reference](https://github.com/Dartagnan98/elevate-agent/docs/reference/tools-reference) |
+| Slash commands | `/help` in session or [Slash commands reference](https://github.com/Dartagnan98/elevate-agent/docs/reference/slash-commands) |
+| Skills catalog | `elevate skills browse` or [Skills catalog](https://github.com/Dartagnan98/elevate-agent/docs/reference/skills-catalog) |
+| Provider setup | `elevate model` or [Providers guide](https://github.com/Dartagnan98/elevate-agent/docs/integrations/providers) |
+| Platform setup | `elevate gateway setup` or [Messaging docs](https://github.com/Dartagnan98/elevate-agent/docs/user-guide/messaging/) |
+| MCP servers | `elevate mcp list` or [MCP guide](https://github.com/Dartagnan98/elevate-agent/docs/user-guide/features/mcp) |
+| Profiles | `elevate profile list` or [Profiles docs](https://github.com/Dartagnan98/elevate-agent/docs/user-guide/profiles) |
+| Cron jobs | `elevate cron list` or [Cron docs](https://github.com/Dartagnan98/elevate-agent/docs/user-guide/features/cron) |
+| Memory | `elevate memory status` or [Memory docs](https://github.com/Dartagnan98/elevate-agent/docs/user-guide/features/memory) |
+| Env variables | `elevate config env-path` or [Env vars reference](https://github.com/Dartagnan98/elevate-agent/docs/reference/environment-variables) |
+| CLI commands | `elevate --help` or [CLI reference](https://github.com/Dartagnan98/elevate-agent/docs/reference/cli-commands) |
 | Gateway logs | `~/.elevate/logs/gateway.log` |
 | Session files | `~/.elevate/sessions/` or `elevate sessions browse` |
 | Source code | `~/.elevate/elevate/` |
@@ -614,7 +614,7 @@ elevate config set auxiliary.vision.model <model_name>
 
 ## Contributor Quick Reference
 
-For occasional contributors and PR authors. Full developer docs: https://elevate.ctrlstrategies.com/docs/developer-guide/
+For occasional contributors and PR authors. Full developer docs: https://github.com/Dartagnan98/elevate-agent/docs/developer-guide/
 
 ### Project Layout
 

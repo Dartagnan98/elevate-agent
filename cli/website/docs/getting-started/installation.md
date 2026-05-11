@@ -7,13 +7,15 @@ description: "Install Elevate on Linux, macOS, WSL2, or Android via Termux"
 # Installation
 
 Get Elevate up and running in under two minutes with the one-line installer.
+The installer creates the local profile and SQLite databases under
+`~/.elevate` during the same run.
 
 ## Quick Install
 
 ### Linux / macOS / WSL2
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 ```
 
 ### Android / Termux
@@ -21,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts
 Elevate now ships a Termux-aware installer path too:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 ```
 
 The installer detects Termux automatically and switches to a tested Android flow:
@@ -39,7 +41,21 @@ Native Windows is **not supported**. Please install [WSL2](https://learn.microso
 
 ### What the Installer Does
 
-The installer handles everything automatically — all dependencies (Python, Node.js, ripgrep, ffmpeg), the repo clone, virtual environment, global `elevate` command setup, and LLM provider configuration. By the end, you're ready to chat.
+The installer handles everything automatically: source download, dependencies,
+virtual environment, global `elevate` command setup, bundled skills, local
+profile files, and local SQLite databases. If Git is installed, the installer
+uses a normal checkout. If Git is missing, it downloads the Elevate source
+archive and continues.
+
+It initializes:
+
+- `~/.elevate/state.db` for sessions, messages, usage, and chat history.
+- `~/.elevate/data/operational.db` for leads, profiles, deal files, handoffs,
+  tasks, admin runs, and workflow state.
+- `~/.elevate/memory_store.db` for local memory and graph recall.
+
+No hosted database project is required for the local runtime. By the end, you're
+ready to configure a model and chat.
 
 ### After Installation
 
@@ -56,6 +72,7 @@ To reconfigure individual settings later, use the dedicated commands:
 elevate model          # Choose your LLM provider and model
 elevate tools          # Configure which tools are enabled
 elevate gateway setup  # Set up messaging platforms
+elevate db init        # Recreate or verify local SQLite databases
 elevate config set     # Set individual config values
 elevate setup          # Or run the full setup wizard to configure everything at once
 ```
@@ -64,7 +81,7 @@ elevate setup          # Or run the full setup wizard to configure everything at
 
 ## Prerequisites
 
-The only prerequisite is **Git**. The installer automatically handles everything else:
+The one-line installer does not require Git. It automatically handles:
 
 - **uv** (fast Python package manager)
 - **Python 3.11** (via uv, no sudo needed)
@@ -73,7 +90,9 @@ The only prerequisite is **Git**. The installer automatically handles everything
 - **ffmpeg** (audio format conversion for TTS)
 
 :::info
-You do **not** need to install Python, Node.js, ripgrep, or ffmpeg manually. The installer detects what's missing and installs it for you. Just make sure `git` is available (`git --version`).
+You do **not** need to install Python, Node.js, ripgrep, ffmpeg, or Git manually.
+Git is still useful for developer checkouts and faster source updates, but a
+normal user install can download the source archive directly.
 :::
 
 :::tip Nix users

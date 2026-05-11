@@ -46,7 +46,7 @@ That does not stop Elevate from working well as a phone-native CLI agent — it 
 Elevate now ships a Termux-aware installer path:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 ```
 
 On Termux, the installer automatically:
@@ -80,7 +80,7 @@ Why these packages?
 ### 2. Clone Elevate
 
 ```bash
-git clone --recurse-submodules https://github.com/CtrlStrategies/elevate.git
+git clone --recurse-submodules https://github.com/Dartagnan98/elevate-agent.git
 cd elevate
 ```
 

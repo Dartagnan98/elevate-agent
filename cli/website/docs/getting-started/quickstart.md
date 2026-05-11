@@ -6,7 +6,7 @@ description: "Your first conversation with Elevate — from install to chatting 
 
 # Quickstart
 
-This guide gets you from zero to a working Elevate setup that survives real use. Install, choose a provider, verify a working chat, and know exactly what to do when something breaks.
+This guide gets you from zero to a working Elevate setup that survives real use. Install, choose a provider, verify a working chat, and know exactly what to do when something breaks. The install path is local-first and creates the SQLite stores under `~/.elevate` automatically.
 
 ## Who this is for
 
@@ -37,7 +37,7 @@ Run the one-line installer:
 
 ```bash
 # Linux / macOS / WSL2 / Android (Termux)
-curl -fsSL https://raw.githubusercontent.com/CtrlStrategies/elevate/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 ```
 
 :::tip Android / Termux
@@ -55,6 +55,18 @@ source ~/.bashrc   # or source ~/.zshrc
 ```
 
 For detailed installation options, prerequisites, and troubleshooting, see the [Installation guide](./installation.md).
+
+The installer initializes the local databases during the same run:
+
+- `~/.elevate/state.db` for sessions and chat history
+- `~/.elevate/data/operational.db` for the operating system data
+- `~/.elevate/memory_store.db` for memory and graph recall
+
+To verify or recreate those stores later:
+
+```bash
+elevate db init
+```
 
 ## 2. Choose a Provider
 

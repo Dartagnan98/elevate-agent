@@ -14,28 +14,40 @@ from typing import Any
 
 PROFILE_STANDALONE = "standalone"
 PROFILE_EXP = "exp"
-PROFILE_SKYLEIGH_DOWNLINE = "skyleigh_downline"
+PROFILE_TEAM_PACK = "team_pack"
 
 PROFILE_CHOICES = (
     PROFILE_STANDALONE,
     PROFILE_EXP,
-    PROFILE_SKYLEIGH_DOWNLINE,
+    PROFILE_TEAM_PACK,
 )
 
 PROFILE_LABELS = {
     PROFILE_STANDALONE: "Standalone Agent",
     PROFILE_EXP: "Standalone eXp Agent",
-    PROFILE_SKYLEIGH_DOWNLINE: "Skyleigh Downline Agent",
+    PROFILE_TEAM_PACK: "Team Pack Agent",
 }
 
 ENTITLEMENT_CORE = "elevate_core"
 ENTITLEMENT_EXP = "exp_agent_pack"
-ENTITLEMENT_SKYLEIGH_TEAM = "skyleigh_team_pack"
+ENTITLEMENT_TEAM_PACK = "real_estate_team_pack"
+ENTITLEMENT_REAL_ESTATE_SALES = "real_estate_sales"
+ENTITLEMENT_REAL_ESTATE_MARKETING = "real_estate_marketing"
+ENTITLEMENT_REAL_ESTATE_ADMIN = "real_estate_admin"
+ENTITLEMENT_REAL_ESTATE_CMA = "real_estate_cma"
+
+REAL_ESTATE_ENTITLEMENTS = (
+    ENTITLEMENT_REAL_ESTATE_SALES,
+    ENTITLEMENT_REAL_ESTATE_MARKETING,
+    ENTITLEMENT_REAL_ESTATE_ADMIN,
+    ENTITLEMENT_REAL_ESTATE_CMA,
+)
 
 KNOWN_ENTITLEMENTS = (
     ENTITLEMENT_CORE,
     ENTITLEMENT_EXP,
-    ENTITLEMENT_SKYLEIGH_TEAM,
+    ENTITLEMENT_TEAM_PACK,
+    *REAL_ESTATE_ENTITLEMENTS,
 )
 
 ACTIVE_STATUSES = {"active", "owned", "lifetime", "trial", "granted"}
@@ -70,11 +82,31 @@ BASE_ACCESS_CONFIG: dict[str, Any] = {
             "owned_snapshot": False,
             "description": "Direct eXp real estate skill pack.",
         },
-        ENTITLEMENT_SKYLEIGH_TEAM: {
+        ENTITLEMENT_TEAM_PACK: {
             "status": "locked",
             "owned_snapshot": False,
             "requires_active_affiliation": True,
-            "description": "Skyleigh downline/team-only skill pack.",
+            "description": "team-only skill pack.",
+        },
+        ENTITLEMENT_REAL_ESTATE_SALES: {
+            "status": "locked",
+            "owned_snapshot": False,
+            "description": "Paid real estate sales, leads, and outreach dashboards and skills.",
+        },
+        ENTITLEMENT_REAL_ESTATE_MARKETING: {
+            "status": "locked",
+            "owned_snapshot": False,
+            "description": "Paid real estate marketing, listing launch, and social dashboards and skills.",
+        },
+        ENTITLEMENT_REAL_ESTATE_ADMIN: {
+            "status": "locked",
+            "owned_snapshot": False,
+            "description": "Paid real estate admin transaction dashboards, automations, and skills.",
+        },
+        ENTITLEMENT_REAL_ESTATE_CMA: {
+            "status": "locked",
+            "owned_snapshot": False,
+            "description": "Paid real estate CMA pricing and report-generation skills.",
         },
     },
 }
@@ -101,14 +133,14 @@ def default_access_config(profile: str = PROFILE_STANDALONE) -> dict[str, Any]:
         cfg["entitlements"][ENTITLEMENT_EXP].update(
             {"status": "active", "owned_snapshot": True}
         )
-    elif profile == PROFILE_SKYLEIGH_DOWNLINE:
+    elif profile == PROFILE_TEAM_PACK:
         cfg["affiliation"].update(
-            {"brokerage": "exp", "team": "skyleigh", "status": "active"}
+            {"brokerage": "exp", "team": "team", "status": "active"}
         )
         cfg["entitlements"][ENTITLEMENT_EXP].update(
             {"status": "active", "owned_snapshot": True}
         )
-        cfg["entitlements"][ENTITLEMENT_SKYLEIGH_TEAM].update(
+        cfg["entitlements"][ENTITLEMENT_TEAM_PACK].update(
             {"status": "active", "owned_snapshot": False}
         )
 
@@ -123,9 +155,9 @@ def normalize_profile(profile: str | None) -> str:
         "exp_agent": PROFILE_EXP,
         "standalone_exp": PROFILE_EXP,
         "aexp": PROFILE_EXP,
-        "skyleigh": PROFILE_SKYLEIGH_DOWNLINE,
-        "downline": PROFILE_SKYLEIGH_DOWNLINE,
-        "skyleigh_team": PROFILE_SKYLEIGH_DOWNLINE,
+        "team": PROFILE_TEAM_PACK,
+        "downline": PROFILE_TEAM_PACK,
+        "team_pack": PROFILE_TEAM_PACK,
     }
     profile = aliases.get(profile, profile)
     if profile not in PROFILE_CHOICES:
@@ -152,13 +184,13 @@ def normalize_access_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     # locks when the profile itself implies access. Explicit revocations,
     # expirations, left-team states, or locks set through `elevate access lock`
     # are kept.
-    if profile in (PROFILE_EXP, PROFILE_SKYLEIGH_DOWNLINE):
+    if profile in (PROFILE_EXP, PROFILE_TEAM_PACK):
         exp_entry = entitlements.get(ENTITLEMENT_EXP) or {}
         if _status(exp_entry.get("status")) == "locked" and not exp_entry.get("manual_lock"):
             exp_entry["status"] = "active"
             exp_entry["owned_snapshot"] = True
-    if profile == PROFILE_SKYLEIGH_DOWNLINE:
-        team_entry = entitlements.get(ENTITLEMENT_SKYLEIGH_TEAM) or {}
+    if profile == PROFILE_TEAM_PACK:
+        team_entry = entitlements.get(ENTITLEMENT_TEAM_PACK) or {}
         if _status(team_entry.get("status")) == "locked" and not team_entry.get("manual_lock"):
             team_entry["status"] = "active"
 
@@ -225,7 +257,7 @@ def is_entitlement_active(
         return True
 
     # Owned snapshots stay usable for personal/direct packs, but do not override
-    # team-affiliation locks such as the Skyleigh downline pack.
+    # team-affiliation locks such as the pilot realtor downline pack.
     if entry.get("owned_snapshot") and not requires_affiliation:
         return True
 
@@ -349,11 +381,55 @@ def set_profile(profile: str) -> dict[str, Any]:
     if existing.get("offline_grace_days") is not None:
         updated["offline_grace_days"] = existing["offline_grace_days"]
     for name, entry in (existing.get("entitlements") or {}).items():
-        if name not in KNOWN_ENTITLEMENTS:
+        if name not in KNOWN_ENTITLEMENTS or name in REAL_ESTATE_ENTITLEMENTS:
             updated.setdefault("entitlements", {})[name] = copy.deepcopy(entry)
     cfg["access"] = updated
     save_config(cfg)
     return updated
+
+
+def dashboard_access_status(access_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return entitlement state shaped for dashboard route/pack gating."""
+    access_config = (
+        load_access_config({"access": access_config})
+        if access_config
+        else load_access_config()
+    )
+    entitlements = access_config.get("entitlements") or {}
+    ordered = list(KNOWN_ENTITLEMENTS) + [
+        name for name in sorted(entitlements) if name not in KNOWN_ENTITLEMENTS
+    ]
+
+    entitlement_payload: dict[str, dict[str, Any]] = {}
+    for name in ordered:
+        entry = entitlements.get(name)
+        if not isinstance(entry, dict):
+            continue
+        entitlement_payload[name] = {
+            "status": entry.get("status", "locked"),
+            "active": is_entitlement_active(name, access_config),
+            "ownedSnapshot": bool(entry.get("owned_snapshot")),
+            "description": entry.get("description") or "",
+            "requiresActiveAffiliation": bool(entry.get("requires_active_affiliation")),
+            "manualLock": bool(entry.get("manual_lock")),
+        }
+
+    sales = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_SALES, access_config)
+    marketing = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_MARKETING, access_config)
+    admin = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, access_config)
+    cma = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_CMA, access_config)
+
+    return {
+        "profile": access_config["profile"],
+        "entitlements": entitlement_payload,
+        "packs": {
+            "realEstateSales": sales,
+            "realEstateMarketing": marketing,
+            "realEstateAdmin": admin,
+            "realEstateCma": cma,
+            "realEstateAny": any((sales, marketing, admin, cma)),
+        },
+    }
 
 
 def update_entitlement(

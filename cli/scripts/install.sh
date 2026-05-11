@@ -6,7 +6,7 @@
 # Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ctrlstrategies/elevate/main/cli/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -28,8 +28,9 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="${ELEVATE_REPO_URL_SSH:-git@github.com:ctrlstrategies/elevate.git}"
-REPO_URL_HTTPS="${ELEVATE_REPO_URL_HTTPS:-https://github.com/ctrlstrategies/elevate.git}"
+REPO_URL_SSH="${ELEVATE_REPO_URL_SSH:-git@github.com:Dartagnan98/elevate-agent.git}"
+REPO_URL_HTTPS="${ELEVATE_REPO_URL_HTTPS:-https://github.com/Dartagnan98/elevate-agent.git}"
+REPO_ARCHIVE_BASE_URL="${ELEVATE_REPO_ARCHIVE_BASE_URL:-https://codeload.github.com/Dartagnan98/elevate-agent/tar.gz/refs/heads}"
 ELEVATE_HOME="${ELEVATE_HOME:-$HOME/.elevate}"
 INSTALL_DIR="${ELEVATE_INSTALL_DIR:-$ELEVATE_HOME/elevate}"
 PYTHON_VERSION="3.11"
@@ -39,6 +40,7 @@ NODE_VERSION="22"
 USE_VENV=true
 RUN_SETUP=true
 BRANCH="main"
+HAS_GIT=false
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -126,6 +128,18 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}✗${NC} $1"
+}
+
+download_file() {
+    local url="$1"
+    local output="$2"
+    local token="${ELEVATE_DOWNLOAD_TOKEN:-${ELEVATE_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}}"
+
+    if [ -n "$token" ]; then
+        curl -fL -H "Authorization: Bearer $token" "$url" -o "$output"
+    else
+        curl -fL "$url" -o "$output"
+    fi
 }
 
 prompt_yes_no() {
@@ -223,7 +237,7 @@ detect_os() {
             OS="windows"
             DISTRO="windows"
             log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  irm https://raw.githubusercontent.com/ctrlstrategies/elevate/main/cli/scripts/install.ps1 | iex"
+            log_info "  irm https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.ps1 | iex"
             exit 1
             ;;
         *)
@@ -340,16 +354,15 @@ check_python() {
     fi
 }
 
-check_git() {
+detect_git() {
     log_info "Checking Git..."
 
     if command -v git &> /dev/null; then
         GIT_VERSION=$(git --version | awk '{print $3}')
         log_success "Git $GIT_VERSION found"
+        HAS_GIT=true
         return 0
     fi
-
-    log_error "Git not found"
 
     if [ "$DISTRO" = "termux" ]; then
         log_info "Installing Git via pkg..."
@@ -357,39 +370,15 @@ check_git() {
         if command -v git >/dev/null 2>&1; then
             GIT_VERSION=$(git --version | awk '{print $3}')
             log_success "Git $GIT_VERSION installed"
+            HAS_GIT=true
             return 0
         fi
     fi
 
-    log_info "Please install Git:"
-
-    case "$OS" in
-        linux)
-            case "$DISTRO" in
-                ubuntu|debian)
-                    log_info "  sudo apt update && sudo apt install git"
-                    ;;
-                fedora)
-                    log_info "  sudo dnf install git"
-                    ;;
-                arch)
-                    log_info "  sudo pacman -S git"
-                    ;;
-                *)
-                    log_info "  Use your package manager to install git"
-                    ;;
-            esac
-            ;;
-        android)
-            log_info "  pkg install git"
-            ;;
-        macos)
-            log_info "  xcode-select --install"
-            log_info "  Or: brew install git"
-            ;;
-    esac
-
-    exit 1
+    HAS_GIT=false
+    log_warn "Git not found — Elevate will download a source archive instead."
+    log_info "Git is optional for one-shot installs. Install it later if you want a Git checkout."
+    return 0
 }
 
 check_node() {
@@ -720,13 +709,98 @@ show_manual_install_hint() {
 # Installation
 # ============================================================================
 
-clone_repo() {
-    log_info "Installing to $INSTALL_DIR..."
+resolve_project_dir() {
+    local checkout_dir="$1"
 
-    if [ -d "$INSTALL_DIR" ]; then
-        if [ -d "$INSTALL_DIR/.git" ]; then
+    if [ -f "$checkout_dir/pyproject.toml" ] && [ -d "$checkout_dir/elevate_cli" ]; then
+        INSTALL_DIR="$checkout_dir"
+        return 0
+    fi
+
+    if [ -f "$checkout_dir/cli/pyproject.toml" ] && [ -d "$checkout_dir/cli/elevate_cli" ]; then
+        INSTALL_DIR="$checkout_dir/cli"
+        log_info "Using Elevate CLI source at $INSTALL_DIR"
+        return 0
+    fi
+
+    log_error "Downloaded source does not contain the Elevate CLI project."
+    log_info "Expected either pyproject.toml + elevate_cli/ or cli/pyproject.toml + cli/elevate_cli/."
+    exit 1
+}
+
+backup_existing_checkout() {
+    local checkout_dir="$1"
+
+    if [ ! -e "$checkout_dir" ]; then
+        return 0
+    fi
+
+    local backup_dir
+    backup_dir="${checkout_dir}.backup.$(date -u +%Y%m%d-%H%M%S)"
+    log_warn "Existing non-Git install found at $checkout_dir"
+    log_info "Moving it to $backup_dir before installing a fresh copy..."
+    mv "$checkout_dir" "$backup_dir"
+    log_success "Previous install preserved at $backup_dir"
+}
+
+download_repo_archive() {
+    local checkout_dir="$1"
+    local tmp_dir
+    local archive_path
+    local archive_url
+    local extracted_dir=""
+
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/elevate-install.XXXXXX")"
+    archive_path="$tmp_dir/elevate-agent.tar.gz"
+    archive_url="${ELEVATE_REPO_ARCHIVE_URL:-$REPO_ARCHIVE_BASE_URL/$BRANCH}"
+
+    log_info "Downloading Elevate source archive..."
+    if ! download_file "$archive_url" "$archive_path"; then
+        rm -rf "$tmp_dir"
+        log_error "Failed to download Elevate source archive"
+        log_info "URL: $archive_url"
+        log_info "If this is a private beta repo, set ELEVATE_DOWNLOAD_TOKEN with read access and retry."
+        exit 1
+    fi
+
+    log_info "Extracting source archive..."
+    if ! tar -xzf "$archive_path" -C "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        log_error "Failed to extract Elevate source archive"
+        exit 1
+    fi
+
+    local candidate
+    for candidate in "$tmp_dir"/*; do
+        if [ -d "$candidate" ]; then
+            extracted_dir="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$extracted_dir" ]; then
+        rm -rf "$tmp_dir"
+        log_error "Downloaded archive did not contain a source directory"
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "$checkout_dir")"
+    backup_existing_checkout "$checkout_dir"
+    mv "$extracted_dir" "$checkout_dir"
+    rm -rf "$tmp_dir"
+
+    log_success "Source archive installed"
+    resolve_project_dir "$checkout_dir"
+}
+
+clone_repo() {
+    local checkout_dir="$INSTALL_DIR"
+    log_info "Installing to $checkout_dir..."
+
+    if [ -d "$checkout_dir" ]; then
+        if [ -d "$checkout_dir/.git" ] && [ "$HAS_GIT" = true ]; then
             log_info "Existing installation found, updating..."
-            cd "$INSTALL_DIR"
+            cd "$checkout_dir"
 
             local autostash_ref=""
             if [ -n "$(git status --porcelain)" ]; then
@@ -772,28 +846,38 @@ clone_repo() {
                     log_info "Restore manually with: git stash apply $autostash_ref"
                 fi
             fi
+            resolve_project_dir "$checkout_dir"
+        elif [ -d "$checkout_dir/.git" ]; then
+            log_warn "Existing Git checkout found, but Git is not available."
+            log_info "Installing a fresh archive copy instead."
+            download_repo_archive "$checkout_dir"
         else
-            log_error "Directory exists but is not a git repository: $INSTALL_DIR"
-            log_info "Remove it or choose a different directory with --dir"
-            exit 1
+            download_repo_archive "$checkout_dir"
         fi
     else
-        # Try SSH first (for private repo access), fall back to HTTPS
-        # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
-        # so SSH fails fast instead of hanging when no key is configured.
-        log_info "Trying SSH clone..."
-        if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
-           git clone --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
-            log_success "Cloned via SSH"
-        else
-            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial SSH clone
-            log_info "SSH failed, trying HTTPS..."
-            if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
-                log_success "Cloned via HTTPS"
+        if [ "$HAS_GIT" = true ]; then
+            # Try SSH first (for private repo access), fall back to HTTPS, then
+            # to a source archive so a one-shot install still works.
+            # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
+            # so SSH fails fast instead of hanging when no key is configured.
+            log_info "Trying SSH clone..."
+            if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
+               git clone --branch "$BRANCH" "$REPO_URL_SSH" "$checkout_dir" 2>/dev/null; then
+                log_success "Cloned via SSH"
             else
-                log_error "Failed to clone repository"
-                exit 1
+                rm -rf "$checkout_dir" 2>/dev/null  # Clean up partial SSH clone
+                log_info "SSH failed, trying HTTPS..."
+                if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$checkout_dir"; then
+                    log_success "Cloned via HTTPS"
+                else
+                    rm -rf "$checkout_dir" 2>/dev/null
+                    log_warn "Git clone failed — falling back to source archive."
+                    download_repo_archive "$checkout_dir"
+                fi
             fi
+            resolve_project_dir "$checkout_dir"
+        else
+            download_repo_archive "$checkout_dir"
         fi
     fi
 
@@ -1119,6 +1203,26 @@ SOUL_EOF
     fi
 }
 
+initialize_local_databases() {
+    log_info "Initializing local SQLite databases..."
+
+    cd "$INSTALL_DIR"
+    if [ "$USE_VENV" = true ]; then
+        DB_INIT_CMD=("$INSTALL_DIR/venv/bin/python" -m elevate_cli.main db init --quiet)
+        DB_DETAIL_CMD=("$INSTALL_DIR/venv/bin/python" -m elevate_cli.main db init)
+    else
+        DB_INIT_CMD=(python -m elevate_cli.main db init --quiet)
+        DB_DETAIL_CMD=(python -m elevate_cli.main db init)
+    fi
+
+    if "${DB_INIT_CMD[@]}"; then
+        log_success "Local SQLite databases ready"
+    else
+        log_warn "Local database initialization had issues"
+        "${DB_DETAIL_CMD[@]}" || true
+    fi
+}
+
 install_node_deps() {
     if [ "$HAS_NODE" = false ]; then
         log_info "Skipping Node.js dependencies (Node not installed)"
@@ -1350,7 +1454,7 @@ print_success() {
     echo -e "   ${YELLOW}Config:${NC}    ~/.elevate/config.yaml"
     echo -e "   ${YELLOW}API Keys:${NC}  ~/.elevate/.env"
     echo -e "   ${YELLOW}Data:${NC}      ~/.elevate/cron/, sessions/, logs/"
-    echo -e "   ${YELLOW}Code:${NC}      ~/.elevate/elevate/"
+    echo -e "   ${YELLOW}Code:${NC}      $INSTALL_DIR"
     echo ""
 
     echo -e "${CYAN}─────────────────────────────────────────────────────────${NC}"
@@ -1423,7 +1527,7 @@ main() {
     detect_os
     install_uv
     check_python
-    check_git
+    detect_git
     check_node
     install_system_packages
 
@@ -1433,6 +1537,7 @@ main() {
     install_node_deps
     setup_path
     copy_config_templates
+    initialize_local_databases
     run_setup_wizard
     maybe_start_gateway
 
