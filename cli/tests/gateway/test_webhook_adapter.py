@@ -43,7 +43,7 @@ def _make_config(
     secret="",
     rate_limit=30,
     max_body_bytes=1_048_576,
-    host="0.0.0.0",
+    host="127.0.0.1",
     port=0,  # let OS pick a free port in tests
 ):
     """Build a PlatformConfig suitable for WebhookAdapter."""
@@ -53,6 +53,7 @@ def _make_config(
         "routes": routes or {},
         "rate_limit": rate_limit,
         "max_body_bytes": max_body_bytes,
+        "allow_insecure_no_auth": True,
     }
     if secret:
         extra["secret"] = secret
@@ -169,6 +170,65 @@ class TestValidateSignature:
         sig = _generic_signature(body, secret)
         req = _mock_request(headers={"X-Webhook-Signature": sig})
         assert adapter._validate_signature(req, body, secret) is True
+
+
+class TestInsecureNoAuthGuard:
+    """Tests for the dev-only INSECURE_NO_AUTH guardrail."""
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_insecure_no_auth_without_explicit_allow(self):
+        config = PlatformConfig(
+            enabled=True,
+            extra={
+                "host": "127.0.0.1",
+                "port": 0,
+                "routes": {"dev": {"secret": _INSECURE_NO_AUTH}},
+            },
+        )
+        adapter = WebhookAdapter(config)
+
+        with pytest.raises(ValueError, match="INSECURE_NO_AUTH"):
+            await adapter.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_insecure_no_auth_on_public_bind(self):
+        config = PlatformConfig(
+            enabled=True,
+            extra={
+                "host": "0.0.0.0",
+                "port": 0,
+                "allow_insecure_no_auth": True,
+                "routes": {"dev": {"secret": _INSECURE_NO_AUTH}},
+            },
+        )
+        adapter = WebhookAdapter(config)
+
+        with pytest.raises(ValueError, match="INSECURE_NO_AUTH"):
+            await adapter.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_insecure_no_auth_in_production_env(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_ENV", "production")
+        config = PlatformConfig(
+            enabled=True,
+            extra={
+                "host": "127.0.0.1",
+                "port": 0,
+                "allow_insecure_no_auth": True,
+                "routes": {"dev": {"secret": _INSECURE_NO_AUTH}},
+            },
+        )
+        adapter = WebhookAdapter(config)
+
+        with pytest.raises(ValueError, match="INSECURE_NO_AUTH"):
+            await adapter.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_allows_insecure_no_auth_only_for_loopback_dev(self):
+        adapter = _make_adapter(routes={"dev": {"secret": _INSECURE_NO_AUTH}})
+
+        assert await adapter.connect() is True
+        await adapter.disconnect()
 
 
 # ===================================================================

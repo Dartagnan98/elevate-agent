@@ -23,7 +23,8 @@ Security:
   - Rate limiting per route (fixed-window, configurable)
   - Idempotency cache prevents duplicate agent runs on webhook retries
   - Body size limits checked before reading payload
-  - Set secret to "INSECURE_NO_AUTH" to skip validation (testing only)
+  - Insecure no-auth routes are refused unless explicitly enabled for
+    loopback-only local testing
 """
 
 import asyncio
@@ -31,6 +32,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -58,6 +60,28 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+_PRODUCTION_ENV_VALUES = {"prod", "production"}
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _is_public_bind_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    return normalized in {"", "0.0.0.0", "::", "[::]"}
+
+
+def _is_production_environment() -> bool:
+    for name in ("ELEVATE_ENV", "HERMES_ENV", "ENVIRONMENT"):
+        value = os.environ.get(name, "").strip().lower()
+        if value in _PRODUCTION_ENV_VALUES:
+            return True
+    return False
 
 
 def check_webhook_requirements() -> bool:
@@ -74,6 +98,9 @@ class WebhookAdapter(BasePlatformAdapter):
         self._port: int = int(config.extra.get("port", DEFAULT_PORT))
         self._global_secret: str = config.extra.get("secret", "")
         self._static_routes: Dict[str, dict] = config.extra.get("routes", {})
+        self._allow_insecure_no_auth: bool = _as_bool(
+            config.extra.get("allow_insecure_no_auth", False)
+        )
         self._dynamic_routes: Dict[str, dict] = {}
         self._dynamic_routes_mtime: float = 0.0
         self._routes: Dict[str, dict] = dict(self._static_routes)
@@ -126,6 +153,14 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
                 )
 
+            if secret == _INSECURE_NO_AUTH and not self._insecure_no_auth_allowed(name):
+                raise ValueError(
+                    f"[webhook] Route '{name}' uses {_INSECURE_NO_AUTH}. "
+                    "This is only allowed for loopback-only local testing with "
+                    "platforms.webhook.extra.allow_insecure_no_auth=true. "
+                    "Use a real HMAC secret for production/public webhooks."
+                )
+
             # deliver_only routes bypass the agent — the POST body becomes a
             # direct push notification via the configured delivery target.
             # Validate up-front so misconfiguration surfaces at startup rather
@@ -160,9 +195,13 @@ class WebhookAdapter(BasePlatformAdapter):
         await site.start()
         self._mark_connected()
 
-        route_names = ", ".join(self._routes.keys()) or "(none configured)"
+        route_names = ", ".join(
+            f"{name}:"
+            f"{'no-auth-dev' if route.get('secret', self._global_secret) == _INSECURE_NO_AUTH else 'hmac'}"
+            for name, route in self._routes.items()
+        ) or "(none configured)"
         logger.info(
-            "[webhook] Listening on %s:%d — routes: %s",
+            "[webhook] Listening on %s:%d — routes/auth: %s",
             self._host,
             self._port,
             route_names,
@@ -251,6 +290,27 @@ class WebhookAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "webhook"}
 
+    def _insecure_no_auth_allowed(self, route_name: str) -> bool:
+        """Return True only for explicit loopback-only local testing mode."""
+        if not self._allow_insecure_no_auth:
+            return False
+        if _is_public_bind_host(self._host):
+            logger.error(
+                "[webhook] Refusing %s on public bind host %s for route %s",
+                _INSECURE_NO_AUTH,
+                self._host,
+                route_name,
+            )
+            return False
+        if _is_production_environment():
+            logger.error(
+                "[webhook] Refusing %s while production environment is active for route %s",
+                _INSECURE_NO_AUTH,
+                route_name,
+            )
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # HTTP handlers
     # ------------------------------------------------------------------
@@ -320,9 +380,23 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] Failed to read body: %s", e)
             return web.json_response({"error": "Bad request"}, status=400)
 
-        # Validate HMAC signature FIRST (skip for INSECURE_NO_AUTH testing mode)
+        # Validate HMAC signature FIRST. INSECURE_NO_AUTH is dev-only and
+        # requires explicit loopback-only allowance.
         secret = route_config.get("secret", self._global_secret)
-        if secret and secret != _INSECURE_NO_AUTH:
+        if secret == _INSECURE_NO_AUTH:
+            if not self._insecure_no_auth_allowed(route_name):
+                logger.warning(
+                    "[webhook] Rejected insecure no-auth route %s", route_name
+                )
+                return web.json_response(
+                    {"error": "Webhook route requires authentication"}, status=401
+                )
+        elif not secret:
+            logger.warning("[webhook] Missing HMAC secret for route %s", route_name)
+            return web.json_response(
+                {"error": "Webhook route requires authentication"}, status=401
+            )
+        else:
             if not self._validate_signature(request, raw_body, secret):
                 logger.warning(
                     "[webhook] Invalid signature for route %s", route_name
