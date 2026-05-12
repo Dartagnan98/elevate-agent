@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -110,7 +111,6 @@ import { X as CloseIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const MemoryConstellation = lazy(() =>
   import("@/components/MemoryConstellation").then((m) => ({ default: m.MemoryConstellation })),
 );
@@ -2296,77 +2296,77 @@ function HotLeadsList({
   );
 }
 
-function LeadPipelineTabs({
+function LeadQueuePanel({
+  children,
+  count,
+  description,
+  title,
+}: {
+  children: ReactNode;
+  count: number;
+  description: string;
+  title: string;
+}) {
+  return (
+    <div className="min-w-0 overflow-hidden rounded-2xl border border-border bg-card">
+      <div className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+        </div>
+        <Badge variant={count ? "outline" : "secondary"}>{count}</Badge>
+      </div>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+function LeadPipelineBoard({
   buyers,
   data,
+  skippedDrafts,
   threads,
 }: {
   buyers: BuyerWatchlistEntry[];
   data: HubData;
+  skippedDrafts: SourceInboxDraft[];
   threads: SourceInboxThread[];
 }) {
-  const followUpCount = leadThreadBuckets(threads).followUp.length;
-  const buyerCount = buyers.length;
-  const defaultTab = followUpCount > 0 || buyerCount === 0 ? "follow-ups" : "buyers";
+  const buckets = leadThreadBuckets(threads);
 
   return (
-    <div className="rounded-2xl border border-border bg-card">
-      <Tabs defaultValue={defaultTab}>
-        {(active, setActive) => (
-          <>
-            <div className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
-              <TabsList>
-                <TabsTrigger
-                  active={active === "follow-ups"}
-                  value="follow-ups"
-                  onClick={() => setActive("follow-ups")}
-                >
-                  <span>Follow-ups</span>
-                  <span
-                    className={cn(
-                      "font-mono-ui ml-2 rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
-                      active === "follow-ups"
-                        ? "bg-foreground/10 text-foreground"
-                        : "bg-foreground/5 text-muted-foreground",
-                    )}
-                  >
-                    {followUpCount}
-                  </span>
-                </TabsTrigger>
-                <TabsTrigger
-                  active={active === "buyers"}
-                  value="buyers"
-                  onClick={() => setActive("buyers")}
-                >
-                  <span>Buyer searches</span>
-                  <span
-                    className={cn(
-                      "font-mono-ui ml-2 rounded-full px-1.5 py-0.5 text-[0.62rem] tabular-nums",
-                      active === "buyers"
-                        ? "bg-foreground/10 text-foreground"
-                        : "bg-foreground/5 text-muted-foreground",
-                    )}
-                  >
-                    {buyerCount}
-                  </span>
-                </TabsTrigger>
-              </TabsList>
-              <span className="hidden truncate text-xs text-muted-foreground sm:inline">
-                {active === "follow-ups"
-                  ? "Replies waiting on you, hottest first."
-                  : "MLS buyers actively shopping."}
-              </span>
-            </div>
-            <div>
-              {active === "follow-ups" ? (
-                <FollowUpThreadsList data={data} threads={threads} />
-              ) : (
-                <PrivateSearchBuyersList buyers={buyers} />
-              )}
-            </div>
-          </>
-        )}
-      </Tabs>
+    <div className="grid gap-4 xl:grid-cols-2">
+      <LeadQueuePanel
+        title="Hot leads"
+        count={buckets.hot.length}
+        description="Top scored leads across every connected source."
+      >
+        <HotLeadsList data={data} threads={threads} />
+      </LeadQueuePanel>
+
+      <LeadQueuePanel
+        title="Follow-ups"
+        count={buckets.followUp.length}
+        description="Replies waiting on you, hottest and oldest waits first."
+      >
+        <FollowUpThreadsList data={data} threads={threads} />
+      </LeadQueuePanel>
+
+      <LeadQueuePanel
+        title="Buyer searches"
+        count={buyers.length}
+        description="MLS/private-search buyers ranked by score and recency."
+      >
+        <PrivateSearchBuyersList buyers={buyers} />
+      </LeadQueuePanel>
+
+      <LeadQueuePanel
+        title="Recently skipped"
+        count={skippedDrafts.length}
+        description="Skipped in the last 3 days. Restore brings the draft back."
+      >
+        <SkippedDraftsList data={data} drafts={skippedDrafts} />
+      </LeadQueuePanel>
     </div>
   );
 }
@@ -2517,8 +2517,14 @@ function BuyerWatchlistRow({ buyer }: { buyer: BuyerWatchlistEntry }) {
   );
 }
 
-function SkippedDraftsList({ data }: { data: HubData }) {
-  const skipped = data.sourceInbox?.skippedDrafts ?? [];
+function SkippedDraftsList({
+  data,
+  drafts: draftsOverride,
+}: {
+  data: HubData;
+  drafts?: SourceInboxDraft[];
+}) {
+  const skipped = draftsOverride ?? data.sourceInbox?.skippedDrafts ?? [];
   const [restoredIds, setRestoredIds] = useState<Set<string>>(() => new Set());
 
   const visible = skipped.filter((d) => !restoredIds.has(d.id));
@@ -3239,6 +3245,7 @@ type LeadSourceOption = {
 
 function LeadFilterBar({
   active,
+  buyerSearches,
   drafts,
   followUps,
   hot,
@@ -3246,9 +3253,11 @@ function LeadFilterBar({
   options,
   pulse,
   profiles,
+  skipped,
   threads,
 }: {
   active: string | null;
+  buyerSearches: number;
   drafts: number;
   followUps: number;
   hot: number;
@@ -3256,6 +3265,7 @@ function LeadFilterBar({
   options: LeadSourceOption[];
   pulse?: ResponsePulse;
   profiles: number;
+  skipped: number;
   threads: number;
 }) {
   type Stat = {
@@ -3267,9 +3277,11 @@ function LeadFilterBar({
   const queueStats: Stat[] = [
     { label: "Drafts to approve", value: drafts, tone: drafts > 0 ? "warning" : "muted", emphasis: "primary" },
     { label: "Hot leads", value: hot, tone: hot > 0 ? "default" : "muted", emphasis: "primary" },
+    { label: "Follow-ups", value: followUps, tone: followUps > 0 ? "warning" : "muted", emphasis: "primary" },
+    { label: "Buyer searches", value: buyerSearches, tone: buyerSearches > 0 ? "default" : "muted", emphasis: "primary" },
+    { label: "Skipped", value: skipped, tone: skipped > 0 ? "warning" : "muted", emphasis: "primary" },
     { label: "Profiles", value: profiles, tone: profiles > 0 ? "default" : "muted", emphasis: "primary" },
     { label: "Open threads", value: threads, tone: "default", emphasis: "primary" },
-    { label: "Follow-ups scheduled", value: followUps, tone: "muted", emphasis: "primary" },
   ];
   const slaStats: Stat[] = [];
   if (pulse) {
@@ -4830,10 +4842,15 @@ export function RealEstateLeadsPage() {
     () => allDrafts.filter((draft) => filterFn(draft.sourceId)),
     [allDrafts, filterFn],
   );
+  const skippedDrafts = useMemo(
+    () => (data.sourceInbox?.skippedDrafts ?? []).filter((draft) => filterFn(draft.sourceId)),
+    [data.sourceInbox?.skippedDrafts, filterFn],
+  );
   const profiles = useMemo(
     () => allProfiles.filter((profile) => sourceFilter === null || profile.sourceIds.includes(sourceFilter)),
     [allProfiles, sourceFilter],
   );
+  const buyerSearches = data.sourceInbox?.privateSearchBuyers ?? [];
 
   const followUpJobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
@@ -4851,6 +4868,7 @@ export function RealEstateLeadsPage() {
   });
 
   const hotLeads = threads.filter((thread) => thread.heatLabel === "hot").length;
+  const followUpThreadCount = leadThreadBuckets(threads).followUp.length;
   const blockedSources = allSources.filter((source) => source.blocked);
   const pulse = useMemo(() => computeResponsePulse(threads), [threads]);
 
@@ -4894,13 +4912,15 @@ export function RealEstateLeadsPage() {
           <>
             <LeadFilterBar
               active={sourceFilter}
+              buyerSearches={buyerSearches.length}
               drafts={drafts.length}
-              followUps={followUpJobs.length}
+              followUps={followUpThreadCount}
               hot={hotLeads}
               onSelect={setSourceFilter}
               options={filterOptions}
               pulse={pulse}
               profiles={profiles.length}
+              skipped={skippedDrafts.length}
               threads={threads.length}
             />
 
@@ -4956,28 +4976,12 @@ export function RealEstateLeadsPage() {
                   />
 
                   <div className="flex flex-col gap-4">
-                    <CollapsibleSection
-                      title="Hot leads"
-                      count={leadThreadBuckets(threads).hot.length}
-                      description="Top scored leads across every connected source."
-                      defaultOpen
-                    >
-                      <HotLeadsList data={data} threads={threads} />
-                    </CollapsibleSection>
-
-                    <LeadPipelineTabs
-                      buyers={data.sourceInbox?.privateSearchBuyers ?? []}
+                    <LeadPipelineBoard
+                      buyers={buyerSearches}
                       data={data}
+                      skippedDrafts={skippedDrafts}
                       threads={threads}
                     />
-
-                    <CollapsibleSection
-                      title="Recently skipped"
-                      count={(data.sourceInbox?.skippedDrafts ?? []).length}
-                      description="Skipped in the last 3 days. Restore brings it back to the queue."
-                    >
-                      <SkippedDraftsList data={data} />
-                    </CollapsibleSection>
                   </div>
                 </div>
 
