@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
-_DOCS_BASE = "https://elevate.ctrlstrategies.com/docs"
+_DOCS_BASE = "https://github.com/Dartagnan98/elevate-agent/docs"
 
 
 def _model_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -381,7 +381,7 @@ def _print_setup_summary(config: dict, elevate_home):
     else:
         tool_status.append(("Web Search & Extract", False, "EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, or TAVILY_API_KEY"))
 
-    # Browser tools (local Chromium, Camofox, Browserbase, Browser Use, or Firecrawl)
+    # Browser tools use Browser Use cloud in the base Elevate onboarding path.
     browser_provider = subscription_features.browser.current_provider
     if subscription_features.browser.managed_by_nous:
         tool_status.append(("Browser Automation (Elevate)", True, None))
@@ -391,20 +391,9 @@ def _print_setup_summary(config: dict, elevate_home):
             label = f"Browser Automation ({browser_provider})"
         tool_status.append((label, True, None))
     else:
-        missing_browser_hint = "npm install -g agent-browser, set CAMOFOX_URL, or configure Browser Use or Browserbase"
-        if browser_provider == "Browserbase":
-            missing_browser_hint = (
-                "npm install -g agent-browser and set "
-                "BROWSERBASE_API_KEY/BROWSERBASE_PROJECT_ID"
-            )
-        elif browser_provider == "Browser Use":
-            missing_browser_hint = (
-                "npm install -g agent-browser and set BROWSER_USE_API_KEY"
-            )
-        elif browser_provider == "Camofox":
-            missing_browser_hint = "CAMOFOX_URL"
-        elif browser_provider == "Local browser":
-            missing_browser_hint = "npm install -g agent-browser"
+        missing_browser_hint = "configure Browser Use"
+        if browser_provider == "Browser Use":
+            missing_browser_hint = "set BROWSER_USE_API_KEY"
         tool_status.append(
             ("Browser Automation", False, missing_browser_hint)
         )
@@ -1876,7 +1865,7 @@ def _setup_slack():
     print_info("   6. Reinstall the app after any scope or event changes")
     print_info("   7. After installing, invite the bot to channels: /invite @YourBot")
     print()
-    print_info("   Full guide: https://elevate.ctrlstrategies.com/docs/user-guide/messaging/slack/")
+    print_info("   Full guide: https://github.com/Dartagnan98/elevate-agent/docs/user-guide/messaging/slack/")
     print()
     bot_token = prompt("Slack Bot Token (xoxb-...)", password=True)
     if not bot_token:
@@ -2184,7 +2173,7 @@ def _setup_webhooks():
     print_warning("   internet. For security, run the gateway in a sandboxed environment")
     print_warning("   (Docker, VM, etc.) to limit blast radius from prompt injection.")
     print()
-    print_info("   Full guide: https://elevate.ctrlstrategies.com/docs/user-guide/messaging/webhooks/")
+    print_info("   Full guide: https://github.com/Dartagnan98/elevate-agent/docs/user-guide/messaging/webhooks/")
     print()
 
     port = prompt("Webhook port (default 8644)")
@@ -2211,7 +2200,7 @@ def _setup_webhooks():
     print_info("      http://your-server:8644/webhooks/<route-name>")
     print()
     print_info("   Route configuration guide:")
-    print_info("   https://elevate.ctrlstrategies.com/docs/user-guide/messaging/webhooks/#configuring-routes")
+    print_info("   https://github.com/Dartagnan98/elevate-agent/docs/user-guide/messaging/webhooks/#configuring-routes")
     print()
     print_info("   Open config in your editor:  elevate config edit")
 

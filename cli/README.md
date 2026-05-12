@@ -31,10 +31,10 @@ curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/
 ```
 
 The installer downloads Elevate, creates the Python environment, links the
-`elevate` command, syncs bundled skills, creates `~/.elevate`, and initializes
-the local SQLite stores. Git is optional: if it is available the installer uses
-a normal checkout, and if it is not available the installer downloads the source
-archive automatically.
+`elevate` command, syncs base bundled skills, creates `~/.elevate`, and
+initializes the local SQLite stores. Git is optional: if it is available the
+installer uses a normal checkout, and if it is not available the installer
+downloads the source archive automatically.
 
 - `~/.elevate/state.db` for sessions, messages, usage, and chat history.
 - `~/.elevate/data/operational.db` for leads, profiles, deal files, admin
@@ -132,7 +132,8 @@ elevate update
 ```
 
 `elevate update` pulls the latest code, reinstalls Python dependencies, rebuilds
-web assets when needed, syncs bundled skills, and restarts installed gateways.
+web assets when needed, syncs base bundled skills, and restarts installed
+gateways.
 When the dashboard or gateway reports that an update is available, the user can
 run one command:
 

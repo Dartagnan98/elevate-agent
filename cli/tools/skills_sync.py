@@ -35,6 +35,14 @@ logger = logging.getLogger(__name__)
 ELEVATE_HOME = get_elevate_home()
 SKILLS_DIR = ELEVATE_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
+PAID_SKILL_PATH_PREFIXES = (
+    "real-estate-admin/",
+)
+PAID_SKILL_PATHS = {
+    "lead-scorer",
+    "outreach-lanes",
+    "social-content-engine",
+}
 
 
 def _get_bundled_dir() -> Path:
@@ -130,7 +138,26 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
     return fallback
 
 
-def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
+def _include_paid_bundled_skills() -> bool:
+    value = os.getenv("ELEVATE_INCLUDE_PAID_BUNDLED_SKILLS", "").strip().lower()
+    return value in {"1", "true", "yes", "on", "all"}
+
+
+def _is_paid_skill_path(skill_dir: Path, bundled_dir: Path) -> bool:
+    try:
+        rel = skill_dir.relative_to(bundled_dir).as_posix()
+    except ValueError:
+        return False
+    return rel in PAID_SKILL_PATHS or any(
+        rel.startswith(prefix) for prefix in PAID_SKILL_PATH_PREFIXES
+    )
+
+
+def _discover_bundled_skills(
+    bundled_dir: Path,
+    *,
+    include_paid: bool | None = None,
+) -> List[Tuple[str, Path]]:
     """
     Find all SKILL.md files in the bundled directory.
     Returns list of (skill_name, skill_directory_path) tuples.
@@ -139,11 +166,16 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
     if not bundled_dir.exists():
         return skills
 
+    if include_paid is None:
+        include_paid = _include_paid_bundled_skills()
+
     for skill_md in bundled_dir.rglob("SKILL.md"):
         path_str = str(skill_md)
         if "/.git/" in path_str or "/.github/" in path_str or "/.hub/" in path_str:
             continue
         skill_dir = skill_md.parent
+        if not include_paid and _is_paid_skill_path(skill_dir, bundled_dir):
+            continue
         skill_name = _read_skill_name(skill_md, skill_dir.name)
         skills.append((skill_name, skill_dir))
 
@@ -190,8 +222,19 @@ def sync_skills(quiet: bool = False) -> dict:
 
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest()
-    bundled_skills = _discover_bundled_skills(bundled_dir)
+    include_paid = _include_paid_bundled_skills()
+    bundled_skills = _discover_bundled_skills(bundled_dir, include_paid=include_paid)
     bundled_names = {name for name, _ in bundled_skills}
+    all_bundled_skills = (
+        bundled_skills
+        if include_paid
+        else _discover_bundled_skills(bundled_dir, include_paid=True)
+    )
+    gated_skills = {
+        name: path
+        for name, path in all_bundled_skills
+        if name not in bundled_names and _is_paid_skill_path(path, bundled_dir)
+    }
 
     copied = []
     updated = []
@@ -291,7 +334,18 @@ def sync_skills(quiet: bool = False) -> dict:
 
     # Clean stale manifest entries (skills removed from bundled dir)
     cleaned = sorted(set(manifest.keys()) - bundled_names)
+    removed_paid = []
     for name in cleaned:
+        gated_src = gated_skills.get(name)
+        if gated_src:
+            dest = _compute_relative_dest(gated_src, bundled_dir)
+            origin_hash = manifest.get(name, "")
+            if dest.exists() and origin_hash and _dir_hash(dest) == origin_hash:
+                try:
+                    shutil.rmtree(dest)
+                    removed_paid.append(name)
+                except (OSError, IOError) as e:
+                    logger.debug("Could not remove gated bundled skill %s: %s", dest, e)
         del manifest[name]
 
     # Also copy DESCRIPTION.md files for categories (if not already present)
@@ -313,6 +367,7 @@ def sync_skills(quiet: bool = False) -> dict:
         "skipped": skipped,
         "user_modified": user_modified,
         "cleaned": cleaned,
+        "removed_paid": removed_paid,
         "total_bundled": len(bundled_skills),
     }
 

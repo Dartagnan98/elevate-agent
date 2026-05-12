@@ -810,7 +810,8 @@ else
 fi
 
 # ============================================================================
-# Seed bundled skills into ~/.elevate/skills/
+# Seed base bundled skills into ~/.elevate/skills/. Paid real estate/admin,
+# sales, and marketing packs are synced during `elevate activate`.
 # ============================================================================
 
 ELEVATE_SKILLS_DIR="${ELEVATE_HOME:-$HOME/.elevate}/skills"
@@ -821,11 +822,7 @@ echo "Syncing bundled skills to ~/.elevate/skills/ ..."
 if "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/tools/skills_sync.py" 2>/dev/null; then
     echo -e "${GREEN}✓${NC} Skills synced"
 else
-    # Fallback: copy if sync script fails (missing deps, etc.)
-    if [ -d "$SCRIPT_DIR/skills" ]; then
-        cp -rn "$SCRIPT_DIR/skills/"* "$ELEVATE_SKILLS_DIR/" 2>/dev/null || true
-        echo -e "${GREEN}✓${NC} Skills copied"
-    fi
+    echo -e "${YELLOW}⚠${NC} Base skill sync failed. Run later with: elevate update"
 fi
 
 # ============================================================================

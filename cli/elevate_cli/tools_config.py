@@ -295,57 +295,15 @@ TOOL_CATEGORIES = {
                 "requires_nous_auth": True,
                 "managed_nous_feature": "browser",
                 "override_env_vars": ["BROWSER_USE_API_KEY"],
-                "post_setup": "agent_browser",
-            },
-            {
-                "name": "Local Browser",
-                "badge": "★ recommended · free",
-                "tag": "Headless Chromium, no API key needed",
-                "env_vars": [],
-                "browser_provider": "local",
-                "post_setup": "agent_browser",
-            },
-            {
-                "name": "Browserbase",
-                "badge": "paid",
-                "tag": "Cloud browser with stealth and proxies",
-                "env_vars": [
-                    {"key": "BROWSERBASE_API_KEY", "prompt": "Browserbase API key", "url": "https://browserbase.com"},
-                    {"key": "BROWSERBASE_PROJECT_ID", "prompt": "Browserbase project ID"},
-                ],
-                "browser_provider": "browserbase",
-                "post_setup": "agent_browser",
             },
             {
                 "name": "Browser Use",
                 "badge": "paid",
-                "tag": "Cloud browser with remote execution",
+                "tag": "Cloud browser automation; no local Playwright or Chromium install",
                 "env_vars": [
                     {"key": "BROWSER_USE_API_KEY", "prompt": "Browser Use API key", "url": "https://browser-use.com"},
                 ],
                 "browser_provider": "browser-use",
-                "post_setup": "agent_browser",
-            },
-            {
-                "name": "Firecrawl",
-                "badge": "paid",
-                "tag": "Cloud browser with remote execution",
-                "env_vars": [
-                    {"key": "FIRECRAWL_API_KEY", "prompt": "Firecrawl API key", "url": "https://firecrawl.dev"},
-                ],
-                "browser_provider": "firecrawl",
-                "post_setup": "agent_browser",
-            },
-            {
-                "name": "Camofox",
-                "badge": "free · local",
-                "tag": "Anti-detection browser (Firefox/Camoufox)",
-                "env_vars": [
-                    {"key": "CAMOFOX_URL", "prompt": "Camofox server URL", "default": "http://localhost:9377",
-                     "url": "https://github.com/jo-inc/camofox-browser"},
-                ],
-                "browser_provider": "camofox",
-                "post_setup": "camofox",
             },
         ],
     },
@@ -405,47 +363,7 @@ TOOLSET_ENV_REQUIREMENTS = {
 
 def _run_post_setup(post_setup_key: str):
     """Run post-setup hooks for tools that need extra installation steps."""
-    import shutil
-    if post_setup_key in ("agent_browser", "browserbase"):
-        node_modules = PROJECT_ROOT / "node_modules" / "agent-browser"
-        if not node_modules.exists() and shutil.which("npm"):
-            _print_info("    Installing Node.js dependencies for browser tools...")
-            import subprocess
-            result = subprocess.run(
-                ["npm", "install", "--silent"],
-                capture_output=True, text=True, cwd=str(PROJECT_ROOT)
-            )
-            if result.returncode == 0:
-                _print_success("    Node.js dependencies installed")
-            else:
-                from elevate_constants import display_elevate_home
-                _print_warning(f"    npm install failed - run manually: cd {display_elevate_home()}/elevate && npm install")
-        elif not node_modules.exists():
-            _print_warning("    Node.js not found - browser tools require: npm install (in elevate directory)")
-
-    elif post_setup_key == "camofox":
-        camofox_dir = PROJECT_ROOT / "node_modules" / "@askjo" / "camofox-browser"
-        if not camofox_dir.exists() and shutil.which("npm"):
-            _print_info("    Installing Camofox browser server...")
-            import subprocess
-            result = subprocess.run(
-                ["npm", "install", "--silent"],
-                capture_output=True, text=True, cwd=str(PROJECT_ROOT)
-            )
-            if result.returncode == 0:
-                _print_success("    Camofox installed")
-            else:
-                _print_warning("    npm install failed - run manually: npm install")
-        if camofox_dir.exists():
-            _print_info("    Start the Camofox server:")
-            _print_info("      npx @askjo/camofox-browser")
-            _print_info("    First run downloads the Camoufox engine (~300MB)")
-            _print_info("    Or use Docker: docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
-        elif not shutil.which("npm"):
-            _print_warning("    Node.js not found. Install Camofox via Docker:")
-            _print_info("      docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
-
-    elif post_setup_key == "kittentts":
+    if post_setup_key == "kittentts":
         try:
             __import__("kittentts")
             _print_success("    kittentts is already installed")
@@ -764,7 +682,7 @@ def _toolset_has_keys(ts_key: str, config: dict = None) -> bool:
         for provider in _visible_providers(cat, config):
             env_vars = provider.get("env_vars", [])
             if not env_vars:
-                return True  # No-key provider (e.g. Local Browser, Edge TTS)
+                return True  # No-key provider (e.g. Edge TTS)
             if all(get_env_value(e["key"]) for e in env_vars):
                 return True
         return False
@@ -1741,7 +1659,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
     print(color("▲ Elevate Tool Configuration", Colors.CYAN, Colors.BOLD))
     print(color("  Enable or disable tools per platform.", Colors.DIM))
     print(color("  Tools that need API keys will be configured when enabled.", Colors.DIM))
-    print(color("  Guide: https://elevate.ctrlstrategies.com/docs/user-guide/features/tools", Colors.DIM))
+    print(color("  Guide: https://github.com/Dartagnan98/elevate-agent/docs/user-guide/features/tools", Colors.DIM))
     print()
 
     # ── First-time install: linear flow, no platform menu ──
@@ -1777,7 +1695,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
                     print(color(f"  ✓ {label}: using your Nous subscription defaults", Colors.GREEN))
 
             # Walk through ALL selected tools that have provider options or
-            # need API keys.  This ensures browser (Local vs Browserbase),
+            # need API keys.  This ensures Browser Use,
             # TTS (Edge vs OpenAI vs ElevenLabs), etc. are shown even when
             # a free provider exists.
             to_configure = [

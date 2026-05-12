@@ -382,7 +382,7 @@ detect_git() {
 }
 
 check_node() {
-    log_info "Checking Node.js (for browser tools)..."
+    log_info "Checking Node.js (optional UI/developer tooling)..."
 
     if command -v node &> /dev/null; then
         local found_ver=$(node --version)
@@ -400,12 +400,10 @@ check_node() {
         return 0
     fi
 
-    if [ "$DISTRO" = "termux" ]; then
-        log_info "Node.js not found — installing Node.js via pkg..."
-    else
-        log_info "Node.js not found — installing Node.js $NODE_VERSION LTS..."
-    fi
-    install_node
+    HAS_NODE=false
+    log_info "Node.js not found — skipping optional Node/browser tooling."
+    log_info "Browser Use cloud workflows do not require local Playwright or Chromium."
+    log_info "Set ELEVATE_INSTALL_NODE_TOOLS=1 before install only if you intentionally want local Node tooling."
 }
 
 install_node() {
@@ -1190,16 +1188,13 @@ SOUL_EOF
 
     log_success "Configuration directory ready: ~/.elevate/"
 
-    # Seed bundled skills into ~/.elevate/skills/ (manifest-based, one-time per skill)
+    # Seed base bundled skills into ~/.elevate/skills/. Paid real estate/admin,
+    # sales, and marketing packs are synced during `elevate activate`.
     log_info "Syncing bundled skills to ~/.elevate/skills/ ..."
     if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" 2>/dev/null; then
         log_success "Skills synced to ~/.elevate/skills/"
     else
-        # Fallback: simple directory copy if Python sync fails
-        if [ -d "$INSTALL_DIR/skills" ] && [ ! "$(ls -A "$ELEVATE_HOME/skills/" 2>/dev/null | grep -v '.bundled_manifest')" ]; then
-            cp -r "$INSTALL_DIR/skills/"* "$ELEVATE_HOME/skills/" 2>/dev/null || true
-            log_success "Skills copied to ~/.elevate/skills/"
-        fi
+        log_warn "Base skill sync failed. Run later with: elevate update"
     fi
 }
 
@@ -1224,83 +1219,41 @@ initialize_local_databases() {
 }
 
 install_node_deps() {
+    if [ "${ELEVATE_INSTALL_NODE_TOOLS:-0}" != "1" ]; then
+        log_info "Skipping optional Node/browser tooling."
+        log_info "Base Elevate uses Browser Use for browser automation; no Playwright/Chromium install is needed."
+        return 0
+    fi
+
     if [ "$HAS_NODE" = false ]; then
-        log_info "Skipping Node.js dependencies (Node not installed)"
+        if [ "$DISTRO" = "termux" ]; then
+            log_info "Node.js not found — installing Node.js via pkg for optional tooling..."
+        else
+            log_info "Node.js not found — installing Node.js $NODE_VERSION LTS for optional tooling..."
+        fi
+        install_node
+    fi
+
+    if [ "$HAS_NODE" = false ]; then
+        log_info "Skipping optional Node dependencies (Node not installed)"
         return 0
     fi
 
     if [ "$DISTRO" = "termux" ]; then
         log_info "Skipping automatic Node/browser dependency setup on Termux"
-        log_info "Browser automation is not part of the tested Termux install path yet."
+        log_info "Browser Use cloud workflows are still available without local browser tooling."
         log_info "If you want to experiment manually later, run: cd $INSTALL_DIR && npm install"
         return 0
     fi
 
     if [ -f "$INSTALL_DIR/package.json" ]; then
-        log_info "Installing Node.js dependencies (browser tools)..."
+        log_info "Installing optional Node.js dependencies..."
         cd "$INSTALL_DIR"
         npm install --silent 2>/dev/null || {
-            log_warn "npm install failed (browser tools may not work)"
+            log_warn "npm install failed (optional Node tooling may not work)"
         }
         log_success "Node.js dependencies installed"
-
-        # Install Playwright browser + system dependencies.
-        # Playwright's --with-deps only supports apt-based systems natively.
-        # For Arch/Manjaro we install the system libs via pacman first.
-        # Other systems must install Chromium dependencies manually.
-        log_info "Installing browser engine (Playwright Chromium)..."
-        case "$DISTRO" in
-            ubuntu|debian|raspbian|pop|linuxmint|elementary|zorin|kali|parrot)
-                log_info "Playwright may request sudo to install browser system dependencies (shared libraries)."
-                log_info "This is standard Playwright setup — Elevate itself does not require root access."
-                cd "$INSTALL_DIR" && npx playwright install --with-deps chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — browser tools will not work."
-                    log_warn "Try running manually: cd $INSTALL_DIR && npx playwright install --with-deps chromium"
-                }
-                ;;
-            arch|manjaro)
-                if command -v pacman &> /dev/null; then
-                    log_info "Arch/Manjaro detected — installing Chromium system dependencies via pacman..."
-                    if command -v sudo &> /dev/null && sudo -n true 2>/dev/null; then
-                        sudo NEEDRESTART_MODE=a pacman -S --noconfirm --needed \
-                            nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
-                    elif [ "$(id -u)" -eq 0 ]; then
-                        pacman -S --noconfirm --needed \
-                            nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
-                    else
-                        log_warn "Cannot install browser deps without sudo. Run manually:"
-                        log_warn "  sudo pacman -S nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib"
-                    fi
-                fi
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — browser tools will not work."
-                }
-                ;;
-            fedora|rhel|centos|rocky|alma)
-                log_warn "Playwright does not support automatic dependency installation on RPM-based systems."
-                log_info "Install Chromium system dependencies manually before using browser tools:"
-                log_info "  sudo dnf install nss atk at-spi2-core cups-libs libdrm libxkbcommon mesa-libgbm pango cairo alsa-lib"
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — install dependencies above and retry."
-                }
-                ;;
-            opensuse*|sles)
-                log_warn "Playwright does not support automatic dependency installation on zypper-based systems."
-                log_info "Install Chromium system dependencies manually before using browser tools:"
-                log_info "  sudo zypper install mozilla-nss libatk-1_0-0 at-spi2-core cups-libs libdrm2 libxkbcommon0 Mesa-libgbm1 pango cairo libasound2"
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — install dependencies above and retry."
-                }
-                ;;
-            *)
-                log_warn "Playwright does not support automatic dependency installation on $DISTRO."
-                log_info "Install Chromium/browser system dependencies for your distribution, then run:"
-                log_info "  cd $INSTALL_DIR && npx playwright install chromium"
-                log_info "Browser tools will not work until dependencies are installed."
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || true
-                ;;
-        esac
-        log_success "Browser engine setup complete"
+        log_info "Playwright/Chromium is intentionally not installed by Elevate."
     fi
 
     # Install TUI dependencies

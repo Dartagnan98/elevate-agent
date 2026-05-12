@@ -56,7 +56,9 @@ source ~/.bashrc   # or source ~/.zshrc
 
 For detailed installation options, prerequisites, and troubleshooting, see the [Installation guide](./installation.md).
 
-The installer initializes the local databases during the same run:
+The installer initializes the local databases and syncs only the base bundled
+skills during the same run. Paid real estate/admin/sales/marketing skills are
+added after activation, not during the free/base install.
 
 - `~/.elevate/state.db` for sessions and chat history
 - `~/.elevate/data/operational.db` for the operating system data

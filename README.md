@@ -14,8 +14,8 @@ curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/
 ```
 
 The installer downloads Elevate, creates the Python environment, links the
-`elevate` command, syncs bundled skills, creates `~/.elevate`, and initializes
-the local SQLite stores:
+`elevate` command, syncs base bundled skills, creates `~/.elevate`, and
+initializes the local SQLite stores:
 
 - `~/.elevate/state.db` for sessions, messages, usage, and chat history.
 - `~/.elevate/data/operational.db` for leads, profiles, deal files, admin
@@ -62,7 +62,7 @@ elevate update
 ```
 
 `elevate update` updates the app, reinstalls dependencies, rebuilds web assets
-when needed, syncs bundled skills, and restarts installed gateways. Archive
+when needed, syncs base bundled skills, and restarts installed gateways. Archive
 installs and Git installs both use the same command.
 
 ## What It Does

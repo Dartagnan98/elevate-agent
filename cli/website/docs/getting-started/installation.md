@@ -42,10 +42,11 @@ Native Windows is **not supported**. Please install [WSL2](https://learn.microso
 ### What the Installer Does
 
 The installer handles everything automatically: source download, dependencies,
-virtual environment, global `elevate` command setup, bundled skills, local
-profile files, and local SQLite databases. If Git is installed, the installer
-uses a normal checkout. If Git is missing, it downloads the Elevate source
-archive and continues.
+virtual environment, global `elevate` command setup, base bundled skills, local
+profile files, and local SQLite databases. Paid real estate skill packs sync
+during `elevate activate`, not during the free/base install. If Git is
+installed, the installer uses a normal checkout. If Git is missing, it downloads
+the Elevate source archive and continues.
 
 It initializes:
 
@@ -85,14 +86,15 @@ The one-line installer does not require Git. It automatically handles:
 
 - **uv** (fast Python package manager)
 - **Python 3.11** (via uv, no sudo needed)
-- **Node.js v22** (for browser automation and WhatsApp bridge)
 - **ripgrep** (fast file search)
 - **ffmpeg** (audio format conversion for TTS)
 
 :::info
 You do **not** need to install Python, Node.js, ripgrep, ffmpeg, or Git manually.
-Git is still useful for developer checkouts and faster source updates, but a
-normal user install can download the source archive directly.
+Base browser automation uses Browser Use cloud and does not install local
+Playwright/Chromium. Git is still useful for developer checkouts and faster
+source updates, but a normal user install can download the source archive
+directly.
 :::
 
 :::tip Nix users
