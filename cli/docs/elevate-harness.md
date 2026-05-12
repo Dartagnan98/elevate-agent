@@ -23,7 +23,7 @@ No client should invent its own session, memory, cron, skill, or agent registry.
   run IDs.
 - Agent orchestration snapshots expose the recent durable event tail, giving
   the dashboard a lightweight status feed without starting hidden workers.
-- Memory snapshots include a jcode-style pipeline posture: search, verify,
+- Memory snapshots include a memory-pipeline pipeline posture: search, verify,
   inject, and maintain states derived from the local turn journal until a live
   memory sidecar event stream exists.
 

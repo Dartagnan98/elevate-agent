@@ -12,20 +12,26 @@ from __future__ import annotations
 
 import csv
 import io
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from elevate_cli.data import (
+    complete_admin_setup,
     connect,
     create_action,
     create_deal,
     evaluate_dispatch,
+    get_admin_setup,
     import_listing_workflow_csv,
     import_exp_agent_centre,
     list_action_runs,
     list_deal_attachments,
+    province_coverage,
     list_deal_events,
+    sync_admin_setup_runtime,
+    update_admin_setup,
     upsert_contact,
 )
 from elevate_cli.data.connection import _reset_schema_cache
@@ -43,9 +49,184 @@ def client():
     from elevate_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
 
     c = TestClient(app, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
+    _complete_admin_setup()
     yield c
     if hasattr(app.state, "bound_host"):
         del app.state.bound_host
+
+
+def _complete_admin_setup():
+    def item_payload(item):
+        value = None
+        if item["key"] in {"approval_channel", "email", "calendar", "drive", "crm"}:
+            value = {
+                "verification": {
+                    "checkedAt": "2026-05-07T00:00:00+00:00",
+                    "signals": ["test connector verified"],
+                }
+            }
+        elif item["key"] == "browser_workflows":
+            value = {
+                "mode": "browser-use",
+                "notes": "Use saved browser profile for portal tests.",
+                "playbooks": {
+                    "mls": {"provider": "Matrix", "loginUrl": "https://mls.example", "credentialRef": "test"},
+                    "compliance": {"provider": "SkySlope", "loginUrl": "https://skyslope.example", "credentialRef": "test"},
+                    "showing": {"provider": "ShowingTime", "loginUrl": "https://showing.example", "credentialRef": "test"},
+                },
+            }
+        elif item["key"] == "photo_processing":
+            value = {"provider": "Drive + Nano Banana", "source": "google-drive"}
+        return {
+            "key": item["key"],
+            "status": "manual" if item["key"] == "fintrac_workflow" else "configured",
+            "provider": "test",
+            "value": value,
+        }
+
+    with connect() as conn:
+        setup = get_admin_setup(conn)
+        update_admin_setup(
+            conn,
+            profile={
+                "realtorLegalName": "Test Realtor",
+                "brokerageName": "Test Brokerage",
+                "province": "BC",
+                "approvalChannel": "telegram:test",
+                "regionalMemory": {"notes": "Test regional memory"},
+            },
+            items=[
+                item_payload(item)
+                for item in setup["items"]
+                if item["required"]
+            ],
+        )
+        complete_admin_setup(conn)
+
+
+def test_admin_setup_gate_blocks_deal_creation_until_ready():
+    from elevate_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
+
+    c = TestClient(app, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
+    resp = c.post("/api/admin/deals", json={"title": "Blocked", "side": "listing"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert "Admin setup" in body["detail"]["message"]
+    assert body["detail"]["setup"]["complete"] is False
+
+
+def test_admin_setup_complete_requires_runtime_verification_for_core_connectors():
+    with connect() as conn:
+        setup = get_admin_setup(conn)
+        update_admin_setup(
+            conn,
+            profile={
+                "realtorLegalName": "Test Realtor",
+                "brokerageName": "Test Brokerage",
+                "province": "BC",
+                "approvalChannel": "telegram:test",
+                "regionalMemory": {"notes": "Test regional memory"},
+            },
+            items=[
+                {
+                    "key": item["key"],
+                    "status": "manual" if item["key"] == "fintrac_workflow" else "configured",
+                    "provider": "typed-only",
+                }
+                for item in setup["items"]
+                if item["required"]
+            ],
+        )
+        unverified = get_admin_setup(conn)
+        assert "email" in unverified["missingRequiredKeys"]
+        assert "browser_workflows" in unverified["missingRequiredKeys"]
+        readiness = {item["key"]: item for item in unverified["readiness"]}
+        assert readiness["email"]["state"] == "needs_runtime_verification"
+        assert readiness["browser_workflows"]["state"] == "incomplete_browser_playbook"
+        assert readiness["identity_profile"]["ready"] is True
+        with pytest.raises(ValueError):
+            complete_admin_setup(conn)
+
+
+def test_admin_setup_runtime_sync_marks_real_connector_signals():
+    with connect() as conn:
+        setup = sync_admin_setup_runtime(
+            conn,
+            source_connectors={
+                "connectors": [
+                    {"id": "crm", "label": "Lofty", "connected": True, "state": "connected"},
+                    {"id": "forms-signing", "label": "WEBForms + signing", "sourceExists": True, "state": "needs_operator"},
+                ],
+            },
+            composio_accounts={
+                "ok": True,
+                "data": {
+                    "items": [
+                        {"status": "ACTIVE", "toolkit": {"slug": "gmail"}},
+                    ],
+                },
+            },
+            env_values={
+                "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN": "token",
+                "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL": "12345",
+            },
+        )
+
+    by_key = {item["key"]: item for item in setup["items"]}
+    assert by_key["approval_channel"]["status"] == "connected"
+    assert by_key["approval_channel"]["provider"] == "telegram"
+    assert by_key["email"]["status"] == "connected"
+    assert by_key["crm"]["status"] == "connected"
+    assert by_key["forms_provider"]["status"] == "configured"
+    assert by_key["signing_provider"]["status"] == "configured"
+
+
+def test_admin_setup_writes_sanitized_agent_memory_snapshot():
+    _complete_admin_setup()
+
+    with connect() as conn:
+        setup = update_admin_setup(
+            conn,
+            items=[
+                {
+                    "key": "photo_processing",
+                    "status": "configured",
+                    "provider": "Drive + Nano Banana",
+                    "value": {
+                        "provider": "Drive + Nano Banana",
+                        "source": "google-drive",
+                        "notes": "api_key=banana-secret",
+                    },
+                }
+            ],
+        )
+
+    memory = setup["memory"]
+    assert memory["synced"] is True
+    path = Path(memory["path"])
+    assert path.exists()
+    content = path.read_text(encoding="utf-8")
+    assert "Admin onboarding memory" in content
+    assert "SQLite operational.db remains the source of truth" in content
+    assert "Matrix" in content
+    assert "SkySlope" in content
+    assert "ShowingTime" in content
+    assert "Drive + Nano Banana" in content
+    assert "[redacted secret reference]" in content
+    assert "banana-secret" not in content
+
+
+def test_admin_setup_verify_endpoint_uses_agent_telegram_env(monkeypatch):
+    monkeypatch.setenv("ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "12345")
+    from elevate_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
+
+    c = TestClient(app, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
+    resp = c.post("/api/admin/setup/verify")
+    assert resp.status_code == 200, resp.text
+    by_key = {item["key"]: item for item in resp.json()["items"]}
+    assert by_key["approval_channel"]["status"] == "connected"
+    assert by_key["approval_channel"]["provider"] == "telegram"
 
 
 def _create(title="Deal", side="listing", current_stage=0):
@@ -72,6 +253,9 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
             "fields": {
                 "pep": True,
                 "signing_authority": "seller",
+                "mlsNumber": "10345678",
+                "listPrice": 799000,
+                "yearBuilt": 2014,
                 "rush_file": "yes",
             },
         },
@@ -89,6 +273,9 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
     assert body["loftyContactId"] == "lofty-123"
     assert body["pep"] is True
     assert body["signingAuthority"] == "seller"
+    assert body["mlsNumber"] == "10345678"
+    assert body["listPrice"] == 799000
+    assert body["yearBuilt"] == 2014
     assert body["extraToggles"] == {"rush_file": "yes"}
 
     with connect() as conn:
@@ -99,6 +286,49 @@ def test_create_deal_endpoint_returns_normalized_row_and_event(client):
     assert events[0]["payload"]["fields"]["rush_file"] == "yes"
 
 
+def test_create_deal_can_suppress_initial_stage_dispatch_for_imports(client):
+    with connect() as conn:
+        create_action(
+            conn,
+            name="stage four entry",
+            trigger="stage_entry",
+            skill="listing-build",
+            side="listing",
+            to_stage=4,
+        )
+
+    suppressed = client.post(
+        "/api/admin/deals",
+        json={
+            "title": "Imported live listing",
+            "side": "listing",
+            "currentStage": 4,
+            "suppressInitialDispatch": True,
+        },
+    )
+    assert suppressed.status_code == 200, suppressed.text
+
+    with connect() as conn:
+        assert list_action_runs(conn, deal_id=suppressed.json()["id"]) == []
+
+    live_create = client.post(
+        "/api/admin/deals",
+        json={
+            "title": "Intentional live listing",
+            "side": "listing",
+            "currentStage": 4,
+        },
+    )
+    assert live_create.status_code == 200, live_create.text
+
+    with connect() as conn:
+        runs = list_action_runs(conn, deal_id=live_create.json()["id"])
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["cronJobId"]
+    assert runs[0]["payload"]["toStage"] == 4
+
+
 
 def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_values(client):
     resp = client.get("/api/admin/jurisdiction")
@@ -106,7 +336,7 @@ def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_valu
     jurisdiction = resp.json()
     assert jurisdiction == {
         "country": "CA",
-        "province": "",
+        "province": "BC",
         "market": "",
         "packageKey": "generic.real-estate",
     }
@@ -171,12 +401,27 @@ def test_get_deals_filters_by_side(client):
     assert listing["id"] not in ids
 
 
-def test_move_deal_endpoint_persists_stage_and_event(client):
+def test_move_deal_endpoint_blocks_incomplete_forward_stage_move(client):
     deal = _create(title="Move me", current_stage=1)
 
     resp = client.post(
         f"/api/admin/deals/{deal['id']}/move",
         json={"toStage": 3},
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["message"] == "deal phase gate is blocked"
+    assert detail["gate"]["stage"] == 1
+    assert any(item["field"] == "listingAddress" for item in detail["gate"]["missingFields"])
+
+
+def test_force_move_deal_endpoint_persists_stage_and_audits_override(client):
+    deal = _create(title="Force move me", current_stage=1)
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/move",
+        json={"toStage": 3, "force": True},
     )
 
     assert resp.status_code == 200, resp.text
@@ -190,9 +435,10 @@ def test_move_deal_endpoint_persists_stage_and_event(client):
     assert events[0]["actor"] == "human:web"
     assert events[0]["fromStage"] == 1
     assert events[0]["toStage"] == 3
+    assert events[0]["payload"]["force"] is True
 
 
-def test_current_workflow_stage_complete_toggle_advances_deal(client):
+def test_current_workflow_stage_complete_toggle_does_not_bypass_gate(client):
     deal = _create(title="Auto move me", current_stage=4)
 
     resp = client.post(
@@ -202,12 +448,43 @@ def test_current_workflow_stage_complete_toggle_advances_deal(client):
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["currentStage"] == 5
+    assert body["currentStage"] == 4
     assert body["extraToggles"]["workflow_stage_4_complete"] is True
 
     with connect() as conn:
         events = list_deal_events(conn, deal["id"])
     assert any(event["kind"] == "toggle_change" and event["fieldName"] == "workflow_stage_4_complete" for event in events)
+    assert not any(event["kind"] == "stage_transition" for event in events)
+
+
+def test_current_workflow_stage_complete_advances_when_gate_is_clear(client):
+    deal = _create(title="Gate clear stage four", current_stage=4)
+
+    for field, value in {
+        "workflow_evalue_bc_age_verified": True,
+        "workflow_listing_description_approved": True,
+        "workflow_feature_sheet_uploaded": True,
+        "workflow_ai_edited_photos_labelled": True,
+        "workflow_mls_input_started_date": "2026-05-06",
+        "workflow_realtor_tour_scheduled": "2026-05-07",
+    }.items():
+        ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": field, "value": value})
+        assert ok.status_code == 200, ok.text
+    attached = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "feature_sheet", "filePath": "/tmp/feature-sheet.pdf"},
+    )
+    assert attached.status_code == 200, attached.text
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/toggle",
+        json={"field": "workflow_stage_4_complete", "value": True},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["currentStage"] == 5
+    with connect() as conn:
+        events = list_deal_events(conn, deal["id"])
     transition = next(event for event in events if event["kind"] == "stage_transition")
     assert transition["fromStage"] == 4
     assert transition["toStage"] == 5
@@ -243,8 +520,43 @@ def test_listing_live_stage_complete_does_not_move_without_accepted_offer(client
     assert not any(event["kind"] == "stage_transition" for event in events)
 
 
-def test_accepted_offer_signal_advances_live_listing(client):
+def _clear_stage_five_gate(client, deal_id: str):
+    for field, value in {
+        "workflow_just_listed_blast_sent": True,
+        "workflow_social_posts_published": True,
+        "workflow_flodesk_mailout_sent": True,
+        "workflow_lofty_text_blast_sent": True,
+        "workflow_stage_5_complete": True,
+        "workflow_order_sign_up_date": "2026-05-06",
+        "workflow_coming_soon_posts_date": "2026-05-05",
+    }.items():
+        ok = client.post(f"/api/admin/deals/{deal_id}/toggle", json={"field": field, "value": value})
+        assert ok.status_code == 200, ok.text
+    fields = client.post(
+        f"/api/deals/{deal_id}/fields",
+        json={"fields": {"mlsNumber": "10345678", "listingPublishedAt": "2026-05-06"}},
+    )
+    assert fields.status_code == 200, fields.text
+
+
+def test_accepted_offer_signal_waits_for_current_phase_gate(client):
     deal = _create(title="Offer accepted", current_stage=5)
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/toggle",
+        json={"field": "workflow_accepted_offer_date", "value": "2026-05-06"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["currentStage"] == 5
+    with connect() as conn:
+        events = list_deal_events(conn, deal["id"])
+    assert not any(event["kind"] == "stage_transition" for event in events)
+
+
+def test_accepted_offer_signal_advances_live_listing_when_gate_is_clear(client):
+    deal = _create(title="Offer accepted clear", current_stage=5)
+    _clear_stage_five_gate(client, deal["id"])
 
     resp = client.post(
         f"/api/admin/deals/{deal['id']}/toggle",
@@ -260,8 +572,9 @@ def test_accepted_offer_signal_advances_live_listing(client):
     assert transition["toStage"] == 6
 
 
-def test_accepted_offer_detail_field_advances_live_listing(client):
+def test_accepted_offer_detail_field_advances_live_listing_when_gate_is_clear(client):
     deal = _create(title="Offer accepted detail", current_stage=5)
+    _clear_stage_five_gate(client, deal["id"])
 
     resp = client.post(
         f"/api/deals/{deal['id']}/fields",
@@ -324,6 +637,117 @@ def test_create_deal_invalid_side_returns_400(client):
     assert resp.status_code == 400
 
 
+def test_profile_promotion_requires_phone_or_email_verifier(client):
+    resp = client.post(
+        "/api/admin/profile-promotions",
+        json={
+            "profileId": "profile-no-verifier",
+            "side": "listing",
+            "displayName": "No Verifier",
+            "profileContext": {"id": "profile-no-verifier", "displayName": "No Verifier"},
+            "verifiers": [],
+            "dispatchInitialStage": False,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "phone or email verifier" in resp.json()["detail"]
+
+
+def test_profile_promotion_creates_and_updates_same_admin_deal(client):
+    payload = {
+        "profileId": "profile-seller-1",
+        "side": "listing",
+        "displayName": "Morgan Seller",
+        "workflow": "seller-cma",
+        "profileContext": {
+            "id": "profile-seller-1",
+            "displayName": "Morgan Seller",
+            "contactIds": ["source-contact-1"],
+            "conversationIds": ["conversation-1"],
+            "threadIds": ["thread-1"],
+            "sourceIds": ["gmail:1"],
+            "sources": ["gmail"],
+            "channels": ["email"],
+            "phones": ["(250) 555-0101"],
+            "emails": ["morgan@example.com"],
+            "latestText": "Can we meet about selling next week?",
+            "latestAt": "2026-05-08T10:00:00+00:00",
+            "heatScore": 92,
+            "heatLabel": "hot",
+            "tags": ["seller", "appointment-booked"],
+        },
+        "verifiers": [
+            {"kind": "phone", "value": "(250) 555-0101", "key": "phone:2505550101"},
+            {"kind": "email", "value": "morgan@example.com", "key": "email:morgan@example.com"},
+        ],
+        "dispatchInitialStage": False,
+    }
+
+    created = client.post("/api/admin/profile-promotions", json=payload)
+    assert created.status_code == 200, created.text
+    created_body = created.json()
+    assert created_body["action"] == "created"
+    deal = created_body["deal"]
+    assert deal["title"] == "Seller: Morgan Seller"
+    assert deal["side"] == "listing"
+    assert deal["province"] == "BC"
+    assert deal["primaryContactId"] is None
+    assert deal["extraToggles"]["sourceProfileId"] == "profile-seller-1"
+    assert deal["extraToggles"]["sourceAdminSide"] == "listing"
+    assert deal["extraToggles"]["workflow"] == "seller-cma"
+    assert "phone:2505550101" in deal["extraToggles"]["profileVerifierKeys"]
+
+    payload["profileContext"] = {
+        **payload["profileContext"],
+        "latestText": "Updated appointment context",
+    }
+    updated = client.post("/api/admin/profile-promotions", json=payload)
+    assert updated.status_code == 200, updated.text
+    updated_body = updated.json()
+    assert updated_body["action"] == "updated"
+    assert updated_body["matchReason"] == "source_profile"
+    assert updated_body["deal"]["id"] == deal["id"]
+    assert updated_body["deal"]["extraToggles"]["profileLatestText"] == "Updated appointment context"
+
+
+def test_profile_promotion_matches_existing_deal_by_verifier(client):
+    first = {
+        "profileId": "profile-old",
+        "side": "buyer",
+        "displayName": "Casey Buyer",
+        "workflow": "buyer-admin",
+        "profileContext": {
+            "id": "profile-old",
+            "displayName": "Casey Buyer",
+            "phones": ["604-555-0199"],
+            "emails": ["casey@example.com"],
+        },
+        "verifiers": [{"kind": "email", "value": "casey@example.com", "key": "email:casey@example.com"}],
+        "dispatchInitialStage": False,
+    }
+    created = client.post("/api/admin/profile-promotions", json=first)
+    assert created.status_code == 200, created.text
+    deal_id = created.json()["deal"]["id"]
+
+    second = {
+        **first,
+        "profileId": "profile-merged",
+        "profileContext": {
+            **first["profileContext"],
+            "id": "profile-merged",
+            "latestText": "Same person, merged source profile.",
+        },
+    }
+    updated = client.post("/api/admin/profile-promotions", json=second)
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["action"] == "updated"
+    assert body["matchReason"] == "verifier"
+    assert body["deal"]["id"] == deal_id
+    assert body["deal"]["extraToggles"]["sourceProfileId"] == "profile-merged"
+    assert body["deal"]["extraToggles"]["sourceProfileIds"] == ["profile-old", "profile-merged"]
+
 
 def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     with connect() as conn:
@@ -383,6 +807,10 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["dealFlow"]["packageKey"] == "ca.bc"
     assert body["dealFlow"]["gate"]["stageName"] == "CMA / Prospect"
     assert body["dealFlow"]["gate"]["canAdvance"] is False
+    assert {item["skill"] for item in body["dealFlow"]["backgroundAutomations"]} == {
+        "gmail-doc-router",
+        "seller-update",
+    }
     assert body["coContacts"][0]["role"] == "lawyer"
     assert body["attachments"][0]["kind"] == "cma_report"
 
@@ -443,6 +871,71 @@ def test_province_guide_import_feeds_deal_context_and_conditional_docs(client, t
     assert any(item["kind"] == "strata_docs" for item in body["dealFlow"]["gate"]["missingDocs"])
 
 
+def test_province_guide_import_defaults_to_product_onboarding_choices(tmp_path):
+    root = tmp_path / "exp-agent-centre"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    pages.joinpath("alberta.md").write_text("# Alberta\n", encoding="utf-8")
+    pages.joinpath("bc-listings-sales.md").write_text("# BC Listings\n", encoding="utf-8")
+
+    with connect() as conn:
+        imported = import_exp_agent_centre(conn, root=root)
+        coverage = province_coverage(conn)
+
+    assert imported["provinces"] == ["AB", "BC"]
+    assert [item["province"] for item in coverage] == ["AB", "BC"]
+
+
+def test_province_guide_targeted_import_does_not_prune_without_explicit_flag(tmp_path):
+    root = tmp_path / "exp-agent-centre"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    pages.joinpath("alberta.md").write_text("# Alberta\n", encoding="utf-8")
+    pages.joinpath("bc-listings-sales.md").write_text("# BC Listings\n", encoding="utf-8")
+
+    with connect() as conn:
+        import_exp_agent_centre(conn, root=root)
+        imported = import_exp_agent_centre(conn, root=root, province="British Columbia")
+        coverage = province_coverage(conn)
+
+    assert imported["provinces"] == ["BC"]
+    assert [item["province"] for item in coverage] == ["AB", "BC"]
+
+
+def test_province_guide_invalid_prune_fails_closed(tmp_path):
+    root = tmp_path / "exp-agent-centre"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    pages.joinpath("bc-listings-sales.md").write_text("# BC Listings\n", encoding="utf-8")
+
+    with connect() as conn:
+        import_exp_agent_centre(conn, root=root)
+        with pytest.raises(ValueError):
+            import_exp_agent_centre(
+                conn,
+                root=root,
+                province="British Columbia typo",
+                prune_other_provinces=True,
+            )
+        coverage = province_coverage(conn)
+
+    assert [item["province"] for item in coverage] == ["BC"]
+
+
+def test_admin_jurisdiction_uses_onboarded_setup_profile(client):
+    with connect() as conn:
+        update_admin_setup(
+            conn,
+            profile={"country": "CA", "province": "ON", "market": "Toronto"},
+            actor="human:test",
+        )
+
+    response = client.get("/api/admin/deals")
+    assert response.status_code == 200, response.text
+    assert response.json()["jurisdiction"]["province"] == "ON"
+    assert response.json()["jurisdiction"]["market"] == "Toronto"
+
+
 def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     deal = _create(title="Gate deal", current_stage=0)
 
@@ -469,11 +962,15 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     )
     assert attached.status_code == 200, attached.text
 
-    advanced = client.post(f"/api/deals/{deal['id']}/advance", json={})
-    assert advanced.status_code == 200, advanced.text
-    body = advanced.json()
+    context = client.get(f"/api/deals/{deal['id']}/context")
+    assert context.status_code == 200, context.text
+    body = context.json()
     assert body["deal"]["currentStage"] == 1
-    assert body["dealFlow"]["stageName"] == "Listing Initiated"
+    assert body["dealFlow"]["stageName"] == "Listing Intake"
+
+    next_advance = client.post(f"/api/deals/{deal['id']}/advance", json={})
+    assert next_advance.status_code == 409, next_advance.text
+    assert next_advance.json()["detail"]["gate"]["stage"] == 1
 
 
 def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
@@ -611,6 +1108,41 @@ def test_workflow_import_cells_drive_listing_phase_gate(client):
     assert any(item["id"] == "workflow_lofty_text_blast_sent" for item in flow["gate"]["missingChecklist"])
 
 
+def test_workflow_import_stage_update_uses_audited_stage_transition(client):
+    headers = ["Row ID", "Property Address", "Current Stage"]
+
+    def csv_text(stage: str) -> str:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["IDENTIFIERS", "", ""])
+        writer.writerow(headers)
+        writer.writerow(["instructions"] * len(headers))
+        writer.writerow(["1", "42 Source Truth Ave", stage])
+        return buf.getvalue()
+
+    with connect() as conn:
+        imported = import_listing_workflow_csv(conn, csv_text("Stage 1 — Listing Intake"), province="BC")
+        deal_id = imported["items"][0]["id"]
+        action = create_action(
+            conn,
+            name="import stage two entry",
+            trigger="stage_entry",
+            skill="mlc",
+            side="listing",
+            to_stage=2,
+        )
+        updated = import_listing_workflow_csv(conn, csv_text("Stage 2 — MLC / Documents"), province="BC")
+        events = list_deal_events(conn, deal_id)
+        runs = list_action_runs(conn, deal_id=deal_id)
+
+    assert updated["updated"] == 1
+    transition = next(event for event in events if event["kind"] == "stage_transition")
+    assert transition["fromStage"] == 1
+    assert transition["toStage"] == 2
+    assert transition["payload"]["force"] is True
+    assert any(run["registryId"] == action["id"] for run in runs)
+
+
 def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     deal = _create(title="Run result deal", current_stage=1)
     with connect() as conn:
@@ -675,7 +1207,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     assert len([item for item in attachments if item["sourceRunId"] == run_id]) == 1
 
 
-def test_run_result_stage_complete_update_advances_deal(client):
+def test_run_result_stage_complete_update_requires_human_not_skill_callback(client):
     deal = _create(title="AI auto move", current_stage=1)
     with connect() as conn:
         create_action(
@@ -705,10 +1237,60 @@ def test_run_result_stage_complete_update_advances_deal(client):
     )
 
     assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "workflow_stage_1_complete" in body["result"]["protectedChecklistSkipped"]
     context = client.get(f"/api/deals/{deal['id']}/context")
     assert context.status_code == 200, context.text
-    assert context.json()["deal"]["currentStage"] == 2
-    assert context.json()["checklist"]["workflow_stage_1_complete"] is True
+    assert context.json()["deal"]["currentStage"] == 1
+    assert "workflow_stage_1_complete" not in context.json()["checklist"]
+
+
+def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(client):
+    deal = _create(title="Gate clear auto move", current_stage=0)
+    with connect() as conn:
+        create_action(
+            conn,
+            name="CMA gate action",
+            trigger="stage_entry",
+            skill="cma",
+            side="listing",
+            to_stage=0,
+        )
+        runs = evaluate_dispatch(
+            conn,
+            deal_id=deal["id"],
+            trigger="stage_entry",
+            actor="human:test",
+            to_stage=0,
+        )
+    run_id = runs[0]["id"]
+
+    resp = client.post(
+        f"/api/deals/{deal['id']}/runs/{run_id}/result",
+        json={
+            "status": "completed",
+            "idempotencyKey": "gate-clear-auto-move",
+            "artifacts": [
+                {"kind": "cma_report", "filePath": "/tmp/gate-clear-cma.pdf", "summary": "CMA report"}
+            ],
+            "checklist_updates": [
+                {"id": "draft-cma-followup", "completed": True},
+                {"id": "pricing-recap", "completed": True},
+                {"id": "missing-info-list", "completed": True},
+                {"id": "workflow_client_1_name", "completed": True},
+                {"id": "workflow_client_1_email", "completed": True},
+                {"id": "workflow_lead_source", "completed": True},
+                {"id": "workflow_cma_date_requested", "completed": True},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    context = client.get(f"/api/deals/{deal['id']}/context")
+    assert context.status_code == 200, context.text
+    body = context.json()
+    assert body["deal"]["currentStage"] == 1
+    assert "workflow_stage_0_complete" not in body["checklist"]
 
 
 def test_admin_deals_requires_session_token():
@@ -717,4 +1299,12 @@ def test_admin_deals_requires_session_token():
 
     unauthed = TestClient(app)
     resp = unauthed.get("/api/admin/deals")
+    assert resp.status_code in (401, 403)
+
+
+def test_plugin_api_routes_require_session_token():
+    from elevate_cli.web_server import app
+
+    unauthed = TestClient(app)
+    resp = unauthed.get("/api/plugins/example/status")
     assert resp.status_code in (401, 403)

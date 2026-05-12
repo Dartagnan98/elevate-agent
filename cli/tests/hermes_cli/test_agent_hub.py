@@ -11,7 +11,7 @@ def test_agent_hub_snapshot_reflects_local_state_without_raw_secrets(tmp_path, m
 
     store = MemoryStore(db_path=memory_db)
     try:
-        store.add_fact("Skyleigh Elevate uses Telegram for agent access.", category="agent")
+        store.add_fact("Elevate Demo uses Telegram for agent access.", category="agent")
         store.record_turn(
             "session-1",
             "Remember that Skyli works with eXp.",
@@ -94,5 +94,6 @@ def test_agent_hub_defaults_include_starter_agents(tmp_path, monkeypatch):
         "Admin",
         "Outreach",
         "Ads",
+        "Marketing",
         "Social Media",
     }.issubset(names)

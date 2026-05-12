@@ -1,0 +1,290 @@
+"""Cron job management routes for the Elevate dashboard."""
+
+import logging
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+class CronJobCreate(BaseModel):
+    prompt: str
+    schedule: str
+    name: str = ""
+    deliver: str = "local"
+    # Phase 3 (/leads): universal cron form fields. All optional so existing
+    # callers keep working. Skill-bound mode = pass `skill`. Per-job model is
+    # the explicit override; tier is the harness-resolved fallback.
+    skill: Optional[str] = None
+    skills: Optional[List[str]] = None
+    agent: Optional[str] = None
+    tier: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    enabled_toolsets: Optional[List[str]] = None
+    workdir: Optional[str] = None
+    expected_readiness_version: Optional[str] = None
+    backfill_pending: bool = False
+
+
+class CronJobUpdate(BaseModel):
+    updates: dict
+
+
+
+
+def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
+    """Build routes for cron job CRUD, lane seeding, and backfill progress."""
+    router = APIRouter()
+    _log = log or logging.getLogger(__name__)
+
+    @router.get("/api/cron/jobs")
+    async def list_cron_jobs():
+        from cron.jobs import list_jobs
+        return list_jobs(include_disabled=True)
+
+
+    @router.get("/api/cron/jobs/{job_id}")
+    async def get_cron_job(job_id: str):
+        from cron.jobs import get_job
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+
+    @router.post("/api/cron/jobs")
+    async def create_cron_job(body: CronJobCreate):
+        from cron.jobs import create_job
+        from elevate_cli.onboarding import compute_onboarding_status
+
+        # Readiness gate: a job that pins ``expected_readiness_version`` is
+        # declaring "I only make sense once the system is configured to this
+        # snapshot." Reject if the snapshot has drifted (or system isn't ready)
+        # so the wizard surfaces the mismatch instead of silently scheduling a
+        # job that will skip itself at fire-time.
+        if body.expected_readiness_version:
+            try:
+                snap = compute_onboarding_status()
+            except Exception as exc:
+                _log.exception("readiness probe failed during POST /api/cron/jobs")
+                raise HTTPException(status_code=503, detail=f"readiness probe failed: {exc}")
+            if not snap.get("ready"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "system_not_ready",
+                        "message": "Onboarding readiness checks not all passing — finish setup before pinning a readiness version.",
+                        "current_version": snap.get("version"),
+                        "checks": snap.get("checks"),
+                    },
+                )
+            if str(snap.get("version")) != str(body.expected_readiness_version):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "readiness_version_mismatch",
+                        "message": "Onboarding state changed since the wizard read it — refresh and resubmit.",
+                        "current_version": snap.get("version"),
+                        "expected_version": body.expected_readiness_version,
+                    },
+                )
+
+        try:
+            job = create_job(
+                prompt=body.prompt,
+                schedule=body.schedule,
+                name=body.name,
+                deliver=body.deliver,
+                skill=body.skill,
+                skills=body.skills,
+                agent=body.agent,
+                tier=body.tier,
+                model=body.model,
+                provider=body.provider,
+                base_url=body.base_url,
+                enabled_toolsets=body.enabled_toolsets,
+                workdir=body.workdir,
+                expected_readiness_version=body.expected_readiness_version,
+                backfill_pending=body.backfill_pending,
+            )
+            return job
+        except ValueError as e:
+            # Tier validation, workdir validation — surface to UI as 400.
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            _log.exception("POST /api/cron/jobs failed")
+            raise HTTPException(status_code=400, detail=str(e))
+
+
+    class _EnsureLanesBody(BaseModel):
+        """Bulk seed for the default /leads lanes. Each entry is a minimal
+        cron job spec; the server creates one only if no existing job has the
+        same case-insensitive name. Lets the UI declare its default lane set
+        in one place and have the backend converge to it on /leads load."""
+
+        lanes: List[CronJobCreate]
+
+
+    @router.post("/api/cron/jobs/ensure-lanes")
+    async def ensure_lanes(body: _EnsureLanesBody):
+        """Idempotently install/converge the default outreach/admin lanes.
+
+        Returns ``{created: [...], updated: [...], skipped: [...]}`` so the UI can decide
+        whether to refresh the cron list. Safe to call on every /leads
+        mount. Existing lanes are updated when the default prompt, delivery,
+        schedule, skills, or workdir changes.
+        """
+        from cron.jobs import create_job, list_jobs, update_job
+
+        existing = list_jobs(include_disabled=True)
+        existing_by_name = {str(j.get("name") or "").strip().lower(): j for j in existing}
+
+        created: list[dict] = []
+        updated: list[dict] = []
+        skipped: list[str] = []
+        for lane in body.lanes:
+            target = str(lane.name or "").strip()
+            if not target:
+                continue
+            existing_job = existing_by_name.get(target.lower())
+            if existing_job:
+                desired_skills = lane.skills if lane.skills is not None else ([lane.skill] if lane.skill else None)
+                updates: dict[str, object] = {}
+                if lane.prompt and existing_job.get("prompt") != lane.prompt:
+                    updates["prompt"] = lane.prompt
+                if lane.deliver and existing_job.get("deliver", "local") != lane.deliver:
+                    updates["deliver"] = lane.deliver
+                if lane.schedule and existing_job.get("schedule_display") != lane.schedule:
+                    updates["schedule"] = lane.schedule
+                if desired_skills is not None and existing_job.get("skills") != desired_skills:
+                    updates["skills"] = desired_skills
+                if lane.workdir is not None and existing_job.get("workdir") != lane.workdir:
+                    updates["workdir"] = lane.workdir
+                if updates:
+                    try:
+                        changed = update_job(existing_job["id"], updates)
+                        if changed:
+                            updated.append(changed)
+                            existing_by_name[target.lower()] = changed
+                            continue
+                    except Exception as exc:
+                        _log.exception("ensure-lanes: failed to update %s", target)
+                        skipped.append(f"{target} (error: {exc})")
+                        continue
+                skipped.append(target)
+                continue
+            try:
+                job = create_job(
+                    prompt=lane.prompt,
+                    schedule=lane.schedule,
+                    name=target,
+                    deliver=lane.deliver or "local",
+                    skill=lane.skill,
+                    skills=lane.skills,
+                    agent=lane.agent,
+                    tier=lane.tier,
+                    model=lane.model,
+                    provider=lane.provider,
+                    base_url=lane.base_url,
+                    enabled_toolsets=lane.enabled_toolsets,
+                    workdir=lane.workdir,
+                )
+                created.append(job)
+                existing_by_name[target.lower()] = job
+            except Exception as exc:
+                _log.exception("ensure-lanes: failed to create %s", target)
+                skipped.append(f"{target} (error: {exc})")
+        return {"created": created, "updated": updated, "skipped": skipped}
+
+
+    @router.put("/api/cron/jobs/{job_id}")
+    async def update_cron_job(job_id: str, body: CronJobUpdate):
+        from cron.jobs import update_job
+        job = update_job(job_id, body.updates)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+
+    class _BackfillProgressBody(BaseModel):
+        queued_today: Optional[int] = None
+        eligible_remaining: Optional[int] = None
+        total_estimate: Optional[int] = None
+
+
+    @router.get("/api/cron/jobs/{job_id}/backfill")
+    async def get_cron_job_backfill(job_id: str):
+        """Return the lane's backfill progress: pending flag + day/eligible counters."""
+        from cron.jobs import get_job
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {
+            "job_id": job_id,
+            "backfill_pending": bool(job.get("backfill_pending")),
+            "backfill_state": job.get("backfill_state"),
+        }
+
+
+    @router.post("/api/cron/jobs/{job_id}/backfill/progress")
+    async def post_cron_job_backfill_progress(job_id: str, body: _BackfillProgressBody):
+        """Lane skill calls this at end of each backfill run to record progress.
+
+        Increments day, records queued_today + eligible_remaining + total_estimate.
+        When eligible_remaining hits 0, the job's ``backfill_pending`` is cleared
+        and subsequent runs use the incremental window.
+        """
+        from cron.jobs import update_backfill_state
+        job = update_backfill_state(
+            job_id,
+            queued_today=body.queued_today,
+            eligible_remaining=body.eligible_remaining,
+            total_estimate=body.total_estimate,
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {
+            "job_id": job_id,
+            "backfill_pending": bool(job.get("backfill_pending")),
+            "backfill_state": job.get("backfill_state"),
+        }
+
+
+    @router.post("/api/cron/jobs/{job_id}/pause")
+    async def pause_cron_job(job_id: str):
+        from cron.jobs import pause_job
+        job = pause_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+
+    @router.post("/api/cron/jobs/{job_id}/resume")
+    async def resume_cron_job(job_id: str):
+        from cron.jobs import resume_job
+        job = resume_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+
+    @router.post("/api/cron/jobs/{job_id}/trigger")
+    async def trigger_cron_job(job_id: str):
+        from cron.jobs import trigger_job
+        job = trigger_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+
+    @router.delete("/api/cron/jobs/{job_id}")
+    async def delete_cron_job(job_id: str):
+        from cron.jobs import remove_job
+        if not remove_job(job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"ok": True}
+
+
+
+    return router

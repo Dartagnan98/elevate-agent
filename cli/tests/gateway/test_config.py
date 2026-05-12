@@ -71,6 +71,34 @@ class TestGetConnectedPlatforms:
         config = GatewayConfig()
         assert config.get_connected_platforms() == []
 
+    def test_telegram_agent_bots_from_dynamic_env_enable_platform(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_AGENT_TRANSACTION_COORDINATOR_TELEGRAM_BOT_TOKEN", "agent-token")
+        config = GatewayConfig()
+
+        _apply_env_overrides(config)
+
+        telegram = config.platforms[Platform.TELEGRAM]
+        assert telegram.enabled is True
+        assert telegram.extra["agent_bots"]["transaction-coordinator"]["token"] == "agent-token"
+        assert telegram.extra["agent_bots"]["transaction-coordinator"]["token_env"] == (
+            "ELEVATE_AGENT_TRANSACTION_COORDINATOR_TELEGRAM_BOT_TOKEN"
+        )
+
+    def test_telegram_agent_bots_from_saved_env_enable_platform(self, monkeypatch):
+        monkeypatch.delenv("ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "gateway.config._gateway_env_values",
+            lambda: {"ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN": "saved-agent-token"},
+        )
+        config = GatewayConfig()
+
+        _apply_env_overrides(config)
+
+        telegram = config.platforms[Platform.TELEGRAM]
+        assert telegram.enabled is True
+        assert telegram.extra["agent_bots"]["admin"]["token"] == "saved-agent-token"
+        assert telegram.extra["agent_bots"]["admin"]["token_env"] == "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN"
+
     def test_dingtalk_recognised_via_extras(self):
         config = GatewayConfig(
             platforms={

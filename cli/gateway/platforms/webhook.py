@@ -15,7 +15,7 @@ Each route defines:
   - deliver_extra: additional delivery config (repo, pr_number, chat_id)
   - deliver_only: if true, skip the agent — the rendered prompt IS the
     message that gets delivered.  Use for external push notifications
-    (Supabase, monitoring alerts, inter-agent pings) where zero LLM cost
+    (database webhooks, monitoring alerts, inter-agent pings) where zero LLM cost
     and sub-second delivery matter more than agent reasoning.
 
 Security:
@@ -512,7 +512,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we
-        # deliver.  Use case: external services (Supabase, monitoring,
+        # deliver.  Use case: external services (database webhooks, monitoring,
         # cron jobs, other agents) that need to push a plain notification
         # to a user's chat with zero LLM cost.  Reuses the same HMAC auth,
         # rate limiting, idempotency, and template rendering as agent mode.

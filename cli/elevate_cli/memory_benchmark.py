@@ -2,7 +2,7 @@
 
 This is intentionally local and read-only. It exercises the same provider/store
 paths used by fact_store so we can measure recall latency, duplicate injection
-risk, and hit counts without mutating ad/Supabase/business systems.
+risk, and hit counts without mutating ads or external business systems.
 """
 
 from __future__ import annotations

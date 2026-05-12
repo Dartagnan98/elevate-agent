@@ -1927,7 +1927,7 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
     def test_visible_agent_profile_loads_local_soul_and_agents_md(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            agent_dir = root / "orgs" / "skyleigh-elevate" / "agents" / "ads"
+            agent_dir = root / "orgs" / "client-elevate" / "agents" / "ads"
             agent_dir.mkdir(parents=True)
             (agent_dir / "IDENTITY.md").write_text("## Name\nAds\n", encoding="utf-8")
             (agent_dir / "SOUL.md").write_text("# Soul\nAds voice and autonomy rules.", encoding="utf-8")
@@ -1938,7 +1938,7 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
                 "agent_id": "ads",
                 "display_name": "Ads",
                 "role": "Paid campaign lane",
-                "org": "skyleigh-elevate",
+                "org": "client-elevate",
                 "metadata": {},
             }
 

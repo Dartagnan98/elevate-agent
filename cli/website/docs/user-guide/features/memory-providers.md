@@ -366,7 +366,7 @@ The setup wizard installs dependencies automatically and only installs what's ne
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
 | `recall_tags` | — | Tags to filter on recall |
 
-See [plugin README](https://github.com/CtrlStrategies/elevate/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference.
+See [plugin README](https://github.com/Dartagnan98/elevate-agent/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference.
 
 ---
 

@@ -80,7 +80,7 @@ You no longer need to wrap `elevate update` in `screen` or `tmux` to survive a t
 elevate version
 ```
 
-Compare against the latest release at the [GitHub releases page](https://github.com/CtrlStrategies/elevate/releases).
+Compare against the latest release at the [GitHub releases page](https://github.com/Dartagnan98/elevate-agent/releases).
 
 ### Updating from Messaging Platforms
 

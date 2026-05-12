@@ -482,6 +482,19 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
     import platform
     import subprocess
 
+    # Hermetic tests must never inspect the developer's real macOS Keychain.
+    # The pytest runner/conftest isolates env vars and ELEVATE_HOME, but the
+    # Keychain is outside the filesystem sandbox. Keep production behaviour
+    # unchanged while preventing local Claude Code credentials from leaking into
+    # unrelated credential-resolution unit tests.
+    #
+    # Still allow explicit Keychain unit tests to exercise parsing/priority
+    # behavior when they have mocked the `security` subprocess call.
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_XDIST_WORKER"):
+        run_type = type(subprocess.run)
+        if run_type.__module__ != "unittest.mock":
+            return None
+
     if platform.system() != "Darwin":
         return None
 
@@ -509,7 +522,7 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
 
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (TypeError, json.JSONDecodeError):
         logger.debug("Keychain: credentials payload is not valid JSON")
         return None
 

@@ -159,7 +159,7 @@ elevate webhook subscribe alerts \
 For use cases where you just want to push a notification through to a user's chat — no reasoning, no agent loop — add `--deliver-only`. The rendered `--prompt` template becomes the literal message body and is dispatched directly to the target adapter.
 
 Use this for:
-- External service push notifications (Supabase/Firebase webhooks → Telegram)
+- External service push notifications (database/app webhooks → Telegram)
 - Monitoring alerts that should forward verbatim
 - Inter-agent pings where one agent is telling another agent's user something
 - Any webhook where an LLM round trip would be wasted effort

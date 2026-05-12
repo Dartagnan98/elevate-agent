@@ -1,5 +1,9 @@
 """Tests for acp_adapter.session — SessionManager and SessionState."""
 
+import pytest
+
+pytest.importorskip("acp", reason="requires optional ACP extra: acp")
+
 import contextlib
 import io
 import json

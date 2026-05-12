@@ -27,6 +27,12 @@ def get_transport(api_mode: str):
         _discover_transports()
     cls = _REGISTRY.get(api_mode)
     if cls is None:
+        # Full-suite test order can leave the registry partially populated
+        # (for example after registering/removing a dummy transport).  Import
+        # built-ins again before deciding a mode is genuinely unavailable.
+        _discover_transports()
+        cls = _REGISTRY.get(api_mode)
+    if cls is None:
         return None
     return cls()
 

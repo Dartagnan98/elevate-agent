@@ -249,7 +249,7 @@ For use cases where you just want to **push a plain notification** — no reason
 
 ### When to use direct delivery
 
-- **External service push** — Supabase/Firebase webhook fires on a database change → notify a user in Telegram instantly
+- **External service push** — a database/app webhook fires on a change → notify a user in Telegram instantly
 - **Monitoring alerts** — Datadog/Grafana alert webhook → push to a Discord channel
 - **Inter-agent pings** — Agent A notifies Agent B's user that a long-running task finished
 - **Background job completion** — Cron job finishes → post result to Slack
@@ -261,7 +261,7 @@ Benefits:
 - **Same security as agent mode** — HMAC auth, rate limits, idempotency, and body-size limits all still apply
 - **Synchronous response** — the POST returns `200 OK` once delivery succeeds, or `502` if the target rejects it, so your upstream service can retry intelligently
 
-### Example: Telegram push from Supabase
+### Example: Telegram push from an external app webhook
 
 ```yaml
 platforms:
@@ -280,7 +280,7 @@ platforms:
             chat_id: "{match.telegram_chat_id}"
 ```
 
-Your Supabase edge function signs the payload with HMAC-SHA256 and POSTs to `https://your-server:8644/webhooks/antenna-matches`. The webhook adapter validates the signature, renders the template from the payload, delivers to Telegram, and returns `200 OK`.
+Your external app signs the payload with HMAC-SHA256 and POSTs to `https://your-server:8644/webhooks/antenna-matches`. The webhook adapter validates the signature, renders the template from the payload, delivers to Telegram, and returns `200 OK`.
 
 ### Example: Dynamic subscription via CLI
 

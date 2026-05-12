@@ -36,6 +36,7 @@ from elevate_cli.data.deals import (
     _validate_stage,
     create_deal,
     get_deal,
+    move_deal_stage,
     set_deal_fields,
 )
 
@@ -185,6 +186,7 @@ def upsert_listing_workflow_row(
             source_label=row.get("sourceLabel"),
             source_synced_at=now,
             fields=fields | extra,
+            dispatch_initial_stage=False,
         )
         if detail_fields:
             deal = set_deal_fields(conn, deal["id"], actor=actor, fields=detail_fields)
@@ -205,7 +207,6 @@ def upsert_listing_workflow_row(
 
     sets = [
         "title=?",
-        "current_stage=?",
         "province=?",
         "listing_address=?",
         "lofty_contact_id=?",
@@ -217,7 +218,6 @@ def upsert_listing_workflow_row(
     ]
     values: list[Any] = [
         str(row["title"]),
-        new_stage,
         province.upper(),
         row.get("listingAddress"),
         row.get("loftyContactId"),
@@ -227,9 +227,6 @@ def upsert_listing_workflow_row(
         now,
         now,
     ]
-    if old_stage != new_stage:
-        sets.append("stage_entered_at=?")
-        values.append(now)
     for field in sorted(_NAMED_FIELDS):
         if field in named_sql:
             sets.append(f"{field}=?")
@@ -249,6 +246,14 @@ def upsert_listing_workflow_row(
         payload={"sourceKey": source_key, "sourceRowId": row.get("sourceRowId")},
         created_at=now,
     )
+    if old_stage != new_stage:
+        move_deal_stage(
+            conn,
+            deal_id,
+            to_stage=new_stage,
+            actor=actor,
+            force=True,
+        )
     updated = get_deal(conn, deal_id)
     return updated, "updated"  # type: ignore[return-value]
 

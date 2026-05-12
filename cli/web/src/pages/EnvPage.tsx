@@ -643,6 +643,7 @@ function CollapsibleUnset({
   onCancelEdit: (key: string) => void;
   clearDialogOpen?: boolean;
 }) {
+  void _category;
   const [collapsed, setCollapsed] = useState(true);
   const { t } = useI18n();
 

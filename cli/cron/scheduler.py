@@ -71,6 +71,44 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
         )
         return None
 
+
+def _as_skill_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _cron_agent_context(job: dict) -> tuple[str, list[str]]:
+    agent_id = str(job.get("agent") or "").strip()
+    if not agent_id:
+        return "", []
+    try:
+        from elevate_cli.agent_hub import _load_agent_defs
+        from gateway.agent_lanes import agent_lane_prompt, normalize_agent_id
+
+        normalized = normalize_agent_id(agent_id)
+        for agent in _load_agent_defs(load_config()):
+            if normalize_agent_id(agent.get("id")) == normalized:
+                return agent_lane_prompt(agent), _as_skill_list(agent.get("skills"))
+    except Exception as exc:
+        logger.debug("Cron agent context failed for %r: %s", agent_id, exc)
+    return f"[Agent lane: {agent_id}. You are running this cron job as the {agent_id} agent.]", []
+
+
+def _merge_skills(first, second) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for skill in [*_as_skill_list(first), *_as_skill_list(second)]:
+        if skill in seen:
+            continue
+        seen.add(skill)
+        merged.append(skill)
+    return merged
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -113,6 +151,162 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+
+
+class AdminActionRunPreflightError(RuntimeError):
+    """Raised when an Admin Hub cron job no longer has a durable run row."""
+
+
+def _admin_hub_origin(job: dict) -> dict | None:
+    origin = job.get("origin")
+    if not isinstance(origin, dict):
+        return None
+    if str(origin.get("source") or "") != "admin_hub":
+        return None
+    deal_id = str(origin.get("deal_id") or "").strip()
+    run_id = str(origin.get("run_id") or "").strip()
+    if not deal_id or not run_id:
+        raise AdminActionRunPreflightError(
+            "admin_hub cron job is missing origin.deal_id or origin.run_id"
+        )
+    return {**origin, "deal_id": deal_id, "run_id": run_id}
+
+
+def _preflight_admin_action_run(job: dict) -> None:
+    """Refuse to run Admin jobs that are detached from SQLite source-of-truth."""
+    origin = _admin_hub_origin(job)
+    if not origin:
+        return
+
+    job_id = str(job.get("id") or "").strip()
+    deal_id = origin["deal_id"]
+    run_id = origin["run_id"]
+
+    try:
+        from elevate_cli.data import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT r.id, r.deal_id, r.status, r.cron_job_id, d.id AS live_deal_id
+                FROM admin_action_runs r
+                LEFT JOIN deals d ON d.id = r.deal_id
+                WHERE r.id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise AdminActionRunPreflightError(
+                    f"admin_action_runs row {run_id!r} was not found for deal {deal_id!r}"
+                )
+            if str(row["deal_id"]) != deal_id or row["live_deal_id"] is None:
+                raise AdminActionRunPreflightError(
+                    f"run {run_id!r} is not attached to live deal {deal_id!r}"
+                )
+
+            status = str(row["status"] or "")
+            if status in {"succeeded", "completed", "failed", "skipped", "cancelled"}:
+                raise AdminActionRunPreflightError(
+                    f"run {run_id!r} is already terminal ({status})"
+                )
+            if status in {"waiting_human", "waiting_external"}:
+                raise AdminActionRunPreflightError(
+                    f"run {run_id!r} is {status}; cron must not launch it"
+                )
+
+            cron_job_id = str(row["cron_job_id"] or "").strip()
+            if cron_job_id and cron_job_id != job_id:
+                raise AdminActionRunPreflightError(
+                    f"run {run_id!r} belongs to cron job {cron_job_id!r}, not {job_id!r}"
+                )
+
+            if status == "queued":
+                now = _elevate_now().isoformat()
+                conn.execute(
+                    """
+                    UPDATE admin_action_runs
+                    SET status='running',
+                        cron_job_id=COALESCE(cron_job_id, ?),
+                        started_at=COALESCE(started_at, ?),
+                        updated_at=?
+                    WHERE id=?
+                    """,
+                    (job_id, now, now, run_id),
+                )
+    except AdminActionRunPreflightError:
+        raise
+    except Exception as exc:
+        raise AdminActionRunPreflightError(
+            f"could not verify Admin action run {run_id!r}: {exc}"
+        ) from exc
+
+
+def _suppress_delivery_for_failed_job(job: dict, error: str | None) -> bool:
+    """Keep orphaned Admin preflight failures local instead of messaging humans."""
+    if not error or "AdminActionRunPreflightError" not in error:
+        return False
+    origin = job.get("origin")
+    return isinstance(origin, dict) and str(origin.get("source") or "") == "admin_hub"
+
+
+def _record_admin_action_delivery_status(
+    job: dict,
+    *,
+    attempted: bool,
+    delivery_error: str | None,
+    suppressed_reason: str | None = None,
+) -> None:
+    """Persist cron delivery outcome on the Admin action run payload."""
+    try:
+        origin = _admin_hub_origin(job)
+    except AdminActionRunPreflightError:
+        return
+    if not origin:
+        return
+
+    recorded_at = _elevate_now().isoformat()
+    delivery = {
+        "jobId": str(job.get("id") or ""),
+        "deliver": str(job.get("deliver") or "local"),
+        "attempted": bool(attempted),
+        "ok": bool(attempted and not delivery_error),
+        "error": delivery_error,
+        "suppressedReason": suppressed_reason,
+        "recordedAt": recorded_at,
+    }
+    try:
+        from elevate_cli.data import connect
+
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM admin_action_runs WHERE id=?",
+                (origin["run_id"],),
+            ).fetchone()
+            if row is None:
+                return
+            payload = {}
+            raw_payload = row["payload_json"]
+            if raw_payload:
+                try:
+                    decoded = json.loads(raw_payload)
+                    payload = decoded if isinstance(decoded, dict) else {"prior": decoded}
+                except (TypeError, json.JSONDecodeError):
+                    payload = {"priorPayload": raw_payload}
+            payload["delivery"] = delivery
+            conn.execute(
+                """
+                UPDATE admin_action_runs
+                SET payload_json=?, updated_at=?
+                WHERE id=?
+                """,
+                (json.dumps(payload, separators=(",", ":"), default=str), recorded_at, origin["run_id"]),
+            )
+    except Exception as exc:
+        logger.warning(
+            "Job '%s': failed to record Admin delivery status: %s",
+            job.get("id", "?"),
+            exc,
+        )
 
 # Resolve Elevate home directory (respects ELEVATE_HOME override)
 _elevate_home = get_elevate_home()
@@ -253,6 +447,31 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     """Resolve the concrete auto-delivery target for a cron job, if any."""
     targets = _resolve_delivery_targets(job)
     return targets[0] if targets else None
+
+
+def _delivery_agent_id(job: dict) -> str:
+    """Return the agent lane that should own outgoing delivery for a cron job."""
+    agent_id = str(job.get("agent") or "").strip()
+    if agent_id:
+        return agent_id
+    origin = job.get("origin")
+    if isinstance(origin, dict):
+        for key in ("agent", "agent_id", "to_agent_id"):
+            agent_id = str(origin.get(key) or "").strip()
+            if agent_id:
+                return agent_id
+    return ""
+
+
+def _delivery_metadata(job: dict, thread_id: str | None) -> dict | None:
+    """Build adapter metadata for cron delivery routing."""
+    metadata = {}
+    if thread_id:
+        metadata["thread_id"] = thread_id
+    agent_id = _delivery_agent_id(job)
+    if agent_id:
+        metadata["agent_id"] = agent_id
+    return metadata or None
 
 
 # Media extension sets — keep in sync with gateway/platforms/base.py:_process_message_background
@@ -407,7 +626,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         runtime_adapter = (adapters or {}).get(platform)
         delivered = False
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
+            send_metadata = _delivery_metadata(job, thread_id)
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
@@ -452,7 +671,16 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
+            agent_id = _delivery_agent_id(job) or None
+            coro = _send_to_platform(
+                platform,
+                pconfig,
+                chat_id,
+                cleaned_delivery_content,
+                thread_id=thread_id,
+                media_files=media_files,
+                agent_id=agent_id,
+            )
             try:
                 result = asyncio.run(coro)
             except RuntimeError:
@@ -462,7 +690,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # fresh thread that has no running loop.
                 coro.close()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                    future = pool.submit(
+                        asyncio.run,
+                        _send_to_platform(
+                            platform,
+                            pconfig,
+                            chat_id,
+                            cleaned_delivery_content,
+                            thread_id=thread_id,
+                            media_files=media_files,
+                            agent_id=agent_id,
+                        ),
+                    )
                     result = future.result(timeout=30)
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
@@ -641,6 +880,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     """
     prompt = job.get("prompt", "")
     skills = job.get("skills")
+    if skills is None and job.get("skill"):
+        skills = [job.get("skill")]
+    agent_prompt, agent_skills = _cron_agent_context(job)
+    if agent_prompt:
+        prompt = f"{agent_prompt}\n\n{prompt}" if prompt else agent_prompt
+    skills = _merge_skills(skills, agent_skills)
 
     # Run data-collection script if configured, inject output as context.
     script_path = job.get("script")
@@ -685,10 +930,6 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
     prompt = cron_hint + prompt
-    if skills is None:
-        legacy = job.get("skill")
-        skills = [legacy] if legacy else []
-
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
         return prompt
@@ -761,6 +1002,29 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     
     job_id = job["id"]
     job_name = job["name"]
+
+    try:
+        _preflight_admin_action_run(job)
+    except AdminActionRunPreflightError as exc:
+        error_msg = f"AdminActionRunPreflightError: {exc}"
+        logger.error("Job '%s' blocked by Admin run preflight: %s", job_id, exc)
+        output = f"""# Cron Job: {job_name} (BLOCKED)
+
+**Job ID:** {job_id}
+**Run Time:** {_elevate_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+
+## Error
+
+```
+{error_msg}
+```
+
+This Admin Hub cron job was not launched because its source-of-truth SQLite
+deal/run row could not be verified. No agent work was run and no human-facing
+delivery should be sent.
+"""
+        return False, output, "", error_msg
 
     # Readiness gate (Phase /leads): if this job pinned an
     # ``expected_readiness_version`` at create-time, re-check it at fire-time.
@@ -854,6 +1118,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         platform=origin["platform"] if origin else "",
         chat_id=str(origin["chat_id"]) if origin else "",
         chat_name=origin.get("chat_name", "") if origin else "",
+        agent_id=str(job.get("agent") or "").strip(),
     )
 
     # Per-job working directory.  When set (and validated at create/update
@@ -1300,6 +1565,16 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
+                    suppressed_reason = "silent"
+                else:
+                    suppressed_reason = None
+                if should_deliver and not success and _suppress_delivery_for_failed_job(job, error):
+                    logger.warning(
+                        "Job '%s': suppressing delivery for Admin preflight failure",
+                        job["id"],
+                    )
+                    should_deliver = False
+                    suppressed_reason = "admin_preflight"
 
                 delivery_error = None
                 if should_deliver:
@@ -1316,6 +1591,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
+                if suppressed_reason != "admin_preflight":
+                    _record_admin_action_delivery_status(
+                        job,
+                        attempted=should_deliver,
+                        delivery_error=delivery_error,
+                        suppressed_reason=suppressed_reason,
+                    )
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
                 return True
 

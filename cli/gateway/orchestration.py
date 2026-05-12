@@ -89,6 +89,25 @@ DEFAULT_ORCHESTRATION_AGENTS: tuple[dict[str, Any], ...] = (
         },
     },
     {
+        "agent_id": "marketing",
+        "display_name": "Marketing",
+        "role": "Listing marketing, seller updates, email campaigns, and creative direction agent.",
+        "tier": "specialist",
+        "reports_to": "executive-assistant",
+        "lane": "Marketing",
+        "org": "standalone",
+        "enabled": True,
+        "status": "ready",
+        "metadata": {
+            "job_profile": {
+                "job": "Listing marketing lane for seller updates, marketing emails, graphics/creative direction, listing launch packages, and campaign handoffs.",
+                "owns": ["seller updates", "marketing emails", "listing launch copy", "graphics/creative direction", "campaign handoff briefs", "market update framing"],
+                "not_for": ["routine scheduling", "CRM cleanup", "transaction checklist ownership", "paid media optimization unless paired with Ads"],
+                "default_expected_return": "Return the marketing asset plan, draft copy, approval needs, and next production step.",
+            }
+        },
+    },
+    {
         "agent_id": "ads",
         "display_name": "Ads",
         "role": "Paid ads, listing campaigns, email campaign, and offer positioning agent.",
@@ -112,7 +131,7 @@ DEFAULT_ORCHESTRATION_AGENTS: tuple[dict[str, Any], ...] = (
         "display_name": "Social Media",
         "role": "Short-form content, caption, hook, posting plan, and platform adaptation agent.",
         "tier": "specialist",
-        "reports_to": "executive-assistant",
+        "reports_to": "marketing",
         "lane": "Social Media",
         "org": "standalone",
         "enabled": True,
@@ -405,8 +424,8 @@ def _cycle_run_ids(items: list[dict[str, Any]]) -> list[str]:
 def summarize_run_plan_graph(runs: list[Dict[str, Any]], *, next_limit: int = 8) -> Dict[str, Any]:
     """Return a dependency summary for visible orchestration runs.
 
-    Inspired by jcode's swarm plan graph summary, but kept local to Elevate's
-    existing run registry. Dependencies live in run metadata as
+    Summarizes the local run registry without requiring an external planner.
+    Dependencies live in run metadata as
     ``blocked_by``/``depends_on`` run-id arrays.
     """
     items = [
@@ -593,17 +612,6 @@ class OrchestrationStore:
     def ensure_default_agents(self) -> None:
         now = _utc_now()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE orchestration_agents
-                   SET enabled = 0,
-                       status = 'disabled',
-                       updated_at = ?
-                 WHERE agent_id = 'marketing'
-                   AND org = 'standalone'
-                """,
-                (now,),
-            )
             for item in DEFAULT_ORCHESTRATION_AGENTS:
                 conn.execute(
                     """

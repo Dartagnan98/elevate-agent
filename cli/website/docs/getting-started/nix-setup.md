@@ -35,11 +35,11 @@ No clone needed. Nix fetches, builds, and runs everything:
 
 ```bash
 # Run directly (builds on first use, cached after)
-nix run github:CtrlStrategies/elevate -- setup
-nix run github:CtrlStrategies/elevate -- chat
+nix run github:Dartagnan98/elevate-agent -- setup
+nix run github:Dartagnan98/elevate-agent -- chat
 
 # Or install persistently
-nix profile install github:CtrlStrategies/elevate
+nix profile install github:Dartagnan98/elevate-agent
 elevate setup
 elevate chat
 ```
@@ -50,7 +50,7 @@ After `nix profile install`, `elevate`, `elevate`, and `elevate-acp` are on your
 <summary><strong>Building from a local clone</strong></summary>
 
 ```bash
-git clone https://github.com/CtrlStrategies/elevate.git
+git clone https://github.com/Dartagnan98/elevate-agent.git
 cd elevate
 nix build
 ./result/bin/elevate setup
@@ -75,7 +75,7 @@ This module requires NixOS. For non-NixOS systems (macOS, other Linux distros), 
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    elevate.url = "github:CtrlStrategies/elevate";
+    elevate.url = "github:Dartagnan98/elevate-agent";
   };
 
   outputs = { nixpkgs, elevate, ... }: {

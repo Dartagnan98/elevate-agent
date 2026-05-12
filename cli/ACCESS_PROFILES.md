@@ -6,7 +6,7 @@ Elevate separates the local agent from premium/team skill access.
 
 - `standalone`: core local agent, local memory, and non-gated skills.
 - `exp`: standalone agent plus the direct eXp real estate skill pack.
-- `skyleigh_downline`: eXp pack plus Skyleigh team/downline-only skills.
+- `team_pack`: eXp pack plus team-only skills.
 
 Core rule:
 
@@ -14,7 +14,7 @@ Core rule:
 Elevate core stays available.
 Personal memory stays local and is not deleted.
 Purchased snapshots can stay usable.
-Skyleigh team packs require active Skyleigh affiliation.
+Team packs require active team affiliation.
 Updates/support/private registry access can require an active subscription.
 ```
 
@@ -24,15 +24,15 @@ Updates/support/private registry access can require an active subscription.
 elevate access status
 elevate access profile standalone
 elevate access profile exp
-elevate access profile skyleigh_downline
+elevate access profile team_pack
 ```
 
 Lock or unlock an installed pack without deleting files:
 
 ```bash
 elevate access unlock exp_agent_pack --owned-snapshot
-elevate access lock skyleigh_team_pack --status left_team
-elevate access affiliation --brokerage exp --team skyleigh --status active
+elevate access lock real_estate_team_pack --status left_team
+elevate access affiliation --brokerage exp --team team --status active
 elevate access affiliation --status left_team
 ```
 
@@ -49,14 +49,14 @@ access:
 ---
 ```
 
-Skyleigh downline-only:
+Team-only:
 
 ```yaml
 ---
-name: skyleigh-recruiting-system
-description: Private Skyleigh team recruiting workflow
+name: team-recruiting-system
+description: Private team recruiting workflow
 access:
-  entitlement: skyleigh_team_pack
+  entitlement: real_estate_team_pack
 ---
 ```
 

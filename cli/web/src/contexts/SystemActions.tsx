@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import type { ActionStatusResponse } from "@/lib/api";
+import type { ActionStatusResponse, UpdateStatusResponse } from "@/lib/api";
 import { Toast } from "@/components/Toast";
 import { useI18n } from "@/i18n";
 import {
@@ -23,14 +23,34 @@ export function SystemActionsProvider({
   const [actionStatus, setActionStatus] = useState<ActionStatusResponse | null>(
     null,
   );
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatusResponse | null>(
+    null,
+  );
   const [toast, setToast] = useState<ToastState | null>(null);
   const { t } = useI18n();
+
+  const refreshUpdateStatus = useCallback(async (refresh = false) => {
+    try {
+      const next = await api.getUpdateStatus(refresh);
+      setUpdateStatus(next);
+    } catch {
+      // Update checks should never make the dashboard feel broken.
+    }
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 4000);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    void refreshUpdateStatus();
+    const interval = window.setInterval(() => {
+      void refreshUpdateStatus();
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [refreshUpdateStatus]);
 
   useEffect(() => {
     if (!activeAction) return;
@@ -44,6 +64,9 @@ export function SystemActionsProvider({
         setActionStatus(resp);
         if (!resp.running) {
           const ok = resp.exit_code === 0;
+          if (activeAction === "update") {
+            void refreshUpdateStatus(true);
+          }
           setToast({
             type: ok ? "success" : "error",
             message: ok
@@ -62,7 +85,7 @@ export function SystemActionsProvider({
     return () => {
       cancelled = true;
     };
-  }, [activeAction, t.status.actionFinished, t.status.actionFailed]);
+  }, [activeAction, refreshUpdateStatus, t.status.actionFinished, t.status.actionFailed]);
 
   const runAction = useCallback(
     async (action: SystemAction) => {
@@ -105,7 +128,9 @@ export function SystemActionsProvider({
         isBusy,
         isRunning,
         pendingAction,
+        refreshUpdateStatus,
         runAction,
+        updateStatus,
       }}
     >
       {children}

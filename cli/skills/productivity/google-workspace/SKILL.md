@@ -7,7 +7,7 @@ license: MIT
 metadata:
   elevate:
     tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email, OAuth]
-    homepage: https://github.com/ctrlstrategies/elevate
+    homepage: https://github.com/Dartagnan98/elevate-agent
     related_skills: [himalaya]
 ---
 

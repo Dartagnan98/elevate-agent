@@ -155,14 +155,14 @@ def _default_sources_root() -> Path:
     override = os.environ.get("ELEVATE_LEGACY_SOURCES_ROOT")
     if override:
         return Path(override)
-    return data_root().parent / "tmp" / "skyleigh-tools" / "data" / "sources"
+    return data_root().parent / "tmp" / "client-tools" / "data" / "sources"
 
 
 def _default_outreach_db() -> Path:
     override = os.environ.get("ELEVATE_LEGACY_OUTREACH_DB")
     if override:
         return Path(override)
-    return data_root().parent / "tmp" / "skyleigh-tools" / "data" / "outreach" / "outreach.db"
+    return data_root().parent / "tmp" / "client-tools" / "data" / "outreach" / "outreach.db"
 
 
 def _print_stats(stats: BackfillStats) -> None:

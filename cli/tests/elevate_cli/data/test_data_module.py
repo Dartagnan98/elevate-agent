@@ -39,8 +39,8 @@ def test_ingest_run_lifecycle():
         assert run["status"] == "running"
         contact = data.upsert_contact(
             conn,
-            display_name="Skyleigh Test",
-            primary_email="skyleigh@example.com",
+            display_name="Demo Agent Test",
+            primary_email="client_tools@example.com",
             source_key="lofty-lead:1142409008547568",
             ingest_run_id=run["id"],
         )

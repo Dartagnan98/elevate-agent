@@ -67,6 +67,17 @@ export default defineConfig({
   build: {
     outDir: "../elevate_cli/web_dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("@radix-ui")) return "vendor-radix";
+          if (id.includes("lucide-react")) return "vendor-icons";
+          if (id.includes("react") || id.includes("scheduler")) return "vendor-react";
+          return "vendor";
+        },
+      },
+    },
   },
   server: {
     proxy: {

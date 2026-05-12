@@ -1,7 +1,7 @@
 """Cold MLS / scrape data + PCS graduation.
 
 Lead signals are the holding pen for scraped records that aren't yet
-contacts — Skyleigh's 1,000+ Xposure PCS buyers, future Realtor.ca
+contacts — high-volume private-search buyers, future Realtor.ca
 saved searches, etc. They graduate to ``contacts`` only when:
 
 * a verified identity match links the signal to an existing contact, OR

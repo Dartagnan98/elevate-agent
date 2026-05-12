@@ -107,6 +107,7 @@ const REAL_ESTATE_WORKFLOWS = [
       "weekly-listing",
       "relisting",
       "mlc",
+      "signing-package",
       "digisign",
       "webforms",
       "deal-vault",

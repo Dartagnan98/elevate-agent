@@ -520,15 +520,13 @@ def _maybe_preregister_client(
 
 
 def _parse_base_url(server_url: str) -> str:
-    """Return the OAuth resource URL for an MCP server.
+    """Return the origin URL used for OAuth discovery for an MCP server."""
+    from urllib.parse import urlparse, urlunparse
 
-    Older Elevate builds stripped the path here and passed only the origin to
-    the MCP SDK OAuth provider. That breaks servers whose protected-resource
-    metadata declares the full MCP endpoint as the resource, e.g.
-    https://connect.composio.dev/mcp. Preserve the configured URL so RFC 8707
-    resource validation matches the endpoint the user configured.
-    """
-    return server_url.rstrip("/")
+    parsed = urlparse(server_url)
+    if not parsed.scheme or not parsed.netloc:
+        return server_url.rstrip("/")
+    return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
 
 
 def build_oauth_auth(

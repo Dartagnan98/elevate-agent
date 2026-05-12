@@ -31,7 +31,7 @@ export function Banner({ t }: { t: Theme }) {
         </Text>
       )}
 
-      <Text color={t.color.dim}>{t.brand.icon} Ctrl Strategies · AI chief of staff for real estate</Text>
+      <Text color={t.color.dim}>{t.brand.icon} Elevation Real Estate HQ · AI chief of staff for real estate</Text>
     </Box>
   )
 }

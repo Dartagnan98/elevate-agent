@@ -1,5 +1,9 @@
 """Tests for acp_adapter.permissions — ACP approval bridging."""
 
+import pytest
+
+pytest.importorskip("acp", reason="requires optional ACP extra: acp")
+
 import asyncio
 from concurrent.futures import Future
 from unittest.mock import MagicMock, patch

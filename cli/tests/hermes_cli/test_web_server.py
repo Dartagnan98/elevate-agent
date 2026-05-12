@@ -291,6 +291,115 @@ class TestWebServerEndpoints:
         # Should contain known env var names
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
 
+    def test_agent_channel_rejects_pasted_bot_token(self):
+        from elevate_cli.config import load_env
+
+        token = "222222222:ADMINbbbbbbbbbbbbbbbbbbbb"
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "value": token},
+        )
+
+        assert resp.status_code == 400
+        assert "Bot token field" in resp.json()["detail"]
+        env = load_env()
+        assert env.get("ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN") != token
+        assert "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL" not in env
+
+    def test_home_channel_rejects_pasted_bot_token(self):
+        token = "222222222:ADMINbbbbbbbbbbbbbbbbbbbb"
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "TELEGRAM_HOME_CHANNEL", "value": token},
+        )
+
+        assert resp.status_code == 400
+        assert "home chat field" in resp.json()["detail"]
+
+    def test_non_executive_agent_cannot_reuse_shared_telegram_token(self):
+        from elevate_cli.config import save_env_value
+
+        token = "111111111:SHAREDaaaaaaaaaaaaaaaaaaaa"
+        save_env_value("TELEGRAM_BOT_TOKEN", token)
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", "value": token},
+        )
+
+        assert resp.status_code == 400
+        assert "separate bot token" in resp.json()["detail"]
+
+    def test_shared_telegram_config_syncs_to_executive_lane(self):
+        from elevate_cli.config import load_env
+
+        token = "111111111:SHAREDaaaaaaaaaaaaaaaaaaaa"
+        token_resp = self.client.put(
+            "/api/env",
+            json={"key": "TELEGRAM_BOT_TOKEN", "value": token},
+        )
+        home_resp = self.client.put(
+            "/api/env",
+            json={"key": "TELEGRAM_HOME_CHANNEL", "value": "-10012345:9"},
+        )
+
+        assert token_resp.status_code == 200
+        assert home_resp.status_code == 200
+        env = load_env()
+        assert env["TELEGRAM_BOT_TOKEN"] == token
+        assert env["ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN"] == token
+        assert env["TELEGRAM_HOME_CHANNEL"] == "-10012345:9"
+        assert env["ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL"] == "-10012345:9"
+
+    def test_executive_lane_config_syncs_to_legacy_gateway_keys(self):
+        from elevate_cli.config import load_env
+
+        token = "333333333:EXECUTIVEcccccccccccccccccccc"
+        token_resp = self.client.put(
+            "/api/env",
+            json={"key": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN", "value": token},
+        )
+        home_resp = self.client.put(
+            "/api/env",
+            json={"key": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL", "value": "-10098765"},
+        )
+
+        assert token_resp.status_code == 200
+        assert home_resp.status_code == 200
+        env = load_env()
+        assert env["ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN"] == token
+        assert env["TELEGRAM_BOT_TOKEN"] == token
+        assert env["ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL"] == "-10098765"
+        assert env["TELEGRAM_HOME_CHANNEL"] == "-10098765"
+
+    def test_non_executive_agent_cannot_reuse_executive_lane_token(self):
+        from elevate_cli.config import save_env_value
+
+        token = "333333333:EXECUTIVEcccccccccccccccccccc"
+        save_env_value("ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN", token)
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", "value": token},
+        )
+
+        assert resp.status_code == 400
+        assert "separate bot token" in resp.json()["detail"]
+
+    def test_executive_token_rejects_existing_non_executive_duplicate(self):
+        from elevate_cli.config import save_env_value
+
+        token = "444444444:ADMINdddddddddddddddddddddd"
+        save_env_value("ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", token)
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN", "value": token},
+        )
+
+        assert resp.status_code == 400
+        assert "already assigned to another agent" in resp.json()["detail"]
+
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""
         from elevate_cli.config import save_env_value
@@ -487,7 +596,7 @@ class TestBuildSchemaFromConfig:
         assert CONFIG_SCHEMA["access.profile"]["options"] == [
             "standalone",
             "exp",
-            "skyleigh_downline",
+            "team_pack",
         ]
         assert CONFIG_SCHEMA["platforms.telegram.reply_to_mode"]["options"] == [
             "off",
@@ -1915,7 +2024,7 @@ class TestPtyWebSocket:
             lambda resume=None, sidecar_url=None: (
                 ["/bin/sh", "-c", "sleep 0.15; tput cols; tput lines"],
                 None,
-                None,
+                {"TERM": "xterm-256color"},
             ),
         )
         with self.client.websocket_connect(self._url()) as conn:

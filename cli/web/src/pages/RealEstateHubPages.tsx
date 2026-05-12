@@ -1,11 +1,9 @@
 import {
-  createContext,
-  forwardRef,
+  createElement,
   lazy,
   memo,
   Suspense,
   useCallback,
-  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -13,9 +11,6 @@ import {
   useRef,
   useState,
   type ComponentType,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -70,19 +65,21 @@ import {
   ThumbsUp,
   ThumbsDown,
   Users,
-  Video,
   XCircle,
   Zap,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
+  AdminActionRun,
   AdminContact,
   AdminDeal,
   AdminDealCreateRequest,
   AdminDealSide,
   AdminDealTask,
   AdminProvinceGuideCoverage,
+  AdminSetupSnapshot,
+  AccessStatusResponse,
   DealAttachmentCreateRequest,
   DealContactCreateRequest,
   DealContext,
@@ -106,13 +103,10 @@ import type {
   SourceInboxThread,
   SocialIdea,
   SocialMetricRow,
-  SocialPlatformBlock,
   SocialSnapshot,
   StatusResponse,
-  ThreadContextMessage,
-  ThreadContextResponse,
 } from "@/lib/api";
-import { X as CloseIcon, StickyNote } from "lucide-react";
+import { X as CloseIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -122,8 +116,66 @@ const MemoryConstellation = lazy(() =>
 );
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
+import { ThreadDrawerProvider, useThreadDrawer } from "@/pages/real-estate-hub/thread-drawer";
+import {
+  computeResponsePulse,
+  contactBuckets,
+  formatMinutes,
+  heatStyles,
+  heatVariant,
+  inboundWaitMinutes,
+  leadThreadBuckets,
+  profileWhen,
+  threadWhen,
+  type ResponsePulse,
+} from "@/pages/real-estate-hub/utils";
+import {
+  PROFILE_ACTION_BUCKETS,
+  PROFILE_ADMIN_SIDE_COPY,
+  isActiveProfileThread,
+  profileActionBucket,
+  profileActionSort,
+  profileContactLine,
+  profileConversationSort,
+  profileHasActiveConversation,
+  profileHasVerifier,
+  profileHandoffBadgeLabel,
+  profileHandoffIsActive,
+  profileHandoffSide,
+  profilePrimaryContactId,
+  profileSkillWorkflowContext,
+  profileSkillWorkflowName,
+  profileSkillWorkflowPrompt,
+  profileSourceMeta,
+  profileVerifierSummary,
+  profileVerifiers,
+  threadSortTime,
+  verifierSummary,
+  type ProfileActionBucketId,
+  type ProfileAdminDealIds,
+  type ProfileHandoffIds,
+  type ProfilePendingAdminAction,
+} from "@/pages/real-estate-hub/profile-workflow";
+import {
+  adminSetupDraftFromSnapshot,
+  adminSetupPayloadFromDraft,
+  type AdminSetupDraft,
+} from "@/pages/real-estate-hub/admin-setup";
+import {
+  IdeaCard,
+  PlatformBlockCard,
+  PlatformRankingsBlock,
+  PlatformTablist,
+  PostDetailModal,
+  RealVideoCard,
+  YouTubeTabView,
+  computeEngagementScore,
+  formatCompact,
+  formatPct,
+} from "@/pages/real-estate-hub/social-media-widgets";
 
-type HubData = {
+export type HubData = {
+  actionRuns: AdminActionRun[];
   cronJobs: CronJob[];
   dealTasks: AdminDealTask[];
   error: string | null;
@@ -142,12 +194,13 @@ function useRealEstateHubData(): HubData {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [dealTasks, setDealTasks] = useState<AdminDealTask[]>([]);
+  const [actionRuns, setActionRuns] = useState<AdminActionRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [hubResult, statusResult, sessionsResult, cronResult, sourceInboxResult, dealTasksResult] =
+    const [hubResult, statusResult, sessionsResult, cronResult, sourceInboxResult, dealTasksResult, actionRunsResult] =
       await Promise.allSettled([
         api.getAgentHub(),
         api.getStatus(),
@@ -155,6 +208,7 @@ function useRealEstateHubData(): HubData {
         api.getCronJobs(),
         api.getSourceInbox(200),
         api.getAdminDealTasks({ status: "open", limit: 200 }),
+        api.getAdminActionRuns({ limit: 200 }),
       ]);
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
@@ -172,6 +226,11 @@ function useRealEstateHubData(): HubData {
       setDealTasks(dealTasksResult.value.items);
     } else {
       setDealTasks([]);
+    }
+    if (actionRunsResult.status === "fulfilled") {
+      setActionRuns(actionRunsResult.value.items);
+    } else {
+      setActionRuns([]);
     }
 
     const failed = [
@@ -201,7 +260,7 @@ function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
-  return { cronJobs, dealTasks, error, loading, refresh, sourceInbox, sessions, snapshot, status };
+  return { actionRuns, cronJobs, dealTasks, error, loading, refresh, sourceInbox, sessions, snapshot, status };
 }
 
 function useHubHeader(title: string, data: HubData) {
@@ -248,7 +307,14 @@ function sessionMatches(session: SessionInfo, keywords: string[]): boolean {
 }
 
 function jobMatches(job: CronJob, keywords: string[]): boolean {
-  const haystack = [job.name ?? "", job.prompt, job.schedule_display ?? "", job.deliver ?? ""]
+  const haystack = [
+    job.name ?? "",
+    job.prompt,
+    job.schedule_display ?? "",
+    job.deliver ?? "",
+    job.skill ?? "",
+    ...(job.skills ?? []),
+  ]
     .join(" ")
     .toLowerCase();
   return keywords.some((keyword) => haystack.includes(keyword));
@@ -540,136 +606,6 @@ function sourceRecordCount(data: HubData, key: string): number {
   return Number(data.sourceInbox?.recordCounts?.[key] ?? 0);
 }
 
-function threadWhen(thread: SourceInboxThread): string {
-  return thread.latestAt ? isoTimeAgo(thread.latestAt) : "unsynced";
-}
-
-function heatVariant(item: { heatLabel: string }): "default" | "success" | "warning" | "destructive" | "outline" {
-  if (item.heatLabel === "hot") return "destructive";
-  if (item.heatLabel === "warm") return "warning";
-  if (item.heatLabel === "watch") return "success";
-  return "outline";
-}
-
-type HeatTone = {
-  dot: string;
-  pill: string;
-  text: string;
-  ring: string;
-  label: string;
-};
-
-function heatStyles(label: string): HeatTone {
-  switch (label) {
-    case "hot":
-      return {
-        dot: "bg-destructive",
-        pill: "bg-destructive/12 text-destructive border-destructive/45",
-        text: "text-destructive",
-        ring: "ring-destructive/30",
-        label: "Hot lead",
-      };
-    case "warm":
-      return {
-        dot: "bg-warning",
-        pill: "bg-warning/12 text-warning border-warning/45",
-        text: "text-warning",
-        ring: "ring-warning/30",
-        label: "Warm lead",
-      };
-    case "watch":
-      return {
-        dot: "bg-success",
-        pill: "bg-success/12 text-success border-success/40",
-        text: "text-success",
-        ring: "ring-success/30",
-        label: "Lead to watch",
-      };
-    case "dead":
-      return {
-        dot: "bg-foreground/30",
-        pill: "bg-card text-foreground/55 border-border line-through",
-        text: "text-foreground/55",
-        ring: "ring-border",
-        label: "Dead lead",
-      };
-    default:
-      return {
-        dot: "bg-foreground/40",
-        pill: "bg-card text-foreground/70 border-border",
-        text: "text-foreground/70",
-        ring: "ring-border",
-        label: "Cold lead",
-      };
-  }
-}
-
-function inboundWaitMinutes(thread: SourceInboxThread): number | null {
-  if (!thread.latestAt) return null;
-  if (thread.direction !== "inbound") return null;
-  const ts = Date.parse(thread.latestAt);
-  if (Number.isNaN(ts)) return null;
-  return Math.max(0, (Date.now() - ts) / 60000);
-}
-
-type ResponsePulse = {
-  unanswered: number;
-  median: number | null;
-  longest: number | null;
-  longestThread: SourceInboxThread | null;
-  breached5: number;
-  breached30: number;
-  breached60: number;
-};
-
-function computeResponsePulse(threads: SourceInboxThread[]): ResponsePulse {
-  const waits: Array<{ minutes: number; thread: SourceInboxThread }> = [];
-  for (const thread of threads) {
-    const minutes = inboundWaitMinutes(thread);
-    if (minutes === null) continue;
-    waits.push({ minutes, thread });
-  }
-  if (waits.length === 0) {
-    return {
-      unanswered: 0,
-      median: null,
-      longest: null,
-      longestThread: null,
-      breached5: 0,
-      breached30: 0,
-      breached60: 0,
-    };
-  }
-  const sorted = waits.slice().sort((a, b) => a.minutes - b.minutes);
-  const mid = Math.floor(sorted.length / 2);
-  const median =
-    sorted.length % 2 === 1
-      ? sorted[mid].minutes
-      : (sorted[mid - 1].minutes + sorted[mid].minutes) / 2;
-  const longest = sorted[sorted.length - 1];
-  return {
-    unanswered: waits.length,
-    median,
-    longest: longest.minutes,
-    longestThread: longest.thread,
-    breached5: waits.filter((w) => w.minutes >= 5).length,
-    breached30: waits.filter((w) => w.minutes >= 30).length,
-    breached60: waits.filter((w) => w.minutes >= 60).length,
-  };
-}
-
-function formatMinutes(minutes: number | null): string {
-  if (minutes == null) return "—";
-  if (minutes < 1) return "<1m";
-  if (minutes < 60) return `${Math.round(minutes)}m`;
-  if (minutes < 1440) {
-    const h = Math.floor(minutes / 60);
-    const m = Math.round(minutes - h * 60);
-    return m ? `${h}h ${m}m` : `${h}h`;
-  }
-  return `${Math.floor(minutes / 1440)}d`;
-}
-
 function ClientInboxPreview({
   data,
   title = "Lead inbox",
@@ -786,60 +722,6 @@ function ClientInboxPreview({
   );
 }
 
-const FOLLOWUP_CHANNELS = new Set([
-  "email",
-  "gmail",
-  "sms",
-  "imessage",
-  "messenger",
-  "facebook",
-  "instagram",
-  "instagram_dm",
-  "whatsapp",
-  "telegram",
-]);
-
-function isFollowUpThread(thread: SourceInboxThread): boolean {
-  const channel = (thread.channel || "").toLowerCase();
-  if (!FOLLOWUP_CHANNELS.has(channel)) return false;
-  // First outreach must have happened — at least one outbound from us.
-  if ((thread.outboundCount ?? 0) < 1) return false;
-  // Ball is in our court: last message came in.
-  return thread.direction === "inbound";
-}
-
-function leadThreadBuckets(threads: SourceInboxThread[]) {
-  const hot = threads.filter((thread) => thread.heatLabel === "hot").slice(0, 10);
-  const followUp = threads
-    .filter(isFollowUpThread)
-    .sort((a, b) => {
-      const heatDiff = (b.heatScore ?? 0) - (a.heatScore ?? 0);
-      if (heatDiff !== 0) return heatDiff;
-      const aTime = a.latestAt ? Date.parse(a.latestAt) : 0;
-      const bTime = b.latestAt ? Date.parse(b.latestAt) : 0;
-      return bTime - aTime;
-    })
-    .slice(0, 12);
-  const placed = new Set<string>([...hot, ...followUp].map((t) => t.id));
-  const remaining = threads.filter((thread) => !placed.has(thread.id));
-  const watch: SourceInboxThread[] = [];
-  const seenSources = new Set<string>(
-    [...hot, ...followUp].map((t) => String(t.sourceId ?? "")),
-  );
-  for (const thread of remaining) {
-    const sid = String(thread.sourceId ?? "");
-    if (!seenSources.has(sid) && watch.length < 10) {
-      watch.push(thread);
-      seenSources.add(sid);
-    }
-  }
-  for (const thread of remaining) {
-    if (watch.length >= 10) break;
-    if (!watch.includes(thread)) watch.push(thread);
-  }
-  return { followUp, hot, watch };
-}
-
 function sourceSummary(data: HubData): Array<{ label: string; count: number; state: string }> {
   const sources = data.sourceInbox?.sources ?? [];
   const sourceCount = (source: typeof sources[number]): number =>
@@ -857,21 +739,6 @@ function sourceSummary(data: HubData): Array<{ label: string; count: number; sta
       state: source.importOnly ? "snapshot" : source.connected ? "live" : source.state,
     }))
     .slice(0, 8);
-}
-
-function contactBuckets(profiles: SourceInboxProfile[]) {
-  const crmContacts = profiles.filter((profile) => profile.hasCrm).slice(0, 12);
-  const active = profiles
-    .filter((profile) => !profile.hasCrm && profile.hasConversation && !profile.isPotentialLead)
-    .slice(0, 8);
-  const potential = profiles
-    .filter((profile) => profile.isPotentialLead && !profile.hasCrm)
-    .slice(0, 8);
-  return { active, crmContacts, potential };
-}
-
-function profileWhen(profile: SourceInboxProfile): string {
-  return profile.latestAt ? isoTimeAgo(profile.latestAt) : "unsynced";
 }
 
 function ContactProfileRow({ profile }: { profile: SourceInboxProfile }) {
@@ -983,274 +850,12 @@ function ContactOverviewBoard({ data }: { data: HubData }) {
   );
 }
 
-function profileSortTime(profile: SourceInboxProfile): number {
-  const ms = Date.parse(profile.latestAt || "");
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function profileContactLine(profile: SourceInboxProfile): string {
-  const contacts = [...profile.phones.slice(0, 1), ...profile.emails.slice(0, 1)];
-  return contacts.length ? contacts.join(" · ") : "No phone or email yet";
-}
-
-type ProfileAdminDealIds = Partial<Record<AdminDealSide, string>>;
-
-type ProfilePendingAdminAction = {
-  profileId: string;
-  side: AdminDealSide;
-};
-
-type ProfileWorkflowJobIds = Partial<Record<AdminDealSide, string>>;
-
-type ProfileActionBucketId = "active-conversation" | "push-admin" | "needs-verifier" | "follow-up" | "in-admin";
-
-const PROFILE_WORKFLOW_JOB_PREFIX = "Lead profile workflow";
-
-const PROFILE_ACTION_BUCKETS: Array<{
-  id: ProfileActionBucketId;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: "active-conversation",
-    label: "Active conversations",
-    description: "People they are actively messaging stay first, sorted by the newest conversation activity.",
-  },
-  {
-    id: "push-admin",
-    label: "Ready for skill handoff",
-    description: "Verified hot or potential leads ready for a buyer workflow or seller CMA before Admin handoff.",
-  },
-  {
-    id: "needs-verifier",
-    label: "Needs phone or email",
-    description: "People with useful conversation context but no matching verifier yet.",
-  },
-  {
-    id: "follow-up",
-    label: "Follow up",
-    description: "Lower-urgency profiles to review, message, or keep watching from the source inbox.",
-  },
-  {
-    id: "in-admin",
-    label: "Already in Admin",
-    description: "Profiles already pushed into Buyers Admin, Sellers Admin, or both.",
-  },
-];
-
-const PROFILE_ADMIN_SIDE_COPY = {
-  listing: {
-    actionLabel: "Run CMA skill",
-    queuedLabel: "CMA queued",
-    openLabel: "Open Sellers",
-    badgeLabel: "Sellers Admin",
-    queuedBadgeLabel: "CMA skill queued",
-    workflow: "seller-cma-admin",
-    skill: "cma",
-    workflowLabel: "Seller CMA",
-    errorLabel: "CMA skill",
-  },
-  buyer: {
-    actionLabel: "Run buyer skill",
-    queuedLabel: "Buyer queued",
-    openLabel: "Open Buyers",
-    badgeLabel: "Buyers Admin",
-    queuedBadgeLabel: "buyer skill queued",
-    workflow: "buyer-admin-intake",
-    skill: "outreach",
-    workflowLabel: "Buyer qualification",
-    errorLabel: "buyer workflow",
-  },
-} satisfies Record<
-  AdminDealSide,
-  {
-    actionLabel: string;
-    queuedLabel: string;
-    openLabel: string;
-    badgeLabel: string;
-    queuedBadgeLabel: string;
-    workflow: string;
-    skill: string;
-    workflowLabel: string;
-    errorLabel: string;
-  }
->;
-
-function profileWorkflowToken(side: AdminDealSide): string {
-  return side === "listing" ? "seller-cma" : "buyer-admin";
-}
-
-function profileSkillWorkflowName(profile: SourceInboxProfile, side: AdminDealSide): string {
-  const name = profile.displayName?.trim() || "New profile";
-  return `${PROFILE_WORKFLOW_JOB_PREFIX}: ${profileWorkflowToken(side)}: ${name}: ${profile.id}`;
-}
-
-function profileSkillWorkflowJob(
-  profile: SourceInboxProfile,
-  side: AdminDealSide,
-  jobs: CronJob[],
-): CronJob | undefined {
-  const exactName = profileSkillWorkflowName(profile, side);
-  const token = profileWorkflowToken(side);
-  return (
-    jobs.find((job) => (job.name ?? "") === exactName) ??
-    jobs.find((job) => {
-      const name = job.name ?? "";
-      return name.includes(PROFILE_WORKFLOW_JOB_PREFIX) && name.includes(token) && name.includes(profile.id);
-    })
-  );
-}
-
-function profileSkillWorkflowContext(profile: SourceInboxProfile, side: AdminDealSide): string {
-  const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
-  return JSON.stringify(
-    {
-      profileId: profile.id,
-      targetSide: side,
-      workflow: sideCopy.workflow,
-      skill: sideCopy.skill,
-      displayName: profile.displayName,
-      primaryContactId: profilePrimaryContactId(profile),
-      contactIds: profile.contactIds ?? [],
-      conversationIds: profile.conversationIds ?? [],
-      threadIds: profile.threadIds,
-      sourceIds: profile.sourceIds,
-      sources: profile.sources,
-      channels: profile.channels,
-      phones: profile.phones,
-      emails: profile.emails,
-      verifiers: profileVerifiers(profile),
-      latestText: profile.latestText,
-      latestAt: profile.latestAt,
-      heatScore: profile.heatScore,
-      heatLabel: profile.heatLabel,
-      tags: profile.tags,
-      sourceMeta: profileSourceMeta(profile),
-    },
-    null,
-    2,
-  );
-}
-
-function profileSkillWorkflowPrompt(profile: SourceInboxProfile, side: AdminDealSide): string {
-  const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
-  const context = profileSkillWorkflowContext(profile, side);
-  if (side === "listing") {
-    return `Run the seller CMA handoff for this lead profile.
-
-Profile context:
-${context}
-
-Workflow rules:
-1. This is a skill-owned handoff, not a direct dashboard push to Sellers Admin.
-2. Confirm from the profile, thread history, or source records that there is enough seller appointment/property context to run the CMA.
-3. If the property address or appointment context is missing, draft or queue the next same-channel follow-up needed to get it. Do not fabricate missing details and do not create an Admin record yet.
-4. Once the appointment/property context is present, run the installed CMA skill workflow. Preserve CMA handoffs and generated artifacts.
-5. Only after the CMA outputs are complete, create or update the Elevate Sellers Admin/CMA record with sourceProfileId=${profile.id}, sourceAdminSide=listing, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
-6. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the listing card at Admin stage 0 (CMA / Prospect) unless the CMA outcome clearly belongs in a later listing stage. This stage event is what lets the Admin action registry run next.
-7. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into CMA/Admin.`;
-  }
-
-  return `Run the buyer qualification handoff for this lead profile.
-
-Profile context:
-${context}
-
-Workflow rules:
-1. This is a skill-owned handoff, not a direct dashboard push to Buyers Admin.
-2. Use the outreach/lead context to determine whether a buyer appointment, qualification, financing, search criteria, or follow-up is still needed.
-3. If qualification details are missing, draft or queue the next same-channel message needed to collect them. Do not fabricate budget, financing, timeline, or area criteria.
-4. After the buyer workflow has enough appointment and qualification context, create or update the Elevate Buyers Admin record with sourceProfileId=${profile.id}, sourceAdminSide=buyer, workflow=${sideCopy.workflow}, and the available verifiers/contact ids.
-5. Hand control to Admin by using the Admin stage mutation after the record exists. Move or re-enter the buyer card at Admin stage 0 (Intake) unless the qualification outcome clearly belongs in a later buyer stage. This stage event is what lets the Admin action registry run next.
-6. Leave a concise run note explaining whether the person stayed in lead follow-up or moved into Buyers Admin.`;
-}
-
-function profileSourceMeta(profile: SourceInboxProfile): string {
-  const sources = profile.sources.length ? profile.sources.slice(0, 2).join(" + ") : "Source inbox";
-  const channels = profile.channels.length ? profile.channels.slice(0, 2).join(" + ") : "unknown channel";
-  return `${sources} / ${channels}`;
-}
-
-function profilePrimaryContactId(profile: SourceInboxProfile): string | null {
-  return profile.contactIds?.[0] ?? null;
-}
-
-function profileVerifiers(profile: SourceInboxProfile): SourceInboxProfileVerifier[] {
-  return (profile.verifiers ?? []).filter((verifier) => verifier.key && verifier.value);
-}
-
-function verifierSummary(verifiers: SourceInboxProfileVerifier[]): string {
-  const kinds = Array.from(new Set(verifiers.map((verifier) => verifier.kind))).sort();
-  if (!kinds.length) return "needs phone/email";
-  return `verified by ${kinds.join(" + ")}`;
-}
-
-function profileVerifierSummary(profile: SourceInboxProfile): string {
-  return verifierSummary(profileVerifiers(profile));
-}
-
-function profileHasVerifier(profile: SourceInboxProfile): boolean {
-  return profileVerifiers(profile).length > 0;
-}
-
-function profileHasAdminDeal(dealIds?: ProfileAdminDealIds): boolean {
-  return Boolean(dealIds?.listing || dealIds?.buyer);
-}
-
-function threadSortTime(thread: SourceInboxThread): number {
-  const ms = Date.parse(thread.latestAt || "");
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function isActiveProfileThread(thread: SourceInboxThread): boolean {
-  const status = String(thread.status || "open").toLowerCase();
-  return status !== "done" && status !== "archived";
-}
-
-function profileHasActiveConversation(
-  profile: SourceInboxProfile,
-  threadsForProfile?: SourceInboxThread[],
-): boolean {
-  if (!profile.hasConversation || profile.threadCount < 1) return false;
-  if (!threadsForProfile?.length) return true;
-  return threadsForProfile.some(isActiveProfileThread);
-}
-
-function profileActionBucket(
-  profile: SourceInboxProfile,
-  dealIds?: ProfileAdminDealIds,
-  activeConversation = false,
-): ProfileActionBucketId {
-  if (activeConversation) return "active-conversation";
-  if (profileHasAdminDeal(dealIds)) return "in-admin";
-  if (!profileHasVerifier(profile)) return "needs-verifier";
-  if (profile.isPotentialLead || profile.heatLabel === "hot" || profile.heatLabel === "warm") return "push-admin";
-  return "follow-up";
-}
-
-function profileActionSort(a: SourceInboxProfile, b: SourceInboxProfile): number {
-  if (a.isPotentialLead !== b.isPotentialLead) return a.isPotentialLead ? -1 : 1;
-  const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
-  if (heat !== 0) return heat;
-  return profileSortTime(b) - profileSortTime(a);
-}
-
-function profileConversationSort(a: SourceInboxProfile, b: SourceInboxProfile): number {
-  const recency = profileSortTime(b) - profileSortTime(a);
-  if (recency !== 0) return recency;
-  const heat = (b.heatScore ?? 0) - (a.heatScore ?? 0);
-  if (heat !== 0) return heat;
-  return a.displayName.localeCompare(b.displayName);
-}
-
 function LeadProfilesWorkbench({
-  cronJobs,
   onChanged,
   showHeader = true,
   profiles,
   threads,
 }: {
-  cronJobs: CronJob[];
   onChanged: () => Promise<void>;
   showHeader?: boolean;
   profiles: SourceInboxProfile[];
@@ -1259,29 +864,48 @@ function LeadProfilesWorkbench({
   const drawer = useThreadDrawer();
   const navigate = useNavigate();
   const [pendingProfileAction, setPendingProfileAction] = useState<ProfilePendingAdminAction | null>(null);
-  const [queuedWorkflowIds, setQueuedWorkflowIds] = useState<Record<string, ProfileWorkflowJobIds>>({});
+  const [profileHandoffs, setProfileHandoffs] = useState<Record<string, ProfileHandoffIds>>({});
   const [existingDealIds, setExistingDealIds] = useState<Record<string, ProfileAdminDealIds>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let live = true;
-    api.getAdminDeals({ status: "active", limit: 200 })
-      .then((response) => {
+    Promise.all([
+      api.getAdminDeals({ status: "active", limit: 200 }),
+      api.getAgentHandoffs({ fromAgentId: "executive-assistant", toAgentId: "admin", limit: 500 }),
+    ])
+      .then(([dealsResponse, handoffsResponse]) => {
         if (!live) return;
-        const next: Record<string, ProfileAdminDealIds> = {};
-        for (const deal of response.items) {
+        const nextDeals: Record<string, ProfileAdminDealIds> = {};
+        for (const deal of dealsResponse.items) {
           const sourceProfileId = deal.extraToggles?.sourceProfileId;
           if (typeof sourceProfileId === "string" && (deal.side === "listing" || deal.side === "buyer")) {
-            next[sourceProfileId] = {
-              ...next[sourceProfileId],
+            nextDeals[sourceProfileId] = {
+              ...nextDeals[sourceProfileId],
               [deal.side]: deal.id,
             };
           }
         }
-        setExistingDealIds(next);
+        const nextHandoffs: Record<string, ProfileHandoffIds> = {};
+        for (const handoff of handoffsResponse.items) {
+          if (!handoff.profileId) continue;
+          const side = profileHandoffSide(handoff);
+          if (!side) continue;
+          const existing = nextHandoffs[handoff.profileId]?.[side];
+          if (existing && Date.parse(existing.updatedAt || "") >= Date.parse(handoff.updatedAt || "")) continue;
+          nextHandoffs[handoff.profileId] = {
+            ...nextHandoffs[handoff.profileId],
+            [side]: handoff,
+          };
+        }
+        setExistingDealIds(nextDeals);
+        setProfileHandoffs(nextHandoffs);
       })
       .catch(() => {
-        if (live) setExistingDealIds({});
+        if (live) {
+          setExistingDealIds({});
+          setProfileHandoffs({});
+        }
       });
     return () => {
       live = false;
@@ -1367,20 +991,51 @@ function LeadProfilesWorkbench({
       return next;
     });
     try {
-      const job = await api.createCronJob({
-        name: profileSkillWorkflowName(profile, side),
-        schedule: "1m",
-        prompt: profileSkillWorkflowPrompt(profile, side),
-        deliver: "local",
-        skills: [sideCopy.skill],
-        tier: "orchestrator",
+      const verifiers = profileVerifiers(profile);
+      if (!verifiers.length) {
+        setErrors((prev) => ({
+          ...prev,
+          [profile.id]: "Add or sync a phone/email verifier before sending this profile to Admin.",
+        }));
+        return;
+      }
+      const setup = await api.getAdminSetup();
+      if (!setup.complete) {
+        setErrors((prev) => ({
+          ...prev,
+          [profile.id]: `Admin setup must be completed before ${sideCopy.errorLabel}. Missing: ${setup.missingRequiredKeys.join(", ")}`,
+        }));
+        return;
+      }
+      const priorHandoff = profileHandoffs[profile.id]?.[side];
+      const activeHandoff = profileHandoffIsActive(priorHandoff);
+      const handoff = await api.createAgentHandoff({
+        fromAgentId: "executive-assistant",
+        toAgentId: "admin",
+        title: profileSkillWorkflowName(profile, side),
+        task: profileSkillWorkflowPrompt(profile, side),
+        priority: side === "listing" ? "high" : "normal",
+        profileId: profile.id,
+        contactId: profilePrimaryContactId(profile),
+        conversationId: profile.conversationIds?.[0] ?? null,
+        payload: {
+          targetSide: side,
+          workflow: sideCopy.workflow,
+          workflowLabel: sideCopy.workflowLabel,
+          skill: sideCopy.skill,
+          profileContext: JSON.parse(profileSkillWorkflowContext(profile, side)),
+          verifiers,
+        },
+        idempotencyKey: priorHandoff && !activeHandoff
+          ? `profile-admin-handoff:${profile.id}:${sideCopy.workflow}:${Date.now()}`
+          : `profile-admin-handoff:${profile.id}:${sideCopy.workflow}`,
+        runNow: true,
       });
-      await api.triggerCronJob(job.id);
-      setQueuedWorkflowIds((prev) => ({
+      setProfileHandoffs((prev) => ({
         ...prev,
         [profile.id]: {
           ...prev[profile.id],
-          [side]: job.id,
+          [side]: handoff,
         },
       }));
       await onChanged();
@@ -1452,17 +1107,16 @@ function LeadProfilesWorkbench({
             const dealIds = combinedDealIdsByProfile[profile.id] ?? {};
             const sellerDealId = dealIds.listing;
             const buyerDealId = dealIds.buyer;
-            const sellerWorkflowId =
-              queuedWorkflowIds[profile.id]?.listing ??
-              profileSkillWorkflowJob(profile, "listing", cronJobs)?.id;
-            const buyerWorkflowId =
-              queuedWorkflowIds[profile.id]?.buyer ??
-              profileSkillWorkflowJob(profile, "buyer", cronJobs)?.id;
             const sellerPending =
               pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "listing";
             const buyerPending =
               pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "buyer";
+            const sellerHandoff = profileHandoffs[profile.id]?.listing;
+            const buyerHandoff = profileHandoffs[profile.id]?.buyer;
             const error = errors[profile.id];
+            const canHandoff = profileHasVerifier(profile);
+            const sellerHandoffLabel = profileHandoffBadgeLabel(sellerHandoff, "listing");
+            const buyerHandoffLabel = profileHandoffBadgeLabel(buyerHandoff, "buyer");
             return (
               <div key={profile.id} className="px-4 py-3">
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
@@ -1492,8 +1146,8 @@ function LeadProfilesWorkbench({
                       <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
                         {profileVerifierSummary(profile)}
                       </Badge>
-                      {sellerWorkflowId && <Badge variant="warning">{PROFILE_ADMIN_SIDE_COPY.listing.queuedBadgeLabel}</Badge>}
-                      {buyerWorkflowId && <Badge variant="warning">{PROFILE_ADMIN_SIDE_COPY.buyer.queuedBadgeLabel}</Badge>}
+                      {sellerHandoffLabel && <Badge variant={sellerHandoff?.status === "failed" ? "destructive" : "warning"}>{sellerHandoffLabel}</Badge>}
+                      {buyerHandoffLabel && <Badge variant={buyerHandoff?.status === "failed" ? "destructive" : "warning"}>{buyerHandoffLabel}</Badge>}
                       {sellerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.listing.badgeLabel}</Badge>}
                       {buyerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.buyer.badgeLabel}</Badge>}
                     </div>
@@ -1536,23 +1190,23 @@ function LeadProfilesWorkbench({
                         {PROFILE_ADMIN_SIDE_COPY.listing.openLabel}
                       </Link>
                     ) : (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => queueProfileSkillWorkflow(profile, "listing")}
-                        disabled={pendingProfileAction !== null || Boolean(sellerWorkflowId)}
-                      >
-                        {sellerPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : sellerWorkflowId ? (
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                        ) : (
-                          <Home className="h-3.5 w-3.5" />
-                        )}
-                        {sellerWorkflowId
-                          ? PROFILE_ADMIN_SIDE_COPY.listing.queuedLabel
-                          : PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
+	                      <Button
+	                        type="button"
+	                        size="sm"
+	                        variant="outline"
+	                        onClick={() => queueProfileSkillWorkflow(profile, "listing")}
+	                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(sellerHandoff)}
+	                      >
+	                        {sellerPending ? (
+	                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+	                        ) : profileHandoffIsActive(sellerHandoff) ? (
+	                          <CheckCircle2 className="h-3.5 w-3.5" />
+	                        ) : (
+	                          <Home className="h-3.5 w-3.5" />
+	                        )}
+	                        {profileHandoffIsActive(sellerHandoff)
+	                          ? PROFILE_ADMIN_SIDE_COPY.listing.queuedLabel
+	                          : PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
                       </Button>
                     )}
                     {buyerDealId ? (
@@ -1566,21 +1220,21 @@ function LeadProfilesWorkbench({
                     ) : (
                       <Button
                         type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => queueProfileSkillWorkflow(profile, "buyer")}
-                        disabled={pendingProfileAction !== null || Boolean(buyerWorkflowId)}
-                      >
-                        {buyerPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : buyerWorkflowId ? (
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                        ) : (
-                          <Users className="h-3.5 w-3.5" />
-                        )}
-                        {buyerWorkflowId
-                          ? PROFILE_ADMIN_SIDE_COPY.buyer.queuedLabel
-                          : PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
+	                        size="sm"
+	                        variant="outline"
+	                        onClick={() => queueProfileSkillWorkflow(profile, "buyer")}
+	                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(buyerHandoff)}
+	                      >
+	                        {buyerPending ? (
+	                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+	                        ) : profileHandoffIsActive(buyerHandoff) ? (
+	                          <CheckCircle2 className="h-3.5 w-3.5" />
+	                        ) : (
+	                          <Users className="h-3.5 w-3.5" />
+	                        )}
+	                        {profileHandoffIsActive(buyerHandoff)
+	                          ? PROFILE_ADMIN_SIDE_COPY.buyer.queuedLabel
+	                          : PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
                       </Button>
                     )}
                   </div>
@@ -1595,12 +1249,10 @@ function LeadProfilesWorkbench({
 }
 
 function LeadProfilesListPage({
-  cronJobs,
   onChanged,
   profiles,
   threads,
 }: {
-  cronJobs: CronJob[];
   onChanged: () => Promise<void>;
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
@@ -1631,7 +1283,6 @@ function LeadProfilesListPage({
 
       <div className="overflow-hidden rounded-2xl border border-border bg-card">
         <LeadProfilesWorkbench
-          cronJobs={cronJobs}
           onChanged={onChanged}
           showHeader={false}
           profiles={profiles}
@@ -2615,586 +2266,6 @@ function DraftMessagesBoard({
   );
 }
 
-type ThreadDrawerTarget = { sourceId: string; threadId: string } | null;
-
-const ThreadDrawerContext = createContext<{
-  openThread: (sourceId: string, threadId: string) => void;
-} | null>(null);
-
-function useThreadDrawer() {
-  return useContext(ThreadDrawerContext);
-}
-
-export function ThreadDrawerProvider({
-  children,
-  data,
-}: {
-  children: ReactNode;
-  data: HubData;
-}) {
-  const [target, setTarget] = useState<ThreadDrawerTarget>(null);
-  const openThread = useCallback((sourceId: string, threadId: string) => {
-    setTarget({ sourceId, threadId });
-  }, []);
-  const close = useCallback(() => setTarget(null), []);
-  const ctx = useMemo(() => ({ openThread }), [openThread]);
-  return (
-    <ThreadDrawerContext.Provider value={ctx}>
-      {children}
-      {target && <ThreadDrawer data={data} target={target} onClose={close} />}
-    </ThreadDrawerContext.Provider>
-  );
-}
-
-function fmtMessageTimestamp(value: string | null | undefined): string {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-function ThreadMessageBubble({ message }: { message: ThreadContextMessage }) {
-  const inbound = message.direction !== "outbound";
-  return (
-    <div className={cn("flex flex-col gap-1.5", inbound ? "items-start" : "items-end")}>
-      <div
-        className={cn(
-          "max-w-[82%] rounded-2xl px-3.5 py-2.5 text-[0.875rem] leading-[1.45] whitespace-pre-wrap break-words text-foreground",
-          inbound
-            ? "bg-card border border-border"
-            : "bg-primary/15 border border-primary/45",
-        )}
-      >
-        {message.text || <span className="text-foreground/55 italic">(no text)</span>}
-      </div>
-      <div
-        className="flex items-center gap-1.5 text-[0.68rem] uppercase tracking-[0.08em] text-foreground/55"
-        style={{ fontFamily: "var(--theme-font-mono)" }}
-      >
-        {message.sender && <span className="font-medium">{message.sender}</span>}
-        {message.sender && message.timestamp && <span>·</span>}
-        {message.timestamp && <span>{fmtMessageTimestamp(message.timestamp)}</span>}
-      </div>
-    </div>
-  );
-}
-
-function ThreadDrawer({
-  data,
-  target,
-  onClose,
-}: {
-  data: HubData;
-  target: { sourceId: string; threadId: string };
-  onClose: () => void;
-}) {
-  const [context, setContext] = useState<ThreadContextResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [reply, setReply] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await api.getThreadContext(target.sourceId, target.threadId);
-      setContext(result);
-      setReply(result.pendingDraft?.draftText ?? "");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [target.sourceId, target.threadId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
-
-  useLayoutEffect(() => {
-    if (!loading && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [loading, context?.messages.length]);
-
-  const sendDraft = useCallback(
-    async (action: "approve" | "skip") => {
-      if (!context?.pendingDraft) return;
-      setSubmitting(true);
-      try {
-        await api.updateSourceInboxDraft(
-          context.pendingDraft.sourceId,
-          context.pendingDraft.taskId,
-          action,
-          reply,
-        );
-        await data.refresh();
-        onClose();
-      } catch (err) {
-        window.alert(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [context?.pendingDraft, data, onClose, reply],
-  );
-
-  const meta = context?.meta;
-  const sends = context?.sends ?? [];
-  const messages = context?.messages ?? [];
-
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      className="fixed inset-0 z-50 flex justify-end bg-black/60 animate-[fade-in_120ms_ease-out]"
-    >
-      <div
-        className="flex h-full w-full max-w-[1100px] flex-col border-l border-border bg-background shadow-[0_24px_90px_rgba(0,0,0,0.32)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <div className="truncate text-[1.05rem] font-semibold leading-tight text-foreground">
-              {context?.personName ?? "Loading thread..."}
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {context?.source?.label && (
-                <Badge
-                  variant="outline"
-                  className="border-border text-foreground/85 text-[0.7rem] font-medium"
-                  style={{ fontFamily: "var(--theme-font-mono)" }}
-                >
-                  {context.source.label}
-                </Badge>
-              )}
-              {context?.source?.ownerAgent && (
-                <Badge
-                  variant="outline"
-                  className="border-border text-foreground/85 text-[0.7rem] font-medium"
-                  style={{ fontFamily: "var(--theme-font-mono)" }}
-                >
-                  {context.source.ownerAgent}
-                </Badge>
-              )}
-              {meta?.label && (
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "text-[0.7rem] font-semibold",
-                    meta.label === "hot" && "border-destructive/60 bg-destructive/10 text-destructive",
-                    meta.label === "warm" && "border-warning/60 bg-warning/10 text-warning",
-                    meta.label === "cold" && "border-border text-foreground/75",
-                    meta.label === "dead" && "border-border/60 text-foreground/55",
-                  )}
-                  style={{ fontFamily: "var(--theme-font-mono)" }}
-                >
-                  {meta.label} {typeof meta.score === "number" ? meta.score : ""}
-                </Badge>
-              )}
-              {context && (
-                <span
-                  className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-foreground/65"
-                  style={{ fontFamily: "var(--theme-font-mono)" }}
-                >
-                  {context.messageCount} {context.messageCount === 1 ? "message" : "messages"}
-                </span>
-              )}
-            </div>
-          </div>
-          <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
-            <CloseIcon className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-          <div className="flex min-h-0 flex-col border-r border-border">
-            <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
-              {loading && (
-                <div className="flex items-center justify-center py-12 text-xs font-medium text-foreground/65">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading thread...
-                </div>
-              )}
-              {error && (
-                <div className="rounded-xl border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
-                  {error}
-                </div>
-              )}
-              {!loading && !error && messages.length === 0 && (
-                <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-border bg-card/60 px-6 py-12 text-center">
-                  <div
-                    className="text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-foreground/55"
-                    style={{ fontFamily: "var(--theme-font-mono)" }}
-                  >
-                    Empty thread
-                  </div>
-                  <div className="text-sm text-foreground/75">
-                    No messages on file yet.
-                  </div>
-                </div>
-              )}
-              {!loading && messages.length > 0 && (
-                <div className="space-y-4">
-                  {messages.map((message) => (
-                    <ThreadMessageBubble key={message.id || `${message.timestamp}-${message.text.slice(0, 12)}`} message={message} />
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {context?.pendingDraft && (
-              <div className="border-t border-border bg-card/70 px-5 py-4">
-                <div
-                  className="mb-2 flex items-center justify-between text-[0.68rem] font-semibold uppercase tracking-[0.1em]"
-                  style={{ fontFamily: "var(--theme-font-mono)" }}
-                >
-                  <span className="flex items-center gap-1.5 text-primary">
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary" />
-                    Draft reply · awaiting approval
-                  </span>
-                  <span className="text-foreground/65">{context.pendingDraft.channel}</span>
-                </div>
-                <textarea
-                  value={reply}
-                  onChange={(e) => setReply(e.target.value)}
-                  rows={4}
-                  className="w-full resize-none rounded-xl border border-border bg-background px-3 py-2.5 text-sm leading-5 text-foreground placeholder:text-foreground/45 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
-                />
-                <div className="mt-2.5 flex justify-end gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void sendDraft("skip")}
-                    disabled={submitting}
-                    className="text-foreground/75 hover:text-foreground"
-                  >
-                    Skip
-                  </Button>
-                  <Button size="sm" onClick={() => void sendDraft("approve")} disabled={submitting || !reply.trim()}>
-                    {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                    Send
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="min-h-0 overflow-y-auto bg-card/30 px-5 py-5">
-            <ThreadContextSidebar context={context} loading={loading} sends={sends} />
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-function ThreadContextSidebar({
-  context,
-  loading,
-  sends,
-}: {
-  context: ThreadContextResponse | null;
-  loading: boolean;
-  sends: ThreadContextResponse["sends"];
-}) {
-  if (loading || !context) {
-    return (
-      <div className="font-mono-ui text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground/80">
-        Loading context...
-      </div>
-    );
-  }
-  const meta = context.meta;
-  const lead = context.lead;
-  const activity = context.activity ?? [];
-  const notes = context.notes ?? [];
-  const tasks = context.tasks ?? [];
-  const sectionLabel =
-    "font-mono-ui flex items-center gap-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-foreground/70";
-  const sectionClass = "py-5 first:pt-0 last:pb-0";
-  const displayScore = meta?.score ?? lead?.score ?? null;
-  const scoreLabel = meta?.label ?? (lead?.stage || lead?.leadSource || null);
-  const hasContact = Boolean(lead && (lead.emails.length > 0 || lead.phones.length > 0));
-  return (
-    <div className="divide-y divide-border/40">
-      <section className={sectionClass}>
-        <h4 className={sectionLabel}>Lead score</h4>
-        {displayScore !== null ? (
-          <>
-            <div className="mt-2 flex items-baseline gap-2.5">
-              <span className="text-[2.25rem] font-semibold leading-none tracking-tight text-primary">
-                {displayScore}
-              </span>
-              {scoreLabel && (
-                <span className="font-mono-ui text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-foreground/70">
-                  {scoreLabel}
-                </span>
-              )}
-            </div>
-            {meta?.reason && (
-              <p className="mt-2.5 text-[0.8rem] leading-[1.5] text-foreground">{meta.reason}</p>
-            )}
-            {!meta && lead?.summary && (
-              <p className="mt-2.5 text-[0.8rem] leading-[1.5] text-foreground">{lead.summary}</p>
-            )}
-            {lead && (lead.leadSource || lead.assignedUser || lead.tags.length > 0) && (
-              <div className="mt-2.5 space-y-1.5">
-                {lead.leadSource && (
-                  <div className="flex items-center gap-1.5 text-[0.72rem] text-foreground/75">
-                    <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.1em] text-muted-foreground/80">
-                      source
-                    </span>
-                    <span>{lead.leadSource}</span>
-                  </div>
-                )}
-                {lead.assignedUser && (
-                  <div className="flex items-center gap-1.5 text-[0.72rem] text-foreground/75">
-                    <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.1em] text-muted-foreground/80">
-                      owner
-                    </span>
-                    <span>{lead.assignedUser}</span>
-                  </div>
-                )}
-                {lead.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {lead.tags
-                      .filter((t) => t !== "crm-lead" && !t.endsWith("-crm"))
-                      .slice(0, 6)
-                      .map((tag) => (
-                        <span
-                          key={tag}
-                          className="font-mono-ui inline-flex items-center rounded-full border border-border/60 bg-card px-2 py-0.5 text-[0.65rem] font-medium text-foreground/75"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {(meta?.scoredBy || meta?.scoredAt) && (
-              <div className="font-mono-ui mt-2.5 text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/80">
-                {meta.scoredBy ? `by ${meta.scoredBy}` : null}
-                {meta.scoredBy && meta.scoredAt ? " · " : ""}
-                {meta.scoredAt ? fmtMessageTimestamp(meta.scoredAt) : ""}
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="mt-2 text-[0.8rem] text-muted-foreground">Not yet scored.</p>
-        )}
-      </section>
-
-      {hasContact && lead && (
-        <section className={sectionClass}>
-          <h4 className={sectionLabel}>Contact</h4>
-          <div className="mt-2 space-y-1">
-            {lead.phones.slice(0, 3).map((phone) => (
-              <div key={phone} className="text-[0.8rem] text-foreground">
-                {phone}
-              </div>
-            ))}
-            {lead.emails.slice(0, 3).map((email) => (
-              <div key={email} className="truncate text-[0.8rem] text-foreground">
-                {email}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      <section className={sectionClass}>
-        <h4 className={sectionLabel}>
-          <StickyNote className="h-3 w-3" />
-          Notes
-          {notes.length > 0 && (
-            <span className="font-mono-ui text-[0.62rem] font-medium text-muted-foreground/70">
-              {notes.length}
-            </span>
-          )}
-        </h4>
-        {notes.length === 0 ? (
-          <p className="mt-2 text-[0.8rem] leading-[1.5] text-muted-foreground">
-            {lead?.summary || "No notes yet."}
-          </p>
-        ) : (
-          <ul className="mt-2 space-y-2.5">
-            {notes.slice(0, 8).map((note) => (
-              <li key={note.id} className="rounded-md border border-border/40 bg-card/40 px-3 py-2">
-                <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.62rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
-                  <span>{note.author || "note"}</span>
-                  {note.timestamp && (
-                    <span className="text-muted-foreground/70">{fmtMessageTimestamp(note.timestamp)}</span>
-                  )}
-                </div>
-                <p className="mt-1 whitespace-pre-line text-[0.8rem] leading-[1.5] text-foreground">
-                  {note.summary}
-                </p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {tasks.length > 0 && (
-        <section className={sectionClass}>
-          <h4 className={sectionLabel}>
-            <CheckSquare className="h-3 w-3" />
-            Tasks
-            <span className="font-mono-ui text-[0.62rem] font-medium text-muted-foreground/70">
-              {tasks.length}
-            </span>
-          </h4>
-          <ul className="mt-2 space-y-1.5">
-            {tasks.slice(0, 6).map((task) => (
-              <li key={task.id} className="flex items-start gap-2">
-                <span
-                  className={cn(
-                    "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                    task.status === "done"
-                      ? "bg-success"
-                      : task.status === "in_progress"
-                        ? "bg-primary"
-                        : "bg-muted-foreground/60"
-                  )}
-                  aria-hidden
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[0.8rem] leading-[1.4] text-foreground">
-                    {task.title}
-                  </div>
-                  {(task.dueAt || task.status) && (
-                    <div className="font-mono-ui mt-0.5 flex items-center gap-1.5 text-[0.62rem] uppercase tracking-[0.1em] text-muted-foreground">
-                      <span>{task.status.replace(/_/g, " ")}</span>
-                      {task.dueAt && (
-                        <>
-                          <span aria-hidden>·</span>
-                          <span>due {fmtMessageTimestamp(task.dueAt)}</span>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <section className={sectionClass}>
-        <h4 className={sectionLabel}>
-          <Activity className="h-3 w-3" />
-          Property activity
-          {activity.length > 0 && (
-            <span className="font-mono-ui text-[0.62rem] font-medium text-muted-foreground/70">
-              {activity.length}
-            </span>
-          )}
-        </h4>
-        {activity.length === 0 ? (
-          <p className="mt-2 text-[0.8rem] leading-[1.5] text-muted-foreground">
-            No activity logged yet.
-          </p>
-        ) : (
-          <ul className="mt-2 divide-y divide-border/30">
-            {activity.slice(0, 8).map((event) => {
-              const label = (event.subtype || event.type).replace(/_/g, " ");
-              return (
-                <li key={event.id} className="py-2.5 first:pt-0 last:pb-0">
-                  <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.66rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                    <span>{label}</span>
-                    {event.timestamp && (
-                      <span className="text-muted-foreground/80">{fmtMessageTimestamp(event.timestamp)}</span>
-                    )}
-                  </div>
-                  {(event.title || event.summary) && (
-                    <p className="mt-1 line-clamp-2 text-[0.8rem] leading-[1.45] text-foreground">
-                      {event.title || event.summary}
-                    </p>
-                  )}
-                  {event.address && (
-                    <p className="font-mono-ui mt-0.5 text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/80">
-                      {event.address}
-                    </p>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      <section className={sectionClass}>
-        <h4 className={sectionLabel}>Send history</h4>
-        {sends.length === 0 ? (
-          <p className="mt-2 text-[0.8rem] text-muted-foreground">No prior sends.</p>
-        ) : (
-          <ul className="mt-2 divide-y divide-border/30">
-            {sends.slice(0, 8).map((send) => (
-              <li key={send.id} className="py-2.5 first:pt-0 last:pb-0">
-                <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.66rem] font-semibold uppercase tracking-[0.08em]">
-                  <span className="text-foreground/75">{send.channel ?? "send"}</span>
-                  <span
-                    className={cn(
-                      send.status === "sent" || send.status === "delivered"
-                        ? "text-success"
-                        : send.status === "failed"
-                          ? "text-destructive"
-                          : "text-muted-foreground",
-                    )}
-                  >
-                    {send.status ?? "unknown"}
-                  </span>
-                </div>
-                {(() => {
-                  // Codex audit P2 (2026-05-05): older outreach_db rows
-                  // store the body at payload.draft_text; future
-                  // operational.db rows may put it at the top level.
-                  // Fall back through every shape we've shipped so the
-                  // history doesn't render blank.
-                  const body =
-                    (send.payload?.text as string | undefined) ||
-                    (send.payload?.draft_text as string | undefined) ||
-                    ((send as { draftText?: string }).draftText) ||
-                    ((send as { text?: string }).text);
-                  return body ? (
-                    <p className="mt-1 line-clamp-3 text-[0.8rem] leading-[1.45] text-foreground">
-                      {String(body)}
-                    </p>
-                  ) : null;
-                })()}
-                {send.createdAt && (
-                  <div className="font-mono-ui mt-1 text-[0.65rem] uppercase tracking-[0.08em] text-muted-foreground/80">
-                    {fmtMessageTimestamp(send.createdAt)}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </div>
-  );
-}
 
 function HotLeadsList({
   data,
@@ -3625,6 +2696,15 @@ function TimedTasks({
   jobs: CronJob[];
   title?: string;
 }) {
+  const automationBadge = (job: CronJob) => {
+    if (job.last_error) return { label: "error", variant: "warning" as const };
+    if (job.alignment_status === "blocked") return { label: "blocked", variant: "warning" as const };
+    if (job.alignment_status === "optional") return { label: "optional", variant: "outline" as const };
+    if (job.alignment_status === "legacy") return { label: "legacy", variant: "warning" as const };
+    if (job.enabled) return { label: job.state || "scheduled", variant: "success" as const };
+    return { label: job.state || "paused", variant: "outline" as const };
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -3649,13 +2729,22 @@ function TimedTasks({
                     {job.schedule_display || job.schedule.display}
                   </div>
                 </div>
-                <Badge variant={job.enabled ? "success" : "warning"}>{job.state}</Badge>
+                {(() => {
+                  const badge = automationBadge(job);
+                  return <Badge variant={badge.variant}>{badge.label}</Badge>;
+                })()}
               </div>
               <div className="flex flex-wrap gap-2 text-[0.72rem] text-muted-foreground">
                 <span>{job.deliver ?? "local"}</span>
                 {job.next_run_at && <span>Next {isoTimeAgo(job.next_run_at)}</span>}
+                {!job.enabled && !job.next_run_at && <span>Paused</span>}
                 {job.last_error && <span className="text-destructive">Error</span>}
               </div>
+              {(job.paused_reason || job.alignment_reason || job.last_error) && (
+                <p className="line-clamp-2 text-[0.72rem] leading-5 text-muted-foreground">
+                  {job.paused_reason || job.alignment_reason || job.last_error}
+                </p>
+              )}
             </div>
           ))
         ) : (
@@ -3761,6 +2850,283 @@ function AdminDealTasks({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function AdminActionRuns({
+  empty = "No Admin action runs yet.",
+  onChanged,
+  runs,
+  title = "Admin action runs",
+}: {
+  empty?: string;
+  onChanged?: () => Promise<void> | void;
+  runs: AdminActionRun[];
+  title?: string;
+}) {
+  const [busyRun, setBusyRun] = useState<AdminRunBusy>(null);
+  const resolveRun = async (run: AdminActionRun, approved: boolean) => {
+    if (busyRun || run.status !== "waiting_human") return;
+    setBusyRun({ id: run.id, action: approved ? "approve" : "cancel" });
+    try {
+      await api.approveAdminActionRun(run.id, { approved, runNow: approved });
+      await onChanged?.();
+    } finally {
+      setBusyRun(null);
+    }
+  };
+  const visibleRuns = [...runs]
+    .sort((a, b) => {
+      if (a.status === "waiting_human" && b.status !== "waiting_human") return -1;
+      if (a.status !== "waiting_human" && b.status === "waiting_human") return 1;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    })
+    .slice(0, 12);
+  const waitingCount = runs.filter((run) => run.status === "waiting_human").length;
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle>{title}</CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Human-gated Admin work that needs a decision before the pipeline can move.
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+            {waitingCount > 0 && <Badge variant="warning">{waitingCount} waiting</Badge>}
+            <Badge variant={runs.some((run) => ["failed", "waiting_human"].includes(run.status)) ? "warning" : "outline"}>
+              {runs.length}
+            </Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-2">
+        {visibleRuns.length ? (
+          visibleRuns.map((run) => (
+            <AdminRunDecisionRow
+              key={run.id}
+              busyRun={busyRun}
+              run={run}
+              onApprove={() => void resolveRun(run, true)}
+              onCancel={() => void resolveRun(run, false)}
+            />
+          ))
+        ) : (
+          <div className="py-8 text-sm text-muted-foreground">{empty}</div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function handoffStatusVariant(status: string): "success" | "warning" | "outline" | "secondary" | "destructive" {
+  if (status === "completed" || status === "succeeded") return "success";
+  if (status === "failed") return "destructive";
+  if (status === "waiting_human") return "warning";
+  if (status === "queued" || status === "running") return "warning";
+  return "outline";
+}
+
+function AgentHandoffsCard({
+  handoffs,
+}: {
+  handoffs?: AgentHubSnapshot["handoffs"];
+}) {
+  const recent = handoffs?.recent ?? [];
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle>Agent handoffs</CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Cross-agent work moving through the local orchestration bus.
+            </p>
+          </div>
+          <Badge variant={(handoffs?.open ?? 0) > 0 ? "warning" : "outline"}>
+            {handoffs?.open ?? 0} open
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-3 gap-2">
+          <HubMetric icon={Clock} label="Queued" value={handoffs?.queued ?? 0} />
+          <HubMetric icon={Bot} label="Running" value={handoffs?.running ?? 0} />
+          <HubMetric icon={AlertTriangle} label="Human" value={handoffs?.waitingHuman ?? 0} />
+        </div>
+        <div className="divide-y divide-border/40">
+          {recent.length ? (
+            recent.slice(0, 6).map((handoff) => (
+              <div key={handoff.id} className="grid gap-1.5 py-3 first:pt-0 last:pb-0">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-foreground">
+                      {handoff.title}
+                    </div>
+                    <div className="mt-0.5 flex flex-wrap gap-2 text-[0.72rem] text-muted-foreground">
+                      <span>{handoff.fromAgentId}</span>
+                      <span>to</span>
+                      <span>{handoff.toAgentId}</span>
+                      <span>{isoTimeAgo(handoff.updatedAt)}</span>
+                    </div>
+                  </div>
+                  <Badge variant={handoffStatusVariant(String(handoff.status))}>
+                    {String(handoff.status).replace(/_/g, " ")}
+                  </Badge>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="py-8 text-sm text-muted-foreground">No handoffs yet.</div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AgentWorkerCard({
+  memory,
+  worker,
+}: {
+  memory?: AgentHubSnapshot["memory"];
+  worker?: AgentHubSnapshot["agentWorker"];
+}) {
+  const heartbeat = worker?.heartbeat;
+  const wake = worker?.wake;
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle>Wake loop</CardTitle>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              The local worker that drains handoffs, heartbeats, and queued agent work.
+            </p>
+          </div>
+          <Badge variant={worker?.enabled ? "success" : "outline"}>
+            {worker?.state ?? "unknown"}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <HubMetric icon={Repeat} label="Handoffs drained" value={worker?.drained.handoffs ?? 0} />
+          <HubMetric icon={Activity} label="Admin runs" value={worker?.drained.adminRuns ?? 0} />
+          <HubMetric icon={Brain} label="Memory queue" value={memory?.journal.pending ?? 0} />
+          <HubMetric icon={Zap} label="Wake count" value={wake?.count ?? 0} />
+        </div>
+        <div className="rounded-2xl border border-border/55 bg-background/35 p-3 text-xs leading-5 text-muted-foreground">
+          <div className="font-semibold text-foreground">
+            {worker?.loop?.running ? "Loop running" : "Loop idle"}
+          </div>
+          <div className="mt-1">
+            Heartbeat {heartbeat?.enabled ? "enabled" : "disabled"}
+            {heartbeat?.nextBeatAt ? ` - next ${isoTimeAgo(heartbeat.nextBeatAt)}` : ""}
+          </div>
+          <div className="mt-1">
+            Wake {wake?.pending ? "pending" : "clear"}
+            {wake?.lastReason ? ` - ${wake.lastReason}` : ""}
+          </div>
+          {worker?.lastError && <div className="mt-2 text-destructive">{worker.lastError}</div>}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AdminRunDecisionRow({
+  busyRun,
+  compact = false,
+  onApprove,
+  onCancel,
+  run,
+}: {
+  busyRun: AdminRunBusy;
+  compact?: boolean;
+  onApprove: () => void;
+  onCancel: () => void;
+  run: AdminActionRun;
+}) {
+  const waiting = run.status === "waiting_human";
+  const message = adminRunMessage(run);
+  const requiredFields = adminRunRequiredFields(run);
+  const delivery = adminRunDeliveryInfo(run);
+  const busyAction = busyRun?.id === run.id ? busyRun.action : null;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border px-3 py-2.5",
+        waiting ? "border-warning/35 bg-warning/10" : "border-border/45 bg-background/30",
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium leading-5 text-foreground">{adminRunTitle(run)}</div>
+          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[0.72rem] text-muted-foreground">
+            <span>{run.skill ?? "admin"}</span>
+            <span>Deal {run.dealId.slice(0, 8)}</span>
+            {run.cronJobId && <span>Cron {run.cronJobId.slice(0, 8)}</span>}
+            <span>{isoTimeAgo(run.updatedAt)}</span>
+          </div>
+        </div>
+        <Badge variant={adminRunStatusVariant(run.status)}>{run.status.replace(/_/g, " ")}</Badge>
+      </div>
+
+      {message && (
+        <p className={cn("mt-2 text-[0.78rem] leading-5 text-foreground/85", !waiting && "line-clamp-3")}>
+          {message}
+        </p>
+      )}
+
+      {requiredFields.length > 0 && waiting && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {requiredFields.map((field) => (
+            <span
+              key={field}
+              className="inline-flex max-w-full items-center rounded-full border border-warning/25 bg-background/40 px-2 py-0.5 text-[0.68rem] text-warning"
+            >
+              <span className="truncate">{field}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {run.errorMessage && (
+        <div className="mt-2 rounded-md border border-destructive/25 bg-destructive/10 px-2 py-1.5 text-[0.72rem] leading-5 text-destructive">
+          {run.errorMessage}
+        </div>
+      )}
+
+      <div className={cn("mt-2 flex flex-wrap items-center justify-between gap-2", compact && "items-start")}>
+        <div className="flex min-w-0 items-center gap-1.5 text-[0.72rem] text-muted-foreground" title={delivery.detail}>
+          <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+          <Badge variant={delivery.variant}>{delivery.label}</Badge>
+          {!compact && <span className="min-w-0 truncate">{delivery.detail}</span>}
+        </div>
+        {waiting && (
+          <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+            <Button size="sm" variant="outline" disabled={busyRun !== null} onClick={onCancel}>
+              {busyAction === "cancel" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <XCircle className="h-3.5 w-3.5" />
+              )}
+              Needs revision
+            </Button>
+            <Button size="sm" disabled={busyRun !== null} onClick={onApprove}>
+              {busyAction === "approve" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Check className="h-3.5 w-3.5" />
+              )}
+              Approve and run
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -4161,6 +3527,73 @@ function laneStatus(job: CronJob | undefined): {
   return { label: "Scheduled", tone: "muted" };
 }
 
+const ADMIN_WORKFLOW_KEYWORDS = [
+  "admin",
+  "listing",
+  "deal",
+  "transaction",
+  "cma",
+  "seller update",
+  "seller-update",
+  "showing",
+  "showingtime",
+  "showing time",
+  "weekly",
+  "relisting",
+  "mlc",
+  "signing",
+  "signing-package",
+  "digisign",
+  "webforms",
+  "contract",
+  "paperwork",
+  "document",
+  "doc router",
+  "gmail-doc-router",
+  "gmail doc",
+  "skyslope",
+  "photo-cleanup",
+  "listing-build",
+  "offer-review",
+  "subject-removal",
+  "closing-admin",
+  "market stats",
+  "market-stats",
+];
+
+const DEFAULT_ADMIN_AUTOMATIONS = [
+  {
+    name: "Gmail Doc Router",
+    schedule: "0 9 * * 1",
+    skill: "gmail-doc-router",
+    skills: ["gmail-doc-router"],
+    deliver: "local",
+    workdir: "/Users/dartagnanpatricio/.elevate/tmp/client-tools",
+    prompt:
+      "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevate deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.",
+  },
+  {
+    name: "Seller Update",
+    schedule: "0 16 * * 1-5",
+    skill: "seller-update",
+    skills: ["seller-update"],
+    deliver: "local",
+    workdir: "/Users/dartagnanpatricio/.elevate/tmp/client-tools",
+    prompt:
+      "Run the seller-update skill. Pull ShowingTime feedback/activity for active listings, match each listing to an Elevate deal, write the digest back to SQLite, and create Gmail seller-update drafts. Never send directly.",
+  },
+  {
+    name: "Market Stats Watcher",
+    schedule: "0 7 * * 1",
+    skill: "market-stats-watcher",
+    skills: ["market-stats-watcher"],
+    deliver: "local",
+    workdir: "/Users/dartagnanpatricio/.elevate/tmp/client-tools",
+    prompt:
+      "Run the market-stats-watcher skill. Pull fresh market-stat emails and route useful market context into the real estate knowledge/admin workflow. Do not send messages.",
+  },
+];
+
 function OutreachLanesGrid({
   cronJobs,
   onChanged,
@@ -4168,9 +3601,9 @@ function OutreachLanesGrid({
   cronJobs: CronJob[];
   onChanged: () => Promise<void>;
 }) {
-  // Idempotently install the default lanes the first time this view
-  // renders. Server-side ``ensure-lanes`` skips any lane whose name
-  // already exists, so re-mounting is a pure no-op. localStorage gate
+  // Idempotently install/converge the default lanes the first time this view
+  // renders. Server-side ``ensure-lanes`` updates an existing lane if the
+  // default delivery, prompt, schedule, skills, or workdir changed. localStorage gate
   // means we don't hit the endpoint on every navigation; the UI still
   // converges if a lane was deleted (clear the flag from devtools).
   useEffect(() => {
@@ -4665,7 +4098,7 @@ function LiveChannelCard({
       className="group flex items-start gap-3 py-3 transition-colors first:pt-0 last:pb-0 hover:bg-foreground/[0.02]"
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
-        <Icon className="h-4 w-4" />
+        {createElement(Icon, { className: "h-4 w-4" })}
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -4710,7 +4143,7 @@ function AvailableChannelChip({ source }: { source: SourceConnectorStatus }) {
       aria-label={`Connect ${source.label} channel`}
       className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground/75 transition-colors hover:border-primary/55 hover:bg-card/80 hover:text-foreground"
     >
-      <Icon className="h-3 w-3" />
+      {createElement(Icon, { className: "h-3 w-3" })}
       <span>{source.label}</span>
       <Plus className="h-3 w-3" />
     </Link>
@@ -5019,8 +4452,9 @@ function TemplatesPanel() {
   };
   const cancelEdit = (id: string) => {
     setEditing((prev) => {
-      const { [id]: _drop, ...rest } = prev;
-      return rest;
+      const next = { ...prev };
+      delete next[id];
+      return next;
     });
   };
   const saveEdit = async (t: OutreachTemplate) => {
@@ -5495,7 +4929,6 @@ export function RealEstateLeadsPage() {
 
             {tab === "profiles" ? (
               <LeadProfilesListPage
-                cronJobs={data.cronJobs}
                 onChanged={refresh}
                 profiles={profiles}
                 threads={threads}
@@ -5637,6 +5070,13 @@ type AdminColumn = {
 
 type AdminChecklistItem = { id: string; label: string };
 
+type AdminPhaseAutomationInfo = {
+  agents: string[];
+  background: string[];
+  moveSignal: string;
+  approvalGate?: string;
+};
+
 type AdminEnumField =
   | "signing_authority"
   | "fintrac_form_type"
@@ -5718,9 +5158,9 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   {
     stage: 1,
     stageNumber: "S1",
-    stageLabel: "Initiated",
+    stageLabel: "Intake",
     labels: {
-      listing: { title: "Listing Initiated", subtitle: "Price + go-live setup" },
+      listing: { title: "Listing Intake", subtitle: "Collect info for MLC" },
       buyer: { title: "Search Setup", subtitle: "Criteria + MLS" },
     },
   },
@@ -5729,7 +5169,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S2",
     stageLabel: "Docs",
     labels: {
-      listing: { title: "Documents Signed", subtitle: "MLC + brokerage file" },
+      listing: { title: "MLC / Documents", subtitle: "Create docs + signing" },
       buyer: { title: "Tours", subtitle: "Route + notes" },
     },
   },
@@ -5798,6 +5238,83 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
 ];
 
+const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminPhaseAutomationInfo>> = {
+  listing: {
+    0: {
+      agents: ["seller-package", "cma"],
+      background: [],
+      moveSignal: "CMA ready + seller package sent",
+      approvalGate: "approve package/draft",
+    },
+    1: {
+      agents: ["mlc", "deal-matcher"],
+      background: [],
+      moveSignal: "listing intake complete",
+      approvalGate: "confirm price + launch plan",
+    },
+    2: {
+      agents: ["mlc", "signing-package", "skyslope-sync"],
+      background: ["gmail-doc-router"],
+      moveSignal: "signed MLC + docs verified",
+      approvalGate: "approve signing/docs",
+    },
+    3: {
+      agents: ["photo-cleanup"],
+      background: [],
+      moveSignal: "photos approved",
+      approvalGate: "human photo approval",
+    },
+    4: {
+      agents: ["property-lookup", "listing-build"],
+      background: [],
+      moveSignal: "MLS package approved",
+      approvalGate: "approve MLS copy/package",
+    },
+    5: {
+      agents: ["marketing"],
+      background: ["seller-update"],
+      moveSignal: "offer accepted",
+      approvalGate: "approve outgoing drafts",
+    },
+    6: {
+      agents: ["offer-review"],
+      background: ["gmail-doc-router"],
+      moveSignal: "accepted-offer dates verified",
+      approvalGate: "review offer terms",
+    },
+    7: {
+      agents: ["subject-removal", "signing-package"],
+      background: ["gmail-doc-router"],
+      moveSignal: "subjects removed + deposit verified",
+      approvalGate: "confirm subject removal",
+    },
+    8: {
+      agents: ["closing-admin"],
+      background: ["gmail-doc-router"],
+      moveSignal: "closing package complete",
+      approvalGate: "confirm conveyance package",
+    },
+    9: {
+      agents: ["skyslope-sync", "marketing"],
+      background: [],
+      moveSignal: "file closed + nurture queued",
+      approvalGate: "approve closeout",
+    },
+  },
+  buyer: {
+    0: { agents: [], background: [], moveSignal: "profile verified" },
+    1: { agents: [], background: [], moveSignal: "search criteria ready" },
+    2: { agents: [], background: [], moveSignal: "showing notes complete" },
+    3: { agents: [], background: [], moveSignal: "follow-up complete" },
+    4: { agents: [], background: [], moveSignal: "offer package ready" },
+    5: { agents: [], background: [], moveSignal: "accepted-offer checklist complete" },
+    6: { agents: [], background: [], moveSignal: "conditions tracked" },
+    7: { agents: [], background: [], moveSignal: "subjects removed" },
+    8: { agents: [], background: [], moveSignal: "closing checklist complete" },
+    9: { agents: [], background: [], moveSignal: "possession follow-up queued" },
+  },
+};
+
 // Per-stage checklist catalog. Card state (completedByStage) overlays this.
 const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminChecklistItem[]>> = {
   listing: {
@@ -5807,31 +5324,31 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "missing-info-list", label: "Identify info needed before listing paperwork" },
     ],
     1: [
-    { id: "workflow_stage_1_complete", label: "Stage 1 complete" },
+    { id: "workflow_stage_1_complete", label: "Listing details verified" },
     ],
     2: [
     { id: "workflow_title_ordered", label: "Title ordered" },
     { id: "workflow_sign_ordered", label: "Sign ordered" },
-    { id: "workflow_stage_2_complete", label: "Stage 2 complete" },
+    { id: "workflow_stage_2_complete", label: "Signed docs verified" },
     ],
     3: [
     { id: "workflow_photos_in_drive", label: "Photos in Drive" },
     { id: "workflow_jeff_photo_review", label: "Photo review complete" },
-    { id: "workflow_stage_3_complete", label: "Stage 3 complete" },
+    { id: "workflow_stage_3_complete", label: "Photos approved for listing" },
     ],
     4: [
     { id: "workflow_evalue_bc_age_verified", label: "eValue BC age verified" },
     { id: "workflow_listing_description_approved", label: "Listing description approved" },
     { id: "workflow_feature_sheet_uploaded", label: "Feature sheet uploaded" },
     { id: "workflow_ai_edited_photos_labelled", label: "AI-edited photos labelled" },
-    { id: "workflow_stage_4_complete", label: "Stage 4 complete" },
+    { id: "workflow_stage_4_complete", label: "MLS package approved" },
     ],
     5: [
     { id: "workflow_just_listed_blast_sent", label: "Just listed blast sent" },
     { id: "workflow_social_posts_published", label: "Social posts published" },
     { id: "workflow_flodesk_mailout_sent", label: "Flodesk mailout sent" },
     { id: "workflow_lofty_text_blast_sent", label: "Lofty text blast sent" },
-    { id: "workflow_stage_5_complete", label: "Stage 5 complete" },
+    { id: "workflow_stage_5_complete", label: "Live marketing checklist complete" },
     ],
     6: [
     { id: "workflow_within_24hrs_contract_reviewed", label: "Contract reviewed within 24 hours" },
@@ -5839,14 +5356,14 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_fintrac_drivers_occupation_employer_captured", label: "FINTRAC details captured" },
     { id: "workflow_calendar_dates_added", label: "Calendar dates added" },
     { id: "workflow_moving_checklist_sent", label: "Moving checklist sent" },
-    { id: "workflow_stage_6_complete", label: "Stage 6 complete" },
+    { id: "workflow_stage_6_complete", label: "Accepted-offer admin verified" },
     ],
     7: [
     { id: "workflow_subject_removal_form_sent", label: "Subject removal form sent" },
     { id: "workflow_title_charges_verified", label: "Title charges verified" },
     { id: "workflow_bir_pds_received", label: "BIR + PDS received" },
     { id: "workflow_lawyer_info_requested", label: "Lawyer info requested" },
-    { id: "workflow_stage_7_complete", label: "Stage 7 complete" },
+    { id: "workflow_stage_7_complete", label: "Subject removal verified" },
     ],
     8: [
     { id: "workflow_conveyancer_package_sent", label: "Conveyancer package sent" },
@@ -5855,7 +5372,7 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_insurance_binder_confirmed", label: "Insurance binder confirmed" },
     { id: "workflow_client_signed_lawyer", label: "Client signed at lawyer" },
     { id: "workflow_funds_released", label: "Funds released" },
-    { id: "workflow_stage_8_complete", label: "Stage 8 complete" },
+    { id: "workflow_stage_8_complete", label: "Closing admin verified" },
     ],
     9: [
     { id: "workflow_commission_submitted", label: "Commission submitted" },
@@ -5863,7 +5380,7 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_sold_update_sent", label: "Sold update sent" },
     { id: "workflow_closing_gift_sent", label: "Closing gift sent" },
     { id: "workflow_review_requested", label: "Review requested" },
-    { id: "workflow_stage_9_complete", label: "Stage 9 complete" },
+    { id: "workflow_stage_9_complete", label: "Closed file archived" },
     ],
   },
   buyer: {
@@ -6074,6 +5591,10 @@ function adminStageChecklist(side: AdminSide, stage: AdminStageNumber): AdminChe
   return ADMIN_STAGE_CHECKLISTS[side][stage];
 }
 
+function adminPhaseAutomation(side: AdminSide, stage: AdminStageNumber): AdminPhaseAutomationInfo {
+  return ADMIN_PHASE_AUTOMATIONS[side][stage];
+}
+
 function adminNextStage(card: AdminCard): AdminStageNumber | null {
   if (card.stage >= 9) return null;
   return (card.stage + 1) as AdminStageNumber;
@@ -6188,16 +5709,26 @@ function adminSourceContextFromDeal(deal: AdminDeal): AdminSourceContext | undef
   const extra = deal.extraToggles ?? {};
   if (!adminStringValue(extra.sourceProfileId) && extra.workflow !== "cma") return undefined;
   return {
-    profileName: adminStringValue(extra.sourceProfileName),
-    latestText: adminStringValue(extra.sourceLatestText),
-    latestAt: adminStringValue(extra.sourceLatestAt),
-    heatLabel: adminStringValue(extra.sourceHeatLabel),
-    heatScore: adminNumberValue(extra.sourceHeatScore),
-    sources: adminStringList(extra.sourceLabels),
-    channels: adminStringList(extra.sourceChannels),
-    contactIds: adminStringList(extra.sourceContactIds),
-    conversationIds: adminStringList(extra.sourceConversationIds),
-    verifiers: adminVerifierList(extra.sourceVerifiers),
+    profileName: adminStringValue(extra.profileDisplayName) ?? adminStringValue(extra.sourceProfileName),
+    latestText: adminStringValue(extra.profileLatestText) ?? adminStringValue(extra.sourceLatestText),
+    latestAt: adminStringValue(extra.profileLatestAt) ?? adminStringValue(extra.sourceLatestAt),
+    heatLabel: adminStringValue(extra.profileHeatLabel) ?? adminStringValue(extra.sourceHeatLabel),
+    heatScore: adminNumberValue(extra.profileHeatScore) ?? adminNumberValue(extra.sourceHeatScore),
+    sources: adminStringList(extra.profileSources).length
+      ? adminStringList(extra.profileSources)
+      : adminStringList(extra.sourceLabels),
+    channels: adminStringList(extra.profileChannels).length
+      ? adminStringList(extra.profileChannels)
+      : adminStringList(extra.sourceChannels),
+    contactIds: adminStringList(extra.profileContactIds).length
+      ? adminStringList(extra.profileContactIds)
+      : adminStringList(extra.sourceContactIds),
+    conversationIds: adminStringList(extra.profileConversationIds).length
+      ? adminStringList(extra.profileConversationIds)
+      : adminStringList(extra.sourceConversationIds),
+    verifiers: adminVerifierList(extra.profileVerifiers).length
+      ? adminVerifierList(extra.profileVerifiers)
+      : adminVerifierList(extra.sourceVerifiers),
     rejectedContactId: adminStringValue(extra.sourcePrimaryContactIdRejected),
   };
 }
@@ -6263,172 +5794,292 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-// Dev fallback cards. Anonymized visual scaffolding used only when the Admin Deals API errors.
-const ADMIN_CARDS_SEED: AdminCard[] = [
-  // ── Listings ────────────────────────────────────────────────────────
-  { id: "c1", side: "listing", stage: 0, client: "Riverside Dr seller", contactInitials: "RD",
-    property: "Riverside Dr · CMA delivered", nextLabel: "Pricing call", daysOut: 1, pinnedTop25: true,
-    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true } },
-    conditions: { signing_authority: "seller", listing_track: "standard", listing_type: "mls" } },
-  { id: "c1b", side: "listing", stage: 0, client: "Pinecrest estate", contactInitials: "PE",
-    property: "Pinecrest Pl · Inherited property", nextLabel: "Estate review", daysOut: 4,
-    completedByStage: { 0: { "draft-cma-followup": true } },
-    conditions: { estate_status: "estate", signing_authority: "executor" } },
-  { id: "c1c", side: "listing", stage: 0, client: "Aberdeen condo seller", contactInitials: "AC",
-    property: "Aberdeen Crt #305 · Walk-through booked", nextLabel: "CMA delivery", daysOut: 2,
-    completedByStage: {},
-    conditions: { property_subtype: "condo", listing_type: "mls" } },
-  { id: "c2", side: "listing", stage: 1, client: "Sahali rancher", contactInitials: "SR",
-    property: "Sahali · Intake meeting Tue", nextLabel: "Legal names", daysOut: 2,
-    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true, "missing-info-list": true } },
-    conditions: { signing_authority: "spouse_pair", property_subtype: "detached" } },
-  { id: "c2b", side: "listing", stage: 1, client: "Glenrose seller", contactInitials: "GL",
-    property: "Glenrose Dr · Awaiting forms", nextLabel: "Forms back", daysOut: 5,
-    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true } },
-    conditions: { listing_track: "standard" } },
-  { id: "c3", side: "listing", stage: 2, client: "Lewis Creek seller", contactInitials: "LC",
-    property: "Lewis Creek Rd · Title pulled", nextLabel: "Photo prep", daysOut: 3, pinnedTop25: true,
-    completedByStage: {
-      0: { "draft-cma-followup": true, "pricing-recap": true, "track-objections": true, "missing-info-list": true, "listing-intake-prep": true },
-      1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
-      2: { "pull-title": true } },
-    conditions: { signing_authority: "seller", property_subtype: "detached", lockbox: true } },
-  { id: "c3b", side: "listing", stage: 2, client: "Brocklehurst bungalow", contactInitials: "BR",
-    property: "Brock · Photos Fri", nextLabel: "Stager visit", daysOut: 1,
-    completedByStage: { 0: { "draft-cma-followup": true, "pricing-recap": true }, 1: { "intake-legal-names": true } },
-    conditions: { listing_type: "mls" } },
-  { id: "c4", side: "listing", stage: 3, client: "Westsyde split", contactInitials: "WS",
-    property: "Westsyde · MLC out for sign", nextLabel: "Digisign chase", daysOut: 1,
-    completedByStage: {
-      0: { "draft-cma-followup": true, "pricing-recap": true, "missing-info-list": true },
-      1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
-      2: { "pull-title": true, "organize-photos": true },
-      3: { "fill-mlc": true, "digisign-send": true } },
-    conditions: { signing_authority: "spouse_pair", property_subtype: "detached" } },
-  { id: "c5", side: "listing", stage: 4, client: "Clifford Ave seller", contactInitials: "CA",
-    property: "Clifford Ave · Live on MLS", nextLabel: "Weekly update", daysOut: 2, pinnedTop25: true,
-    completedByStage: {
-      0: { "draft-cma-followup": true, "pricing-recap": true, "track-objections": true, "missing-info-list": true, "listing-intake-prep": true },
-      1: { "intake-legal-names": true, "intake-price-commission": true, "intake-included-excluded": true },
-      2: { "pull-title": true, "organize-photos": true },
-      3: { "fill-mlc": true, "digisign-send": true, "track-signatures": true },
-      4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true, "email-blast": true } },
-    conditions: { listing_track: "standard", property_subtype: "townhouse", delayed_offer: true } },
-  { id: "c5b", side: "listing", stage: 4, client: "Knutsford acreage", contactInitials: "KN",
-    property: "Knutsford · Just live", nextLabel: "OH plan", daysOut: 3,
-    completedByStage: { 4: { "mls-remarks": true, "feature-sheet": true } },
-    conditions: { property_subtype: "acreage", lockbox: true } },
-  { id: "c6", side: "listing", stage: 5, client: "Valleyview townhouse", contactInitials: "VV",
-    property: "Valleyview · 6 showings booked", nextLabel: "Showing feedback", daysOut: 0, pinnedTop25: true,
-    completedByStage: { 4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true } },
-    conditions: { property_subtype: "townhouse" } },
-  { id: "c6b", side: "listing", stage: 5, client: "Juniper Ridge", contactInitials: "JR",
-    property: "Juniper · Open house Sat", nextLabel: "OH supplies", daysOut: 2,
-    completedByStage: { 4: { "mls-remarks": true, "feature-sheet": true, "social-posts": true, "email-blast": true } },
-    conditions: { listing_type: "mls" } },
-  { id: "c7", side: "listing", stage: 6, client: "Mt Paul seller", contactInitials: "MP",
-    property: "Mt Paul · Offer in", nextLabel: "Counter draft", daysOut: 0,
-    completedByStage: { 6: { "offer-summary": true } },
-    conditions: { multiple_offers: true } },
-  { id: "c7b", side: "listing", stage: 6, client: "Bestwick semi-detached", contactInitials: "BS",
-    property: "Bestwick · Reviewing 2 offers", nextLabel: "Owner call", daysOut: 0, pinnedTop25: true,
-    completedByStage: { 6: { "offer-summary": true } },
-    conditions: { multiple_offers: true, dual_rep: false } },
-  { id: "c8", side: "listing", stage: 7, client: "Birch Bay seller", contactInitials: "BB",
-    property: "Birch Bay · Subjects ticking", nextLabel: "Subject removal", daysOut: 4,
-    completedByStage: {
-      6: { "offer-summary": true, "subject-deadline": true, "inspection-timing": true },
-      7: { "deposit-confirmed": true } },
-    conditions: { multiple_offers: true, transaction_type: "residential", fintrac_form_type: "individual" } },
-  { id: "c8b", side: "listing", stage: 7, client: "Oakridge seller", contactInitials: "OK",
-    property: "Oakridge · Inspection Tue", nextLabel: "Inspector follow-up", daysOut: 2,
-    completedByStage: { 7: { "deposit-confirmed": true } },
-    conditions: { property_subtype: "detached" } },
-  { id: "c9", side: "listing", stage: 8, client: "Pacific Way seller", contactInitials: "PW",
-    property: "Pacific Way · Closing this Fri", nextLabel: "Possession check", daysOut: 5,
-    completedByStage: { 8: { "completion-checklist": true } },
-    conditions: { transaction_type: "residential" } },
-  { id: "c10", side: "listing", stage: 9, client: "Maple Ridge seller", contactInitials: "MR",
-    property: "Maple Ridge · Possessed", nextLabel: "Closing gift", daysOut: 8,
-    completedByStage: {
-      8: { "completion-checklist": true, "key-handoff": true },
-      9: { "closing-gift": true, "thank-you": true, "anniversary": true, "past-client-nurture": true } },
-    conditions: { listing_type: "mls", estate_status: "none" } },
+function useAdminSetup(): {
+  setup: AdminSetupSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+  setSetup: (setup: AdminSetupSnapshot) => void;
+} {
+  const [setup, setSetup] = useState<AdminSetupSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // ── Buyers ─────────────────────────────────────────────────────────
-  { id: "b1", side: "buyer", stage: 0, client: "Vasquez family", contactInitials: "VF",
-    property: "First-time · 3-4bd · ≤$650k", nextLabel: "Mortgage broker intro", daysOut: 1,
-    completedByStage: {},
-    conditions: { transaction_type: "residential" } },
-  { id: "b1b", side: "buyer", stage: 0, client: "Owen H", contactInitials: "OH",
-    property: "Investment · 2bd condo · ≤$420k", nextLabel: "Profile call", daysOut: 3,
-    completedByStage: {},
-    conditions: { property_subtype: "condo" } },
-  { id: "b2", side: "buyer", stage: 1, client: "Tessa & Ryan", contactInitials: "TR",
-    property: "North market · 3bd", nextLabel: "Showing route", daysOut: 2, pinnedTop25: true,
-    completedByStage: { 0: { "buyer-profile": true, "search-criteria": true }, 1: { shortlist: true } },
-    conditions: { transaction_type: "residential" } },
-  { id: "b2b", side: "buyer", stage: 1, client: "Carlita M", contactInitials: "CM",
-    property: "Sahali area · townhouse · ≤$580k", nextLabel: "MLS hotsheet", daysOut: 4,
-    completedByStage: { 0: { "buyer-profile": true, "search-criteria": true } },
-    conditions: { property_subtype: "townhouse" } },
-  { id: "b3", side: "buyer", stage: 2, client: "DeMarco family", contactInitials: "DM",
-    property: "5 props on tour Sat", nextLabel: "Tour wrap", daysOut: 1,
-    completedByStage: { 1: { shortlist: true, "showing-route": true } },
-    conditions: { property_subtype: "detached" } },
-  { id: "b3b", side: "buyer", stage: 2, client: "Priya & Nik", contactInitials: "PN",
-    property: "Tour 3 props Wed", nextLabel: "Showing notes", daysOut: 2,
-    completedByStage: { 1: { shortlist: true, "showing-route": true, "preview-notes": true } },
-    conditions: {} },
-  { id: "b4", side: "buyer", stage: 3, client: "Nadia P", contactInitials: "NP",
-    property: "Saw 4 · interested in #2", nextLabel: "Offer prep", daysOut: 1, pinnedTop25: true,
-    completedByStage: {
-      0: { "buyer-profile": true, "search-criteria": true },
-      1: { shortlist: true, "showing-route": true, "preview-notes": true },
-      2: { "followup-draft": true, "feedback-summary": true },
-      3: { "criteria-update": true, "comp-pull": true } },
-    conditions: { sale_of_buyers_property: true, property_subtype: "detached" } },
-  { id: "b4b", side: "buyer", stage: 3, client: "Reggie L", contactInitials: "RL",
-    property: "Lost #1 · re-shortlisting", nextLabel: "New criteria", daysOut: 2,
-    completedByStage: { 2: { "followup-draft": true, "feedback-summary": true } },
-    conditions: {} },
-  { id: "b5", side: "buyer", stage: 4, client: "Beaumont couple", contactInitials: "BC",
-    property: "Drafting on Mt Paul", nextLabel: "CPS draft", daysOut: 0, pinnedTop25: true,
-    completedByStage: { 3: { "criteria-update": true, "comp-pull": true } },
-    conditions: { property_subtype: "detached" } },
-  { id: "b5b", side: "buyer", stage: 4, client: "Krista S", contactInitials: "KS",
-    property: "Comps pulled · offer Tue", nextLabel: "Lender confirm", daysOut: 1,
-    completedByStage: { 3: { "criteria-update": true, "comp-pull": true } },
-    conditions: {} },
-  { id: "b6", side: "buyer", stage: 5, client: "Henson family", contactInitials: "HF",
-    property: "Westsyde · Accepted offer", nextLabel: "Inspection", daysOut: 3,
-    completedByStage: {
-      4: { "lender-paperwork": true, "accepted-offer-checklist": true, "doc-list": true },
-      5: { "inspection-booked": true } },
-    conditions: { fintrac_form_type: "individual", dual_rep: false } },
-  { id: "b7", side: "buyer", stage: 6, client: "Theo & Pia", contactInitials: "TP",
-    property: "Conditions running", nextLabel: "Strata docs review", daysOut: 2,
-    completedByStage: { 6: { "inspection-summary": true } },
-    conditions: { property_subtype: "condo" } },
-  { id: "b8", side: "buyer", stage: 7, client: "Marisol C", contactInitials: "MC",
-    property: "Brock · Subjects clearing", nextLabel: "Subjects off", daysOut: 1, pinnedTop25: true,
-    completedByStage: { 7: { "subjects-removed": true, "deposit-received": true, "completion-locked": true } },
-    conditions: { property_subtype: "condo", unrepresented_other_side: true } },
-  { id: "b8b", side: "buyer", stage: 7, client: "Lin Tran", contactInitials: "LT",
-    property: "Sahali · subjects in 4d", nextLabel: "Inspector quote", daysOut: 3,
-    completedByStage: { 7: { "deposit-received": true } },
-    conditions: {} },
-  { id: "b9", side: "buyer", stage: 8, client: "Ortega household", contactInitials: "OR",
-    property: "Closing next Wed", nextLabel: "Lawyer chase", daysOut: 6,
-    completedByStage: { 8: { "completion-checklist": true } },
-    conditions: { transaction_type: "residential" } },
-  { id: "b10", side: "buyer", stage: 9, client: "Eli & Jordan", contactInitials: "EJ",
-    property: "Aberdeen · Possession Fri", nextLabel: "Key handoff", daysOut: 5,
-    completedByStage: {
-      8: { "completion-checklist": true, "final-walkthrough": true },
-      9: { "utility-reminder": true, "key-handoff": true, "closing-gift": true, "thank-you": true } },
-    conditions: { transaction_type: "residential", lockbox: true } },
-];
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setSetup(await api.getAdminSetup());
+    } catch (err) {
+      setError(errorMessage(err, "Admin setup failed"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { setup, loading, error, refresh, setSetup };
+}
+
+function AdminSetupField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block min-w-0">
+      <span className="mb-1 block text-[0.72rem] font-medium text-muted-foreground">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="h-10 w-full rounded-xl border border-border/60 bg-background/55 px-3 text-[0.86rem] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+      />
+    </label>
+  );
+}
+
+function AdminSetupLaunch({
+  setup,
+  onSetupUpdated,
+}: {
+  setup: AdminSetupSnapshot;
+  onSetupUpdated: (setup: AdminSetupSnapshot) => void;
+}) {
+  const [draft, setDraft] = useState<AdminSetupDraft>(() => adminSetupDraftFromSnapshot(setup));
+  const [saving, setSaving] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(adminSetupDraftFromSnapshot(setup));
+  }, [setup]);
+
+  const updateDraft = useCallback(
+    (field: keyof AdminSetupDraft, value: string) => {
+      setDraft((prev) => ({ ...prev, [field]: value }));
+    },
+    [],
+  );
+
+  const submit = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    setSavedMessage(null);
+    try {
+      const updated = await api.updateAdminSetup(adminSetupPayloadFromDraft(draft));
+      onSetupUpdated(updated);
+      setSavedMessage(
+        updated.missingRequiredKeys.length === 0
+          ? "Saved. Verify connections before Admin can start."
+          : "Saved. Finish and verify the missing setup items before Admin can start.",
+      );
+    } catch (err) {
+      setError(errorMessage(err, "Save admin setup failed"));
+    } finally {
+      setSaving(false);
+    }
+  }, [draft, onSetupUpdated]);
+
+  const verify = useCallback(async () => {
+    setVerifying(true);
+    setError(null);
+    setSavedMessage(null);
+    try {
+      await api.updateAdminSetup(adminSetupPayloadFromDraft(draft));
+      const verified = await api.verifyAdminSetup();
+      if (verified.missingRequiredKeys.length === 0) {
+        const completed = await api.completeAdminSetup();
+        onSetupUpdated(completed);
+        setSavedMessage("Admin setup is verified and ready.");
+      } else {
+        onSetupUpdated(verified);
+        setSavedMessage("Checked live connectors. Finish the missing setup items before Admin can start.");
+      }
+    } catch (err) {
+      setError(errorMessage(err, "Verify admin setup failed"));
+    } finally {
+      setVerifying(false);
+    }
+  }, [draft, onSetupUpdated]);
+
+  const missingLabels = useMemo(() => {
+    const labels = new Map(setup.items.map((item) => [item.key, item.label]));
+    return setup.missingRequiredKeys.map((key) => labels.get(key) ?? key);
+  }, [setup.items, setup.missingRequiredKeys]);
+  const readinessBlockers = useMemo(
+    () => (setup.readiness ?? []).filter((item) => !item.ready),
+    [setup.readiness],
+  );
+  const verificationWarnings = setup.verificationWarnings ?? [];
+
+  return (
+    <div className="space-y-4 rounded-2xl border border-primary/30 bg-primary/5 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.16)]">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[0.78rem] font-semibold uppercase tracking-[0.16em] text-primary">
+            <ShieldCheck className="h-4 w-4" />
+            Admin setup required
+          </div>
+          <h2 className="mt-2 text-xl font-semibold tracking-normal text-foreground">Connect the admin operating stack first.</h2>
+          <p className="mt-1 max-w-3xl text-[0.86rem] leading-6 text-muted-foreground">
+            Admin automations stay paused until the realtor profile, province package, accounts, providers, approval lane, and regional memory are configured.
+          </p>
+        </div>
+        <div className="min-w-[10rem] rounded-xl border border-border/60 bg-background/45 p-3">
+          <div className="font-mono-ui text-[0.7rem] uppercase tracking-[0.14em] text-muted-foreground">Readiness</div>
+          <div className="mt-1 text-2xl font-semibold text-foreground">{setup.completionPct}%</div>
+          <div className="mt-2 h-1.5 rounded-full bg-muted">
+            <div className="h-full rounded-full bg-primary" style={{ width: `${setup.completionPct}%` }} />
+          </div>
+        </div>
+      </div>
+
+      {missingLabels.length > 0 && (
+        <div className="rounded-xl border border-warning/35 bg-warning/10 px-3 py-2 text-[0.8rem] text-warning">
+          Missing: {missingLabels.join(", ")}
+        </div>
+      )}
+      {readinessBlockers.length > 0 && (
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {readinessBlockers.slice(0, 9).map((item) => (
+            <div
+              key={item.key}
+              className="min-w-0 rounded-xl border border-border/60 bg-background/45 px-3 py-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate text-[0.78rem] font-semibold text-foreground">{item.label}</span>
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full border px-2 py-0.5 font-mono-ui text-[0.62rem] uppercase tracking-[0.1em]",
+                    item.state === "needs_runtime_verification"
+                      ? "border-warning/35 bg-warning/10 text-warning"
+                      : "border-border/60 bg-muted/30 text-muted-foreground",
+                  )}
+                >
+                  {item.state.replaceAll("_", " ")}
+                </span>
+              </div>
+              <p className="mt-1 text-[0.74rem] leading-5 text-muted-foreground">{item.action}</p>
+            </div>
+          ))}
+          {readinessBlockers.length > 9 && (
+            <div className="rounded-xl border border-border/60 bg-background/45 px-3 py-2 text-[0.76rem] leading-5 text-muted-foreground">
+              {readinessBlockers.length - 9} more setup item{readinessBlockers.length - 9 === 1 ? "" : "s"} still need attention.
+            </div>
+          )}
+        </div>
+      )}
+      {verificationWarnings.length > 0 && (
+        <div className="rounded-xl border border-border/60 bg-background/45 px-3 py-2 text-[0.78rem] leading-5 text-muted-foreground">
+          {verificationWarnings.join(" ")}
+        </div>
+      )}
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <AdminSetupField label="Realtor legal name" value={draft.realtorLegalName} onChange={(v) => updateDraft("realtorLegalName", v)} />
+        <AdminSetupField label="Licensed / public name" value={draft.licenseName} onChange={(v) => updateDraft("licenseName", v)} />
+        <AdminSetupField label="Brokerage" value={draft.brokerageName} onChange={(v) => updateDraft("brokerageName", v)} />
+        <AdminSetupField label="Team / PREC" value={draft.teamName} onChange={(v) => updateDraft("teamName", v)} />
+        <AdminSetupField label="Province" value={draft.province} onChange={(v) => updateDraft("province", v.toUpperCase())} placeholder="BC, AB, ON..." />
+        <AdminSetupField label="Market" value={draft.market} onChange={(v) => updateDraft("market", v)} placeholder="Kamloops, Calgary..." />
+        <AdminSetupField label="Board memberships" value={draft.boardMemberships} onChange={(v) => updateDraft("boardMemberships", v)} placeholder="AOIR, FVREB..." />
+        <AdminSetupField label="Managing broker/admin email" value={draft.managingBrokerEmail} onChange={(v) => updateDraft("managingBrokerEmail", v)} />
+        <AdminSetupField label="Admin approval channel" value={draft.approvalChannel} onChange={(v) => updateDraft("approvalChannel", v)} placeholder="Telegram Admin bot/lane" />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <AdminSetupField label="Email" value={draft.emailProvider} onChange={(v) => updateDraft("emailProvider", v)} placeholder="Gmail / Outlook account" />
+        <AdminSetupField label="Calendar" value={draft.calendarProvider} onChange={(v) => updateDraft("calendarProvider", v)} placeholder="Google Calendar / Outlook" />
+        <AdminSetupField label="Cloud drive" value={draft.driveProvider} onChange={(v) => updateDraft("driveProvider", v)} placeholder="Google Drive / SharePoint" />
+        <AdminSetupField label="CRM" value={draft.crmProvider} onChange={(v) => updateDraft("crmProvider", v)} placeholder="Lofty, kvCORE, BoldTrail..." />
+        <AdminSetupField label="MLS / board portal" value={draft.mlsProvider} onChange={(v) => updateDraft("mlsProvider", v)} placeholder="Matrix, Xposure, Paragon..." />
+        <AdminSetupField label="Forms provider" value={draft.formsProvider} onChange={(v) => updateDraft("formsProvider", v)} placeholder="WEBForms / TransactionDesk" />
+        <AdminSetupField label="Signing provider" value={draft.signingProvider} onChange={(v) => updateDraft("signingProvider", v)} placeholder="DigiSign / DocuSign" />
+        <AdminSetupField label="Compliance platform" value={draft.complianceProvider} onChange={(v) => updateDraft("complianceProvider", v)} placeholder="SkySlope / Lone Wolf" />
+        <AdminSetupField label="Showing platform" value={draft.showingProvider} onChange={(v) => updateDraft("showingProvider", v)} placeholder="ShowingTime / BrokerBay" />
+        <AdminSetupField label="Photo processing" value={draft.photoProcessingProvider} onChange={(v) => updateDraft("photoProcessingProvider", v)} placeholder="Drive + Nano Banana / Higgsfield" />
+        <AdminSetupField label="FINTRAC / ID workflow" value={draft.fintracProvider} onChange={(v) => updateDraft("fintracProvider", v)} placeholder="Fintracker / manual FIN# capture" />
+        <AdminSetupField label="Folder pattern" value={draft.defaultFolderPattern} onChange={(v) => updateDraft("defaultFolderPattern", v)} />
+        <AdminSetupField label="Commission / service notes" value={draft.commissionNotes} onChange={(v) => updateDraft("commissionNotes", v)} />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <AdminSetupField label="MLS login URL" value={draft.mlsLoginUrl} onChange={(v) => updateDraft("mlsLoginUrl", v)} placeholder="https://..." />
+        <AdminSetupField label="MLS credential ref" value={draft.mlsCredentialRef} onChange={(v) => updateDraft("mlsCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
+        <AdminSetupField label="SkySlope login URL" value={draft.complianceLoginUrl} onChange={(v) => updateDraft("complianceLoginUrl", v)} placeholder="https://..." />
+        <AdminSetupField label="SkySlope credential ref" value={draft.complianceCredentialRef} onChange={(v) => updateDraft("complianceCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
+        <AdminSetupField label="Showing login URL" value={draft.showingLoginUrl} onChange={(v) => updateDraft("showingLoginUrl", v)} placeholder="https://..." />
+        <AdminSetupField label="Showing credential ref" value={draft.showingCredentialRef} onChange={(v) => updateDraft("showingCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <label className="block min-w-0">
+          <span className="mb-1 block text-[0.72rem] font-medium text-muted-foreground">Browser-use notes</span>
+          <textarea
+            value={draft.browserWorkflowNotes}
+            onChange={(event) => updateDraft("browserWorkflowNotes", event.target.value)}
+            placeholder="Board portal quirks, browser profile, MFA expectations, where to find MLS number, showing feedback, compliance status, and confirmation screens."
+            className="min-h-28 w-full rounded-xl border border-border/60 bg-background/55 px-3 py-2 text-[0.86rem] leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+          />
+        </label>
+        <label className="block min-w-0">
+          <span className="mb-1 block text-[0.72rem] font-medium text-muted-foreground">Regional memory</span>
+          <textarea
+            value={draft.regionalMemory}
+            onChange={(event) => updateDraft("regionalMemory", event.target.value)}
+            placeholder="Province docs, local MLS quirks, deposit rules, admin emails, property lookup sources, showing platform notes."
+            className="min-h-28 w-full rounded-xl border border-border/60 bg-background/55 px-3 py-2 text-[0.86rem] leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+          />
+        </label>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <label className="block min-w-0">
+          <span className="mb-1 block text-[0.72rem] font-medium text-muted-foreground">Approval policy</span>
+          <textarea
+            value={draft.approvalPolicy}
+            onChange={(event) => updateDraft("approvalPolicy", event.target.value)}
+            placeholder="What AI can draft/upload, what needs approval, whether docs/MLS/signing can ever send without a human."
+            className="min-h-28 w-full rounded-xl border border-border/60 bg-background/55 px-3 py-2 text-[0.86rem] leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+          />
+        </label>
+      </div>
+
+      {(error || savedMessage) && (
+        <div className={cn("rounded-xl border px-3 py-2 text-[0.8rem]", error ? "border-destructive/35 bg-destructive/10 text-destructive" : "border-success/35 bg-success/10 text-success")}>
+          {error || savedMessage}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-3">
+        <div className="text-[0.76rem] leading-5 text-muted-foreground">
+          Admin deal creation, profile handoffs, stage moves, task launches, and default automation seeding are blocked until this reaches 100%.
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={() => void verify()} disabled={saving || verifying}>
+            {verifying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Verify connections
+          </Button>
+          <Button onClick={() => void submit()} disabled={saving || verifying}>
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+          Save setup
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function useAdminDeals(): {
   deals: AdminCard[];
@@ -6465,8 +6116,8 @@ function useAdminDeals(): {
       }
     } catch (err) {
       setError(errorMessage(err, "Admin deals failed"));
-      setDeals(ADMIN_CARDS_SEED);
-      setUsingDevFallback(true);
+      setDeals([]);
+      setUsingDevFallback(false);
     } finally {
       setLoading(false);
     }
@@ -6490,8 +6141,8 @@ function useAdminDeals(): {
       .catch((err) => {
         if (cancelled) return;
         setError(errorMessage(err, "Admin deals failed"));
-        setDeals(ADMIN_CARDS_SEED);
-        setUsingDevFallback(true);
+        setDeals([]);
+        setUsingDevFallback(false);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -6648,6 +6299,78 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
   );
 });
 
+function AdminPhaseSummary({
+  phase,
+  dense = false,
+}: {
+  phase: AdminPhaseAutomationInfo;
+  dense?: boolean;
+}) {
+  const agentLimit = dense ? 2 : 3;
+  const backgroundLimit = dense ? 1 : 2;
+  const agents = phase.agents.slice(0, agentLimit);
+  const background = phase.background.slice(0, backgroundLimit);
+  const hiddenCount = Math.max(0, phase.agents.length - agents.length) + Math.max(0, phase.background.length - background.length);
+
+  return (
+    <div className={cn("flex flex-col gap-1.5", dense ? "mt-1.5" : "mt-2")}>
+      <div className="flex flex-wrap gap-1">
+        {agents.length > 0 ? (
+          agents.map((agent) => (
+            <span
+              key={`agent-${agent}`}
+              title={`Stage-entry skill: ${agent}`}
+              className="inline-flex max-w-full items-center gap-1 rounded-full border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[0.62rem] text-primary"
+            >
+              <Bot className="h-2.5 w-2.5 shrink-0" />
+              <span className="truncate">{agent}</span>
+            </span>
+          ))
+        ) : (
+          <span
+            title="No stage-entry skill is wired for this phase yet"
+            className="inline-flex items-center gap-1 rounded-full border border-border/50 bg-background/35 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground"
+          >
+            <CheckSquare className="h-2.5 w-2.5 shrink-0" />
+            task list
+          </span>
+        )}
+        {background.map((skill) => (
+          <span
+            key={`background-${skill}`}
+            title={`Background cron skill: ${skill}`}
+            className="inline-flex max-w-full items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 py-0.5 text-[0.62rem] text-success"
+          >
+            <Repeat className="h-2.5 w-2.5 shrink-0" />
+            <span className="truncate">{skill}</span>
+          </span>
+        ))}
+        {phase.approvalGate && (
+          <span
+            title={`Approval gate: ${phase.approvalGate}`}
+            className="inline-flex max-w-full items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[0.62rem] text-warning"
+          >
+            <ShieldCheck className="h-2.5 w-2.5 shrink-0" />
+            <span className="truncate">approval</span>
+          </span>
+        )}
+        {hiddenCount > 0 && (
+          <span className="inline-flex items-center rounded-full border border-border/45 bg-background/30 px-1.5 py-0.5 font-mono-ui text-[0.6rem] text-muted-foreground">
+            +{hiddenCount}
+          </span>
+        )}
+      </div>
+      <div
+        title={`Move signal: ${phase.moveSignal}`}
+        className="flex min-w-0 items-center gap-1.5 text-[0.66rem] leading-tight text-muted-foreground"
+      >
+        <Target className="h-3 w-3 shrink-0 text-muted-foreground/80" />
+        <span className="truncate">Moves on {phase.moveSignal}</span>
+      </div>
+    </div>
+  );
+}
+
 function AdminKanbanColumn(props: {
   side: AdminSide;
   stage: AdminStageNumber;
@@ -6659,6 +6382,7 @@ function AdminKanbanColumn(props: {
   const { side, stage, cards, onCardSelect, onCardDragStart, onCardDrop } = props;
   const column = adminStageDefinition(stage);
   const label = column.labels[side];
+  const phase = adminPhaseAutomation(side, stage);
   const [isDragOver, setIsDragOver] = useState(false);
   return (
     <div
@@ -6674,7 +6398,7 @@ function AdminKanbanColumn(props: {
         onCardDrop(stage);
       }}
       className={cn(
-        "flex h-full min-w-[16rem] flex-col rounded-2xl border bg-card/30 transition-colors",
+        "flex h-full min-w-[18.5rem] flex-col rounded-2xl border bg-card/30 transition-colors",
         isDragOver ? "border-primary/60 bg-primary/5" : "border-border/60",
       )}
     >
@@ -6690,6 +6414,7 @@ function AdminKanbanColumn(props: {
             {cards.length}
           </span>
         </div>
+        <AdminPhaseSummary phase={phase} />
       </div>
       <div className="flex flex-col gap-2 p-2">
         {cards.length === 0 ? (
@@ -6743,7 +6468,7 @@ function AdminKanbanSwimlane({
       </div>
       <div
         className="grid gap-2 overflow-x-auto pb-1"
-        style={{ gridTemplateColumns: `repeat(${ADMIN_STAGE_NUMBERS.length}, 16rem)` }}
+        style={{ gridTemplateColumns: `repeat(${ADMIN_STAGE_NUMBERS.length}, 18.5rem)` }}
       >
         {ADMIN_STAGE_NUMBERS.map((stage) => (
           <AdminKanbanColumn
@@ -6833,6 +6558,7 @@ function AdminCardStageSection({
 }) {
   const column = adminStageDefinition(stage);
   const label = column.labels[card.side];
+  const phase = adminPhaseAutomation(card.side, stage);
   const items = adminStageChecklist(card.side, stage);
   const completed = card.completedByStage?.[stage] ?? {};
   const done = items.reduce((n, item) => n + (completed[item.id] ? 1 : 0), 0);
@@ -6879,6 +6605,10 @@ function AdminCardStageSection({
           <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
             {column.stageNumber} · {column.stageLabel ?? label.subtitle}
           </div>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[0.66rem] leading-tight text-muted-foreground">
+            <Target className="h-3 w-3 shrink-0 text-muted-foreground/80" />
+            <span className="truncate">{phase.moveSignal}</span>
+          </div>
         </div>
         <span
           className={cn(
@@ -6897,6 +6627,15 @@ function AdminCardStageSection({
       </button>
       {expanded && (
         <div className="border-t border-border/50 px-3 py-2.5">
+          <div className="mb-2 rounded-lg border border-border/45 bg-background/35 px-2 py-2">
+            <AdminPhaseSummary phase={phase} dense />
+            {phase.approvalGate && (
+              <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[0.68rem] text-muted-foreground">
+                <ShieldCheck className="h-3 w-3 shrink-0 text-warning" />
+                <span className="truncate">Gate: {phase.approvalGate}</span>
+              </div>
+            )}
+          </div>
           {items.length === 0 ? (
             <div className="text-[0.72rem] text-muted-foreground">No checklist items defined for this stage.</div>
           ) : (
@@ -7088,6 +6827,106 @@ function adminRunStatusVariant(status: string): "default" | "secondary" | "destr
   return "outline";
 }
 
+type AdminRunTone = "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
+type AdminRunBusy = { id: string; action: "approve" | "cancel" } | null;
+
+function adminRunRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function adminRunText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function adminRunList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === "string" && item.trim()) return [item.trim()];
+    const record = adminRunRecord(item);
+    const label =
+      adminRunText(record.label) ||
+      adminRunText(record.name) ||
+      adminRunText(record.key) ||
+      adminRunText(record.field);
+    return label ? [label] : [];
+  });
+}
+
+function adminRunPrompt(run: AdminActionRun): Record<string, unknown> {
+  const direct = adminRunRecord(run.humanPrompt);
+  if (Object.keys(direct).length > 0) return direct;
+  const resultPrompt = adminRunRecord(adminRunRecord(run.result).humanPrompt);
+  return resultPrompt;
+}
+
+function adminRunTitle(run: AdminActionRun): string {
+  const prompt = adminRunPrompt(run);
+  return (
+    adminRunText(prompt.title) ||
+    adminRunText(prompt.question) ||
+    adminRunText(prompt.summary) ||
+    run.registryName ||
+    run.skill ||
+    "Admin run"
+  );
+}
+
+function adminRunMessage(run: AdminActionRun): string {
+  const prompt = adminRunPrompt(run);
+  return (
+    adminRunText(prompt.message) ||
+    adminRunText(prompt.body) ||
+    adminRunText(prompt.prompt) ||
+    adminRunText(prompt.decisionNeeded) ||
+    adminRunText(prompt.reason)
+  );
+}
+
+function adminRunRequiredFields(run: AdminActionRun): string[] {
+  const prompt = adminRunPrompt(run);
+  const fields = [
+    ...adminRunList(prompt.requiredFields),
+    ...adminRunList(prompt.missingFields),
+    ...adminRunList(prompt.inputsNeeded),
+    ...adminRunList(prompt.fields),
+  ];
+  return Array.from(new Set(fields)).slice(0, 10);
+}
+
+function adminRunDeliveryInfo(run: AdminActionRun): { label: string; detail: string; variant: AdminRunTone } {
+  const delivery = adminRunRecord(adminRunRecord(run.payload).delivery);
+  if (Object.keys(delivery).length > 0) {
+    const deliver = adminRunText(delivery.deliver) || "local";
+    const channel = deliver.startsWith("telegram") ? "Telegram" : "Delivery";
+    const attempted = delivery.attempted === true;
+    const ok = delivery.ok === true;
+    const error = adminRunText(delivery.error);
+    const suppressed = adminRunText(delivery.suppressedReason);
+    if (ok) {
+      return { label: `${channel} notified`, detail: deliver, variant: "success" };
+    }
+    if (attempted && error) {
+      return { label: `${channel} failed`, detail: error, variant: "destructive" };
+    }
+    if (suppressed) {
+      return { label: `${channel} skipped`, detail: suppressed.replace(/_/g, " "), variant: "outline" };
+    }
+    return { label: `${channel} not sent`, detail: deliver, variant: "warning" };
+  }
+  if (run.cronJobId) {
+    return {
+      label: "Telegram pending",
+      detail: "Cron will record delivery after the Admin response.",
+      variant: "outline",
+    };
+  }
+  return {
+    label: "UI queue only",
+    detail: "No cron delivery is attached to this run yet.",
+    variant: "outline",
+  };
+}
+
 function AdminDealContextSection({
   context,
   loading,
@@ -7098,6 +6937,7 @@ function AdminDealContextSection({
   onAddAttachment,
   onAddContact,
   onApproveRun,
+  onCancelRun,
 }: {
   context: DealContext | null;
   loading: boolean;
@@ -7108,8 +6948,10 @@ function AdminDealContextSection({
   onAddAttachment: (body: DealAttachmentCreateRequest) => Promise<void>;
   onAddContact: (body: DealContactCreateRequest) => Promise<void>;
   onApproveRun: (runId: string) => Promise<void>;
+  onCancelRun: (runId: string) => Promise<void>;
 }) {
   const [actionMode, setActionMode] = useState<"dates" | "doc" | "contact" | null>(null);
+  const [approvalBusyRun, setApprovalBusyRun] = useState<AdminRunBusy>(null);
   const [fieldDraft, setFieldDraft] = useState({
     listingDate: "",
     subjectRemovalDate: "",
@@ -7129,6 +6971,19 @@ function AdminDealContextSection({
   const flow = context?.dealFlow ?? null;
   const gate = flow?.gate ?? null;
   const pendingHumanRuns = priorRuns.filter((run) => run.status === "waiting_human");
+  const resolvePendingRun = async (run: AdminActionRun, approved: boolean) => {
+    if (busy || approvalBusyRun) return;
+    setApprovalBusyRun({ id: run.id, action: approved ? "approve" : "cancel" });
+    try {
+      if (approved) {
+        await onApproveRun(run.id);
+      } else {
+        await onCancelRun(run.id);
+      }
+    } finally {
+      setApprovalBusyRun(null);
+    }
+  };
   const dateRows: Array<[string, string]> = deal
     ? ([
         ["Listing", deal.listingDate],
@@ -7249,10 +7104,39 @@ function AdminDealContextSection({
                   </Button>
                 )}
               </div>
-            </div>
-          )}
+	            </div>
+	          )}
 
-          <div className="grid gap-2 sm:grid-cols-2">
+	          {flow?.backgroundAutomations?.length ? (
+	            <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
+	              <div className="flex flex-wrap items-center justify-between gap-2">
+	                <div>
+	                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
+	                    Background automations
+	                  </div>
+	                  <div className="mt-1 text-[0.78rem] text-muted-foreground">
+	                    Cron skills feed evidence into this deal; phases consume the results.
+	                  </div>
+	                </div>
+	                <Badge variant="outline">{flow.backgroundAutomations.length}</Badge>
+	              </div>
+	              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+	                {flow.backgroundAutomations.map((item) => (
+	                  <div key={item.id} className="rounded-md border border-border/40 bg-background/35 px-2 py-2">
+	                    <div className="flex min-w-0 items-center justify-between gap-2">
+	                      <span className="truncate text-[0.8rem] font-medium text-foreground">{item.name}</span>
+	                      <Badge variant="secondary">{item.kind}</Badge>
+	                    </div>
+	                    <div className="mt-1 truncate font-mono-ui text-[0.62rem] uppercase tracking-[0.12em] text-muted-foreground">
+	                      {item.skill}
+	                    </div>
+	                  </div>
+	                ))}
+	              </div>
+	            </div>
+	          ) : null}
+
+	          <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-border/45 bg-background/30 px-3 py-2">
               <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
                 Primary contact
@@ -7486,18 +7370,28 @@ function AdminDealContextSection({
           </div>
 
           {pendingHumanRuns.length > 0 && (
-            <div className="rounded-lg border border-warning/35 bg-warning/10 px-3 py-2">
-              <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-warning">
-                Pending approvals
+            <div className="grid gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-[0.14em] text-warning">
+                    Pending approvals
+                  </div>
+                  <div className="mt-1 text-[0.76rem] leading-5 text-muted-foreground">
+                    These are the Admin decisions blocking the next run or phase move.
+                  </div>
+                </div>
+                <Badge variant="warning">{pendingHumanRuns.length}</Badge>
               </div>
               <div className="mt-2 space-y-2">
                 {pendingHumanRuns.map((run) => (
-                  <div key={run.id} className="flex items-center justify-between gap-2 text-[0.78rem]">
-                    <span className="min-w-0 truncate text-foreground">{run.registryName ?? run.skill ?? "Admin run"}</span>
-                    <Button size="sm" variant="outline" disabled={busy} onClick={() => void onApproveRun(run.id)}>
-                      Approve
-                    </Button>
-                  </div>
+                  <AdminRunDecisionRow
+                    key={run.id}
+                    compact
+                    busyRun={busy ? { id: "__busy__", action: "approve" } : approvalBusyRun}
+                    run={run}
+                    onApprove={() => void resolvePendingRun(run, true)}
+                    onCancel={() => void resolvePendingRun(run, false)}
+                  />
                 ))}
               </div>
             </div>
@@ -7781,7 +7675,13 @@ function AdminCardDetailPanel({
             }
             onApproveRun={(runId) =>
               runDealAction(async () => {
-                await api.recordDealRunResult(card.id, runId, { status: "completed" });
+                await api.approveAdminActionRun(runId, { approved: true, runNow: true });
+                await reloadDealContext();
+              })
+            }
+            onCancelRun={(runId) =>
+              runDealAction(async () => {
+                await api.approveAdminActionRun(runId, { approved: false, runNow: false });
                 await reloadDealContext();
               })
             }
@@ -8638,45 +8538,36 @@ function AdminKanbanBoard() {
 
 export function RealEstateAdminPage() {
   const data = useRealEstateHubData();
+  const adminSetup = useAdminSetup();
   useHubHeader("Admin", data);
+  useEffect(() => {
+    if (!adminSetup.setup?.complete) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [cronDefaults, actionDefaults] = await Promise.all([
+          api.ensureLaneCronJobs(DEFAULT_ADMIN_AUTOMATIONS),
+          api.ensureDefaultAdminActions(),
+        ]);
+        const changedCronDefaults = cronDefaults.created.length + (cronDefaults.updated?.length ?? 0);
+        const changedActionDefaults = actionDefaults.created.length + (actionDefaults.updated?.length ?? 0);
+        if (!cancelled && (changedCronDefaults > 0 || changedActionDefaults > 0)) {
+          await data.refresh();
+        }
+      } catch {
+        // Best-effort defaults. Existing cron jobs still render, and the Cron
+        // page/action registry can create these manually if the backend is unavailable.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [adminSetup.setup?.complete, data.refresh]);
   const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, [
-      "admin",
-      "listing",
-      "deal",
-      "transaction",
-      "cma",
-      "seller update",
-      "showing",
-      "weekly",
-      "relisting",
-      "mlc",
-      "digisign",
-      "webforms",
-      "contract",
-      "paperwork",
-      "document",
-      "skyslope",
-    ]),
+    sessionMatches(session, ADMIN_WORKFLOW_KEYWORDS),
   );
   const jobs = data.cronJobs.filter((job) =>
-    jobMatches(job, [
-      "admin",
-      "listing",
-      "deal",
-      "transaction",
-      "seller update",
-      "showing",
-      "weekly",
-      "relisting",
-      "mlc",
-      "digisign",
-      "webforms",
-      "contract",
-      "paperwork",
-      "document",
-      "skyslope",
-    ]),
+    jobMatches(job, ADMIN_WORKFLOW_KEYWORDS),
   );
   const activeSessions = sessions.filter((session) => session.is_active);
   const actions = [
@@ -8719,6 +8610,25 @@ export function RealEstateAdminPage() {
           },
         ]}
       />
+      {adminSetup.loading && (
+        <div className="rounded-2xl border border-border/50 bg-card/30 px-4 py-5 text-[0.86rem] text-muted-foreground">
+          <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+          Loading Admin setup
+        </div>
+      )}
+      {adminSetup.error && (
+        <div className="rounded-2xl border border-warning/35 bg-warning/10 px-4 py-3 text-[0.84rem] text-warning">
+          {adminSetup.error}
+        </div>
+      )}
+      {!adminSetup.loading && adminSetup.setup && !adminSetup.setup.complete && (
+        <AdminSetupLaunch setup={adminSetup.setup} onSetupUpdated={adminSetup.setSetup} />
+      )}
+      {!adminSetup.loading && adminSetup.setup && !adminSetup.setup.complete && (
+        <TimedTasks jobs={jobs} empty="No admin/document schedules are installed yet." title="Admin automations" />
+      )}
+      {!adminSetup.loading && adminSetup.setup?.complete && (
+        <>
       <div className="flex flex-wrap items-center gap-2">
         <Link to="/admin/templates" className="inline-flex">
           <Button variant="outline" size="sm">
@@ -8739,317 +8649,11 @@ export function RealEstateAdminPage() {
       <RecentSessions
         title="Admin work"
         sessions={sessions}
-        empty="No admin-specific sessions found yet. CMA, seller updates, MLC, DigiSign, WebForms, and listing/deal cron work will land here."
+        empty="No admin-specific sessions found yet. CMA, seller updates, MLC, signing packages, WebForms, and listing/deal cron work will land here."
       />
-    </HubShell>
-  );
-}
-
-function formatCompact(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(Math.round(n));
-}
-
-function formatPct(n: number | null | undefined, digits = 1): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(digits)}%`;
-}
-
-// Total/cumulative time fields — show as hours. Returned in ms unless noted.
-const MS_TOTAL_TIME_KEYS = new Set([
-  "ig_reels_video_view_total_time",
-  "post_video_view_time_organic",
-]);
-const MIN_TOTAL_TIME_KEYS = new Set([
-  "estimated_minutes_watched", // YouTube — minutes
-]);
-// Per-view averages — show as seconds (hours would be too small to read).
-const MS_AVG_TIME_KEYS = new Set([
-  "ig_reels_avg_watch_time",
-  "post_video_avg_time_watched",
-]);
-const SEC_AVG_TIME_KEYS = new Set([
-  "avg_view_duration_sec",
-]);
-const PCT_KEYS = new Set([
-  "engagement_rate",
-  "hook_rate",
-  "hold_rate",
-  "avg_view_percentage",
-]);
-
-function formatHours(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0h";
-  const h = ms / 3_600_000;
-  if (h >= 100) return `${h.toFixed(0)}h`;
-  if (h >= 10) return `${h.toFixed(1)}h`;
-  if (h >= 1) return `${h.toFixed(2)}h`;
-  // Sub-hour totals — degrade gracefully so we never claim "0h" on a real value.
-  const m = ms / 60_000;
-  if (m >= 1) return `${m.toFixed(1)}m`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function formatSeconds(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "0s";
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}s`;
-  const m = Math.floor(s / 60);
-  const rem = Math.round(s - m * 60);
-  return rem ? `${m}m ${rem}s` : `${m}m`;
-}
-
-function formatIsoDuration(iso: string): string {
-  // PT#H#M#S → "1h 23m 4s"
-  const re = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/;
-  const m = iso.match(re);
-  if (!m) return iso;
-  const [, h, mm, s] = m;
-  const parts: string[] = [];
-  if (h) parts.push(`${h}h`);
-  if (mm) parts.push(`${mm}m`);
-  if (s) parts.push(`${Math.round(Number(s))}s`);
-  return parts.join(" ") || "0s";
-}
-
-function prettifyMetricKey(key: string): string {
-  const map: Record<string, string> = {
-    likes: "likes",
-    comments: "comments",
-    shares: "shares",
-    saved: "saves",
-    views: "views",
-    reach: "reach",
-    plays: "plays",
-    impressions: "impressions",
-    total_interactions: "total interactions",
-    profile_visits: "profile visits",
-    profile_activity: "profile activity",
-    follows: "follows",
-    navigation: "navigation",
-    replies: "replies",
-    ig_reels_video_view_total_time: "total watch time",
-    ig_reels_avg_watch_time: "avg watch time",
-    post_video_view_time_organic: "total watch time",
-    post_video_avg_time_watched: "avg watch time",
-    avg_view_duration_sec: "avg watch time",
-    avg_view_percentage: "avg view %",
-    estimated_minutes_watched: "total watch time",
-    duration_iso: "duration",
-    view_count: "views",
-    like_count: "likes",
-    comment_count: "comments",
-    dislike_count: "dislikes",
-    favorite_count: "favorites",
-    engagement_rate: "engagement rate",
-    hook_rate: "hook rate",
-    hold_rate: "hold rate",
-  };
-  return map[key] ?? key.replace(/_/g, " ");
-}
-
-function formatMetricValue(key: string, value: unknown): string {
-  if (value == null) return "—";
-  if (typeof value === "string") {
-    if (key === "duration_iso" && value.startsWith("PT")) return formatIsoDuration(value);
-    return value;
-  }
-  if (typeof value !== "number" || !Number.isFinite(value)) return String(value);
-  if (PCT_KEYS.has(key)) return `${(value * 100).toFixed(1)}%`;
-  if (MS_TOTAL_TIME_KEYS.has(key)) return formatHours(value);
-  if (MIN_TOTAL_TIME_KEYS.has(key)) return formatHours(value * 60_000);
-  if (MS_AVG_TIME_KEYS.has(key)) return formatSeconds(value);
-  if (SEC_AVG_TIME_KEYS.has(key)) return formatSeconds(value * 1000);
-  return formatCompact(value);
-}
-
-function platformDot(platform: string): string {
-  const map: Record<string, string> = {
-    instagram: "bg-[oklch(0.62_0.14_350)]",
-    tiktok: "bg-[oklch(0.65_0.13_15)]",
-    youtube: "bg-[oklch(0.58_0.16_30)]",
-    facebook: "bg-[oklch(0.58_0.13_245)]",
-    linkedin: "bg-[oklch(0.55_0.13_240)]",
-  };
-  return map[platform.toLowerCase()] ?? "bg-muted-foreground";
-}
-
-function IdeaCard({
-  idea,
-  onAction,
-  busy,
-}: {
-  idea: SocialIdea;
-  onAction: (action: "approve" | "reject" | "edit", edit?: Partial<SocialIdea>) => Promise<void>;
-  busy: boolean;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<Partial<SocialIdea>>({
-    hook: idea.hook,
-    concept: idea.concept,
-    best_post_time: idea.best_post_time ?? "",
-    target_audience: idea.target_audience ?? "",
-  });
-
-  const grounded = idea.grounded_in || {};
-  const chipTone = "bg-background text-foreground border-border";
-  const groundedChips = [
-    grounded.metric ? { label: "metric", text: grounded.metric, tone: chipTone } : null,
-    grounded.trend ? { label: "trend", text: grounded.trend, tone: chipTone } : null,
-    grounded.signal ? { label: "signal", text: grounded.signal, tone: chipTone } : null,
-  ].filter((x): x is { label: string; text: string; tone: string } => !!x);
-
-  return (
-    <div className="space-y-3 border-b border-border/40 pb-5 last:border-b-0 last:pb-0">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={cn("h-2 w-2 rounded-full", platformDot(idea.platform))} />
-        <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-          {idea.platform} · {idea.format}
-        </span>
-        {idea.best_post_time && (
-          <Badge variant="outline" className="text-[0.65rem]">
-            <Clock className="mr-1 h-3 w-3" />
-            {idea.best_post_time}
-          </Badge>
-        )}
-      </div>
-
-      {editing ? (
-        <div className="space-y-2">
-          <input
-            value={draft.hook ?? ""}
-            onChange={(e) => setDraft({ ...draft, hook: e.target.value })}
-            placeholder="Hook (first 3 seconds)"
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium"
-          />
-          <textarea
-            value={draft.concept ?? ""}
-            onChange={(e) => setDraft({ ...draft, concept: e.target.value })}
-            placeholder="Concept"
-            rows={3}
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-          />
-          <div className="grid gap-2 sm:grid-cols-2">
-            <input
-              value={(draft.best_post_time as string) ?? ""}
-              onChange={(e) => setDraft({ ...draft, best_post_time: e.target.value })}
-              placeholder="Best post time"
-              className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
-            />
-            <input
-              value={(draft.target_audience as string) ?? ""}
-              onChange={(e) => setDraft({ ...draft, target_audience: e.target.value })}
-              placeholder="Target audience"
-              className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
-            />
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="text-sm font-semibold leading-snug text-foreground">{idea.hook}</div>
-          <p className="text-xs leading-5 text-muted-foreground">{idea.concept}</p>
-          {idea.outline && idea.outline.length > 0 && (
-            <ol className="text-xs leading-5 text-muted-foreground space-y-0.5 pl-4 list-decimal">
-              {idea.outline.slice(0, 4).map((beat, i) => (
-                <li key={i}>{beat}</li>
-              ))}
-            </ol>
-          )}
         </>
       )}
-
-      {groundedChips.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {groundedChips.map((chip) => (
-            <span
-              key={chip.label}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.65rem] font-medium",
-                chip.tone,
-              )}
-              title={chip.text}
-            >
-              <span className="font-mono-ui uppercase tracking-wider">{chip.label}</span>
-              <span className="max-w-[16rem] truncate">{chip.text}</span>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {idea.reasoning && !editing && (
-        <p className="text-[0.75rem] italic leading-5 text-muted-foreground">
-          {idea.reasoning}
-        </p>
-      )}
-
-      <div className="flex items-center justify-between gap-2 pt-1">
-        <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-          {idea.timestamp ? isoTimeAgo(idea.timestamp) : ""}
-        </div>
-        <div className="flex items-center gap-1.5">
-          {editing ? (
-            <>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setEditing(false)}
-                disabled={busy}
-                className="min-h-[44px] px-3"
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                onClick={async () => {
-                  await onAction("edit", draft);
-                  setEditing(false);
-                }}
-                disabled={busy}
-                className="min-h-[44px] px-3"
-              >
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save edit"}
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setEditing(true)}
-                disabled={busy}
-                aria-label="Edit idea"
-                className="min-h-[44px] min-w-[44px]"
-              >
-                <PencilLine className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onAction("reject")}
-                disabled={busy}
-                aria-label="Reject idea"
-                className="min-h-[44px] min-w-[44px] text-destructive hover:text-destructive"
-              >
-                <ThumbsDown className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => onAction("approve")}
-                disabled={busy}
-                aria-label="Approve idea"
-                className="min-h-[44px] px-3"
-              >
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ThumbsUp className="h-3.5 w-3.5" />}
-                <span className="ml-1">Approve</span>
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+    </HubShell>
   );
 }
 
@@ -9478,1181 +9082,73 @@ export function RealEstateSocialMediaPage() {
 // YouTube — tab inside /social-media. 16:9 cards, per-video metrics, rankings.
 // ---------------------------------------------------------------------------
 
-function ytNum(row: SocialMetricRow, key: string): number {
-  const v = (row.metrics as Record<string, unknown>)?.[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
-}
-
-function ytEngagementScore(row: SocialMetricRow): number {
-  const likes = ytNum(row, "like_count");
-  const comments = ytNum(row, "comment_count");
-  const views = ytNum(row, "view_count");
-  if (views <= 0) return 0;
-  return (likes + comments * 2) / views;
-}
-
-function YouTubeTabView({
-  posts,
-  onSelect,
-}: {
-  posts: SocialMetricRow[];
-  onSelect: (row: SocialMetricRow) => void;
-}) {
-  const ytAll = useMemo(
-    () => posts.filter((p) => (p.platform || "").toLowerCase() === "youtube"),
-    [posts],
-  );
-  const channelRow = useMemo(
-    () => ytAll.find((p) => (p.media_type || "").toUpperCase() === "ACCOUNT"),
-    [ytAll],
-  );
-  const videos = useMemo(
-    () => ytAll.filter((p) => (p.media_type || "").toUpperCase() !== "ACCOUNT"),
-    [ytAll],
-  );
-  const sumComments = useMemo(
-    () => videos.reduce((a, r) => a + ytNum(r, "comment_count"), 0),
-    [videos],
-  );
-
-  const channelMetrics = (channelRow?.metrics ?? {}) as Record<string, unknown>;
-  const subCount =
-    typeof channelMetrics.subscriber_count === "number" ? channelMetrics.subscriber_count : null;
-  const channelViews =
-    typeof channelMetrics.view_count === "number" ? channelMetrics.view_count : null;
-  const videoCount =
-    typeof channelMetrics.video_count === "number" ? channelMetrics.video_count : null;
-
-  const rankings = useMemo(() => {
-    const top = (key: string) =>
-      [...videos]
-        .sort((a, b) => ytNum(b, key) - ytNum(a, key))
-        .filter((r) => ytNum(r, key) > 0)
-        .slice(0, 3);
-    const eng = [...videos]
-      .map((r) => ({ row: r, score: ytEngagementScore(r) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-      .map((x) => x.row);
-    const least = [...videos]
-      .filter((r) => ytNum(r, "view_count") > 0)
-      .sort((a, b) => ytNum(a, "view_count") - ytNum(b, "view_count"))
-      .slice(0, 3);
-    return {
-      views: top("view_count"),
-      likes: top("like_count"),
-      comments: top("comment_count"),
-      engagement: eng,
-      least,
-    };
-  }, [videos]);
-
-  return (
-    <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <YouTubeStatTile label="Subscribers" value={formatCompact(subCount)} hint="lifetime" />
-        <YouTubeStatTile label="Channel views" value={formatCompact(channelViews)} hint="lifetime" />
-        <YouTubeStatTile label="Videos" value={formatCompact(videoCount)} hint="published" />
-        <YouTubeStatTile
-          label="Comments (pulled)"
-          value={formatCompact(sumComments)}
-          hint={`across ${videos.length} videos`}
-        />
-      </div>
-
-      {videos.length > 0 && (
-        <section aria-labelledby="yt-rankings-heading" className="space-y-3">
-          <div className="flex items-center gap-2">
-            <h3
-              id="yt-rankings-heading"
-              className="font-mono-ui text-[0.75rem] uppercase tracking-wider text-foreground"
-            >
-              Rankings
-            </h3>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
-            <RankPanel
-              title="Most views"
-              rows={rankings.views}
-              formatValue={(r) => formatCompact(ytNum(r, "view_count"))}
-              onSelect={onSelect}
-            />
-            <RankPanel
-              title="Most likes"
-              rows={rankings.likes}
-              formatValue={(r) => formatCompact(ytNum(r, "like_count"))}
-              onSelect={onSelect}
-            />
-            <RankPanel
-              title="Most comments"
-              rows={rankings.comments}
-              formatValue={(r) => formatCompact(ytNum(r, "comment_count"))}
-              onSelect={onSelect}
-            />
-            <RankPanel
-              title="Most engagement"
-              rows={rankings.engagement}
-              formatValue={(r) => `${(ytEngagementScore(r) * 100).toFixed(2)}%`}
-              onSelect={onSelect}
-            />
-            <RankPanel
-              title="Least views"
-              rows={rankings.least}
-              formatValue={(r) => formatCompact(ytNum(r, "view_count"))}
-              onSelect={onSelect}
-              tone="muted"
-            />
-          </div>
-        </section>
-      )}
-
-      {videos.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-10 text-sm text-muted-foreground text-center">
-          No YouTube videos pulled yet. Click "refresh from platforms" above to pull the channel.
-        </div>
-      ) : (
-        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
-          {videos
-            .slice()
-            .sort((a, b) => ytNum(b, "view_count") - ytNum(a, "view_count"))
-            .map((row) => (
-              <YouTubeVideoCard
-                key={`${row.platform}:${row.post_id}`}
-                row={row}
-                onClick={() => onSelect(row)}
-              />
-            ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function YouTubeStatTile({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string | number;
-  hint?: string;
-}) {
-  return (
-    <div className="rounded-xl border border-border/60 bg-background/40 px-3 py-3">
-      <div className="font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-1 text-xl font-semibold text-foreground tabular-nums">{value}</div>
-      {hint && (
-        <div className="mt-0.5 font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground/70">
-          {hint}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RankPanel({
-  title,
-  rows,
-  formatValue,
-  onSelect,
-  tone,
-}: {
-  title: string;
-  rows: SocialMetricRow[];
-  formatValue: (row: SocialMetricRow) => string;
-  onSelect: (row: SocialMetricRow) => void;
-  tone?: "muted";
-}) {
-  return (
-    <div className="rounded-xl bg-background/30 p-3 space-y-2">
-      <div
-        className={cn(
-          "font-mono-ui text-[0.7rem] uppercase tracking-wider",
-          tone === "muted" ? "text-muted-foreground" : "text-foreground",
-        )}
-      >
-        {title}
-      </div>
-      {rows.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/40 bg-background/20 px-2 py-3 text-center text-[0.75rem] text-muted-foreground">
-          No data yet
-        </div>
-      ) : (
-        <ol className="space-y-1.5">
-          {rows.map((row, idx) => (
-            <li key={`${row.post_id}-${idx}`}>
-              <button
-                type="button"
-                onClick={() => onSelect(row)}
-                aria-label={`Rank ${idx + 1}: ${row.caption || "untitled"}, ${formatValue(row)}`}
-                className="group flex min-h-[44px] w-full items-center gap-2 rounded-lg border border-border/40 bg-background/30 px-2.5 py-2 text-left transition hover:border-primary/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-              >
-                <span className="font-mono-ui w-4 text-center text-[0.7rem] text-muted-foreground">
-                  {idx + 1}
-                </span>
-                <span className="flex-1 truncate text-[0.8rem] text-foreground">
-                  {row.caption || "(untitled)"}
-                </span>
-                <span className="font-mono-ui text-[0.75rem] tabular-nums text-foreground">
-                  {formatValue(row)}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Cross-platform metric resolver. Each platform names the same concept
-// differently — IG uses `likes`/`saved`/`shares`, FB uses `like_count`/
-// `reaction_count`/`comments_count`, TikTok uses `digg_count`/`play_count`/
-// `share_count`/`save_count`. Read in priority order; first hit wins.
-// ---------------------------------------------------------------------------
-const METRIC_LOOKUP: Record<string, string[]> = {
-  views: [
-    "views", "view_count", "plays", "play_count", "video_views",
-    "post_video_views", "post_impressions",
-  ],
-  likes: ["likes", "like_count", "reaction_count", "digg_count"],
-  comments: ["comments", "comment_count", "comments_count"],
-  shares: ["shares", "share_count"],
-  saves: ["saved", "saves", "save_count"],
-  reach: ["reach"],
-};
-
-function readMetric(row: SocialMetricRow, logical: string): number {
-  const m = (row.metrics || {}) as Record<string, unknown>;
-  const raw = (row.raw || {}) as Record<string, unknown>;
-  const fbPost = (raw.post as Record<string, unknown> | undefined) || {};
-  for (const key of METRIC_LOOKUP[logical] || []) {
-    for (const src of [m, raw, fbPost]) {
-      const v = src[key];
-      if (typeof v === "number" && Number.isFinite(v)) return v;
-      if (typeof v === "string") {
-        const n = Number(v);
-        if (Number.isFinite(n)) return n;
-      }
-    }
-  }
-  return 0;
-}
-
-function genericEngagement(row: SocialMetricRow): number {
-  const likes = readMetric(row, "likes");
-  const comments = readMetric(row, "comments");
-  const shares = readMetric(row, "shares");
-  const saves = readMetric(row, "saves");
-  const views = readMetric(row, "views");
-  const total = likes + comments * 2 + shares * 3 + saves * 2;
-  if (views > 0) return total / views;
-  return 0;
-}
-
-function totalActivity(row: SocialMetricRow): number {
-  return (
-    readMetric(row, "likes") +
-    readMetric(row, "comments") +
-    readMetric(row, "shares") +
-    readMetric(row, "saves")
-  );
-}
-
-// Hook rate = % of people who watched after seeing the post.
-// IG: views / reach. FB: post_video_views / post_impressions.
-// TikTok Display API and YouTube Data API don't expose impressions/reach.
-function derivedHookRate(row: SocialMetricRow): number | null {
-  const platform = (row.platform || "").toLowerCase();
-  const m = (row.metrics || {}) as Record<string, unknown>;
-  const backend = m.hook_rate;
-  if (typeof backend === "number" && Number.isFinite(backend) && backend > 0) {
-    return backend;
-  }
-  if (platform === "instagram") {
-    const views = readMetric(row, "views");
-    const reach = readMetric(row, "reach");
-    if (views > 0 && reach > 0) return Math.min(views / reach, 1);
-    return null;
-  }
-  if (platform === "facebook") {
-    const videoViews = Number(m.post_video_views) || 0;
-    const impressions =
-      Number(m.post_impressions) || Number(m.post_impressions_unique) || 0;
-    if (videoViews > 0 && impressions > 0) return Math.min(videoViews / impressions, 1);
-    return null;
-  }
-  return null;
-}
-
-// Hold rate = % of the video the average viewer watched.
-// IG: ig_reels_avg_watch_time (ms) / duration_sec. Requires `duration` in fetcher.
-// FB needs a separate /video?fields=length lookup (not yet wired).
-// TikTok Display API has no avg_watch_time. YouTube Analytics API not exposed.
-function derivedHoldRate(row: SocialMetricRow): number | null {
-  const platform = (row.platform || "").toLowerCase();
-  const m = (row.metrics || {}) as Record<string, unknown>;
-  const backend = m.hold_rate;
-  if (typeof backend === "number" && Number.isFinite(backend) && backend > 0) {
-    return backend;
-  }
-  if (platform === "instagram") {
-    const avgMs = Number(m.ig_reels_avg_watch_time) || 0;
-    const durSec = Number(m.duration_sec ?? m.duration) || 0;
-    if (avgMs > 0 && durSec > 0) return Math.min(avgMs / (durSec * 1000), 1);
-    return null;
-  }
-  if (platform === "facebook") {
-    // post_video_avg_time_watched is in milliseconds; need video length to ratio.
-    const avgMs = Number(m.post_video_avg_time_watched) || 0;
-    const raw = (row.raw || {}) as Record<string, unknown>;
-    const fbPost = (raw.post as Record<string, unknown> | undefined) || {};
-    const fbAttach = ((fbPost.attachments as Record<string, unknown> | undefined)
-      ?.data as Array<Record<string, unknown>> | undefined)?.[0];
-    const fbMedia = (fbAttach?.media as Record<string, unknown> | undefined) || {};
-    const fbSrc = fbMedia.source as string | undefined;
-    const lengthSec =
-      Number((fbAttach as Record<string, unknown> | undefined)?.video_length) ||
-      Number(fbMedia.length) ||
-      0;
-    if (avgMs > 0 && lengthSec > 0 && fbSrc) {
-      return Math.min(avgMs / (lengthSec * 1000), 1);
-    }
-    return null;
-  }
-  return null;
-}
-
-function PlatformRankingsBlock({
-  posts,
-  onSelect,
-}: {
-  posts: SocialMetricRow[];
-  onSelect: (row: SocialMetricRow) => void;
-}) {
-  // YouTube has its own block; ACCOUNT rows aren't posts.
-  const eligible = useMemo(
-    () =>
-      posts.filter(
-        (p) =>
-          (p.platform || "").toLowerCase() !== "youtube" &&
-          (p.media_type || "").toUpperCase() !== "ACCOUNT",
-      ),
-    [posts],
-  );
-
-  const panels = useMemo(() => {
-    const top = (logical: string) =>
-      [...eligible]
-        .sort((a, b) => readMetric(b, logical) - readMetric(a, logical))
-        .filter((r) => readMetric(r, logical) > 0)
-        .slice(0, 3);
-    const eng = [...eligible]
-      .map((r) => ({ row: r, score: genericEngagement(r) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-      .map((x) => x.row);
-    const least = [...eligible]
-      .filter((r) => totalActivity(r) > 0)
-      .sort((a, b) => totalActivity(a) - totalActivity(b))
-      .slice(0, 3);
-
-    const fmtCount = (key: string) => (r: SocialMetricRow) => formatCompact(readMetric(r, key));
-    return [
-      { title: "Most views", rows: top("views"), format: fmtCount("views") },
-      { title: "Most likes", rows: top("likes"), format: fmtCount("likes") },
-      { title: "Most comments", rows: top("comments"), format: fmtCount("comments") },
-      { title: "Most shares", rows: top("shares"), format: fmtCount("shares") },
-      { title: "Most saves", rows: top("saves"), format: fmtCount("saves") },
-      {
-        title: "Most engagement",
-        rows: eng,
-        format: (r: SocialMetricRow) => `${(genericEngagement(r) * 100).toFixed(2)}%`,
-      },
-      {
-        title: "Least performing",
-        rows: least,
-        format: (r: SocialMetricRow) => `${formatCompact(totalActivity(r))} ints`,
-        tone: "muted" as const,
-      },
-    ].filter((p) => p.rows.length > 0);
-  }, [eligible]);
-
-  if (!panels.length) return null;
-
-  return (
-    <section aria-labelledby="rankings-heading" className="space-y-3">
-      <h3
-        id="rankings-heading"
-        className="font-mono-ui text-[0.75rem] uppercase tracking-wider text-foreground"
-      >
-        Rankings
-      </h3>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {panels.map((panel) => (
-          <RankPanel
-            key={panel.title}
-            title={panel.title}
-            rows={panel.rows}
-            formatValue={panel.format}
-            onSelect={onSelect}
-            tone={panel.tone}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function YouTubeVideoCard({
-  row,
-  onClick,
-}: {
-  row: SocialMetricRow;
-  onClick: () => void;
-}) {
-  const raw = (row.raw || {}) as Record<string, unknown>;
-  const ytSnippet = raw.snippet as Record<string, unknown> | undefined;
-  const ytThumb =
-    (ytSnippet?.thumbnail as string | undefined) ||
-    ((ytSnippet?.thumbnails as Record<string, { url?: string }> | undefined)?.high?.url as string | undefined);
-  const thumb =
-    (raw.thumbnail_url as string | undefined) ||
-    (raw.thumbnail as string | undefined) ||
-    ytThumb;
-  const m = (row.metrics || {}) as Record<string, unknown>;
-  const caption = row.caption || "";
-  const isShort = (row.media_type || "").toUpperCase() === "SHORT";
-  const duration = m.duration_iso as string | undefined;
-
-  const views = ytNum(row, "view_count");
-  const likes = ytNum(row, "like_count");
-  const comments = ytNum(row, "comment_count");
-  const engagement = ytEngagementScore(row);
-
-  const skipKeys = new Set([
-    "view_count",
-    "like_count",
-    "comment_count",
-    "duration_iso",
-    "avg_view_duration_sec",
-    "avg_view_percentage",
-  ]);
-  const extraChips: Array<{ label: string; value: string }> = [];
-  for (const [k, v] of Object.entries(m)) {
-    if (k.startsWith("_") || skipKeys.has(k)) continue;
-    if (v == null) continue;
-    if (typeof v !== "number" && typeof v !== "string") continue;
-    extraChips.push({ label: prettifyMetricKey(k), value: formatMetricValue(k, v) });
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group flex flex-col text-left rounded-2xl border border-border/40 bg-background/30 overflow-hidden transition hover:border-border"
-    >
-      <div className="relative aspect-video w-full bg-background/40">
-        {thumb ? (
-          <img
-            src={thumb}
-            alt={caption ? caption.slice(0, 100) : ""}
-            loading="lazy"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
-            className="absolute inset-0 h-full w-full object-cover"
-          />
-        ) : (
-          <div aria-hidden="true" className="absolute inset-0 flex items-center justify-center text-muted-foreground/40">
-            <Video className="h-8 w-8" />
-          </div>
-        )}
-        <div className="absolute top-1.5 left-1.5 flex items-center gap-1 rounded-full bg-card border border-border/60 px-2 py-0.5">
-          <span className={cn("h-1.5 w-1.5 rounded-full", platformDot("youtube"))} />
-          <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground">
-            {isShort ? "short" : "video"}
-          </span>
-        </div>
-        {duration && (
-          <div className="absolute bottom-1.5 right-1.5 rounded bg-card border border-border/60 px-1.5 py-0.5 font-mono-ui text-[0.7rem] tabular-nums text-foreground">
-            {formatIsoDuration(duration)}
-          </div>
-        )}
-        {engagement > 0 && (
-          <div
-            className="absolute top-1.5 right-1.5 rounded bg-primary px-1.5 py-0.5 font-mono-ui text-[0.7rem] uppercase tracking-wider text-primary-foreground"
-            aria-label={`Engagement ${(engagement * 100).toFixed(2)} percent`}
-          >
-            {(engagement * 100).toFixed(2)}% eng
-          </div>
-        )}
-      </div>
-      <div className="flex flex-col gap-2 p-3">
-        <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-foreground">
-          {caption || "(untitled)"}
-        </h3>
-        <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-          {row.posted_at ? isoTimeAgo(row.posted_at) : "—"}
-        </div>
-        <div className="grid grid-cols-3 gap-1.5 pt-1">
-          <YouTubeMetricCell label="views" value={formatCompact(views)} />
-          <YouTubeMetricCell label="likes" value={formatCompact(likes)} />
-          <YouTubeMetricCell label="comments" value={formatCompact(comments)} />
-        </div>
-        {extraChips.length > 0 && (
-          <div className="font-mono-ui flex flex-wrap gap-x-2 gap-y-0.5 pt-1 text-[0.7rem] text-muted-foreground">
-            {extraChips.map((chip, i) => (
-              <span key={`${chip.label}-${i}`} className="whitespace-nowrap">
-                {chip.value}
-                <span className="ml-0.5 text-muted-foreground">{chip.label}</span>
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    </button>
-  );
-}
-
-function YouTubeMetricCell({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-border/40 bg-background/40 px-2 py-1">
-      <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className="text-sm font-semibold tabular-nums text-foreground">{value}</div>
-    </div>
-  );
-}
-
-function PlatformTablist({
-  tabs,
-  active,
-  onChange,
-  idPrefix,
-  panelId,
-}: {
-  tabs: Array<{ label: string; count: number }>;
-  active: string;
-  onChange: (label: string) => void;
-  idPrefix: string;
-  panelId: string;
-}) {
-  const refs = useRef<Array<HTMLButtonElement | null>>([]);
-  const handleKey = (idx: number) => (e: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft" && e.key !== "Home" && e.key !== "End")
-      return;
-    e.preventDefault();
-    let next = idx;
-    if (e.key === "ArrowRight") next = (idx + 1) % tabs.length;
-    else if (e.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = tabs.length - 1;
-    onChange(tabs[next].label);
-    refs.current[next]?.focus();
-  };
-  return (
-    <div role="tablist" aria-label="Filter posts by platform" className="flex flex-wrap items-center gap-1.5 pt-1">
-      {tabs.map((t, i) => (
-        <PlatformTab
-          key={t.label}
-          ref={(el) => {
-            refs.current[i] = el;
-          }}
-          id={`${idPrefix}-tab-${t.label}`}
-          label={t.label}
-          count={t.count}
-          active={active === t.label}
-          onClick={() => onChange(t.label)}
-          onKeyDown={handleKey(i)}
-          controlsId={panelId}
-        />
-      ))}
-    </div>
-  );
-}
-
-const PlatformTab = forwardRef<HTMLButtonElement, {
-  id: string;
-  label: string;
-  active: boolean;
-  count: number;
-  onClick: () => void;
-  onKeyDown?: (e: ReactKeyboardEvent<HTMLButtonElement>) => void;
-  controlsId?: string;
-}>(function PlatformTab({ id, label, active, count, onClick, onKeyDown, controlsId }, ref) {
-  return (
-    <button
-      ref={ref}
-      id={id}
-      type="button"
-      role="tab"
-      aria-selected={active}
-      aria-controls={controlsId}
-      tabIndex={active ? 0 : -1}
-      onClick={onClick}
-      onKeyDown={onKeyDown}
-      className={cn(
-        "inline-flex min-h-[44px] items-center gap-1.5 rounded-full border px-3 py-2 font-mono-ui text-[0.75rem] uppercase tracking-wider transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
-        active
-          ? "border-primary bg-primary/10 text-primary"
-          : "border-border bg-background text-muted-foreground hover:border-foreground hover:text-foreground",
-      )}
-    >
-      {label !== "all" && (
-        <span aria-hidden="true" className={cn("h-1.5 w-1.5 rounded-full", platformDot(label))} />
-      )}
-      <span>{label}</span>
-      <span className="text-muted-foreground">{count}</span>
-    </button>
-  );
-});
-
-// Single source of truth — delegates to the cross-platform readers so IG/FB/TT/YT
-// rank consistently. Adds a tiny activity tiebreaker so two posts with identical
-// rates don't shuffle randomly.
-function computeEngagementScore(row: SocialMetricRow): number {
-  const score = genericEngagement(row);
-  const activity = totalActivity(row);
-  if (score > 0) return score * 100 + activity * 0.001;
-  return activity;
-}
-
-function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClose: () => void }) {
-  const raw = (row.raw || {}) as Record<string, unknown>;
-  const fbPost = (raw.post as Record<string, unknown> | undefined) || {};
-  const fbAttach = ((fbPost.attachments as Record<string, unknown> | undefined)?.data as Array<Record<string, unknown>> | undefined)?.[0];
-  const fbMedia = (fbAttach?.media as Record<string, unknown> | undefined) || {};
-  const fbImage = (fbMedia.image as { src?: string } | undefined)?.src;
-  const ytSnippet = raw.snippet as Record<string, unknown> | undefined;
-  const ytThumb =
-    (ytSnippet?.thumbnail as string | undefined) ||
-    ((ytSnippet?.thumbnails as Record<string, { url?: string }> | undefined)?.high?.url as string | undefined);
-  const thumb =
-    (raw.thumbnail_url as string | undefined) ||
-    (raw.thumbnail as string | undefined) ||
-    ytThumb ||
-    (fbPost.full_picture as string | undefined) ||
-    fbImage ||
-    (raw.full_picture as string | undefined) ||
-    (raw.media_url as string | undefined);
-  const caption = row.caption || (fbPost.message as string | undefined) || "";
-  const m = (row.metrics || {}) as Record<string, unknown>;
-  const page = (m._page as string | undefined) || "";
-  const hookRate = derivedHookRate(row);
-  const holdRate = derivedHoldRate(row);
-  const engagementRate =
-    typeof m.engagement_rate === "number" ? (m.engagement_rate as number) : null;
-  // Hook/hold render as their own row above the grid; drop the raw fields
-  // from the grid so we don't show them twice.
-  const metricEntries = Object.entries(m).filter(
-    ([k]) => !k.startsWith("_") && k !== "hook_rate" && k !== "hold_rate",
-  );
-
-  const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const previouslyFocused = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    previouslyFocused.current = document.activeElement as HTMLElement | null;
-    const root = dialogRef.current;
-    if (root) {
-      const first = root.querySelector<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      (first ?? root).focus();
-    }
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-        return;
-      }
-      if (e.key === "Tab" && root) {
-        const focusable = Array.from(
-          root.querySelectorAll<HTMLElement>(
-            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          ),
-        ).filter((el) => !el.hasAttribute("aria-hidden"));
-        if (!focusable.length) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        const active = document.activeElement as HTMLElement | null;
-        if (e.shiftKey && active === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && active === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = prevOverflow;
-      previouslyFocused.current?.focus?.();
-    };
-  }, [onClose]);
-
-  const headingText = caption
-    ? caption.split("\n")[0].slice(0, 120)
-    : `${row.platform || "Post"} detail`;
-  const platformLabel = (row.platform || "").toString();
-  const isFbLandscape = platformLabel.toLowerCase() === "facebook";
-  const [linkCopied, setLinkCopied] = useState(false);
-  const handleCopyLink = useCallback(async () => {
-    if (!row.permalink) return;
-    try {
-      await navigator.clipboard.writeText(row.permalink);
-      setLinkCopied(true);
-      window.setTimeout(() => setLinkCopied(false), 1600);
-    } catch {
-      // clipboard blocked; ignore
-    }
-  }, [row.permalink]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/85 p-4"
-      onClick={onClose}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-        className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-border bg-card shadow-2xl outline-none"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close post detail"
-          className="absolute right-3 top-3 z-10 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full bg-background px-3 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-        >
-          close
-        </button>
-        <div className="grid gap-0 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-          <div
-            className={cn(
-              "relative bg-background/40 md:aspect-auto md:min-h-[480px]",
-              isFbLandscape ? "aspect-[4/5]" : "aspect-[9/16]",
-            )}
-          >
-            {thumb ? (
-              <img
-                src={thumb}
-                alt={caption ? caption.slice(0, 100) : ""}
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).style.display = "none";
-                }}
-                className="absolute inset-0 h-full w-full object-cover"
-              />
-            ) : (
-              <div
-                aria-hidden="true"
-                className="absolute inset-0 flex items-center justify-center text-muted-foreground/40"
-              >
-                <Activity className="h-8 w-8" />
-              </div>
-            )}
-            <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-card border border-border/60 px-2.5 py-1">
-              <span
-                aria-hidden="true"
-                className={cn("h-2 w-2 rounded-full", platformDot(row.platform))}
-              />
-              <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground">
-                {platformLabel || "post"}
-              </span>
-            </div>
-          </div>
-          <div className="space-y-4 p-5">
-            <div>
-              <h2
-                id={titleId}
-                className="text-base font-semibold leading-snug text-foreground"
-              >
-                {headingText}
-              </h2>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-                {page && <span>{page}</span>}
-                <span>
-                  {row.posted_at ? new Date(row.posted_at).toLocaleString() : "—"}
-                </span>
-              </div>
-              {row.permalink && (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <a
-                    href={row.permalink}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label="Open original post in new tab"
-                    className="font-mono-ui inline-flex min-h-[44px] items-center px-3 text-[0.7rem] uppercase tracking-wider text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                  >
-                    open ↗
-                  </a>
-                  <button
-                    type="button"
-                    onClick={handleCopyLink}
-                    aria-label="Copy post link to clipboard"
-                    aria-live="polite"
-                    className="font-mono-ui inline-flex min-h-[44px] items-center rounded-md border border-border bg-background px-3 text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                  >
-                    {linkCopied ? "copied" : "copy link"}
-                  </button>
-                </div>
-              )}
-            </div>
-            {caption && caption !== headingText && (
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-                {caption}
-              </p>
-            )}
-            {(engagementRate != null || hookRate != null || holdRate != null) && (
-              <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-t border-border pt-3 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-                {engagementRate != null && (
-                  <span>
-                    <span className="text-base font-semibold tabular-nums text-foreground">
-                      {(engagementRate * 100).toFixed(2)}%
-                    </span>{" "}
-                    engagement
-                  </span>
-                )}
-                {hookRate != null && (
-                  <span>
-                    <span className="text-base font-semibold tabular-nums text-foreground">
-                      {(hookRate * 100).toFixed(1)}%
-                    </span>{" "}
-                    hook
-                  </span>
-                )}
-                {holdRate != null && (
-                  <span>
-                    <span className="text-base font-semibold tabular-nums text-foreground">
-                      {(holdRate * 100).toFixed(1)}%
-                    </span>{" "}
-                    hold
-                  </span>
-                )}
-              </div>
-            )}
-            {metricEntries.length > 0 ? (
-              <div>
-                <div className="mb-2 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-                  Metrics
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {metricEntries.map(([k, v]) => (
-                    <div key={k} className="rounded-lg border border-border/40 bg-background/30 px-3 py-2">
-                      <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-                        {prettifyMetricKey(k)}
-                      </div>
-                      <div className="mt-0.5 text-sm font-medium tabular-nums text-foreground">
-                        {formatMetricValue(k, v)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-lg border border-dashed border-border/40 bg-background/20 px-3 py-4 text-center text-xs text-muted-foreground">
-                No metrics returned for this post yet.
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RealVideoCard({
-  row,
-  onClick,
-  highlight,
-}: {
-  row: SocialMetricRow;
-  onClick?: () => void;
-  highlight?: boolean;
-}) {
-  const raw = (row.raw || {}) as Record<string, unknown>;
-  const fbPost = (raw.post as Record<string, unknown> | undefined) || {};
-  const fbAttach = ((fbPost.attachments as Record<string, unknown> | undefined)?.data as Array<Record<string, unknown>> | undefined)?.[0];
-  const fbMedia = (fbAttach?.media as Record<string, unknown> | undefined) || {};
-  const fbImage = (fbMedia.image as { src?: string } | undefined)?.src;
-  const ytSnippet = raw.snippet as Record<string, unknown> | undefined;
-  const ytThumb =
-    (ytSnippet?.thumbnail as string | undefined) ||
-    ((ytSnippet?.thumbnails as Record<string, { url?: string }> | undefined)?.high?.url as string | undefined);
-  const thumb =
-    (raw.thumbnail_url as string | undefined) ||
-    (raw.thumbnail as string | undefined) ||
-    ytThumb ||
-    (fbPost.full_picture as string | undefined) ||
-    fbImage ||
-    (raw.full_picture as string | undefined) ||
-    (raw.media_url as string | undefined);
-  const m = (row.metrics || {}) as Record<string, unknown>;
-  const engagementRate =
-    typeof m.engagement_rate === "number" ? (m.engagement_rate as number) : null;
-  const hookRate = derivedHookRate(row);
-  const holdRate = derivedHoldRate(row);
-  const caption = row.caption || (fbPost.message as string | undefined) || "";
-  const captionDisplay = caption.trim() || "Untitled post";
-
-  // Two metrics max — pick the most meaningful for this row.
-  // Video: views + likes. Static: likes + comments. Story: reach + replies.
-  const views = readMetric(row, "views");
-  const likes = readMetric(row, "likes");
-  const comments = readMetric(row, "comments");
-  const shares = readMetric(row, "shares");
-  const candidates: Array<[string, number]> = [
-    ["views", views],
-    ["likes", likes],
-    ["comments", comments],
-    ["shares", shares],
-  ];
-  const topMetrics = candidates.filter(([, v]) => v > 0).slice(0, 2);
-
-  // Pick a single rate to show — hold > hook > engagement (descending priority of insight value).
-  const primaryRate: { label: string; value: number } | null =
-    holdRate != null
-      ? { label: "hold", value: holdRate }
-      : hookRate != null
-        ? { label: "hook", value: hookRate }
-        : engagementRate != null
-          ? { label: "eng", value: engagementRate }
-          : null;
-
-  const handleClick = (e: ReactMouseEvent) => {
-    if (onClick) {
-      e.preventDefault();
-      onClick();
-    }
-  };
-
-  const platform = (row.platform || "").toLowerCase();
-  const mediaType = (row.media_type || "").toUpperCase();
-  // Vertical for Reels/Shorts/TikTok; square for static FB/IG photo posts.
-  const isVertical =
-    platform === "tiktok" ||
-    mediaType === "REEL" ||
-    mediaType === "REELS" ||
-    mediaType === "VIDEO" ||
-    mediaType === "SHORT" ||
-    mediaType === "STORY";
-  const aspectClass = isVertical ? "aspect-[9/16]" : "aspect-square";
-
-  const Inner = (
-    <div className="space-y-2">
-      <div
-        className={cn(
-          "relative overflow-hidden rounded-xl bg-background/40 border transition",
-          aspectClass,
-          highlight ? "border-primary" : "border-border/40 group-hover:border-border",
-        )}
-      >
-        {thumb ? (
-          <img
-            src={thumb}
-            alt={caption ? caption.slice(0, 100) : ""}
-            loading="lazy"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
-            className="absolute inset-0 h-full w-full object-cover"
-          />
-        ) : (
-          <div aria-hidden="true" className="absolute inset-0 flex items-center justify-center text-muted-foreground/40">
-            <Activity className="h-6 w-6" />
-          </div>
-        )}
-        <span
-          aria-hidden="true"
-          className={cn(
-            "absolute top-2 left-2 h-2 w-2 rounded-full ring-2 ring-background",
-            platformDot(row.platform),
-          )}
-          title={row.platform}
-        />
-      </div>
-      <div className="space-y-1">
-        <p className="line-clamp-2 text-[0.8rem] leading-snug text-foreground">
-          {captionDisplay}
-        </p>
-        {topMetrics.length > 0 && (
-          <div className="flex items-baseline gap-3 text-[0.72rem] text-muted-foreground">
-            {topMetrics.map(([label, value]) => (
-              <span key={label} className="whitespace-nowrap">
-                <span className="font-medium tabular-nums text-foreground">
-                  {formatCompact(value)}
-                </span>{" "}
-                {label}
-              </span>
-            ))}
-          </div>
-        )}
-        <div className="flex items-center justify-between text-[0.7rem] text-muted-foreground">
-          <span className="font-mono-ui uppercase tracking-wider">
-            {row.posted_at ? isoTimeAgo(row.posted_at) : "—"}
-          </span>
-          {primaryRate && (
-            <span className="font-mono-ui tabular-nums uppercase tracking-wider text-foreground">
-              {(primaryRate.value * 100).toFixed(1)}% {primaryRate.label}
-            </span>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={handleClick}
-        className="group block w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary rounded-xl"
-      >
-        {Inner}
-      </button>
-    );
-  }
-  return row.permalink ? (
-    <a
-      href={row.permalink}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="group block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary rounded-xl"
-    >
-      {Inner}
-    </a>
-  ) : (
-    <div>{Inner}</div>
-  );
-}
-
-function PlatformBlockCard({
-  platform,
-  block,
-}: {
-  platform: string;
-  block: SocialPlatformBlock;
-}) {
-  const { totals, averages, top_posts, post_count } = block;
-  return (
-    <div className="space-y-4">
-      <div className="flex items-baseline justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <span aria-hidden="true" className={cn("h-2 w-2 rounded-full", platformDot(platform))} />
-          <span className="font-mono-ui text-[0.8rem] uppercase tracking-wider text-foreground">
-            {platform}
-          </span>
-        </div>
-        <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-          {post_count} posts
-        </span>
-      </div>
-
-      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
-        <div>
-          <div className="text-base font-semibold tabular-nums text-foreground">
-            {formatCompact(totals?.reach)}
-          </div>
-          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-            Reach
-          </div>
-        </div>
-        <div>
-          <div className="text-base font-semibold tabular-nums text-foreground">
-            {formatPct(averages?.engagement_rate, 2)}
-          </div>
-          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-            Engagement
-          </div>
-        </div>
-        <div>
-          <div className="text-base font-semibold tabular-nums text-foreground">
-            {formatPct(averages?.hook_rate ?? averages?.hold_rate, 2)}
-          </div>
-          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-            {averages?.hook_rate != null ? "Hook" : "Hold"}
-          </div>
-        </div>
-      </div>
-
-      {top_posts && top_posts.length > 0 && (
-        <div className="space-y-1">
-          <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-            Top performers
-          </div>
-          <ul className="space-y-0.5">
-            {top_posts.slice(0, 3).map((p) => (
-              <li key={p.post_id}>
-                <a
-                  href={p.permalink ?? "#"}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-1 py-1 text-[0.8rem] text-foreground hover:text-primary"
-                >
-                  <span className="flex-1 truncate">{p.caption || "(no caption)"}</span>
-                  <span className="font-mono-ui text-[0.7rem] tabular-nums text-muted-foreground">
-                    {formatPct(p.derived?.engagement_rate, 1)}
-                  </span>
-                  {p.permalink && <ExternalLink className="h-3 w-3 text-muted-foreground" />}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function RealEstateTasksPage() {
   const data = useRealEstateHubData();
+  const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
   useHubHeader("Tasks", data);
   const activeSessions = data.sessions.filter((session) => session.is_active);
   const enabledJobs = data.cronJobs.filter((job) => job.enabled);
   const erroredJobs = data.cronJobs.filter((job) => job.last_error);
-  const aiDealTasks = data.dealTasks.filter((task) => task.canRunWithAi);
+  const openActionRuns = data.actionRuns.filter(
+    (run) => !["succeeded", "completed", "skipped", "cancelled"].includes(run.status),
+  );
+  const handoffs = data.snapshot?.handoffs;
+  const worker = data.snapshot?.agentWorker;
+  const memory = data.snapshot?.memory;
+  const adminPackActive = Boolean(accessStatus?.packs.realEstateAdmin);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAccessStatus()
+      .then((status) => {
+        if (!cancelled) setAccessStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setAccessStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <HubShell
       data={data}
       eyebrow="Task Board"
-      hero="A practical view of what the local agent is running now, what is scheduled, and where attention is needed."
+      hero="A practical view of what the local agent network is running now, what is scheduled, and where attention is needed."
       icon={CalendarClock}
-      title="Tasks, automations, and active sessions in one place."
+      title="Agent handoffs, wake loops, automations, and sessions in one place."
     >
       <WorkflowStrip
         items={[
           { icon: Activity, label: "Active sessions", value: activeSessions.length },
-          { icon: CheckSquare, label: "Deal tasks", value: data.dealTasks.length },
-          { icon: Bot, label: "AI-ready", value: aiDealTasks.length },
+          { icon: Bot, label: "Open handoffs", value: handoffs?.open ?? 0 },
+          { icon: AlertTriangle, label: "Human waiting", value: handoffs?.waitingHuman ?? 0 },
           { icon: CalendarClock, label: "Enabled tasks", value: enabledJobs.length },
+          { icon: Brain, label: "Memory queue", value: memory?.journal.pending ?? 0 },
           { icon: FileCheck2, label: "Task errors", value: erroredJobs.length },
         ]}
       />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <AdminDealTasks tasks={data.dealTasks} onChanged={data.refresh} />
+        <AgentHandoffsCard handoffs={handoffs} />
+        <AgentWorkerCard memory={memory} worker={worker} />
+      </div>
+      {adminPackActive && (
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+          <AdminDealTasks tasks={data.dealTasks} onChanged={data.refresh} />
+          <AdminActionRuns runs={openActionRuns} onChanged={data.refresh} />
+        </div>
+      )}
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <TimedTasks jobs={data.cronJobs} empty="No timed tasks have been created yet." title="All timed tasks" />
         <RecentSessions
           title="Active sessions"
           sessions={activeSessions}
           empty="No sessions are active right now."
         />
       </div>
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <TimedTasks jobs={data.cronJobs} empty="No timed tasks have been created yet." title="All timed tasks" />
+      <div className="mt-4">
         <RecentSessions
           title="Recent sessions"
           sessions={data.sessions.filter((session) => !session.is_active).slice(0, 6)}

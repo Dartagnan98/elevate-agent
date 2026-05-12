@@ -72,7 +72,7 @@ FACT_STORE_SCHEMA = {
         "• document_add/document_search — Chunk-level local RAG over source documents.\n"
         "• import_plaud_archive — Build chunk RAG from the local Plaud JSONL archive.\n"
         "• hygiene — Find stale, overused, duplicate, low-trust, and source-missing facts.\n"
-        "• cluster/auto_tag/confidence_maintenance/prune_logs/benchmark — jcode-style upkeep and profiling.\n"
+        "• cluster/auto_tag/confidence_maintenance/prune_logs/benchmark — memory-maintenance upkeep and profiling.\n"
         "• memory_events/memory_replay/memory_profile — Audit recall, injection, and token/byte impact.\n"
         "• supersede — Mark an old fact as replaced by a newer fact.\n"
         "• update/remove/list — CRUD operations.\n\n"
@@ -1085,7 +1085,7 @@ class HolographicMemoryProvider(MemoryProvider):
         """Cheap relevance verifier + session-level injection dedupe.
 
         This is intentionally deterministic. It avoids another model call while
-        giving us jcode-style verified/rejected accounting.
+        giving us memory-maintenance verified/rejected accounting.
         """
         if not results:
             return [], []

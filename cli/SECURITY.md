@@ -4,7 +4,7 @@ This document outlines the security protocols, trust model, and deployment harde
 
 ## 1. Vulnerability Reporting
 
-Elevate does **not** operate a bug bounty program. Security issues should be reported by emailing **security@ctrlstrategies.com**. Do not open public issues for security vulnerabilities.
+Elevate does **not** operate a bug bounty program. Security issues should be reported by emailing **security@elevationrealestatehq.com**. Do not open public issues for security vulnerabilities.
 
 ### Required Submission Details
 - **Title & Severity:** Concise description and CVSS score/rating.
@@ -80,5 +80,5 @@ The following scenarios are **not** considered security breaches:
 ## 5. Disclosure Process
 
 - **Coordinated Disclosure:** 90-day window or until a fix is released, whichever comes first.
-- **Communication:** All updates occur via email correspondence with security@ctrlstrategies.com.
+- **Communication:** All updates occur via email correspondence with security@elevationrealestatehq.com.
 - **Credits:** Reporters are credited in release notes unless anonymity is requested.

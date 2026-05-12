@@ -2,18 +2,18 @@
 slug: /
 sidebar_position: 0
 title: "Elevate Documentation"
-description: "The self-improving AI agent built by Ctrl Strategies. A built-in learning loop that creates skills from experience, improves them during use, and remembers across sessions."
+description: "The self-improving AI agent built by Elevation Real Estate HQ. A built-in learning loop that creates skills from experience, improves them during use, and remembers across sessions."
 hide_table_of_contents: true
 displayed_sidebar: docs
 ---
 
 # Elevate
 
-The self-improving AI agent built by [Ctrl Strategies](https://ctrlstrategies.com). The only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, and builds a deepening model of who you are across sessions.
+The self-improving AI agent built by [Elevation Real Estate HQ](https://elevationrealestatehq.com). The only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, and builds a deepening model of who you are across sessions.
 
 <div style={{display: 'flex', gap: '1rem', marginBottom: '2rem', flexWrap: 'wrap'}}>
   <a href="/docs/getting-started/installation" style={{display: 'inline-block', padding: '0.6rem 1.2rem', backgroundColor: '#FFD700', color: '#07070d', borderRadius: '8px', fontWeight: 600, textDecoration: 'none'}}>Get Started →</a>
-  <a href="https://github.com/CtrlStrategies/elevate" style={{display: 'inline-block', padding: '0.6rem 1.2rem', border: '1px solid rgba(255,215,0,0.2)', borderRadius: '8px', textDecoration: 'none'}}>View on GitHub</a>
+  <a href="https://github.com/Dartagnan98/elevate-agent" style={{display: 'inline-block', padding: '0.6rem 1.2rem', border: '1px solid rgba(255,215,0,0.2)', borderRadius: '8px', textDecoration: 'none'}}>View on GitHub</a>
 </div>
 
 ## What is Elevate?
@@ -48,10 +48,10 @@ It's not a coding copilot tethered to an IDE or a chatbot wrapper around a singl
 - **A closed learning loop** — Agent-curated memory with periodic nudges, autonomous skill creation, skill self-improvement during use, FTS5 cross-session recall with LLM summarization, and [Honcho](https://github.com/plastic-labs/honcho) dialectic user modeling
 - **Runs anywhere, not just your laptop** — 6 terminal backends: local, Docker, SSH, Daytona, Singularity, Modal. Daytona and Modal offer serverless persistence — your environment hibernates when idle, costing nearly nothing
 - **Lives where you do** — CLI, Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Mattermost, Email, SMS, DingTalk, Feishu, WeCom, BlueBubbles, Home Assistant — 15+ platforms from one gateway
-- **Bring your own provider** — Built by [Ctrl Strategies](https://ctrlstrategies.com) for real estate teams. Works with [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai), OpenAI, Anthropic, or any endpoint
+- **Bring your own provider** — Built by [Elevation Real Estate HQ](https://elevationrealestatehq.com) for real estate teams. Works with [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai), OpenAI, Anthropic, or any endpoint
 - **Scheduled automations** — Built-in cron with delivery to any platform
 - **Delegates & parallelizes** — Spawn isolated subagents for parallel workstreams. Programmatic Tool Calling via `execute_code` collapses multi-step pipelines into single inference calls
 - **Open standard skills** — Compatible with [agentskills.io](https://agentskills.io). Skills are portable, shareable, and community-contributed via the Skills Hub
 - **Full web control** — Search, extract, browse, vision, image generation, TTS
 - **MCP support** — Connect to any MCP server for extended tool capabilities
-- **Research-ready** — Batch processing, trajectory export, RL training with Atropos. Built by [Ctrl Strategies](https://ctrlstrategies.com) — the lab behind Elevate, Nomos, and Psyche models
+- **Research-ready** — Batch processing, trajectory export, RL training with Atropos. Built by [Elevation Real Estate HQ](https://elevationrealestatehq.com) — the lab behind Elevate, Nomos, and Psyche models

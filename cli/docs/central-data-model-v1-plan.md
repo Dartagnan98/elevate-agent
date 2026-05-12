@@ -11,11 +11,11 @@ Ship a single-realtor production install that:
 - Owns the truth in one SQLite (`~/.elevate/data/operational.db`)
 - Routes all reads/writes through one Python data module (`elevate_cli/data/`)
 - Supports AI-driven template matching + AI-generated template proposals
-- Works for Skyleigh's daily ops by default
+- Works for the pilot realtor's daily ops by default
 
 ## Out of scope for V1
 
-- Cloud sync (Supabase write-through)
+- Hosted cloud sync/write-through
 - Multi-realtor isolation (`agents/<slug>/`) on this CLI
 - Identity challenge-response verification (e.g., reply-with-code)
 - Auto-promote of `proposed` templates (always human-in-the-loop)
@@ -141,7 +141,7 @@ Built in Sprint 1, used in Sprint 2.
   1. Take backup → `~/.elevate/backups/pre-migration-<ts>/`
   2. Create `~/.elevate/data/`, `~/.elevate/sources/`, `~/.elevate/logs/`
   3. Initialize `operational.db` from migration 0001
-  4. Move `~/.elevate/tmp/skyleigh-tools/data/sources/` →
+  4. Move `~/.elevate/tmp/client-tools/data/sources/` →
      `~/.elevate/sources/`, leave backwards-compat symlink for one release
   5. Open one synthetic ingest_run per source (so backfilled rows have a
      real `ingest_run_id`)
@@ -165,7 +165,7 @@ Built in Sprint 1, used in Sprint 2.
 ### Done when
 
 - `elevate migrate-data --dry-run` produces a clean report
-- Real migration runs on Skyleigh's Mac with backup created first
+- Real migration runs on the pilot realtor's Mac with backup created first
 - SQLite file exists with data + `identity_conflicts` rows for ambiguous merges
 - `/leads` page still works (still reading old JSONL)
 - Tests pass against `:memory:` DB
@@ -197,7 +197,7 @@ design doc's "Connector ingest contract" section:
 - Phase A — **shadow mode** with `ELEVATE_DATA_SHADOW_READ=1`:
   serve legacy JSONL response to client, run new SQLite path in parallel,
   log every diff to `data_parity_snapshots`. Run for at least one full
-  Skyleigh ops cycle (~7 days of normal usage).
+  pilot realtor ops cycle (~7 days of normal usage).
 - Phase B — **flip** once `parity_diff_count(since=last_7d) == 0` for at
   least 3 days. UI now reads from `operational.db`. Old JSONL path stays
   available behind `ELEVATE_DATA_LEGACY_READ=1` for one release.
@@ -223,7 +223,7 @@ Routes: `GET /api/source-inbox`, `GET /api/threads/<id>`. Filters
 
 ## Sprint 3 — Lifecycle UX (the daily-value surfaces)
 
-What Skyleigh actually sees and uses every day.
+What pilot realtor actually sees and uses every day.
 
 ### 3.1 Classify button
 
@@ -279,12 +279,12 @@ What Skyleigh actually sees and uses every day.
 
 ### Done when
 
-- Skyleigh can classify a lead in `/leads` → it moves to `/admin/buyers`
+- pilot realtor can classify a lead in `/leads` → it moves to `/admin/buyers`
 - Park works
 - Active section renders correctly
 - `/admin/conflicts` shows any quarantined identity merges and lets her
   resolve them
-- A cold MLS lead that suddenly emails Skyleigh auto-graduates from
+- A cold MLS lead that suddenly emails pilot realtor auto-graduates from
   `lead_signals` to `contacts`
 
 ---
@@ -369,7 +369,7 @@ proven templates win without starving new ones.
 
 ## Sprint 5 — AI template generation + /admin/templates
 
-AI starts proposing new templates. Skyleigh approves them. Approval is
+AI starts proposing new templates. pilot realtor approves them. Approval is
 enforced at the schema layer (CHECK) and the data-module layer (actor
 gate) — there is no path for an AI-proposed template to enter the live
 pool without a human approval action.
@@ -424,7 +424,7 @@ pool without a human approval action.
 ### Done when
 
 - AI proposes a template after a one-off lands or pattern detection runs
-- Skyleigh sees it on `/admin/templates`, approves
+- pilot realtor sees it on `/admin/templates`, approves
 - Next `pick_template` call's eligible pool includes it
 - Approval invariant test passes (no path for AI to bypass approval)
 
@@ -466,14 +466,14 @@ Sprint 1E — backfill migration                      (one-time data move)
 Sprint 2  — connectors adopt ingest contract +
             shadow-mode parity → flip               (zero UX change)
 Sprint 3  — classify / park / active / /admin /
-            conflicts queue / signal graduation     (Skyleigh's daily UX)
+            conflicts queue / signal graduation     (the pilot realtor's daily UX)
 Sprint 4  — picker (Thompson + cooldown + AI) +
             two-tier attribution + versioning       (loop closes)
 Sprint 5  — template generation + /admin/templates +
             approval invariant test                 (self-improving)
 ```
 
-Each sprint ships to Skyleigh's Mac before the next starts. Sprint 1's
+Each sprint ships to the pilot realtor's Mac before the next starts. Sprint 1's
 sub-stages (1A→1E) ship as one bundle since they're all foundation.
 
 ## Validation gates
@@ -482,9 +482,9 @@ sub-stages (1A→1E) ship as one bundle since they're all foundation.
 |---|---|
 | 1 | `migrate-data --dry-run` reports clean. Real migration creates backup, lands schema, populates `identity_conflicts` for ambiguous merges, lead_signals for cold MLS rows. `tests/test_data_module_isolation.py` passes. /leads still works on legacy reads. |
 | 2 | Shadow mode runs ≥7 days. `parity_diff_count(since=last_7d) == 0` for ≥3 days. After flip: /leads renders identically, rollback flag works. |
-| 3 | Classify → /admin/buyers. Park → /admin/parked. `/admin/conflicts` shows ambiguous merges and lets Skyleigh resolve them. Cold MLS lead that emails Skyleigh auto-graduates to a contact. |
+| 3 | Classify → /admin/buyers. Park → /admin/parked. `/admin/conflicts` shows ambiguous merges and lets pilot realtor resolve them. Cold MLS lead that emails pilot realtor auto-graduates to a contact. |
 | 4 | Templated send → confident reply → stats reflect within 60s. Cross-channel reply emits `attribution_ambiguous`, doesn't poison clean stats. Picker doesn't repeat the same template to same contact within 7 days. Edit a live template → new version row, old marked `superseded`. |
-| 5 | AI proposes template after pattern detection → Skyleigh approves in `/admin/templates` → next pick eligible-pool includes it. `agent:*` actors cannot bypass approval (CHECK constraint + data-module-level enforcement). |
+| 5 | AI proposes template after pattern detection → pilot realtor approves in `/admin/templates` → next pick eligible-pool includes it. `agent:*` actors cannot bypass approval (CHECK constraint + data-module-level enforcement). |
 
 ## Risks
 
@@ -494,7 +494,7 @@ sub-stages (1A→1E) ship as one bundle since they're all foundation.
 - **Deterministic-only auto-merge** — by design we'll generate more
   `identity_conflicts` rows than a fuzzy auto-merge would. That's the
   correct trade. Risk: if the conflict queue grows unmanageable,
-  Skyleigh ignores it and AI outreach stays blocked on those contacts.
+  pilot realtor ignores it and AI outreach stays blocked on those contacts.
   Mitigation: `/admin/conflicts` ergonomics matter; default to surfacing
   the count in the global nav as an unread-style badge.
 - **Codex auth broken** — Thompson sampling is the deterministic
@@ -510,7 +510,7 @@ sub-stages (1A→1E) ship as one bundle since they're all foundation.
 - **Migration aborts mid-run** — `event_hash` UNIQUE makes a partial
   run safe to re-run; backup makes a worst-case rollback possible.
   Mitigation: run `--dry-run` first, then real run with backup, only
-  delete backup once Skyleigh has used the new system for a week.
+  delete backup once pilot realtor has used the new system for a week.
 
 ## Sprint progress log
 

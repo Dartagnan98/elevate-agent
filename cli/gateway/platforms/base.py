@@ -718,6 +718,12 @@ class MessageEvent:
     # Discord channel_skill_bindings).  A single name or ordered list.
     auto_skill: Optional[str | list[str]] = None
 
+    # Visible agent lane for this conversation (e.g. admin, outreach, ads).
+    # The gateway resolves this into agent-specific prompt/skills before the
+    # turn runs. If absent, the configured default agent is used.
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+
     # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
     # Applied at API call time and never persisted to transcript history.
     channel_prompt: Optional[str] = None
@@ -1040,6 +1046,16 @@ class BasePlatformAdapter(ABC):
         """
         self._message_handler = handler
 
+    @staticmethod
+    def _event_delivery_metadata(event: MessageEvent) -> Optional[Dict[str, Any]]:
+        metadata: Dict[str, Any] = {}
+        if event.source and event.source.thread_id:
+            metadata["thread_id"] = event.source.thread_id
+        agent_id = str(getattr(event, "agent_id", "") or getattr(event.source, "agent_id", "") or "").strip()
+        if agent_id:
+            metadata["agent_id"] = agent_id
+        return metadata or None
+
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
         self._busy_session_handler = handler
@@ -1105,6 +1121,7 @@ class BasePlatformAdapter(ABC):
         content: str,
         *,
         finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """
         Edit a previously sent message. Optional — platforms that don't
@@ -1161,7 +1178,7 @@ class BasePlatformAdapter(ABC):
         """
         # Fallback: send URL as text (subclasses override for native images)
         text = f"{caption}\n{image_url}" if caption else image_url
-        return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
+        return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
     
     async def send_animation(
         self,
@@ -1252,7 +1269,12 @@ class BasePlatformAdapter(ABC):
         text = f"🔊 Audio: {audio_path}"
         if caption:
             text = f"{caption}\n{text}"
-        return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            reply_to=reply_to,
+            metadata=kwargs.get("metadata"),
+        )
 
     async def play_tts(
         self,
@@ -1285,7 +1307,12 @@ class BasePlatformAdapter(ABC):
         text = f"🎬 Video: {video_path}"
         if caption:
             text = f"{caption}\n{text}"
-        return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            reply_to=reply_to,
+            metadata=kwargs.get("metadata"),
+        )
 
     async def send_document(
         self,
@@ -1305,7 +1332,12 @@ class BasePlatformAdapter(ABC):
         text = f"📎 File: {file_path}"
         if caption:
             text = f"{caption}\n{text}"
-        return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            reply_to=reply_to,
+            metadata=kwargs.get("metadata"),
+        )
 
     async def send_image_file(
         self,
@@ -1325,7 +1357,12 @@ class BasePlatformAdapter(ABC):
         text = f"🖼️ Image: {image_path}"
         if caption:
             text = f"{caption}\n{text}"
-        return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            reply_to=reply_to,
+            metadata=kwargs.get("metadata"),
+        )
 
     @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
@@ -1872,7 +1909,7 @@ class BasePlatformAdapter(ABC):
         current_guard = self._active_sessions.get(session_key)
         command_guard = asyncio.Event()
         self._active_sessions[session_key] = command_guard
-        thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        thread_meta = self._event_delivery_metadata(event)
 
         try:
             response = await self._message_handler(event)
@@ -1965,7 +2002,7 @@ class BasePlatformAdapter(ABC):
                     self.name, cmd, session_key,
                 )
                 try:
-                    _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                    _thread_meta = self._event_delivery_metadata(event)
                     response = await self._message_handler(event)
                     if response:
                         await self._send_with_retry(
@@ -2050,7 +2087,7 @@ class BasePlatformAdapter(ABC):
         callback_generation = getattr(interrupt_event, "_elevate_run_generation", None)
         
         # Start continuous typing indicator (refreshes every 2 seconds)
-        _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        _thread_metadata = self._event_delivery_metadata(event)
         _keep_typing_kwargs = {"metadata": _thread_metadata}
         try:
             _keep_typing_sig = inspect.signature(self._keep_typing)
@@ -2307,7 +2344,7 @@ class BasePlatformAdapter(ABC):
             try:
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
-                _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                _thread_metadata = self._event_delivery_metadata(event)
                 await self.send(
                     chat_id=event.source.chat_id,
                     content=(
@@ -2439,6 +2476,7 @@ class BasePlatformAdapter(ABC):
         chat_topic: Optional[str] = None,
         user_id_alt: Optional[str] = None,
         chat_id_alt: Optional[str] = None,
+        agent_id: Optional[str] = None,
         is_bot: bool = False,
     ) -> SessionSource:
         """Helper to build a SessionSource for this platform."""
@@ -2456,6 +2494,7 @@ class BasePlatformAdapter(ABC):
             chat_topic=chat_topic.strip() if chat_topic else None,
             user_id_alt=user_id_alt,
             chat_id_alt=chat_id_alt,
+            agent_id=agent_id,
             is_bot=is_bot,
         )
     

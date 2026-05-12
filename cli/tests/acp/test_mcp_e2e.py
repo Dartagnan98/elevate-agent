@@ -7,6 +7,10 @@ Exercises the full flow through the ACP server layer:
     session_update events arrive at the mock client
 """
 
+import pytest
+
+pytest.importorskip("acp", reason="requires optional ACP extra: acp")
+
 import asyncio
 from collections import deque
 from types import SimpleNamespace

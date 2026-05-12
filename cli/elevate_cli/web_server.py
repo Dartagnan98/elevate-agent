@@ -41,6 +41,7 @@ from elevate_cli.config import (
     get_config_path,
     get_env_path,
     get_elevate_home,
+    get_env_value,
     load_config,
     load_env,
     save_config,
@@ -49,6 +50,8 @@ from elevate_cli.config import (
     check_config_version,
     redact_key,
 )
+from elevate_cli.access import dashboard_access_status
+from elevate_cli.data.deals import DealPhaseGateBlocked
 from gateway.status import get_running_pid, read_runtime_status
 
 try:
@@ -255,7 +258,7 @@ async def host_header_middleware(request: Request, call_next):
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         if not (_has_valid_session_token(request) or _has_valid_run_token(request)):
             return JSONResponse(
                 status_code=401,
@@ -466,7 +469,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "access.profile": {
         "type": "select",
         "description": "Access profile for local entitlement gates",
-        "options": ["standalone", "exp"],
+        "options": ["standalone", "exp", "team_pack"],
         "category": "access",
     },
     "access.affiliation.status": {
@@ -538,6 +541,8 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "dashboard": "display",
     "code_execution": "agent",
     "prompt_caching": "agent",
+    "goals": "agent",
+    "sources": "integrations",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
@@ -634,6 +639,101 @@ class EnvVarDelete(BaseModel):
 
 class EnvVarReveal(BaseModel):
     key: str
+
+
+_AGENT_TELEGRAM_CHANNEL_RE = re.compile(r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_CHANNEL$")
+_AGENT_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_BOT_TOKEN$")
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
+_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY = "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN"
+_EXECUTIVE_TELEGRAM_CHANNEL_KEY = "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL"
+
+
+def _looks_like_telegram_bot_token(value: Any) -> bool:
+    text = str(value or "").strip()
+    if text.lower().startswith("telegram:"):
+        text = text.split(":", 1)[1]
+    return bool(_TELEGRAM_BOT_TOKEN_RE.fullmatch(text))
+
+
+def _agent_segment_is_executive(segment: str) -> bool:
+    return segment.strip().upper() == "EXECUTIVE_ASSISTANT"
+
+
+def _executive_telegram_token() -> str:
+    return str(
+        get_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY)
+        or get_env_value("TELEGRAM_BOT_TOKEN")
+        or ""
+    ).strip()
+
+
+def _non_executive_duplicate_agent_token(value: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        return ""
+    for key, existing in load_env().items():
+        match = _AGENT_TELEGRAM_BOT_TOKEN_RE.fullmatch(key)
+        if not match or _agent_segment_is_executive(match.group(1)):
+            continue
+        if str(existing or "").strip() == candidate:
+            return key
+    return ""
+
+
+def _reject_shared_agent_token(segment: str, value: str) -> None:
+    executive_token = _executive_telegram_token()
+    if executive_token and value.strip() == executive_token and not _agent_segment_is_executive(segment):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This token already belongs to the Executive Telegram bot. "
+                "Create a separate bot token for this agent in BotFather."
+            ),
+        )
+
+
+def _sync_executive_telegram_aliases(key: str, value: str) -> list[str]:
+    """Keep legacy gateway Telegram keys and the Executive agent lane aligned."""
+    old_shared_token = str(get_env_value("TELEGRAM_BOT_TOKEN") or "").strip()
+    old_shared_channel = str(get_env_value("TELEGRAM_HOME_CHANNEL") or "").strip()
+    old_executive_token = str(get_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY) or "").strip()
+    old_executive_channel = str(get_env_value(_EXECUTIVE_TELEGRAM_CHANNEL_KEY) or "").strip()
+    synced: list[str] = []
+
+    if key == "TELEGRAM_BOT_TOKEN":
+        if _non_executive_duplicate_agent_token(value):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This token is already assigned to another agent. "
+                    "Each non-Executive Telegram agent needs its own BotFather token."
+                ),
+            )
+        if value and (not old_executive_token or old_executive_token == old_shared_token):
+            save_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY, value)
+            synced.append(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY)
+    elif key == _EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY:
+        if _non_executive_duplicate_agent_token(value):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This token is already assigned to another agent. "
+                    "Each non-Executive Telegram agent needs its own BotFather token."
+                ),
+            )
+        if value and (not old_shared_token or old_shared_token == old_executive_token):
+            save_env_value("TELEGRAM_BOT_TOKEN", value)
+            synced.append("TELEGRAM_BOT_TOKEN")
+    elif key == "TELEGRAM_HOME_CHANNEL":
+        if value and (not old_executive_channel or old_executive_channel == old_shared_channel):
+            save_env_value(_EXECUTIVE_TELEGRAM_CHANNEL_KEY, value)
+            synced.append(_EXECUTIVE_TELEGRAM_CHANNEL_KEY)
+    elif key == _EXECUTIVE_TELEGRAM_CHANNEL_KEY:
+        if value and (not old_shared_channel or old_shared_channel == old_executive_channel):
+            save_env_value("TELEGRAM_HOME_CHANNEL", value)
+            synced.append("TELEGRAM_HOME_CHANNEL")
+
+    return synced
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -790,35 +890,15 @@ async def get_status():
     }
 
 
-@app.get("/api/agent-hub")
-async def get_agent_hub():
-    """Return the local Agent Hub snapshot for the dashboard."""
-    try:
-        from elevate_cli.agent_hub import build_agent_hub_snapshot
-        import inspect
-
-        kwargs = (
-            {"include_profiles": False}
-            if "include_profiles" in inspect.signature(build_agent_hub_snapshot).parameters
-            else {}
-        )
-        return build_agent_hub_snapshot(**kwargs)
-    except Exception as exc:
-        _log.exception("GET /api/agent-hub failed")
-        raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")
+@app.get("/api/access")
+async def get_access_status():
+    """Return local entitlement state used to unlock paid dashboard packs."""
+    return dashboard_access_status()
 
 
-@app.get("/api/harness")
-async def get_harness(include_profiles: bool = False):
-    """Return the compact local harness health snapshot."""
-    try:
-        from elevate_cli.harness import build_harness_snapshot
-
-        return build_harness_snapshot(include_profiles=include_profiles)
-    except Exception as exc:
-        _log.exception("GET /api/harness failed")
-        raise HTTPException(status_code=500, detail=f"Harness snapshot failed: {exc}")
-
+from elevate_cli.web_routes.agent_hub import create_agent_hub_router
+from elevate_cli.web_routes.cron import create_cron_router
+from elevate_cli.web_routes.source_connectors import create_source_connectors_router
 
 # ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
@@ -941,6 +1021,94 @@ async def update_elevate():
         "pid": proc.pid,
         "name": "elevate-update",
     }
+
+
+def _git_value(repo_dir: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    return value or None
+
+
+@app.get("/api/elevate/update/status")
+async def get_elevate_update_status(refresh: bool = False):
+    """Return whether this checkout is behind the release branch.
+
+    The source of truth is the install's ``origin/main``. When the developer
+    pushes commits to that branch, installed dashboards can show "updates
+    available" before the user runs ``elevate update``.
+    """
+    try:
+        from elevate_cli.banner import (
+            _resolve_repo_dir,
+            check_for_updates,
+            get_git_banner_state,
+        )
+        from elevate_cli.config import recommended_update_command
+
+        repo_dir = _resolve_repo_dir()
+        if repo_dir is None:
+            return {
+                "available": False,
+                "behind": None,
+                "ahead": 0,
+                "branch": None,
+                "checked_at": time.time(),
+                "command": recommended_update_command(),
+                "local": None,
+                "origin_url": None,
+                "repo_dir": None,
+                "upstream": None,
+                "error": "not_git_install",
+            }
+
+        loop = asyncio.get_running_loop()
+        behind = await loop.run_in_executor(
+            None,
+            lambda: check_for_updates(force=refresh, cache_seconds=5 * 60),
+        )
+        git_state = get_git_banner_state(repo_dir) or {}
+        branch = _git_value(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
+        origin_url = _git_value(repo_dir, "remote", "get-url", "origin")
+        available = bool(behind and behind > 0)
+        return {
+            "available": available,
+            "behind": behind,
+            "ahead": int(git_state.get("ahead") or 0),
+            "branch": branch,
+            "checked_at": time.time(),
+            "command": recommended_update_command(),
+            "local": git_state.get("local"),
+            "origin_url": origin_url,
+            "repo_dir": str(repo_dir),
+            "upstream": git_state.get("upstream"),
+            "error": None,
+        }
+    except Exception as exc:
+        _log.exception("GET /api/elevate/update/status failed")
+        return {
+            "available": False,
+            "behind": None,
+            "ahead": 0,
+            "branch": None,
+            "checked_at": time.time(),
+            "command": "elevate update",
+            "local": None,
+            "origin_url": None,
+            "repo_dir": None,
+            "upstream": None,
+            "error": str(exc),
+        }
 
 
 @app.get("/api/actions/{name}/status")
@@ -1427,15 +1595,50 @@ async def get_env_vars():
             "tools": info.get("tools", []),
             "advanced": info.get("advanced", False),
         }
+    for var_name, value in env_on_disk.items():
+        if var_name in result:
+            continue
+        if not re.match(r"^ELEVATE_AGENT_[A-Z0-9_]+_TELEGRAM_(BOT_TOKEN|CHANNEL)$", var_name):
+            continue
+        is_token = var_name.endswith("_BOT_TOKEN")
+        result[var_name] = {
+            "is_set": bool(value),
+            "redacted_value": redact_key(value) if value else None,
+            "description": "Telegram bot token" if is_token else "Telegram chat or topic routed to this agent",
+            "url": "https://t.me/BotFather" if is_token else None,
+            "category": "messaging",
+            "is_password": is_token,
+            "tools": [],
+            "advanced": False,
+        }
     return result
 
 
 @app.put("/api/env")
 async def set_env_var(body: EnvVarUpdate):
     try:
-        save_env_value(body.key, body.value)
-        return {"ok": True, "key": body.key}
+        key = str(body.key or "").strip()
+        value = str(body.value or "").strip()
+        if key == "TELEGRAM_HOME_CHANNEL" and _looks_like_telegram_bot_token(value):
+            raise HTTPException(
+                status_code=400,
+                detail="That looks like a Telegram bot token. Paste it into the Bot token field, not the home chat field.",
+            )
+        channel_match = _AGENT_TELEGRAM_CHANNEL_RE.fullmatch(key)
+        if channel_match and _looks_like_telegram_bot_token(value):
+            raise HTTPException(
+                status_code=400,
+                detail="That looks like a Telegram bot token. Paste it into the Bot token field, not the chat/topic field.",
+            )
+        token_match = _AGENT_TELEGRAM_BOT_TOKEN_RE.fullmatch(key)
+        if token_match:
+            _reject_shared_agent_token(token_match.group(1), value)
+        synced = _sync_executive_telegram_aliases(key, value)
+        save_env_value(key, value)
+        return {"ok": True, "key": key, "synced": synced}
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         _log.exception("PUT /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -2498,47 +2701,9 @@ async def get_logs(
 # ---------------------------------------------------------------------------
 
 
-class CronJobCreate(BaseModel):
-    prompt: str
-    schedule: str
-    name: str = ""
-    deliver: str = "local"
-    # Phase 3 (/leads): universal cron form fields. All optional so existing
-    # callers keep working. Skill-bound mode = pass `skill`. Per-job model is
-    # the explicit override; tier is the harness-resolved fallback.
-    skill: Optional[str] = None
-    skills: Optional[List[str]] = None
-    agent: Optional[str] = None
-    tier: Optional[str] = None
-    model: Optional[str] = None
-    provider: Optional[str] = None
-    base_url: Optional[str] = None
-    enabled_toolsets: Optional[List[str]] = None
-    workdir: Optional[str] = None
-    expected_readiness_version: Optional[str] = None
-    backfill_pending: bool = False
-
-
-class CronJobUpdate(BaseModel):
-    updates: dict
-
-
 class SourceConnectorAction(BaseModel):
     action: str
     sourceId: str
-
-
-class SourceInboxThreadAction(BaseModel):
-    action: str
-    sourceId: str
-    threadId: str
-
-
-class SourceInboxDraftAction(BaseModel):
-    action: str
-    sourceId: str
-    taskId: str
-    draftText: str = ""
 
 
 class IntegrationSettingsUpdate(BaseModel):
@@ -2556,364 +2721,9 @@ class IntegrationSettingsUpdate(BaseModel):
     action: str = ""
 
 
-@app.get("/api/cron/jobs")
-async def list_cron_jobs():
-    from cron.jobs import list_jobs
-    return list_jobs(include_disabled=True)
+app.include_router(create_cron_router(log=_log))
 
-
-@app.get("/api/cron/jobs/{job_id}")
-async def get_cron_job(job_id: str):
-    from cron.jobs import get_job
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-@app.post("/api/cron/jobs")
-async def create_cron_job(body: CronJobCreate):
-    from cron.jobs import create_job
-    from elevate_cli.onboarding import compute_onboarding_status
-
-    # Readiness gate: a job that pins ``expected_readiness_version`` is
-    # declaring "I only make sense once the system is configured to this
-    # snapshot." Reject if the snapshot has drifted (or system isn't ready)
-    # so the wizard surfaces the mismatch instead of silently scheduling a
-    # job that will skip itself at fire-time.
-    if body.expected_readiness_version:
-        try:
-            snap = compute_onboarding_status()
-        except Exception as exc:
-            _log.exception("readiness probe failed during POST /api/cron/jobs")
-            raise HTTPException(status_code=503, detail=f"readiness probe failed: {exc}")
-        if not snap.get("ready"):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "system_not_ready",
-                    "message": "Onboarding readiness checks not all passing — finish setup before pinning a readiness version.",
-                    "current_version": snap.get("version"),
-                    "checks": snap.get("checks"),
-                },
-            )
-        if str(snap.get("version")) != str(body.expected_readiness_version):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "readiness_version_mismatch",
-                    "message": "Onboarding state changed since the wizard read it — refresh and resubmit.",
-                    "current_version": snap.get("version"),
-                    "expected_version": body.expected_readiness_version,
-                },
-            )
-
-    try:
-        job = create_job(
-            prompt=body.prompt,
-            schedule=body.schedule,
-            name=body.name,
-            deliver=body.deliver,
-            skill=body.skill,
-            skills=body.skills,
-            agent=body.agent,
-            tier=body.tier,
-            model=body.model,
-            provider=body.provider,
-            base_url=body.base_url,
-            enabled_toolsets=body.enabled_toolsets,
-            workdir=body.workdir,
-            expected_readiness_version=body.expected_readiness_version,
-            backfill_pending=body.backfill_pending,
-        )
-        return job
-    except ValueError as e:
-        # Tier validation, workdir validation — surface to UI as 400.
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        _log.exception("POST /api/cron/jobs failed")
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-class _EnsureLanesBody(BaseModel):
-    """Bulk seed for the default /leads lanes. Each entry is a minimal
-    cron job spec; the server creates one only if no existing job has the
-    same case-insensitive name. Lets the UI declare its default lane set
-    in one place and have the backend converge to it on /leads load."""
-
-    lanes: List[CronJobCreate]
-
-
-@app.post("/api/cron/jobs/ensure-lanes")
-async def ensure_lanes(body: _EnsureLanesBody):
-    """Idempotently install the default outreach lanes (New Outreach,
-    Hot Leads Watcher, Follow-ups, Private Searches). Skips any lane
-    whose ``name`` already exists (case-insensitive).
-
-    Returns ``{created: [...], skipped: [...]}`` so the UI can decide
-    whether to refresh the cron list. Safe to call on every /leads
-    mount — after first install it's a pure no-op.
-    """
-    from cron.jobs import create_job, list_jobs
-
-    existing = list_jobs(include_disabled=True)
-    existing_names = {str(j.get("name") or "").strip().lower() for j in existing}
-
-    created: list[dict] = []
-    skipped: list[str] = []
-    for lane in body.lanes:
-        target = str(lane.name or "").strip()
-        if not target:
-            continue
-        if target.lower() in existing_names:
-            skipped.append(target)
-            continue
-        try:
-            job = create_job(
-                prompt=lane.prompt,
-                schedule=lane.schedule,
-                name=target,
-                deliver=lane.deliver or "local",
-                skill=lane.skill,
-                skills=lane.skills,
-                agent=lane.agent,
-                tier=lane.tier,
-                model=lane.model,
-                provider=lane.provider,
-                base_url=lane.base_url,
-                enabled_toolsets=lane.enabled_toolsets,
-                workdir=lane.workdir,
-            )
-            created.append(job)
-            existing_names.add(target.lower())
-        except Exception as exc:
-            _log.exception("ensure-lanes: failed to create %s", target)
-            skipped.append(f"{target} (error: {exc})")
-    return {"created": created, "skipped": skipped}
-
-
-@app.put("/api/cron/jobs/{job_id}")
-async def update_cron_job(job_id: str, body: CronJobUpdate):
-    from cron.jobs import update_job
-    job = update_job(job_id, body.updates)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-class _BackfillProgressBody(BaseModel):
-    queued_today: Optional[int] = None
-    eligible_remaining: Optional[int] = None
-    total_estimate: Optional[int] = None
-
-
-@app.get("/api/cron/jobs/{job_id}/backfill")
-async def get_cron_job_backfill(job_id: str):
-    """Return the lane's backfill progress: pending flag + day/eligible counters."""
-    from cron.jobs import get_job
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {
-        "job_id": job_id,
-        "backfill_pending": bool(job.get("backfill_pending")),
-        "backfill_state": job.get("backfill_state"),
-    }
-
-
-@app.post("/api/cron/jobs/{job_id}/backfill/progress")
-async def post_cron_job_backfill_progress(job_id: str, body: _BackfillProgressBody):
-    """Lane skill calls this at end of each backfill run to record progress.
-
-    Increments day, records queued_today + eligible_remaining + total_estimate.
-    When eligible_remaining hits 0, the job's ``backfill_pending`` is cleared
-    and subsequent runs use the incremental window.
-    """
-    from cron.jobs import update_backfill_state
-    job = update_backfill_state(
-        job_id,
-        queued_today=body.queued_today,
-        eligible_remaining=body.eligible_remaining,
-        total_estimate=body.total_estimate,
-    )
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {
-        "job_id": job_id,
-        "backfill_pending": bool(job.get("backfill_pending")),
-        "backfill_state": job.get("backfill_state"),
-    }
-
-
-@app.post("/api/cron/jobs/{job_id}/pause")
-async def pause_cron_job(job_id: str):
-    from cron.jobs import pause_job
-    job = pause_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-@app.post("/api/cron/jobs/{job_id}/resume")
-async def resume_cron_job(job_id: str):
-    from cron.jobs import resume_job
-    job = resume_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-@app.post("/api/cron/jobs/{job_id}/trigger")
-async def trigger_cron_job(job_id: str):
-    from cron.jobs import trigger_job
-    job = trigger_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-@app.delete("/api/cron/jobs/{job_id}")
-async def delete_cron_job(job_id: str):
-    from cron.jobs import remove_job
-    if not remove_job(job_id):
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"ok": True}
-
-
-# ---------------------------------------------------------------------------
-# Real-estate source connectors and integration settings
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/source-connectors")
-async def get_source_connectors():
-    try:
-        from elevate_cli.source_connectors import build_source_connectors_response
-
-        return build_source_connectors_response()
-    except Exception as exc:
-        _log.exception("GET /api/source-connectors failed")
-        raise HTTPException(status_code=500, detail=f"Source connectors failed: {exc}")
-
-
-@app.get("/api/source-connectors/{source_id}/records")
-async def get_source_connector_records(source_id: str, limit: int = 12):
-    try:
-        from elevate_cli.source_connectors import build_source_records_response
-
-        return build_source_records_response(source_id, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        _log.exception("GET /api/source-connectors/%s/records failed", source_id)
-        raise HTTPException(status_code=500, detail=f"Source records failed: {exc}")
-
-
-@app.get("/api/source-inbox")
-async def get_source_inbox(limit: int = 16):
-    try:
-        from elevate_cli.source_connectors import build_source_inbox_response
-        from elevate_cli.data import db_source_inbox_response, shadow_read
-
-        # Sprint 2: db_fn is wired. Production stays on legacy until
-        # ELEVATE_DATA_PRIMARY=db flips after a clean parity window.
-        return shadow_read(
-            endpoint="GET /api/source-inbox",
-            request_args={"limit": limit},
-            jsonl_fn=lambda: build_source_inbox_response(limit=limit),
-            db_fn=lambda: db_source_inbox_response(limit=limit),
-        )
-    except Exception as exc:
-        _log.exception("GET /api/source-inbox failed")
-        raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")
-
-
-@app.get("/api/source-inbox/thread/{source_id}/{thread_id}")
-async def get_source_inbox_thread(source_id: str, thread_id: str, limit: int = 200):
-    try:
-        from elevate_cli.source_connectors import build_thread_context_response
-        from elevate_cli.data import db_thread_context_response, shadow_read
-
-        return shadow_read(
-            endpoint="GET /api/source-inbox/thread",
-            request_args={"sourceId": source_id, "threadId": thread_id, "limit": limit},
-            jsonl_fn=lambda: build_thread_context_response(source_id, thread_id, limit=limit),
-            db_fn=lambda: db_thread_context_response(source_id, thread_id, limit=limit),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        _log.exception("GET /api/source-inbox/thread/%s/%s failed", source_id, thread_id)
-        raise HTTPException(status_code=500, detail=f"Thread context failed: {exc}")
-
-
-@app.post("/api/source-inbox/thread")
-async def update_source_inbox_thread(body: SourceInboxThreadAction):
-    try:
-        from elevate_cli.source_connectors import update_source_thread_state
-
-        return update_source_thread_state(body.sourceId, body.threadId, body.action)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/source-inbox/thread failed")
-        raise HTTPException(status_code=500, detail=f"Source inbox update failed: {exc}")
-
-
-@app.post("/api/source-inbox/draft")
-async def update_source_inbox_draft(body: SourceInboxDraftAction):
-    try:
-        from elevate_cli.source_connectors import update_source_task_state
-
-        return update_source_task_state(
-            body.sourceId,
-            body.taskId,
-            body.action,
-            draft_text=body.draftText,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/source-inbox/draft failed")
-        raise HTTPException(status_code=500, detail=f"Source draft update failed: {exc}")
-
-
-@app.get("/api/source-inbox/draft/{source_id}/{thread_id}/{task_id}/send-status")
-async def get_source_inbox_draft_send_status(source_id: str, thread_id: str, task_id: str):
-    try:
-        from elevate_cli import sender
-
-        status = sender.status_for_task(source_id, thread_id, task_id)
-        if status is None:
-            return {"queued": False, "status": None}
-        return {"queued": True, **status}
-    except Exception as exc:
-        _log.exception("GET /api/source-inbox/draft/.../send-status failed")
-        raise HTTPException(status_code=500, detail=f"Send status lookup failed: {exc}")
-
-
-@app.post("/api/sender/tick")
-async def post_sender_tick(batch: int = 10):
-    """Manual sender tick — useful for tests/admin. Cron calls this on schedule."""
-    try:
-        from elevate_cli import sender
-
-        return sender.tick(batch=max(1, min(100, batch)))
-    except Exception as exc:
-        _log.exception("POST /api/sender/tick failed")
-        raise HTTPException(status_code=500, detail=f"Sender tick failed: {exc}")
-
-
-@app.get("/api/sender/stats")
-async def get_sender_stats():
-    try:
-        from elevate_cli import outreach_db
-
-        return {"queue": outreach_db.send_queue_stats()}
-    except Exception as exc:
-        _log.exception("GET /api/sender/stats failed")
-        raise HTTPException(status_code=500, detail=f"Sender stats failed: {exc}")
-
+app.include_router(create_source_connectors_router(log=_log))
 
 # ---------------------------------------------------------------------------
 # Sprint 3: lifecycle UX (classify, park, active leads, admin contacts,
@@ -2970,6 +2780,26 @@ class _DealCreateBody(BaseModel):
     loftyContactId: Optional[str] = None
     listingAddress: Optional[str] = None
     fields: Optional[Dict[str, Any]] = None
+    dispatchInitialStage: bool = True
+    suppressInitialDispatch: bool = False
+
+
+class _ProfilePromotionBody(BaseModel):
+    profileId: str
+    side: str
+    displayName: Optional[str] = None
+    primaryContactId: Optional[str] = None
+    listingAddress: Optional[str] = None
+    workflow: Optional[str] = None
+    # Optional package selectors. If omitted, the configured deal-flow defaults are used.
+    province: Optional[str] = None
+    board: Optional[str] = None
+    market: Optional[str] = None
+    currentStage: int = 0
+    profileContext: Dict[str, Any] = Field(default_factory=dict)
+    verifiers: List[Dict[str, Any]] = Field(default_factory=list)
+    fields: Dict[str, Any] = Field(default_factory=dict)
+    dispatchInitialStage: bool = True
 
 
 class _AdminJurisdictionBody(BaseModel):
@@ -2980,8 +2810,22 @@ class _AdminJurisdictionBody(BaseModel):
     package_key: Optional[str] = None
 
 
+class _AdminSetupItemBody(BaseModel):
+    key: str
+    status: str = "missing"
+    provider: Optional[str] = None
+    value: Any = None
+    notes: Optional[str] = None
+
+
+class _AdminSetupUpdateBody(BaseModel):
+    profile: Optional[Dict[str, Any]] = None
+    items: List[_AdminSetupItemBody] = []
+
+
 class _DealMoveBody(BaseModel):
     toStage: int
+    force: bool = False
 
 
 class _DealToggleBody(BaseModel):
@@ -3044,6 +2888,8 @@ class _AdminTaskRunBody(BaseModel):
 
 class _ProvinceGuideImportBody(BaseModel):
     root: Optional[str] = None
+    province: Optional[str] = None
+    pruneOtherProvinces: bool = False
 
 
 class _ActionRunApproveBody(BaseModel):
@@ -3092,13 +2938,35 @@ def _clean_admin_jurisdiction_value(value: Any, default: str = "") -> str:
 
 
 def _admin_jurisdiction_config() -> Dict[str, str]:
-    """Return the configured Admin Hub deal-flow package defaults."""
+    """Return Admin Hub deal-flow defaults.
+
+    Product onboarding is the canonical source after a profile exists; config is
+    only the fallback/override layer for package keys and fresh installs.
+    """
     from elevate_cli.admin_deal_flow import package_key_from_jurisdiction
 
     real_estate = (load_config().get("real_estate") or {})
-    country = _clean_admin_jurisdiction_value(real_estate.get("country"), "CA").upper()
-    province = _clean_admin_jurisdiction_value(real_estate.get("province"), "").upper()
-    market = _clean_admin_jurisdiction_value(real_estate.get("market"), "")
+    setup_profile: Dict[str, Any] = {}
+    try:
+        from elevate_cli.data import connect, get_admin_setup
+
+        with connect() as conn:
+            setup_profile = (get_admin_setup(conn).get("profile") or {})
+    except Exception:
+        setup_profile = {}
+
+    country = _clean_admin_jurisdiction_value(
+        setup_profile.get("country") or real_estate.get("country"),
+        "CA",
+    ).upper()
+    province = _clean_admin_jurisdiction_value(
+        setup_profile.get("province") or real_estate.get("province"),
+        "",
+    ).upper()
+    market = _clean_admin_jurisdiction_value(
+        setup_profile.get("market") or real_estate.get("market"),
+        "",
+    )
     package_key = package_key_from_jurisdiction(
         country=country,
         province=province,
@@ -3110,6 +2978,43 @@ def _admin_jurisdiction_config() -> Dict[str, str]:
         "market": market,
         "packageKey": package_key,
     }
+
+
+def _require_admin_setup_ready_for_launch() -> None:
+    """Block Admin launch/mutation endpoints until the setup gate is complete."""
+    from elevate_cli.data import connect, get_admin_setup
+
+    with connect() as conn:
+        setup = get_admin_setup(conn)
+    if setup.get("complete"):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": "Admin setup must be completed before starting admin work.",
+            "setup": setup,
+        },
+    )
+
+
+def _admin_setup_runtime_env_values() -> Dict[str, str]:
+    env_values: Dict[str, str] = {
+        str(key): str(value)
+        for key, value in load_env().items()
+        if value is not None
+    }
+    for key, value in os.environ.items():
+        if value:
+            env_values[key] = value
+    return env_values
+
+
+app.include_router(
+    create_agent_hub_router(
+        require_admin_setup_ready_for_launch=_require_admin_setup_ready_for_launch,
+        log=_log,
+    )
+)
 
 
 @app.post("/api/contacts/{contact_id}/classify")
@@ -3361,6 +3266,18 @@ async def put_admin_jurisdiction(body: _AdminJurisdictionBody):
         )
         config["real_estate"] = real_estate
         save_config(config)
+        try:
+            from elevate_cli.data import connect, update_admin_setup
+
+            with connect() as conn:
+                update_admin_setup(
+                    conn,
+                    profile={"country": country, "province": province, "market": market},
+                    actor="admin:jurisdiction",
+                )
+        except Exception:
+            _log.exception("failed to sync Admin setup jurisdiction profile")
+            raise
         return _admin_jurisdiction_config()
     except HTTPException:
         raise
@@ -3371,15 +3288,152 @@ async def put_admin_jurisdiction(body: _AdminJurisdictionBody):
         raise HTTPException(status_code=500, detail=f"Update jurisdiction failed: {exc}")
 
 
+@app.get("/api/admin/setup")
+async def get_admin_setup_endpoint():
+    """Return the Admin first-run readiness profile."""
+    try:
+        from elevate_cli.data import connect, get_admin_setup
+
+        with connect() as conn:
+            return get_admin_setup(conn)
+    except Exception as exc:
+        _log.exception("GET /api/admin/setup failed")
+        raise HTTPException(status_code=500, detail=f"Admin setup failed: {exc}")
+
+
+@app.put("/api/admin/setup")
+async def put_admin_setup_endpoint(body: _AdminSetupUpdateBody):
+    """Update Admin setup profile/items while the launch gate is open."""
+    try:
+        from elevate_cli.data import connect, update_admin_setup
+
+        with connect() as conn:
+            setup = update_admin_setup(
+                conn,
+                profile=body.profile,
+                items=[item.dict() for item in body.items],
+                actor=_WEB_ACTOR,
+            )
+        if body.profile and any(key in body.profile for key in ("country", "province", "market", "packageKey", "package_key")):
+            from elevate_cli.admin_deal_flow import package_key_from_jurisdiction
+
+            config = load_config()
+            real_estate = dict(config.get("real_estate") or {})
+            country = _clean_admin_jurisdiction_value(body.profile.get("country"), real_estate.get("country") or "CA").upper()
+            province = _clean_admin_jurisdiction_value(body.profile.get("province"), real_estate.get("province") or "").upper()
+            market = _clean_admin_jurisdiction_value(body.profile.get("market"), real_estate.get("market") or "")
+            package_key = package_key_from_jurisdiction(
+                country=country,
+                province=province,
+                package_key=body.profile.get("packageKey") or body.profile.get("package_key") or real_estate.get("package_key"),
+            )
+            real_estate.update({"country": country, "province": province, "market": market, "package_key": package_key})
+            config["real_estate"] = real_estate
+            save_config(config)
+        return setup
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/admin/setup failed")
+        raise HTTPException(status_code=500, detail=f"Update admin setup failed: {exc}")
+
+
+@app.post("/api/admin/setup/complete")
+async def post_admin_setup_complete_endpoint():
+    """Mark Admin setup complete after all required readiness items are filled."""
+    try:
+        from elevate_cli.data import complete_admin_setup, connect
+
+        with connect() as conn:
+            return complete_admin_setup(conn, actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/setup/complete failed")
+        raise HTTPException(status_code=500, detail=f"Complete admin setup failed: {exc}")
+
+
+@app.post("/api/admin/setup/verify")
+async def post_admin_setup_verify_endpoint():
+    """Check setup items against local runtime connectors and imported guides."""
+    warnings: List[str] = []
+    try:
+        from elevate_cli.data import (
+            connect,
+            get_admin_setup,
+            import_exp_agent_centre,
+            province_guide_summary,
+            sync_admin_setup_runtime,
+        )
+
+        config = load_config()
+        source_connectors: Dict[str, Any] | None = None
+        composio_accounts: Dict[str, Any] | None = None
+        try:
+            from elevate_cli.source_connectors import build_source_connectors_response
+
+            source_connectors = build_source_connectors_response(config)
+        except Exception as exc:
+            warnings.append(f"Source connector check skipped: {exc}")
+        try:
+            from elevate_cli import composio_client
+
+            composio_accounts = composio_client.list_all_connected_accounts(
+                page_size=100,
+                max_pages=2,
+            )
+            if not composio_accounts.get("ok"):
+                warnings.append(
+                    f"Composio account check skipped: {composio_accounts.get('error') or 'not connected'}"
+                )
+        except Exception as exc:
+            warnings.append(f"Composio account check skipped: {exc}")
+
+        with connect() as conn:
+            setup = get_admin_setup(conn)
+            province = str(setup.get("profile", {}).get("province") or "").strip().upper()
+            province_guide: Dict[str, Any] | None = None
+            try:
+                import_exp_agent_centre(conn)
+                if province:
+                    province_guide = province_guide_summary(conn, province)
+            except Exception as exc:
+                warnings.append(f"Province guide import skipped: {exc}")
+            verified = sync_admin_setup_runtime(
+                conn,
+                env_values=_admin_setup_runtime_env_values(),
+                source_connectors=source_connectors,
+                composio_accounts=composio_accounts,
+                province_guide=province_guide,
+                actor=_WEB_ACTOR,
+            )
+        if warnings:
+            verified["verificationWarnings"] = warnings
+        return verified
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/admin/setup/verify failed")
+        raise HTTPException(status_code=500, detail=f"Verify admin setup failed: {exc}")
+
+
 @app.get("/api/admin/province-guides")
 async def get_admin_province_guides(province: Optional[str] = None):
     """Return SQLite-backed province guide coverage/reference material."""
     try:
         from elevate_cli.data import connect, province_coverage, province_guide_summary
+        from elevate_cli.data.province_guides import normalize_province_code
 
         with connect() as conn:
-            if province and province.strip():
-                return province_guide_summary(conn, province.strip().upper())
+            requested_province = normalize_province_code(province) if province and province.strip() else None
+            if requested_province:
+                return province_guide_summary(conn, requested_province)
             return {"items": province_coverage(conn)}
     except HTTPException:
         raise
@@ -3395,10 +3449,18 @@ async def post_admin_province_guides_import(body: Optional[_ProvinceGuideImportB
     """Import local eXp Agent Centre scrape output into SQLite."""
     try:
         from elevate_cli.data import connect, import_exp_agent_centre
+        from elevate_cli.data.province_guides import normalize_province_code
 
         root = body.root.strip() if body and body.root and body.root.strip() else None
+        requested_province = normalize_province_code(body.province) if body and body.province else None
+        prune = body.pruneOtherProvinces if body is not None else False
         with connect() as conn:
-            return import_exp_agent_centre(conn, root=root)
+            return import_exp_agent_centre(
+                conn,
+                root=root,
+                province=requested_province,
+                prune_other_provinces=prune,
+            )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -3449,12 +3511,14 @@ async def get_admin_deals(
 async def post_admin_deal(body: _DealCreateBody):
     """Create one Admin Hub deal card."""
     try:
-        from elevate_cli.data import connect, create_deal
+        _require_admin_setup_ready_for_launch()
+        from elevate_cli.data import connect, create_deal, get_admin_setup
 
         jurisdiction = _admin_jurisdiction_config()
-        province = body.province if body.province is not None else jurisdiction["province"]
-        market = body.market if body.market is not None else jurisdiction["market"]
         with connect() as conn:
+            setup_profile = (get_admin_setup(conn).get("profile") or {})
+            province = body.province if body.province is not None else (jurisdiction["province"] or setup_profile.get("province"))
+            market = body.market if body.market is not None else (jurisdiction["market"] or setup_profile.get("market"))
             return create_deal(
                 conn,
                 title=body.title,
@@ -3468,6 +3532,7 @@ async def post_admin_deal(body: _DealCreateBody):
                 lofty_contact_id=body.loftyContactId,
                 listing_address=body.listingAddress,
                 fields=body.fields,
+                dispatch_initial_stage=body.dispatchInitialStage and not body.suppressInitialDispatch,
             )
     except HTTPException:
         raise
@@ -3482,10 +3547,54 @@ async def post_admin_deal(body: _DealCreateBody):
         raise HTTPException(status_code=500, detail=f"Create deal failed: {exc}")
 
 
+@app.post("/api/admin/profile-promotions")
+async def post_admin_profile_promotion(body: _ProfilePromotionBody):
+    """Create or update an Admin Hub deal from a verified lead profile."""
+    try:
+        _require_admin_setup_ready_for_launch()
+        from elevate_cli.data import connect, get_admin_setup, promote_profile_to_admin_deal
+
+        jurisdiction = _admin_jurisdiction_config()
+        with connect() as conn:
+            setup_profile = (get_admin_setup(conn).get("profile") or {})
+            province = body.province if body.province is not None else (jurisdiction["province"] or setup_profile.get("province"))
+            market = body.market if body.market is not None else (jurisdiction["market"] or setup_profile.get("market"))
+            return promote_profile_to_admin_deal(
+                conn,
+                profile_id=body.profileId,
+                side=body.side,
+                actor=_WEB_ACTOR,
+                province=(province or "").strip().upper(),
+                board=(body.board or "").strip() or None,
+                market=(market or "").strip() or None,
+                current_stage=body.currentStage,
+                display_name=body.displayName,
+                primary_contact_id=body.primaryContactId,
+                listing_address=body.listingAddress,
+                workflow=body.workflow,
+                profile_context=body.profileContext,
+                verifiers=body.verifiers,
+                fields=body.fields,
+                dispatch_initial_stage=body.dispatchInitialStage,
+            )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/admin/profile-promotions failed")
+        raise HTTPException(status_code=500, detail=f"Promote profile failed: {exc}")
+
+
 @app.post("/api/admin/deals/{deal_id}/move")
 async def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
     """Move one Admin Hub deal card to another stage."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import connect, move_deal_stage
 
         with connect() as conn:
@@ -3494,9 +3603,18 @@ async def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
                 deal_id,
                 to_stage=body.toStage,
                 actor=_WEB_ACTOR,
+                force=body.force,
             )
     except HTTPException:
         raise
+    except DealPhaseGateBlocked as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "gate": exc.gate,
+            },
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except LookupError as exc:
@@ -3512,6 +3630,7 @@ async def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
 async def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
     """Update one checklist, toggle, or enum field on an Admin Hub deal."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import connect, set_deal_toggle
 
         with connect() as conn:
@@ -3565,6 +3684,7 @@ async def get_deal_source_context(deal_id: str):
 async def post_deal_fields(deal_id: str, body: _DealFieldsBody):
     """Patch durable date/money/property fields on the deal source of truth."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import connect, set_deal_fields
 
         with connect() as conn:
@@ -3586,6 +3706,7 @@ async def post_deal_fields(deal_id: str, body: _DealFieldsBody):
 async def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
     """Advance a deal to the next package phase when its gate is clear."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import connect, get_deal_context, move_deal_stage
 
         with connect() as conn:
@@ -3602,7 +3723,14 @@ async def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
                         "gate": gate,
                     },
                 )
-            move_deal_stage(conn, deal_id, to_stage=int(next_stage), actor=_WEB_ACTOR)
+            move_deal_stage(
+                conn,
+                deal_id,
+                to_stage=int(next_stage),
+                actor=_WEB_ACTOR,
+                force=body.force,
+                gate_checked=not body.force,
+            )
             return get_deal_context(conn, deal_id)
     except HTTPException:
         raise
@@ -3621,6 +3749,7 @@ async def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
 async def post_deal_contact(deal_id: str, body: _DealContactBody):
     """Attach a co-contact role (lawyer/lender/inspector/etc.) to a deal."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import add_deal_contact, connect
 
         with connect() as conn:
@@ -3649,6 +3778,7 @@ async def post_deal_contact(deal_id: str, body: _DealContactBody):
 async def post_deal_attachment(deal_id: str, body: _DealAttachmentBody):
     """Attach an artifact/file to the deal source of truth."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import add_deal_attachment, connect
 
         with connect() as conn:
@@ -3783,6 +3913,20 @@ async def post_admin_action(body: _AdminActionCreateBody):
         raise HTTPException(status_code=500, detail=f"Create action failed: {exc}")
 
 
+@app.post("/api/admin/actions/defaults")
+async def post_admin_actions_defaults():
+    """Idempotently seed the default listing phase action registry."""
+    try:
+        _require_admin_setup_ready_for_launch()
+        from elevate_cli.data import connect, ensure_default_admin_actions
+
+        with connect() as conn:
+            return ensure_default_admin_actions(conn)
+    except Exception as exc:
+        _log.exception("POST /api/admin/actions/defaults failed")
+        raise HTTPException(status_code=500, detail=f"Seed default admin actions failed: {exc}")
+
+
 @app.patch("/api/admin/actions/{action_id}")
 async def patch_admin_action(action_id: str, body: _AdminActionUpdateBody):
     """Update an existing registry row, bumping its version."""
@@ -3871,6 +4015,7 @@ async def get_admin_action_runs(
 async def post_admin_action_runs_drain(limit: int = 50):
     """Drain queued Admin action runs into cron."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import connect, drain_queued_action_runs
 
         with connect() as conn:
@@ -3891,6 +4036,7 @@ async def post_admin_action_runs_drain(limit: int = 50):
 async def post_admin_action_run_approve(run_id: str, body: _ActionRunApproveBody):
     """Approve or cancel a human-gated Admin action run."""
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import approve_action_run, connect
 
         with connect() as conn:
@@ -3945,6 +4091,7 @@ async def post_admin_task_run(body: _AdminTaskRunBody):
     if not body.skill or not body.skill.strip():
         raise HTTPException(status_code=400, detail="skill is required")
     try:
+        _require_admin_setup_ready_for_launch()
         from elevate_cli.data import connect, queue_action_run
 
         with connect() as conn:

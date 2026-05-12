@@ -17,7 +17,7 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration for Elevate. Uses
 | Source | Bundled (installed by default) |
 | Path | `skills/productivity/google-workspace` |
 | Version | `1.0.0` |
-| Author | Ctrl Strategies |
+| Author | Elevation Real Estate HQ |
 | License | MIT |
 | Tags | `Google`, `Gmail`, `Calendar`, `Drive`, `Sheets`, `Docs`, `Contacts`, `Email`, `OAuth` |
 | Related skills | [`himalaya`](/docs/user-guide/skills/bundled/email/email-himalaya) |

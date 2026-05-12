@@ -148,9 +148,18 @@ class TestApprovalHeartbeat:
         thread = threading.Thread(target=_run_check, daemon=True)
         thread.start()
 
-        # Resolve almost immediately — the wait loop should return within
-        # its current 1s poll slice.
-        time.sleep(0.1)
+        # Wait until the security scan has actually queued the blocking
+        # approval. Fixed sleeps race under xdist/full-suite load and can
+        # resolve zero pending entries before the worker starts waiting.
+        from tools.approval import has_blocking_approval
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if has_blocking_approval(self.SESSION_KEY):
+                break
+            time.sleep(0.05)
+        assert has_blocking_approval(self.SESSION_KEY)
+
         resolve_gateway_approval(self.SESSION_KEY, "once")
         thread.join(timeout=5)
         elapsed = time.monotonic() - start_time
@@ -191,7 +200,19 @@ class TestApprovalHeartbeat:
         thread = threading.Thread(target=_run_check, daemon=True)
         thread.start()
 
-        time.sleep(0.2)
+        # The security scan can take longer under full-suite load, so wait
+        # until the gateway approval entry is actually queued before resolving
+        # it. A fixed sleep can race and resolve zero entries, leaving the
+        # worker blocked until the approval timeout.
+        from tools.approval import has_blocking_approval
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if has_blocking_approval(self.SESSION_KEY):
+                break
+            time.sleep(0.05)
+        assert has_blocking_approval(self.SESSION_KEY)
+
         resolve_gateway_approval(self.SESSION_KEY, "once")
         thread.join(timeout=5)
 

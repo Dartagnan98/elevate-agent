@@ -1,6 +1,6 @@
 """Tests for the webhook adapter's ``deliver_only`` route mode.
 
-``deliver_only`` lets external services (Supabase webhooks, monitoring
+``deliver_only`` lets external services (database webhooks, monitoring
 alerts, background jobs, other agents) push plain-text notifications to
 a user's chat via the webhook adapter WITHOUT invoking the agent.  The
 rendered prompt template becomes the literal message body.

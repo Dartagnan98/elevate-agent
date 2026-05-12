@@ -76,6 +76,17 @@ _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {
     8: 9,
 }
 _WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
+_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7, 8}
+_CHECKLIST_TRUE_VALUES = {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
+_CHECKLIST_FALSE_VALUES = {"0", "false", "no", "n", "unchecked", "todo", "incomplete", "not done", ""}
+
+
+class DealPhaseGateBlocked(ValueError):
+    """Raised when a stage move would bypass the source-of-truth phase gate."""
+
+    def __init__(self, message: str, *, gate: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.gate = dict(gate or {})
 
 
 def _decode_json(value: str | None) -> Any:
@@ -241,10 +252,13 @@ def _split_fields(
     for field, value in (fields or {}).items():
         if not field or not isinstance(field, str):
             raise ValueError("field names must be non-empty strings")
-        if field in _TOGGLE_FIELDS:
-            named[field] = _sql_toggle_value(value)
-        elif field in _ENUM_FIELDS:
-            named[field] = None if value is None else str(value)
+        normalized_field = _API_TO_DB_DETAIL_FIELDS.get(field, field)
+        if normalized_field in _TOGGLE_FIELDS:
+            named[normalized_field] = _sql_toggle_value(value)
+        elif normalized_field in _ENUM_FIELDS:
+            named[normalized_field] = None if value is None else str(value)
+        elif normalized_field in _DEAL_DETAIL_FIELDS:
+            named[normalized_field] = _coerce_detail_value(normalized_field, value)
         else:
             extra[field] = value
     return named, extra
@@ -354,6 +368,7 @@ def create_deal(
     source_label: str | None = None,
     source_synced_at: str | None = None,
     fields: Mapping[str, Any] | None = None,
+    dispatch_initial_stage: bool = True,
 ) -> dict[str, Any]:
     """Insert a deal, apply initial field values, and append a created event."""
     if not title or not title.strip():
@@ -421,7 +436,7 @@ def create_deal(
         f"INSERT INTO deals({', '.join(columns)}) VALUES ({placeholders})",
         values,
     )
-    _insert_deal_event(
+    event = _insert_deal_event(
         conn,
         deal_id=did,
         kind="created",
@@ -435,7 +450,357 @@ def create_deal(
         },
         created_at=now,
     )
+    if dispatch_initial_stage:
+        _dispatch_safely(
+            conn,
+            deal_id=did,
+            deal_event_id=event["id"],
+            actor=actor,
+            triggers=(("stage_entry", {"to_stage": current_stage}),),
+        )
     return get_deal(conn, did)  # type: ignore[return-value]
+
+
+def _compact_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _unique_strings(values: Sequence[Any] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = _compact_string(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _profile_context_list(context: Mapping[str, Any], key: str) -> list[str]:
+    value = context.get(key)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return _unique_strings(value)
+    return []
+
+
+def _sequence_or_empty(value: Any) -> Sequence[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return value
+    return []
+
+
+def _canonical_phone_key(value: Any) -> str | None:
+    text = _compact_string(value)
+    if not text:
+        return None
+    digits = re.sub(r"\D+", "", text)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) < 7:
+        return None
+    return f"phone:{digits}"
+
+
+def _canonical_email_key(value: Any) -> str | None:
+    text = _compact_string(value)
+    if not text or "@" not in text:
+        return None
+    return f"email:{text.lower()}"
+
+
+def _canonical_profile_verifier_keys(
+    *,
+    verifiers: Sequence[Mapping[str, Any]] | None = None,
+    phones: Sequence[Any] | None = None,
+    emails: Sequence[Any] | None = None,
+) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(key: str | None) -> None:
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    for verifier in verifiers or []:
+        if not isinstance(verifier, Mapping):
+            continue
+        kind = str(verifier.get("kind") or verifier.get("type") or "").strip().lower()
+        value = verifier.get("value")
+        raw_key = _compact_string(verifier.get("key"))
+        if kind == "email" or (raw_key or "").startswith("email:"):
+            add(_canonical_email_key(value) or (raw_key.lower() if raw_key else None))
+        elif kind in {"phone", "tel", "telephone", "sms"} or (raw_key or "").startswith("phone:"):
+            add(_canonical_phone_key(value) or (raw_key.lower() if raw_key else None))
+    for phone in phones or []:
+        add(_canonical_phone_key(phone))
+    for email in emails or []:
+        add(_canonical_email_key(email))
+    return keys
+
+
+def _sanitize_profile_verifiers(verifiers: Sequence[Mapping[str, Any]] | None) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for verifier in verifiers or []:
+        if not isinstance(verifier, Mapping):
+            continue
+        kind = _compact_string(verifier.get("kind") or verifier.get("type"))
+        value = _compact_string(verifier.get("value"))
+        key = _compact_string(verifier.get("key"))
+        if not kind or not value:
+            continue
+        out.append({"kind": kind, "value": value, "key": key or f"{kind}:{value}"})
+    return out
+
+
+def _existing_contact_id(conn: sqlite3.Connection, contact_id: str | None) -> str | None:
+    contact_id = _compact_string(contact_id)
+    if not contact_id:
+        return None
+    row = conn.execute("SELECT id FROM contacts WHERE id=?", (contact_id,)).fetchone()
+    return contact_id if row else None
+
+
+def _profile_deal_match_keys(deal: Mapping[str, Any]) -> set[str]:
+    extra = deal.get("extraToggles") if isinstance(deal.get("extraToggles"), Mapping) else {}
+    keys: set[str] = set()
+    for key in _unique_strings(extra.get("profileVerifierKeys") if isinstance(extra, Mapping) else []):
+        keys.add(key.lower())
+    if isinstance(extra, Mapping):
+        keys.update(
+            _canonical_profile_verifier_keys(
+                verifiers=_sequence_or_empty(extra.get("profileVerifiers")),
+                phones=_sequence_or_empty(extra.get("profilePhones")),
+                emails=_sequence_or_empty(extra.get("profileEmails")),
+            )
+        )
+    return keys
+
+
+def _find_profile_admin_deal(
+    conn: sqlite3.Connection,
+    *,
+    profile_id: str,
+    side: str,
+    primary_contact_id: str | None,
+    verifier_keys: Sequence[str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    candidates = list_deals(conn, side=side, status="active", limit=500)
+    for deal in candidates:
+        extra = deal.get("extraToggles") if isinstance(deal.get("extraToggles"), Mapping) else {}
+        source_profile_ids = set(_unique_strings(extra.get("sourceProfileIds") if isinstance(extra, Mapping) else []))
+        source_profile_id = _compact_string(extra.get("sourceProfileId") if isinstance(extra, Mapping) else None)
+        if source_profile_id:
+            source_profile_ids.add(source_profile_id)
+        if profile_id in source_profile_ids:
+            return deal, "source_profile"
+
+    if primary_contact_id:
+        for deal in candidates:
+            if deal.get("primaryContactId") == primary_contact_id:
+                return deal, "primary_contact"
+
+    wanted = {key.lower() for key in verifier_keys}
+    if wanted:
+        for deal in candidates:
+            if wanted.intersection(_profile_deal_match_keys(deal)):
+                return deal, "verifier"
+
+    return None, None
+
+
+def _profile_promotion_extra_fields(
+    *,
+    profile_id: str,
+    side: str,
+    workflow: str | None,
+    display_name: str | None,
+    profile_context: Mapping[str, Any],
+    verifiers: Sequence[Mapping[str, Any]],
+    verifier_keys: Sequence[str],
+    phones: Sequence[str],
+    emails: Sequence[str],
+    existing_extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    contact_ids = _profile_context_list(profile_context, "contactIds")
+    conversation_ids = _profile_context_list(profile_context, "conversationIds")
+    thread_ids = _profile_context_list(profile_context, "threadIds")
+    source_ids = _profile_context_list(profile_context, "sourceIds")
+    prior_profile_ids: list[Any] = []
+    existing_source_profile_ids = (existing_extra or {}).get("sourceProfileIds")
+    if isinstance(existing_source_profile_ids, Sequence) and not isinstance(
+        existing_source_profile_ids,
+        (str, bytes, bytearray),
+    ):
+        prior_profile_ids.extend(existing_source_profile_ids)
+    prior_profile_ids.extend([(existing_extra or {}).get("sourceProfileId"), profile_id])
+    source_profile_ids = _unique_strings(prior_profile_ids)
+    promoted_at = now_iso()
+    fields: dict[str, Any] = {
+        "sourceProfileId": profile_id,
+        "sourceProfileIds": source_profile_ids,
+        "sourceAdminSide": side,
+        "workflow": workflow,
+        "profileDisplayName": display_name,
+        "profileContactIds": contact_ids,
+        "profileConversationIds": conversation_ids,
+        "profileThreadIds": thread_ids,
+        "profileSourceIds": source_ids,
+        "profileSources": _profile_context_list(profile_context, "sources"),
+        "profileChannels": _profile_context_list(profile_context, "channels"),
+        "profilePhones": list(phones),
+        "profileEmails": list(emails),
+        "profileVerifiers": _sanitize_profile_verifiers(verifiers),
+        "profileVerifierKeys": list(verifier_keys),
+        "profileLatestText": _compact_string(profile_context.get("latestText")),
+        "profileLatestAt": _compact_string(profile_context.get("latestAt")),
+        "profileHeatScore": profile_context.get("heatScore"),
+        "profileHeatLabel": _compact_string(profile_context.get("heatLabel")),
+        "profileTags": _profile_context_list(profile_context, "tags"),
+        "profilePromotedAt": promoted_at,
+        "profileLastSyncedAt": promoted_at,
+    }
+    return {key: value for key, value in fields.items() if value not in (None, "", [])}
+
+
+def promote_profile_to_admin_deal(
+    conn: sqlite3.Connection,
+    *,
+    profile_id: str,
+    side: str,
+    actor: str,
+    province: str = "",
+    board: str | None = None,
+    market: str | None = None,
+    current_stage: int = 0,
+    display_name: str | None = None,
+    primary_contact_id: str | None = None,
+    listing_address: str | None = None,
+    workflow: str | None = None,
+    profile_context: Mapping[str, Any] | None = None,
+    verifiers: Sequence[Mapping[str, Any]] | None = None,
+    fields: Mapping[str, Any] | None = None,
+    dispatch_initial_stage: bool = True,
+) -> dict[str, Any]:
+    """Create or update an Admin deal from a verified lead profile.
+
+    Matching is intentionally verifier-first: source profile id, existing
+    contact id, then normalized phone/email keys. That gives the Admin agent a
+    stable path from conversations to deal files without guessing identities.
+    """
+    profile_id = _compact_string(profile_id) or _compact_string((profile_context or {}).get("id")) or ""
+    if not profile_id:
+        raise ValueError("profile_id is required")
+    if side not in _VALID_SIDES:
+        raise ValueError(f"invalid side {side!r}")
+    current_stage = _validate_stage(current_stage)
+    context = dict(profile_context or {})
+    display_name = _compact_string(display_name) or _compact_string(context.get("displayName"))
+    context_contact_ids = _profile_context_list(context, "contactIds")
+    primary_contact_id = _compact_string(primary_contact_id) or (context_contact_ids[0] if context_contact_ids else None)
+    if primary_contact_id and not context_contact_ids:
+        context["contactIds"] = [primary_contact_id]
+    valid_primary_contact_id = _existing_contact_id(conn, primary_contact_id)
+    phones = _unique_strings(_sequence_or_empty(context.get("phones")))
+    emails = _unique_strings(_sequence_or_empty(context.get("emails")))
+    sanitized_verifiers = _sanitize_profile_verifiers(verifiers or _sequence_or_empty(context.get("verifiers")))
+    verifier_keys = _canonical_profile_verifier_keys(
+        verifiers=sanitized_verifiers,
+        phones=phones,
+        emails=emails,
+    )
+    if not verifier_keys:
+        raise ValueError("at least one phone or email verifier is required before promoting a profile to Admin")
+
+    existing, match_reason = _find_profile_admin_deal(
+        conn,
+        profile_id=profile_id,
+        side=side,
+        primary_contact_id=valid_primary_contact_id,
+        verifier_keys=verifier_keys,
+    )
+    existing_extra = existing.get("extraToggles") if isinstance((existing or {}).get("extraToggles"), Mapping) else {}
+    promotion_fields = _profile_promotion_extra_fields(
+        profile_id=profile_id,
+        side=side,
+        workflow=_compact_string(workflow) or _compact_string(context.get("workflow")),
+        display_name=display_name,
+        profile_context=context,
+        verifiers=sanitized_verifiers,
+        verifier_keys=verifier_keys,
+        phones=phones,
+        emails=emails,
+        existing_extra=existing_extra,
+    )
+    combined_fields = {**dict(fields or {}), **promotion_fields}
+
+    if existing is None:
+        title_name = display_name or _compact_string(listing_address) or "Lead profile"
+        title = f"{'Seller' if side == 'listing' else 'Buyer'}: {title_name}"
+        deal = create_deal(
+            conn,
+            title=title,
+            side=side,
+            actor=actor,
+            province=province,
+            board=board,
+            market=market,
+            current_stage=current_stage,
+            primary_contact_id=valid_primary_contact_id,
+            listing_address=listing_address,
+            fields=combined_fields,
+            dispatch_initial_stage=dispatch_initial_stage,
+        )
+        return {"action": "created", "matchReason": None, "deal": deal}
+
+    row = conn.execute("SELECT * FROM deals WHERE id=?", (existing["id"],)).fetchone()
+    if row is None:
+        raise LookupError(f"deal {existing['id']!r} not found")
+    named_fields, extra_fields = _split_fields(combined_fields)
+    extra = _decode_json(row["extra_toggles_json"]) or {}
+    if not isinstance(extra, dict):
+        extra = {}
+    old_extra = dict(extra)
+    for key, value in extra_fields.items():
+        extra[key] = _normalize_extra_field_value(value)
+
+    updates: dict[str, Any] = dict(named_fields)
+    if valid_primary_contact_id and not row["primary_contact_id"]:
+        updates["primary_contact_id"] = valid_primary_contact_id
+    listing_address = _compact_string(listing_address)
+    if listing_address and not row["listing_address"]:
+        updates["listing_address"] = listing_address
+    if extra != old_extra:
+        updates["extra_toggles_json"] = _encode_json(extra)
+    if updates:
+        now = now_iso()
+        updates["updated_at"] = now
+        sets = ", ".join(f"{field}=?" for field in updates)
+        conn.execute(
+            f"UPDATE deals SET {sets} WHERE id=?",
+            [*updates.values(), existing["id"]],
+        )
+        _insert_deal_event(
+            conn,
+            deal_id=existing["id"],
+            kind="contact_linked",
+            actor=actor,
+            old_value={"extra": old_extra},
+            new_value={"extra": extra, **{k: v for k, v in updates.items() if k != "updated_at"}},
+            payload={
+                "profileId": profile_id,
+                "side": side,
+                "workflow": promotion_fields.get("workflow"),
+                "matchReason": match_reason,
+                "verifierKeys": verifier_keys,
+            },
+            created_at=now,
+        )
+    return {"action": "updated", "matchReason": match_reason, "deal": get_deal(conn, existing["id"])}
 
 
 def move_deal_stage(
@@ -444,6 +809,8 @@ def move_deal_stage(
     *,
     to_stage: int,
     actor: str,
+    force: bool = False,
+    gate_checked: bool = False,
 ) -> dict[str, Any]:
     """Move a deal to a 0-9 stage and append a stage_transition event."""
     to_stage = _validate_stage(to_stage)
@@ -451,6 +818,13 @@ def move_deal_stage(
     if existing is None:
         raise LookupError(f"deal {deal_id!r} not found")
     from_stage = existing["currentStage"]
+    if from_stage == to_stage:
+        return existing
+    gate_snapshot: dict[str, Any] | None = None
+    if to_stage > from_stage and not force and not gate_checked:
+        gate_snapshot = _resolved_phase_gate(conn, deal_id, expected_stage=int(from_stage or 0))
+        if not gate_snapshot.get("canAdvance") or gate_snapshot.get("nextStage") != to_stage:
+            raise DealPhaseGateBlocked("deal phase gate is blocked", gate=gate_snapshot)
     now = now_iso()
     conn.execute(
         """
@@ -467,7 +841,11 @@ def move_deal_stage(
         actor=actor,
         from_stage=from_stage,
         to_stage=to_stage,
-        payload={"fromStage": from_stage, "toStage": to_stage},
+        payload={
+            "fromStage": from_stage,
+            "toStage": to_stage,
+            **({"force": True, "gate": gate_snapshot} if force else {}),
+        },
         created_at=now,
     )
     _dispatch_safely(
@@ -519,8 +897,8 @@ def set_deal_toggle(
         if not isinstance(extra, dict):
             extra = {}
         old_value = extra.get(field)
-        extra[field] = value
-        new_value = value
+        extra[field] = _normalize_extra_field_value(value)
+        new_value = extra[field]
         conn.execute(
             """
             UPDATE deals
@@ -552,7 +930,9 @@ def set_deal_toggle(
             ),
         ),
     )
-    _maybe_advance_from_workflow_signal(conn, deal_id, field=field, value=new_value, actor=actor)
+    moved = _maybe_advance_from_workflow_signal(conn, deal_id, field=field, value=new_value, actor=actor)
+    if moved is None:
+        _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=int(row["current_stage"] or 0))
     return get_deal(conn, deal_id)  # type: ignore[return-value]
 
 
@@ -572,7 +952,7 @@ def _is_completion_value(value: Any) -> bool:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value == 1
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
+        return value.strip().lower() in _CHECKLIST_TRUE_VALUES
     return False
 
 
@@ -584,15 +964,21 @@ def _maybe_advance_from_workflow_signal(
     value: Any,
     actor: str,
 ) -> dict[str, Any] | None:
-    if field in _WORKFLOW_ACCEPTED_OFFER_FIELDS and _present_signal(value):
-        return _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
+    try:
+        if field in _WORKFLOW_ACCEPTED_OFFER_FIELDS and _present_signal(value):
+            return _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
+    except DealPhaseGateBlocked:
+        return None
     completed_stage = _workflow_stage_complete_stage(field)
     if completed_stage is None or not _is_completion_value(value):
         return None
     next_stage = _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO.get(completed_stage)
     if next_stage is None:
         return None
-    return _move_if_current_stage(conn, deal_id, current_stage=completed_stage, to_stage=next_stage, actor=actor)
+    try:
+        return _move_if_current_stage(conn, deal_id, current_stage=completed_stage, to_stage=next_stage, actor=actor)
+    except DealPhaseGateBlocked:
+        return None
 
 
 def _move_if_current_stage(
@@ -611,12 +997,75 @@ def _move_if_current_stage(
     return move_deal_stage(conn, deal_id, to_stage=to_stage, actor=actor)
 
 
+def _resolved_phase_gate(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    expected_stage: int | None = None,
+) -> dict[str, Any]:
+    try:
+        context = get_deal_context(conn, deal_id)
+    except Exception as exc:
+        return {
+            "stage": expected_stage,
+            "canAdvance": False,
+            "reason": f"phase gate could not be resolved: {exc}",
+        }
+    deal = context.get("deal") or {}
+    current_stage = int(deal.get("currentStage") or 0)
+    gate = dict(((context.get("dealFlow") or {}).get("gate") or {}))
+    if expected_stage is not None and current_stage != expected_stage:
+        gate["canAdvance"] = False
+        gate["reason"] = "deal stage changed before gate evaluation completed"
+    return gate
+
+
+def _maybe_auto_advance_from_gate(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    actor: str,
+    expected_stage: int | None = None,
+) -> dict[str, Any] | None:
+    """Advance once when the resolved source-of-truth phase gate is clear."""
+    try:
+        context = get_deal_context(conn, deal_id)
+    except Exception:
+        return None
+    deal = context.get("deal") or {}
+    current_stage = int(deal.get("currentStage") or 0)
+    if expected_stage is not None and current_stage != expected_stage:
+        return None
+    if current_stage not in _AUTO_ADVANCE_GATE_STAGES:
+        return None
+    gate = ((context.get("dealFlow") or {}).get("gate") or {})
+    if not gate.get("canAdvance"):
+        return None
+    next_stage = gate.get("nextStage")
+    if next_stage is None:
+        return None
+    try:
+        return move_deal_stage(conn, deal_id, to_stage=int(next_stage), actor=actor, gate_checked=True)
+    except Exception:
+        return None
+
+
 def _present_signal(value: Any) -> bool:
     if value is None or value is False:
         return False
     if isinstance(value, str):
         return bool(value.strip())
     return True
+
+
+def _normalize_extra_field_value(value: Any) -> Any:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _CHECKLIST_TRUE_VALUES:
+            return True
+        if lowered in _CHECKLIST_FALSE_VALUES:
+            return False
+    return value
 
 
 def _dispatch_safely(
@@ -735,6 +1184,14 @@ def _normalize_detail_field(field: str) -> str:
     return field
 
 
+def _coerce_detail_value(field: str, value: Any) -> Any:
+    if field in _MONEY_FIELDS or field == "lot_size_sqft":
+        return None if value is None or value == "" else float(value)
+    if field == "year_built":
+        return None if value is None or value == "" else int(value)
+    return None if value is None else str(value)
+
+
 def set_deal_fields(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -756,12 +1213,7 @@ def set_deal_fields(
     for raw_field, value in fields.items():
         field = _normalize_detail_field(raw_field)
         old_values[field] = row[field]
-        if field in _MONEY_FIELDS or field == "lot_size_sqft":
-            updates[field] = None if value is None or value == "" else float(value)
-        elif field == "year_built":
-            updates[field] = None if value is None or value == "" else int(value)
-        else:
-            updates[field] = None if value is None else str(value)
+        updates[field] = _coerce_detail_value(field, value)
     now = now_iso()
     sets = ", ".join([f"{field}=?" for field in updates] + ["updated_at=?"])
     conn.execute(
@@ -779,8 +1231,15 @@ def set_deal_fields(
         payload={"fields": updates},
         created_at=now,
     )
+    stage_before = int(row["current_stage"] or 0)
+    moved = None
     if _present_signal(updates.get("offer_accepted_at")):
-        _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
+        try:
+            moved = _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
+        except DealPhaseGateBlocked:
+            moved = None
+    if moved is None:
+        _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=stage_before)
     return get_deal(conn, deal_id)  # type: ignore[return-value]
 
 
@@ -880,7 +1339,8 @@ def add_deal_attachment(
     source_snapshot_id: str | None = None,
     actor: str = "system",
 ) -> dict[str, Any]:
-    if get_deal(conn, deal_id) is None:
+    deal = get_deal(conn, deal_id)
+    if deal is None:
         raise LookupError(f"deal {deal_id!r} not found")
     if not kind or not kind.strip():
         raise ValueError("attachment kind is required")
@@ -918,6 +1378,7 @@ def add_deal_attachment(
         payload={"kind": kind_clean, "filePath": file_path_clean, "sourceRunId": source_run_id},
         created_at=now,
     )
+    _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=int(deal.get("currentStage") or 0))
     return _row_to_deal_attachment(row)
 
 
@@ -1055,6 +1516,7 @@ def _deal_task_common(
     skill: str | None = None,
     can_run_with_ai: bool = False,
     run_id: str | None = None,
+    handoff_id: str | None = None,
     field: str | None = None,
     kind: str | None = None,
 ) -> dict[str, Any]:
@@ -1074,6 +1536,7 @@ def _deal_task_common(
         "skill": skill,
         "canRunWithAi": bool(can_run_with_ai),
         "runId": run_id,
+        "handoffId": handoff_id,
         "field": field,
         "kind": kind,
         "createdAt": deal.get("createdAt"),
@@ -1137,6 +1600,34 @@ def list_deal_tasks(
                     skill=str(skill) if skill else None,
                     can_run_with_ai=bool(skill),
                     run_id=str(run.get("id")),
+                )
+            )
+
+        try:
+            from elevate_cli.data.agent_handoffs import list_agent_handoffs
+
+            handoffs = list_agent_handoffs(conn, deal_id=str(deal["id"]), limit=50)
+        except Exception:
+            handoffs = []
+        for handoff in handoffs:
+            handoff_status = str(handoff.get("status") or "queued")
+            if status == "open" and handoff_status in {"completed", "cancelled"}:
+                continue
+            if status == "done" and handoff_status not in {"completed", "cancelled"}:
+                continue
+            tasks.append(
+                _deal_task_common(
+                    deal,
+                    flow,
+                    task_id=f"handoff:{handoff.get('id')}",
+                    task_type="agent_handoff",
+                    source="agent_handoff",
+                    title=str(handoff.get("title") or "Agent handoff"),
+                    description=str(handoff.get("task") or ""),
+                    status=handoff_status,
+                    skill=None,
+                    can_run_with_ai=False,
+                    handoff_id=str(handoff.get("id")),
                 )
             )
 
@@ -1255,19 +1746,76 @@ _ARTIFACT_CHECKLIST_HINTS = {
     "inspection_report": "workflow_calendar_dates_added",
     "strata_docs": "strata-docs-review",
 }
+_PROTECTED_SKILL_CHECKLIST_KEYS = {
+    "workflow_listing_description_approved",
+    "workflow_jeff_photo_review",
+}
+
+
+def _is_skill_actor(actor: str) -> bool:
+    return str(actor or "").startswith("skill")
+
+
+def _is_protected_skill_checklist_key(key: str) -> bool:
+    return bool(_workflow_stage_complete_stage(key) is not None or key in _PROTECTED_SKILL_CHECKLIST_KEYS)
+
+
+def _filter_protected_skill_checklist_updates(
+    updates: Mapping[str, bool],
+    *,
+    actor: str,
+) -> tuple[dict[str, bool], list[str]]:
+    if not _is_skill_actor(actor):
+        return dict(updates), []
+    allowed: dict[str, bool] = {}
+    skipped: list[str] = []
+    for key, value in updates.items():
+        if value is True and _is_protected_skill_checklist_key(str(key)):
+            skipped.append(str(key))
+            continue
+        allowed[str(key)] = bool(value)
+    return allowed, skipped
+
+
+def _coerce_checklist_bool(value: Any, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == 1
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _CHECKLIST_TRUE_VALUES:
+            return True
+        if lowered in _CHECKLIST_FALSE_VALUES:
+            return False
+    return bool(value)
 
 
 def _explicit_checklist_updates(items: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None) -> dict[str, bool]:
     if not items:
         return {}
     if isinstance(items, Mapping):
-        return {str(k): bool(v) for k, v in items.items()}
+        return {str(k): _coerce_checklist_bool(v) for k, v in items.items()}
     updates: dict[str, bool] = {}
     for item in items:
         key = item.get("id") or item.get("itemId") or item.get("field")
         if key:
-            updates[str(key)] = bool(item.get("completed", True))
+            updates[str(key)] = _coerce_checklist_bool(item.get("completed"), default=True)
     return updates
+
+
+def _run_payload_stage(payload: Mapping[str, Any]) -> int | None:
+    for key in ("toStage", "currentStage"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return _validate_stage(int(value))
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def record_run_result(
@@ -1314,6 +1862,7 @@ def record_run_result(
         "artifacts": [dict(item) for item in (artifacts or [])],
         "nextTasks": [dict(item) for item in (next_tasks or [])],
         "checklistUpdates": checklist_updates,
+        "protectedChecklistSkipped": [],
         "humanPrompt": dict(human_prompt) if human_prompt else None,
         "error": error,
         "idempotencyKey": idempotency_key,
@@ -1340,6 +1889,9 @@ def record_run_result(
             hinted = _ARTIFACT_CHECKLIST_HINTS.get(str(artifact.get("kind") or ""))
             if hinted:
                 updates.setdefault(hinted, True)
+        updates, protected_skipped = _filter_protected_skill_checklist_updates(updates, actor=actor)
+        result_payload["protectedChecklistSkipped"] = protected_skipped
+        payload["result"] = result_payload
         for field, value in updates.items():
             set_deal_toggle(conn, deal_id, field=field, value=value, actor=actor)
         if next_tasks:
@@ -1391,5 +1943,7 @@ def record_run_result(
         payload={"runId": run_id, "status": normalized_status, "humanPrompt": human_prompt, "error": error},
         created_at=now,
     )
+    if normalized_status in {"succeeded", "completed"}:
+        _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=_run_payload_stage(payload))
     updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
     return _row_to_action_run(updated)

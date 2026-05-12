@@ -36,6 +36,19 @@ _EXTRA_ENV_KEYS = frozenset({
     "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
     "DISCORD_HOME_CHANNEL", "TELEGRAM_HOME_CHANNEL",
+    "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
+    "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+    "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+    "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "ELEVATE_ADMIN_AGENT_TELEGRAM_CHANNEL",
+    "TELEGRAM_ADMIN_AGENT_CHANNEL", "ADMIN_AGENT_TELEGRAM_CHAT_ID",
+    "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN",
+    "ELEVATE_AGENT_OUTREACH_TELEGRAM_CHANNEL",
+    "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN",
+    "ELEVATE_AGENT_ADS_TELEGRAM_CHANNEL",
+    "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN",
+    "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL",
+    "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN",
+    "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_CHANNEL",
     "SIGNAL_ACCOUNT", "SIGNAL_HTTP_URL",
     "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
     "DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET",
@@ -674,7 +687,7 @@ DEFAULT_CONFIG = {
     # local records under <tools_root>/data/sources/<source-id>/ so the Hub can
     # show Leads, Deals, Listings, Tasks, and Artifacts without a cloud backend.
     "sources": {
-        "tools_root": "",  # empty = ELEVATE_TOOLS_ROOT, ~/.elevate/tmp/skyleigh-tools, then ~/.elevate/tools
+        "tools_root": "",  # empty = ELEVATE_TOOLS_ROOT, ~/.elevate/tmp/client-tools, then ~/.elevate/tools
     },
 
     # Provider-neutral integration settings. Specific CRMs such as Lofty or
@@ -721,19 +734,27 @@ DEFAULT_CONFIG = {
                 "session_sources": ["cli", "telegram", "api_server", "webhook", "cron"],
                 "skills": [],
                 "toolsets": [],
-                "prompt": "",
+                "prompt": "All-in-one front desk and coordinator. Route work to specialist agents when a narrower agent owns the task, and synthesize final answers when work crosses domains.",
+                "metadata": {
+                    "telegram_bot_token_env": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
+                    "telegram_target_env": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+                },
             },
             {
                 "id": "admin",
                 "name": "Admin",
                 "role": "support",
-                "description": "Operations, scheduling, and admin support.",
+                "description": "Operations, deal-file orchestration, and admin support.",
                 "enabled": True,
-                "platforms": ["local"],
-                "session_sources": ["cli", "cron"],
-                "skills": [],
+                "platforms": ["local", "telegram"],
+                "session_sources": ["cli", "telegram", "cron"],
+                "skills": ["admin-agent", "deal-matcher", "admin-result-writer"],
                 "toolsets": [],
-                "prompt": "",
+                "prompt": "Own Admin workflow orchestration. Coordinate worker skills, write back to SQLite, and route human confirmations through the Admin Telegram lane.",
+                "metadata": {
+                    "telegram_bot_token_env": "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+                    "telegram_target_env": "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL",
+                },
             },
             {
                 "id": "outreach",
@@ -741,11 +762,15 @@ DEFAULT_CONFIG = {
                 "role": "support",
                 "description": "Lead follow-up and relationship workflows.",
                 "enabled": True,
-                "platforms": ["local"],
-                "session_sources": ["cli", "webhook"],
+                "platforms": ["local", "telegram"],
+                "session_sources": ["cli", "telegram", "webhook"],
                 "skills": [],
                 "toolsets": [],
-                "prompt": "",
+                "prompt": "Own lead follow-up, relationship notes, nurture timing, and client touchpoint drafts. Hand transaction/file tasks to Admin and broad routing back to Executive Assistant.",
+                "metadata": {
+                    "telegram_bot_token_env": "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN",
+                    "telegram_target_env": "ELEVATE_AGENT_OUTREACH_TELEGRAM_CHANNEL",
+                },
             },
             {
                 "id": "ads",
@@ -753,11 +778,31 @@ DEFAULT_CONFIG = {
                 "role": "support",
                 "description": "Paid ads, listing campaigns, and email campaign workflows.",
                 "enabled": True,
-                "platforms": ["local"],
-                "session_sources": ["cli", "cron"],
+                "platforms": ["local", "telegram"],
+                "session_sources": ["cli", "telegram", "cron"],
                 "skills": [],
                 "toolsets": [],
-                "prompt": "",
+                "prompt": "Own paid ads, campaign angles, listing promotion, audience/offer framing, and ad creative briefs. Hand operational checklist work to Admin.",
+                "metadata": {
+                    "telegram_bot_token_env": "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN",
+                    "telegram_target_env": "ELEVATE_AGENT_ADS_TELEGRAM_CHANNEL",
+                },
+            },
+            {
+                "id": "marketing",
+                "name": "Marketing",
+                "role": "support",
+                "description": "Listing marketing, seller updates, email campaigns, and creative direction.",
+                "enabled": True,
+                "platforms": ["local", "telegram"],
+                "session_sources": ["cli", "telegram", "cron"],
+                "skills": [],
+                "toolsets": [],
+                "prompt": "Own listing marketing, seller update drafts, email campaigns, creative direction, and launch assets. Hand checklist/status work to Admin and paid optimization to Ads.",
+                "metadata": {
+                    "telegram_bot_token_env": "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN",
+                    "telegram_target_env": "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL",
+                },
             },
             {
                 "id": "social-media",
@@ -765,11 +810,15 @@ DEFAULT_CONFIG = {
                 "role": "support",
                 "description": "Organic social posts, captions, hooks, and content repurposing.",
                 "enabled": True,
-                "platforms": ["local"],
-                "session_sources": ["cli"],
+                "platforms": ["local", "telegram"],
+                "session_sources": ["cli", "telegram"],
                 "skills": [],
                 "toolsets": [],
-                "prompt": "",
+                "prompt": "Own organic social hooks, captions, posting ideas, short-form content, and platform adaptation. Hand paid campaign strategy to Ads.",
+                "metadata": {
+                    "telegram_bot_token_env": "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN",
+                    "telegram_target_env": "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_CHANNEL",
+                },
             },
         ],
     },
@@ -949,7 +998,7 @@ DEFAULT_CONFIG = {
     # Core Elevate stays local and available. Premium skill packs can mark
     # SKILL.md frontmatter with access.entitlement to require one of these.
     "access": {
-        "profile": "standalone",  # standalone | exp | skyleigh_downline
+        "profile": "standalone",  # standalone | exp | team_pack
         "offline_grace_days": 14,
         "affiliation": {
             "brokerage": "",
@@ -967,11 +1016,31 @@ DEFAULT_CONFIG = {
                 "owned_snapshot": False,
                 "description": "Direct eXp real estate skill pack.",
             },
-            "skyleigh_team_pack": {
+            "real_estate_team_pack": {
                 "status": "locked",
                 "owned_snapshot": False,
                 "requires_active_affiliation": True,
-                "description": "Skyleigh downline/team-only skill pack.",
+                "description": "team-only skill pack.",
+            },
+            "real_estate_sales": {
+                "status": "locked",
+                "owned_snapshot": False,
+                "description": "Paid real estate sales, leads, and outreach dashboards and skills.",
+            },
+            "real_estate_marketing": {
+                "status": "locked",
+                "owned_snapshot": False,
+                "description": "Paid real estate marketing, listing launch, and social dashboards and skills.",
+            },
+            "real_estate_admin": {
+                "status": "locked",
+                "owned_snapshot": False,
+                "description": "Paid real estate admin transaction dashboards, automations, and skills.",
+            },
+            "real_estate_cma": {
+                "status": "locked",
+                "owned_snapshot": False,
+                "description": "Paid real estate CMA pricing and report-generation skills.",
             },
         },
     },
@@ -1146,6 +1215,18 @@ DEFAULT_CONFIG = {
         # 1 = serial (pre-v0.9 behaviour).
         # Also overridable via ELEVATE_CRON_MAX_PARALLEL env var.
         "max_parallel_jobs": None,
+    },
+
+    "agent_worker": {
+        # Gateway-side supervisor that drains durable agent handoffs and queued
+        # Admin action runs into cron.  The heartbeat is the safety-net drain;
+        # wake requests are cross-process nudges from Agent Hub/data writes.
+        "enabled": True,
+        "max_handoffs_per_tick": 25,
+        "max_admin_runs_per_tick": 25,
+        "stale_running_minutes": 120,
+        "heartbeat_interval_seconds": 30,
+        "wake_poll_seconds": 1,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.
@@ -1772,6 +1853,90 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "messaging",
     },
+    "TELEGRAM_HOME_CHANNEL": {
+        "description": "Default Telegram chat or topic for the Executive Assistant",
+        "prompt": "Telegram home chat ID",
+        "password": False,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token for the Executive Assistant agent",
+        "prompt": "Executive Assistant Telegram bot token",
+        "url": "https://t.me/BotFather",
+        "password": True,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL": {
+        "description": "Telegram chat or topic routed to the Executive Assistant",
+        "prompt": "Executive Assistant Telegram lane",
+        "password": False,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token for the Admin agent",
+        "prompt": "Admin Telegram bot token",
+        "url": "https://t.me/BotFather",
+        "password": True,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL": {
+        "description": "Telegram chat or topic routed to the Admin agent",
+        "prompt": "Admin Telegram lane",
+        "password": False,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token for the Outreach agent",
+        "prompt": "Outreach Telegram bot token",
+        "url": "https://t.me/BotFather",
+        "password": True,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_OUTREACH_TELEGRAM_CHANNEL": {
+        "description": "Telegram chat or topic routed to the Outreach agent",
+        "prompt": "Outreach Telegram lane",
+        "password": False,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token for the Ads agent",
+        "prompt": "Ads Telegram bot token",
+        "url": "https://t.me/BotFather",
+        "password": True,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_ADS_TELEGRAM_CHANNEL": {
+        "description": "Telegram chat or topic routed to the Ads agent",
+        "prompt": "Ads Telegram lane",
+        "password": False,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token for the Marketing agent",
+        "prompt": "Marketing Telegram bot token",
+        "url": "https://t.me/BotFather",
+        "password": True,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL": {
+        "description": "Telegram chat or topic routed to the Marketing agent",
+        "prompt": "Marketing Telegram lane",
+        "password": False,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN": {
+        "description": "Telegram bot token for the Social Media agent",
+        "prompt": "Social Media Telegram bot token",
+        "url": "https://t.me/BotFather",
+        "password": True,
+        "category": "messaging",
+    },
+    "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_CHANNEL": {
+        "description": "Telegram chat or topic routed to the Social Media agent",
+        "prompt": "Social Media Telegram lane",
+        "password": False,
+        "category": "messaging",
+    },
     "TELEGRAM_ALLOWED_USERS": {
         "description": "Comma-separated Telegram user IDs allowed to use the bot (get ID from @userinfobot)",
         "prompt": "Allowed Telegram user IDs (comma-separated)",
@@ -2246,6 +2411,12 @@ def _normalize_custom_provider_entry(
     if not isinstance(entry, dict):
         return None
 
+    # Normalize against a shallow copy. Alias handling below adds snake_case
+    # keys for camelCase spellings; mutating the caller's config object makes
+    # warning emission order-dependent when the same parsed config is reused by
+    # multiple validation paths in a long-lived process or a full test worker.
+    entry = dict(entry)
+
     # Accept camelCase aliases commonly used in hand-written configs.
     _CAMEL_ALIASES: Dict[str, str] = {
         "apiKey": "api_key",
@@ -2444,7 +2615,7 @@ _KNOWN_ROOT_KEYS = {
     "voice", "human_delay", "prefill_messages_file", "honcho", "timezone",
     "discord", "whatsapp", "telegram", "slack", "mattermost", "platforms",
     "approvals", "command_allowlist", "quick_commands", "hooks",
-    "hooks_auto_accept", "personalities", "security", "cron",
+    "hooks_auto_accept", "personalities", "security", "cron", "agent_worker",
     "code_execution", "network", "prompt_caching", "bedrock",
     "file_read_max_chars", "tool_output", "browser", "checkpoints",
 }
@@ -3531,13 +3702,28 @@ def _sanitize_env_lines(lines: list) -> list:
 
         # Detect concatenated KEY=VALUE pairs on one line.
         # Search for known KEY= patterns at any position in the line.
-        split_positions = []
-        for key_name in known_keys:
+        #
+        # Longer keys must win when one key is a suffix of another. For
+        # example, TELEGRAM_BOT_TOKEN also appears inside
+        # ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN; treating both as split
+        # positions would collapse the agent token into the shared token.
+        matches: list[tuple[int, str]] = []
+        for key_name in sorted(known_keys, key=len, reverse=True):
             needle = key_name + "="
             idx = stripped.find(needle)
             while idx >= 0:
-                split_positions.append(idx)
+                matches.append((idx, key_name))
                 idx = stripped.find(needle, idx + len(needle))
+
+        matches.sort(key=lambda item: (item[0], -len(item[1])))
+        split_positions: list[int] = []
+        occupied_key_ranges: list[tuple[int, int]] = []
+        for idx, key_name in matches:
+            key_end = idx + len(key_name)
+            if any(start <= idx < end for start, end in occupied_key_ranges):
+                continue
+            split_positions.append(idx)
+            occupied_key_ranges.append((idx, key_end))
 
         if len(split_positions) > 1:
             split_positions.sort()

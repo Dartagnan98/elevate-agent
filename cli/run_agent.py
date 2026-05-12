@@ -742,6 +742,25 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def _load_admin_onboarding_memory_block() -> str:
+    """Load generated Admin onboarding memory from the active profile, if present."""
+    try:
+        path = get_elevate_home() / "memories" / "ADMIN_ONBOARDING.md"
+        if not path.exists():
+            return ""
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        return (
+            "==============================================\n"
+            "ADMIN ONBOARDING MEMORY (generated from SQLite)\n"
+            "==============================================\n"
+            f"{content}"
+        )
+    except Exception:
+        return ""
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -1269,7 +1288,7 @@ class AIAgent:
                 effective_base = base_url
                 if base_url_host_matches(effective_base, "openrouter.ai"):
                     client_kwargs["default_headers"] = {
-                        "HTTP-Referer": "https://elevate.ctrlstrategies.com",
+                        "HTTP-Referer": "https://github.com/Dartagnan98/elevate-agent",
                         "X-OpenRouter-Title": "Elevate",
                         "X-OpenRouter-Categories": "productivity,cli-agent",
                     }
@@ -4417,6 +4436,10 @@ class AIAgent:
                 user_block = self._memory_store.format_for_system_prompt("user")
                 if user_block:
                     prompt_parts.append(user_block)
+
+        admin_onboarding_block = _load_admin_onboarding_memory_block()
+        if admin_onboarding_block:
+            prompt_parts.append(admin_onboarding_block)
 
         # External memory provider system prompt block (additive to built-in)
         if self._memory_manager:
@@ -8321,7 +8344,26 @@ class AIAgent:
                 pass
             start = time.time()
             try:
-                result = self._invoke_tool(function_name, function_args, effective_task_id, tool_call.id, messages=messages)
+                try:
+                    result = self._invoke_tool(
+                        function_name,
+                        function_args,
+                        effective_task_id,
+                        tool_call.id,
+                        messages=messages,
+                    )
+                except TypeError as type_error:
+                    # Backwards compatibility for tests/subclasses/stubs that
+                    # still implement the pre-messages _invoke_tool contract.
+                    # Real tool TypeErrors should still surface as tool errors.
+                    if "unexpected keyword argument 'messages'" not in str(type_error):
+                        raise
+                    result = self._invoke_tool(
+                        function_name,
+                        function_args,
+                        effective_task_id,
+                        tool_call.id,
+                    )
             except Exception as tool_error:
                 result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
@@ -8483,7 +8525,8 @@ class AIAgent:
             # Same as the sequential path: drain between each collected
             # result so the steer lands as early as possible.
             self._apply_pending_steer_to_tool_results(messages, 1)
-            self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
+            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
+                self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
 
         # ── Per-turn aggregate budget enforcement ─────────────────────────
         num_tools = len(parsed_calls)
@@ -8497,7 +8540,8 @@ class AIAgent:
         # so the steer marker is never truncated. See steer() for details.
         if num_tools > 0:
             self._apply_pending_steer_to_tool_results(messages, num_tools)
-            self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools)
+            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
+                self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools)
 
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
@@ -8846,7 +8890,8 @@ class AIAgent:
             # injection lands as soon as a tool finishes — not after the
             # entire batch.  The model sees it on the next API iteration.
             self._apply_pending_steer_to_tool_results(messages, 1)
-            self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
+            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
+                self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
 
             if not self.quiet_mode:
                 if self.verbose_logging:
@@ -8882,7 +8927,8 @@ class AIAgent:
         # applied to sequential execution as well.
         if num_tools_seq > 0:
             self._apply_pending_steer_to_tool_results(messages, num_tools_seq)
-            self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools_seq)
+            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
+                self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools_seq)
 
 
 
@@ -11102,11 +11148,21 @@ class AIAgent:
                         self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                         original_len = len(messages)
-                        messages, active_system_prompt = self._compress_context(
-                            messages, system_message, approx_tokens=approx_tokens,
-                            task_id=effective_task_id,
-                            focus_topic="context-limit recovery",
-                        )
+                        try:
+                            messages, active_system_prompt = self._compress_context(
+                                messages, system_message, approx_tokens=approx_tokens,
+                                task_id=effective_task_id,
+                                focus_topic="context-limit recovery",
+                            )
+                        except TypeError as type_error:
+                            if "unexpected keyword argument 'focus_topic'" not in str(type_error):
+                                raise
+                            # Backwards compatibility for subclasses/tests with
+                            # the pre-focus_topic _compress_context signature.
+                            messages, active_system_prompt = self._compress_context(
+                                messages, system_message, approx_tokens=approx_tokens,
+                                task_id=effective_task_id,
+                            )
                         # Compression created a new session — clear history
                         # so _flush_messages_to_session_db writes compressed
                         # messages to the new session, not skipping them.

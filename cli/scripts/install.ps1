@@ -5,7 +5,7 @@
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/CtrlStrategies/elevate/main/cli/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.ps1 | iex
 #
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
@@ -26,8 +26,8 @@ $ErrorActionPreference = "Stop"
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:CtrlStrategies/elevate.git"
-$RepoUrlHttps = "https://github.com/CtrlStrategies/elevate.git"
+$RepoUrlSsh = "git@github.com:Dartagnan98/elevate-agent.git"
+$RepoUrlHttps = "https://github.com/Dartagnan98/elevate-agent.git"
 $PythonVersion = "3.11"
 $NodeVersion = "22"
 
@@ -462,7 +462,7 @@ function Install-Repository {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
             Write-Warn "Git clone failed — downloading ZIP archive instead..."
             try {
-                $zipUrl = "https://github.com/CtrlStrategies/elevate/archive/refs/heads/$Branch.zip"
+                $zipUrl = "https://github.com/Dartagnan98/elevate-agent/archive/refs/heads/$Branch.zip"
                 $zipPath = "$env:TEMP\elevate-$Branch.zip"
                 $extractPath = "$env:TEMP\elevate-extract"
 
@@ -919,7 +919,7 @@ try {
     Write-Err "Installation failed: $_"
     Write-Host ""
     Write-Info "If the error is unclear, try downloading and running the script directly:"
-    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/CtrlStrategies/elevate/main/cli/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
+    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
     Write-Host "  .\install.ps1" -ForegroundColor Yellow
     Write-Host ""
 }

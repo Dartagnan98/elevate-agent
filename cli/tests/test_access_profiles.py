@@ -22,11 +22,12 @@ def _write_skill(root, folder, name, description, extra_frontmatter=""):
 
 def test_default_access_locks_team_pack(tmp_path, monkeypatch):
     monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    monkeypatch.delenv("ELEVATE_DEV_UNLOCK_REAL_ESTATE_DASHBOARDS", raising=False)
 
     from elevate_cli.access import (
         ENTITLEMENT_CORE,
         ENTITLEMENT_EXP,
-        ENTITLEMENT_SKYLEIGH_TEAM,
+        ENTITLEMENT_TEAM_PACK,
         is_entitlement_active,
         load_access_config,
     )
@@ -34,48 +35,88 @@ def test_default_access_locks_team_pack(tmp_path, monkeypatch):
     access = load_access_config({"access": {"profile": "standalone"}})
     assert is_entitlement_active(ENTITLEMENT_CORE, access) is True
     assert is_entitlement_active(ENTITLEMENT_EXP, access) is False
-    assert is_entitlement_active(ENTITLEMENT_SKYLEIGH_TEAM, access) is False
+    assert is_entitlement_active(ENTITLEMENT_TEAM_PACK, access) is False
 
 
-def test_skyleigh_profile_locks_team_pack_when_affiliation_leaves(tmp_path, monkeypatch):
+def test_dashboard_access_keeps_paid_packs_locked_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    monkeypatch.delenv("ELEVATE_DEV_UNLOCK_REAL_ESTATE_DASHBOARDS", raising=False)
+
+    from elevate_cli.access import dashboard_access_status, load_access_config
+
+    access = load_access_config({"access": {"profile": "standalone"}})
+    status = dashboard_access_status(access)
+
+    assert status["devOverride"] is False
+    assert status["mode"] == "entitlement"
+    assert status["packs"] == {
+        "realEstateSales": False,
+        "realEstateMarketing": False,
+        "realEstateAdmin": False,
+        "realEstateCma": False,
+        "realEstateAny": False,
+    }
+
+
+def test_dashboard_access_dev_override_unlocks_local_dashboards(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    monkeypatch.setenv("ELEVATE_DEV_UNLOCK_REAL_ESTATE_DASHBOARDS", "1")
+
+    from elevate_cli.access import dashboard_access_status, load_access_config
+
+    access = load_access_config({"access": {"profile": "standalone"}})
+    status = dashboard_access_status(access)
+
+    assert status["devOverride"] is True
+    assert status["mode"] == "development"
+    assert status["packs"] == {
+        "realEstateSales": True,
+        "realEstateMarketing": True,
+        "realEstateAdmin": True,
+        "realEstateCma": True,
+        "realEstateAny": True,
+    }
+
+
+def test_team_profile_locks_team_pack_when_affiliation_leaves(tmp_path, monkeypatch):
     monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
 
     from elevate_cli.access import (
-        ENTITLEMENT_SKYLEIGH_TEAM,
+        ENTITLEMENT_TEAM_PACK,
         default_access_config,
         is_entitlement_active,
     )
 
-    access = default_access_config("skyleigh_downline")
-    assert is_entitlement_active(ENTITLEMENT_SKYLEIGH_TEAM, access) is True
+    access = default_access_config("team_pack")
+    assert is_entitlement_active(ENTITLEMENT_TEAM_PACK, access) is True
     access["affiliation"]["status"] = "left_team"
-    assert is_entitlement_active(ENTITLEMENT_SKYLEIGH_TEAM, access) is False
+    assert is_entitlement_active(ENTITLEMENT_TEAM_PACK, access) is False
 
 
 def test_profile_promotes_default_locks_but_respects_manual_lock(tmp_path, monkeypatch):
     monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
 
     from elevate_cli.access import (
-        ENTITLEMENT_SKYLEIGH_TEAM,
+        ENTITLEMENT_TEAM_PACK,
         is_entitlement_active,
         load_access_config,
     )
 
     raw = {
-        "profile": "skyleigh_downline",
+        "profile": "team_pack",
         "entitlements": {
-            "skyleigh_team_pack": {
+            "real_estate_team_pack": {
                 "status": "locked",
                 "requires_active_affiliation": True,
             }
         },
     }
     promoted = load_access_config({"access": raw})
-    assert is_entitlement_active(ENTITLEMENT_SKYLEIGH_TEAM, promoted) is True
+    assert is_entitlement_active(ENTITLEMENT_TEAM_PACK, promoted) is True
 
-    raw["entitlements"]["skyleigh_team_pack"]["manual_lock"] = True
+    raw["entitlements"]["real_estate_team_pack"]["manual_lock"] = True
     locked = load_access_config({"access": raw})
-    assert is_entitlement_active(ENTITLEMENT_SKYLEIGH_TEAM, locked) is False
+    assert is_entitlement_active(ENTITLEMENT_TEAM_PACK, locked) is False
 
 
 def test_skill_list_and_view_hide_locked_pack(tmp_path, monkeypatch):
@@ -90,7 +131,7 @@ def test_skill_list_and_view_hide_locked_pack(tmp_path, monkeypatch):
         "team-skill",
         "team-skill",
         "Team skill",
-        "access:\n  entitlement: skyleigh_team_pack\n",
+        "access:\n  entitlement: real_estate_team_pack\n",
     )
 
     monkeypatch.setenv("ELEVATE_HOME", str(home))
@@ -104,15 +145,15 @@ def test_skill_list_and_view_hide_locked_pack(tmp_path, monkeypatch):
         locked = json.loads(skill_view("team-skill"))
         assert locked["success"] is False
         assert locked["readiness_status"] == "locked"
-        assert locked["access"]["locked_entitlements"] == ["skyleigh_team_pack"]
+        assert locked["access"]["locked_entitlements"] == ["real_estate_team_pack"]
 
 
-def test_skill_view_allows_team_pack_for_active_skyleigh_profile(tmp_path, monkeypatch):
+def test_skill_view_allows_team_pack_for_active_team_profile(tmp_path, monkeypatch):
     home = tmp_path / ".elevate"
     skills_dir = home / "skills"
     skills_dir.mkdir(parents=True)
     (home / "config.yaml").write_text(
-        "access:\n  profile: skyleigh_downline\n",
+        "access:\n  profile: team_pack\n",
         encoding="utf-8",
     )
     _write_skill(
@@ -120,7 +161,7 @@ def test_skill_view_allows_team_pack_for_active_skyleigh_profile(tmp_path, monke
         "team-skill",
         "team-skill",
         "Team skill",
-        "access:\n  entitlement: skyleigh_team_pack\n",
+        "access:\n  entitlement: real_estate_team_pack\n",
     )
 
     monkeypatch.setenv("ELEVATE_HOME", str(home))
@@ -146,7 +187,7 @@ def test_skills_prompt_excludes_locked_team_pack(tmp_path, monkeypatch):
         "team-skill",
         "team-skill",
         "Team skill",
-        "access:\n  entitlement: skyleigh_team_pack\n",
+        "access:\n  entitlement: real_estate_team_pack\n",
     )
 
     monkeypatch.setenv("ELEVATE_HOME", str(home))

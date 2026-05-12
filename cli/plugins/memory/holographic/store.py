@@ -1553,7 +1553,7 @@ class MemoryStore:
         """Small local recall benchmark: latency, hit counts, and duplicate rate across queries."""
         queries = [str(q).strip() for q in (queries or []) if str(q).strip()]
         if not queries:
-            queries = ["user preferences", "project decisions", "Plaud meeting Uppercuts", "Google Ads campaigns"]
+            queries = ["user preferences", "project decisions", "Plaud meeting notes", "Google Ads campaigns"]
         started = time.time()
         rows = []
         seen_fact_ids: list[int] = []

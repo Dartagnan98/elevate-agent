@@ -86,6 +86,7 @@ class SessionSource:
     chat_topic: Optional[str] = None  # Channel topic/description (Discord, Slack)
     user_id_alt: Optional[str] = None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
+    agent_id: Optional[str] = None  # Visible agent/bot lane when a platform has multiple agent bots
     is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
     
     @property
@@ -119,6 +120,7 @@ class SessionSource:
             "user_name": self.user_name,
             "thread_id": self.thread_id,
             "chat_topic": self.chat_topic,
+            "agent_id": self.agent_id,
         }
         if self.user_id_alt:
             d["user_id_alt"] = self.user_id_alt
@@ -139,6 +141,7 @@ class SessionSource:
             chat_topic=data.get("chat_topic"),
             user_id_alt=data.get("user_id_alt"),
             chat_id_alt=data.get("chat_id_alt"),
+            agent_id=data.get("agent_id"),
         )
     
 
@@ -521,6 +524,8 @@ def build_session_key(
       - Without identifiers, messages fall back to one session per platform/chat_type.
     """
     platform = source.platform.value
+    agent_id = str(getattr(source, "agent_id", "") or "").strip()
+    agent_suffix = f":agent:{agent_id}" if agent_id else ""
     if source.chat_type == "dm":
         dm_chat_id = source.chat_id
         if source.platform == Platform.WHATSAPP:
@@ -528,11 +533,11 @@ def build_session_key(
 
         if dm_chat_id:
             if source.thread_id:
-                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{dm_chat_id}"
+                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}{agent_suffix}"
+            return f"agent:main:{platform}:dm:{dm_chat_id}{agent_suffix}"
         if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
+            return f"agent:main:{platform}:dm:{source.thread_id}{agent_suffix}"
+        return f"agent:main:{platform}:dm{agent_suffix}"
 
     participant_id = source.user_id_alt or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:
@@ -556,6 +561,8 @@ def build_session_key(
 
     if isolate_user and participant_id:
         key_parts.append(str(participant_id))
+    if agent_id:
+        key_parts.extend(["agent", agent_id])
 
     return ":".join(key_parts)
 

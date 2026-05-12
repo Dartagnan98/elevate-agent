@@ -117,6 +117,7 @@ export const zh: Translations = {
     startedInBackground: "已在后台启动 — 请查看日志",
     stopped: "已停止",
     updateElevate: "更新 Elevate",
+    updatesAvailable: "有可用更新",
     updatingElevate: "正在更新 Elevate…",
     waitingForOutput: "等待输出…",
   },

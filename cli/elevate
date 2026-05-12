@@ -15,8 +15,16 @@ if __name__ == "__main__":
     for env_dir in (".venv", "venv"):
         python = root / env_dir / "bin" / "python"
         if python.exists():
+            try:
+                already_running = Path(sys.executable).resolve().samefile(python)
+            except OSError:
+                already_running = Path(sys.executable).resolve() == python.resolve()
+            if already_running:
+                break
             os.execv(str(python), [str(python), "-m", "elevate_cli.main", *sys.argv[1:]])
 
     from elevate_cli.main import main
 
-    sys.exit(main())
+    exit_code = main()
+    if exit_code:
+        sys.exit(exit_code)

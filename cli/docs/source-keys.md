@@ -29,7 +29,7 @@ given record, fall back to the documented synthetic hash.
 | identity (phone) | E.164 of `phones` | `phones` (string or array) |
 
 Lofty exposes a stable numeric `lead_id`. We embed the provider prefix so
-multi-CRM households (Skyleigh + a future second CRM) don't collide.
+multi-CRM households (pilot realtor + a future second CRM) don't collide.
 
 ## apple-messages
 

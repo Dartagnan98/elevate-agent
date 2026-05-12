@@ -1,0 +1,695 @@
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
+import {
+  Activity,
+  AlertTriangle,
+  Bot,
+  CheckCircle2,
+  CircleAlert,
+  Clock,
+  Database,
+  FileText,
+  FolderOpen,
+  KeyRound,
+  Loader2,
+  MessageSquare,
+  RefreshCw,
+  RotateCw,
+  Settings,
+  ShieldCheck,
+  Terminal,
+  type LucideIcon,
+} from "lucide-react";
+import { api } from "@/lib/api";
+import type {
+  AdminSetupSnapshot,
+  AgentHubAgent,
+  AgentHubSnapshot,
+  ComposioStatus,
+  HarnessSnapshot,
+  OAuthProvidersResponse,
+  SourceConnectorsResponse,
+  StatusResponse,
+  UpdateStatusResponse,
+} from "@/lib/api";
+import { cn, isoTimeAgo } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Toast } from "@/components/Toast";
+import { useToast } from "@/hooks/useToast";
+import { usePageHeader } from "@/contexts/usePageHeader";
+
+type ReadinessTone = "success" | "warning" | "outline" | "destructive";
+
+interface LoadState {
+  adminSetup: AdminSetupSnapshot | null;
+  composio: ComposioStatus | null;
+  connectors: SourceConnectorsResponse | null;
+  harness: HarnessSnapshot | null;
+  hub: AgentHubSnapshot | null;
+  oauth: OAuthProvidersResponse | null;
+  status: StatusResponse | null;
+  updateStatus: UpdateStatusResponse | null;
+}
+
+const EMPTY_STATE: LoadState = {
+  adminSetup: null,
+  composio: null,
+  connectors: null,
+  harness: null,
+  hub: null,
+  oauth: null,
+  status: null,
+  updateStatus: null,
+};
+
+const REQUIRED_AGENT_IDS = new Set(["executive-assistant", "admin"]);
+
+function badgeTone(ready: boolean, warning = false): ReadinessTone {
+  if (ready) return "success";
+  if (warning) return "warning";
+  return "outline";
+}
+
+function statusCopy(ready: boolean, label: string, fallback = "Needs setup") {
+  return ready ? label : fallback;
+}
+
+function formatTime(value: string | null | undefined) {
+  return value ? isoTimeAgo(value) : "Never";
+}
+
+function DetailRow({
+  icon: Icon,
+  label,
+  value,
+  tone = "outline",
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: ReactNode;
+  tone?: ReadinessTone;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-background/35 px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{label}</span>
+      </div>
+      <Badge variant={tone} className="max-w-[64%] truncate">
+        {value}
+      </Badge>
+    </div>
+  );
+}
+
+function SetupLink({
+  children,
+  to,
+}: {
+  children: ReactNode;
+  to: string;
+}) {
+  return (
+    <Link to={to} className={cn(buttonVariants({ variant: "outline", size: "sm" }), "shrink-0")}>
+      {children}
+    </Link>
+  );
+}
+
+function ReadinessCard({
+  action,
+  children,
+  description,
+  icon: Icon,
+  status,
+  title,
+  tone,
+}: {
+  action?: ReactNode;
+  children: ReactNode;
+  description: string;
+  icon: LucideIcon;
+  status: string;
+  title: string;
+  tone: ReadinessTone;
+}) {
+  return (
+    <Card className="min-h-[17rem] bg-card/75">
+      <CardHeader className="gap-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-background/45 text-muted-foreground">
+              <Icon className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <CardTitle>{title}</CardTitle>
+              <CardDescription>{description}</CardDescription>
+            </div>
+          </div>
+          <Badge variant={tone}>{status}</Badge>
+        </div>
+        {action ? <div className="flex flex-wrap items-center gap-2">{action}</div> : null}
+      </CardHeader>
+      <CardContent className="space-y-2">{children}</CardContent>
+    </Card>
+  );
+}
+
+function RunwayStep({
+  description,
+  icon: Icon,
+  label,
+  tone,
+}: {
+  description: string;
+  icon: LucideIcon;
+  label: string;
+  tone: ReadinessTone;
+}) {
+  const StatusIcon = tone === "success" ? CheckCircle2 : tone === "warning" ? AlertTriangle : CircleAlert;
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-border/60 bg-background/35 px-3 py-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-card/60">
+        <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <div className="truncate text-sm font-medium text-foreground">{label}</div>
+          <StatusIcon
+            className={cn(
+              "h-4 w-4 shrink-0",
+              tone === "success" && "text-success",
+              tone === "warning" && "text-warning",
+              tone !== "success" && tone !== "warning" && "text-muted-foreground",
+            )}
+          />
+        </div>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+      </div>
+    </div>
+  );
+}
+
+function AgentLaneRow({ agent }: { agent: AgentHubAgent }) {
+  const lane = agent.telegramLane;
+  const ready = Boolean(lane?.tokenConfigured && lane?.targetConfigured && !lane?.duplicateSharedBot);
+  const warn = Boolean(lane?.duplicateSharedBot || lane?.usesSharedBot);
+  return (
+    <div className="rounded-xl border border-border/60 bg-background/35 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-foreground">{agent.name}</div>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">{agent.id}</div>
+        </div>
+        <Badge variant={badgeTone(ready, warn)}>
+          {ready ? "Separate lane" : warn ? "Shared lane" : "Needs lane"}
+        </Badge>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Badge variant={lane?.tokenConfigured ? "success" : "outline"}>bot token</Badge>
+        <Badge variant={lane?.targetConfigured ? "success" : "outline"}>chat target</Badge>
+        {lane?.topicConfigured ? <Badge variant="success">topic</Badge> : null}
+      </div>
+    </div>
+  );
+}
+
+function safeHarness(value: AgentHubSnapshot["harness"] | HarnessSnapshot | null | undefined): HarnessSnapshot | null {
+  if (!value || !("orchestration" in value)) return null;
+  return value;
+}
+
+export default function DesktopSetupPage() {
+  const [state, setState] = useState<LoadState>(EMPTY_STATE);
+  const [loading, setLoading] = useState(true);
+  const [actionName, setActionName] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const { toast, showToast } = useToast();
+  const { setAfterTitle, setEnd } = usePageHeader();
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [status, hub, adminSetup, oauth, connectors, composio, harness, updateStatus] = await Promise.all([
+        api.getStatus(),
+        api.getAgentHub(),
+        api.getAdminSetup().catch(() => null),
+        api.getOAuthProviders().catch(() => null),
+        api.getSourceConnectors().catch(() => null),
+        api.getComposioStatus().catch(() => null),
+        api.getHarness().catch(() => null),
+        api.getUpdateStatus().catch(() => null),
+      ]);
+      setState({
+        adminSetup,
+        composio,
+        connectors,
+        harness,
+        hub,
+        oauth,
+        status,
+        updateStatus,
+      });
+      setUpdatedAt(new Date());
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Desktop setup failed to load", "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const runAction = useCallback(
+    async (name: "restart" | "update" | "verify" | "complete") => {
+      setActionName(name);
+      try {
+        if (name === "restart") {
+          await api.restartGateway();
+          showToast("Gateway restart queued.", "success");
+        } else if (name === "update") {
+          await api.updateElevate();
+          showToast("Update queued. Watch Logs for progress.", "success");
+        } else if (name === "verify") {
+          const next = await api.verifyAdminSetup();
+          setState((prev) => ({ ...prev, adminSetup: next }));
+          showToast("Admin setup verified.", "success");
+        } else {
+          const next = await api.completeAdminSetup();
+          setState((prev) => ({ ...prev, adminSetup: next }));
+          showToast("Admin setup marked complete.", "success");
+        }
+        await load();
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : "Action failed", "error");
+      } finally {
+        setActionName(null);
+      }
+    },
+    [load, showToast],
+  );
+
+  const requiredAgents = useMemo(
+    () => state.hub?.agents.filter((agent) => REQUIRED_AGENT_IDS.has(agent.id)) ?? [],
+    [state.hub],
+  );
+  const separateLaneCount = requiredAgents.filter(
+    (agent) =>
+      agent.telegramLane?.tokenConfigured &&
+      agent.telegramLane?.targetConfigured &&
+      !agent.telegramLane?.duplicateSharedBot,
+  ).length;
+  const lanesReady = requiredAgents.length >= REQUIRED_AGENT_IDS.size && separateLaneCount === requiredAgents.length;
+
+  const oauthConnected = state.oauth?.providers.filter((provider) => provider.status.logged_in).length ?? 0;
+  const sourceConnected = state.connectors?.connectors.filter((connector) => connector.connected).length ?? 0;
+  const composioReady = Boolean(state.composio?.configured && state.composio.valid);
+  const accountReady = composioReady || oauthConnected > 0 || sourceConnected > 0;
+
+  const setup = state.adminSetup;
+  const setupReady = Boolean(setup?.canStartAdmin || setup?.complete);
+  const setupWarning = Boolean(setup && !setupReady && setup.completedRequiredCount > 0);
+  const gatewayReady = Boolean(state.status?.gateway_running && state.hub?.gateway.running);
+  const worker = state.hub?.agentWorker;
+  const workerReady = Boolean(worker?.enabled && worker.state !== "error" && worker.state !== "disabled");
+  const runtimeReady = gatewayReady && workerReady;
+  const harness = safeHarness(state.harness ?? state.hub?.harness ?? null);
+  const reliabilityReady = Boolean(harness || state.hub?.cron.total || state.hub?.memory.db_exists);
+  const updatesAvailable = Boolean(state.updateStatus?.available && state.updateStatus.behind);
+
+  const readySections = [setupReady, runtimeReady, lanesReady, accountReady, reliabilityReady].filter(Boolean).length;
+  const totalSections = 5;
+  const overallReady = readySections === totalSections;
+
+  useLayoutEffect(() => {
+    setAfterTitle(
+      <Badge variant={overallReady ? "success" : readySections >= 3 ? "warning" : "outline"}>
+        {readySections}/{totalSections} ready
+      </Badge>,
+    );
+    setEnd(
+      <div className="flex items-center gap-2">
+        {updatedAt ? (
+          <span className="hidden text-xs text-muted-foreground sm:inline">Updated {updatedAt.toLocaleTimeString()}</span>
+        ) : null}
+        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+          Refresh
+        </Button>
+      </div>,
+    );
+    return () => {
+      setAfterTitle(null);
+      setEnd(null);
+    };
+  }, [load, loading, overallReady, readySections, setAfterTitle, setEnd, updatedAt]);
+
+  if (loading && !state.status && !state.hub) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
+      <Toast toast={toast} />
+
+      <section className="overflow-hidden rounded-[1.5rem] border border-border bg-card/70">
+        <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_24rem]">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={overallReady ? "success" : "warning"}>
+                {overallReady ? "Production runway ready" : "Setup runway"}
+              </Badge>
+              <Badge variant={gatewayReady ? "success" : "outline"}>
+                {state.status?.gateway_running ? "gateway online" : "gateway offline"}
+              </Badge>
+              <Badge variant={workerReady ? "success" : "outline"}>worker {worker?.state ?? "unknown"}</Badge>
+              <Badge variant={lanesReady ? "success" : "warning"}>{separateLaneCount}/2 Telegram lanes</Badge>
+              <Badge variant={updatesAvailable ? "warning" : "outline"}>
+                {updatesAvailable ? `${state.updateStatus?.behind} updates available` : "up to date"}
+              </Badge>
+            </div>
+            <h2 className="mt-4 text-2xl font-semibold tracking-normal text-foreground sm:text-3xl">
+              Desktop setup
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+              One place to see whether this local Elevate install is actually ready to run for a realtor: runtime,
+              separate agent inboxes, connected accounts, admin setup, and the logs needed to debug handoffs.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={Boolean(actionName)}
+                onClick={() => void runAction("restart")}
+              >
+                <RotateCw className={cn("h-3.5 w-3.5", actionName === "restart" && "animate-spin")} />
+                Restart gateway
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={Boolean(actionName)}
+                onClick={() => void runAction("update")}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", actionName === "update" && "animate-spin")} />
+                {updatesAvailable ? "Updates available" : "Update"}
+              </Button>
+              <SetupLink to="/logs">
+                <FileText className="h-3.5 w-3.5" />
+                Logs
+              </SetupLink>
+              <SetupLink to="/project">
+                <FolderOpen className="h-3.5 w-3.5" />
+                Local files
+              </SetupLink>
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <RunwayStep
+              icon={ShieldCheck}
+              label="Admin setup"
+              tone={setupReady ? "success" : setupWarning ? "warning" : "outline"}
+              description={
+                setup
+                  ? `${setup.completedRequiredCount}/${setup.requiredCount} required setup items complete.`
+                  : "Admin onboarding snapshot is not available yet."
+              }
+            />
+            <RunwayStep
+              icon={Terminal}
+              label="Runtime loop"
+              tone={runtimeReady ? "success" : gatewayReady ? "warning" : "outline"}
+              description={`Gateway ${state.status?.gateway_state ?? "unknown"}; worker ${worker?.state ?? "unknown"}.`}
+            />
+            <RunwayStep
+              icon={MessageSquare}
+              label="Agent Telegram lanes"
+              tone={lanesReady ? "success" : separateLaneCount > 0 ? "warning" : "outline"}
+              description="Executive Assistant and Admin need separate bot tokens and chat targets."
+            />
+            <RunwayStep
+              icon={KeyRound}
+              label="Connected accounts"
+              tone={accountReady ? "success" : "outline"}
+              description={`${oauthConnected} OAuth, ${sourceConnected} source connector, Composio ${
+                composioReady ? "ready" : "not ready"
+              }.`}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-2">
+        <ReadinessCard
+          icon={ShieldCheck}
+          title="Realtor profile and admin launch"
+          description="The source-of-truth setup gate before Admin starts moving files."
+          status={statusCopy(setupReady, "Ready", setupWarning ? "Partial" : "Needs setup")}
+          tone={badgeTone(setupReady, setupWarning)}
+          action={
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={Boolean(actionName)}
+                onClick={() => void runAction("verify")}
+              >
+                <CheckCircle2 className={cn("h-3.5 w-3.5", actionName === "verify" && "animate-pulse")} />
+                Verify
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={Boolean(actionName) || !setup || Boolean(setup.missingRequiredKeys.length)}
+                onClick={() => void runAction("complete")}
+              >
+                Complete setup
+              </Button>
+              <SetupLink to="/admin">Open Admin</SetupLink>
+            </>
+          }
+        >
+          <DetailRow
+            icon={Settings}
+            label="Province"
+            value={setup?.profile.province || "Not set"}
+            tone={setup?.profile.province ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Activity}
+            label="Market"
+            value={setup?.profile.market || "Not set"}
+            tone={setup?.profile.market ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Database}
+            label="Required items"
+            value={`${setup?.completedRequiredCount ?? 0}/${setup?.requiredCount ?? 0}`}
+            tone={setupReady ? "success" : setupWarning ? "warning" : "outline"}
+          />
+          <div className="rounded-xl border border-border/60 bg-background/35 px-3 py-2">
+            <div className="text-xs font-medium text-muted-foreground">Missing launch items</div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {setup?.missingRequiredKeys.length ? (
+                setup.missingRequiredKeys.slice(0, 8).map((key) => (
+                  <Badge key={key} variant="warning">
+                    {key.replace(/_/g, " ")}
+                  </Badge>
+                ))
+              ) : (
+                <Badge variant="success">none</Badge>
+              )}
+            </div>
+          </div>
+        </ReadinessCard>
+
+        <ReadinessCard
+          icon={Terminal}
+          title="Backend mode and wake loop"
+          description="The local API, gateway, and handoff worker that keep agents alive."
+          status={statusCopy(runtimeReady, "Running", gatewayReady ? "Worker check" : "Offline")}
+          tone={badgeTone(runtimeReady, gatewayReady)}
+          action={
+            <>
+              <SetupLink to="/hub">Agent Hub</SetupLink>
+              <SetupLink to="/cron">Automations</SetupLink>
+            </>
+          }
+        >
+          <DetailRow
+            icon={Terminal}
+            label="Gateway"
+            value={state.status?.gateway_state || "unknown"}
+            tone={gatewayReady ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Bot}
+            label="Agent worker"
+            value={worker?.state || "unknown"}
+            tone={workerReady ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Clock}
+            label="Heartbeat"
+            value={worker?.heartbeat?.enabled ? `next ${formatTime(worker.heartbeat.nextBeatAt)}` : "off"}
+            tone={worker?.heartbeat?.enabled ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Activity}
+            label="Open handoffs"
+            value={state.hub?.handoffs.open ?? 0}
+            tone={(state.hub?.handoffs.failed ?? 0) > 0 ? "warning" : "success"}
+          />
+        </ReadinessCard>
+
+        <ReadinessCard
+          icon={MessageSquare}
+          title="Agent communication lanes"
+          description="Separate inboxes keep Admin from replying as the Executive Assistant."
+          status={statusCopy(lanesReady, "Separated", separateLaneCount > 0 ? "Partial" : "Needs lanes")}
+          tone={badgeTone(lanesReady, separateLaneCount > 0)}
+          action={<SetupLink to="/hub">Configure lanes</SetupLink>}
+        >
+          {requiredAgents.length ? (
+            requiredAgents.map((agent) => <AgentLaneRow key={agent.id} agent={agent} />)
+          ) : (
+            <div className="rounded-xl border border-border/60 bg-background/35 px-3 py-3 text-sm text-muted-foreground">
+              Agent Hub did not return the Executive Assistant/Admin agent definitions.
+            </div>
+          )}
+        </ReadinessCard>
+
+        <ReadinessCard
+          icon={KeyRound}
+          title="Connected accounts"
+          description="Composio, OAuth, and source connectors that skills use during real workflows."
+          status={statusCopy(accountReady, "Connected", "Needs accounts")}
+          tone={badgeTone(accountReady)}
+          action={
+            <>
+              <SetupLink to="/config">Connections</SetupLink>
+              <SetupLink to="/env">Keys</SetupLink>
+            </>
+          }
+        >
+          <DetailRow
+            icon={KeyRound}
+            label="Composio"
+            value={composioReady ? "ready" : state.composio?.configured ? "check failed" : "not configured"}
+            tone={composioReady ? "success" : state.composio?.configured ? "warning" : "outline"}
+          />
+          <DetailRow
+            icon={ShieldCheck}
+            label="OAuth providers"
+            value={`${oauthConnected}/${state.oauth?.providers.length ?? 0}`}
+            tone={oauthConnected > 0 ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Database}
+            label="Source connectors"
+            value={`${sourceConnected}/${state.connectors?.connectors.length ?? 0}`}
+            tone={sourceConnected > 0 ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Bot}
+            label="Configured platforms"
+            value={state.hub?.platforms.filter((platform) => platform.configured).length ?? 0}
+            tone={(state.hub?.platforms.filter((platform) => platform.configured).length ?? 0) > 0 ? "success" : "outline"}
+          />
+        </ReadinessCard>
+
+        <ReadinessCard
+          icon={Database}
+          title="Memory, runs, and recovery"
+          description="The durability layer for handoffs, callbacks, traces, and source-of-truth state."
+          status={statusCopy(reliabilityReady, "Visible", "Needs checks")}
+          tone={badgeTone(reliabilityReady)}
+          action={
+            <>
+              <SetupLink to="/memory">Memory</SetupLink>
+              <SetupLink to="/logs">Logs</SetupLink>
+              <SetupLink to="/sessions">Sessions</SetupLink>
+            </>
+          }
+        >
+          <DetailRow
+            icon={Database}
+            label="Memory database"
+            value={state.hub?.memory.db_exists ? "present" : "missing"}
+            tone={state.hub?.memory.db_exists ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Activity}
+            label="Cron jobs"
+            value={`${state.hub?.cron.enabled ?? 0}/${state.hub?.cron.total ?? 0}`}
+            tone={(state.hub?.cron.enabled ?? 0) > 0 ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={ShieldCheck}
+            label="Harness"
+            value={harness ? `${harness.orchestration.total_agents} agents` : "not visible"}
+            tone={harness ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Clock}
+            label="Last worker tick"
+            value={formatTime(worker?.lastTickAt)}
+            tone={worker?.lastTickAt ? "success" : "outline"}
+          />
+        </ReadinessCard>
+
+        <ReadinessCard
+          icon={FolderOpen}
+          title="Diagnostics and support"
+          description="The desktop support surface: where to inspect state before touching a live deal."
+          status="Available"
+          tone="success"
+          action={
+            <>
+              <SetupLink to="/project">Project</SetupLink>
+              <SetupLink to="/analytics">Analytics</SetupLink>
+            </>
+          }
+        >
+          <DetailRow
+            icon={FolderOpen}
+            label="Project root"
+            value={state.status?.project_root ? "visible" : "unknown"}
+            tone={state.status?.project_root ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={Settings}
+            label="Config"
+            value={state.status?.config_version ?? "unknown"}
+            tone={
+              state.status && state.status.config_version === state.status.latest_config_version
+                ? "success"
+                : "warning"
+            }
+          />
+          <DetailRow
+            icon={KeyRound}
+            label="Secrets file"
+            value={state.status?.env_path ? "visible" : "unknown"}
+            tone={state.status?.env_path ? "success" : "outline"}
+          />
+          <DetailRow
+            icon={FileText}
+            label="Release"
+            value={state.status?.version ? `v${state.status.version}` : "unknown"}
+            tone="outline"
+          />
+        </ReadinessCard>
+      </section>
+    </div>
+  );
+}

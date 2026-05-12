@@ -41,6 +41,7 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+_UPDATE_AVAILABLE_DEFAULT_INTERVAL = 6 * 60 * 60
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -710,8 +711,14 @@ def _parse_session_key(session_key: str) -> "dict | None":
             "chat_type": parts[3],
             "chat_id": parts[4],
         }
-        if len(parts) > 5 and parts[3] in ("dm", "thread"):
-            result["thread_id"] = parts[5]
+        tail = parts[5:]
+        if "agent" in tail:
+            marker = tail.index("agent")
+            if marker + 1 < len(tail):
+                result["agent_id"] = tail[marker + 1]
+            tail = tail[:marker]
+        if tail and parts[3] in ("dm", "thread"):
+            result["thread_id"] = tail[0]
         return result
     return None
 
@@ -894,6 +901,19 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+
+
+    @staticmethod
+    def _source_delivery_metadata(source: Optional[SessionSource]) -> Optional[Dict[str, Any]]:
+        if source is None:
+            return None
+        metadata: Dict[str, Any] = {}
+        if source.thread_id:
+            metadata["thread_id"] = source.thread_id
+        agent_id = str(getattr(source, "agent_id", "") or "").strip()
+        if agent_id:
+            metadata["agent_id"] = agent_id
+        return metadata or None
 
 
     def _warn_if_docker_media_delivery_is_risky(self) -> None:
@@ -1573,7 +1593,7 @@ class GatewayRunner:
             return "queue"
         if mode in {"interrupt", "hard", "cancel"}:
             return "interrupt"
-        return "soft"
+        return "interrupt"
 
     @staticmethod
     def _load_restart_drain_timeout() -> float:
@@ -2127,7 +2147,7 @@ class GatewayRunner:
             if not adapter:
                 return True
 
-            thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            thread_meta = self._source_delivery_metadata(event.source)
             if self._queue_during_drain_enabled():
                 self._queue_or_replace_pending_event(session_key, event)
                 message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
@@ -2149,7 +2169,7 @@ class GatewayRunner:
 
         running_agent = self._running_agents.get(session_key)
         if _is_busy_status_query(event.text):
-            thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            thread_meta = self._source_delivery_metadata(event.source)
             try:
                 await adapter._send_with_retry(
                     chat_id=event.source.chat_id,
@@ -2252,7 +2272,7 @@ class GatewayRunner:
                 f"I'll respond once the current task reaches a safe point."
             )
 
-        thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        thread_meta = self._source_delivery_metadata(event.source)
         try:
             await adapter._send_with_retry(
                 chat_id=event.source.chat_id,
@@ -2344,6 +2364,7 @@ class GatewayRunner:
                 platform_str = source.platform.value
                 chat_id = source.chat_id
                 thread_id = source.thread_id
+                agent_id = getattr(source, "agent_id", None)
             else:
                 # Fall back to parsing the session key when no persisted
                 # origin is available (legacy sessions/tests).
@@ -2353,10 +2374,11 @@ class GatewayRunner:
                 platform_str = _parsed["platform"]
                 chat_id = _parsed["chat_id"]
                 thread_id = _parsed.get("thread_id")
+                agent_id = _parsed.get("agent_id")
 
             # Deduplicate: one notification per chat, even if multiple
             # sessions (different users/threads) share the same chat.
-            dedup_key = (platform_str, chat_id)
+            dedup_key = (platform_str, chat_id, agent_id or "")
             if dedup_key in notified:
                 continue
 
@@ -2368,7 +2390,13 @@ class GatewayRunner:
 
                 # Include thread_id if present so the message lands in the
                 # correct forum topic / thread.
-                metadata = {"thread_id": thread_id} if thread_id else None
+                metadata: Optional[Dict[str, Any]] = {}
+                if thread_id:
+                    metadata["thread_id"] = thread_id
+                if agent_id:
+                    metadata["agent_id"] = agent_id
+                if not metadata:
+                    metadata = None
 
                 await adapter.send(chat_id, msg, metadata=metadata)
                 notified.add(dedup_key)
@@ -2872,6 +2900,11 @@ class GatewayRunner:
             )
         ):
             self._schedule_update_notification_watch()
+
+        # Let connected home channels know when the release branch advances.
+        # The updater itself still stays explicit: users run `elevate update`
+        # in a terminal or `/update` from chat.
+        self._schedule_update_available_watcher()
 
         # Notify the chat that initiated /restart that the gateway is back.
         await self._send_restart_notification()
@@ -4651,7 +4684,7 @@ class GatewayRunner:
                 )
                 if any(marker in message_text for marker in _stt_fail_markers):
                     _stt_adapter = self.adapters.get(source.platform)
-                    _stt_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    _stt_meta = self._source_delivery_metadata(source)
                     if _stt_adapter:
                         try:
                             _stt_msg = (
@@ -4781,9 +4814,51 @@ class GatewayRunner:
         
         # Build session context
         context = build_session_context(source, self.config, session_entry)
+
+        # Resolve the visible agent lane for this conversation. Telegram can
+        # route by dedicated chat/topic; otherwise the configured default
+        # agent (Executive Assistant) owns the turn.
+        _turn_agent: dict[str, Any] | None = None
+        try:
+            from gateway.agent_lanes import (
+                agent_lane_prompt,
+                merge_agent_skills,
+                resolve_agent_lane_for_source,
+            )
+
+            _lane_config = _load_gateway_config()
+            _turn_agent = resolve_agent_lane_for_source(
+                _lane_config,
+                platform=source.platform.value if source.platform else "",
+                chat_id=source.chat_id,
+                thread_id=str(source.thread_id) if source.thread_id else None,
+                chat_topic=source.chat_topic,
+                explicit_agent_id=getattr(event, "agent_id", None),
+            )
+            if _turn_agent:
+                event.agent_id = str(_turn_agent.get("id") or _turn_agent.get("agent_id") or "").strip()
+                event.agent_name = str(_turn_agent.get("name") or _turn_agent.get("display_name") or "").strip()
+                event.auto_skill = merge_agent_skills(getattr(event, "auto_skill", None), _turn_agent)
+                _agent_prompt = agent_lane_prompt(_turn_agent)
+                if _agent_prompt:
+                    event.channel_prompt = "\n\n".join(
+                        part for part in (_agent_prompt, event.channel_prompt) if str(part or "").strip()
+                    )
+        except Exception as exc:
+            logger.debug("Agent lane resolution skipped: %s", exc)
         
         # Set session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        try:
+            _session_env_tokens = self._set_session_env(
+                context,
+                agent_id=str(getattr(event, "agent_id", "") or ""),
+            )
+        except TypeError as exc:
+            if "agent_id" not in str(exc):
+                raise
+            # Backward-compatible for lightweight tests/subclasses that stubbed
+            # _set_session_env before agent lane context added agent_id.
+            _session_env_tokens = self._set_session_env(context)
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -5069,7 +5144,7 @@ class GatewayRunner:
                         f"{_compress_token_threshold:,}",
                     )
 
-                    _hyg_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    _hyg_meta = self._source_delivery_metadata(source)
 
                     try:
                         from run_agent import AIAgent
@@ -6044,6 +6119,8 @@ class GatewayRunner:
             }
             if event.source.thread_id:
                 notify_data["thread_id"] = event.source.thread_id
+            if getattr(event.source, "agent_id", None):
+                notify_data["agent_id"] = event.source.agent_id
             (_elevate_home / ".restart_notify.json").write_text(
                 json.dumps(notify_data)
             )
@@ -6377,7 +6454,7 @@ class GatewayRunner:
                         lines.append("_(session only — use `/model <name> --global` to persist)_")
                         return "\n".join(lines)
 
-                    metadata = {"thread_id": source.thread_id} if source.thread_id else None
+                    metadata = self._source_delivery_metadata(source)
                     result = await adapter.send_model_picker(
                         chat_id=source.chat_id,
                         providers=providers,
@@ -6782,7 +6859,7 @@ class GatewayRunner:
                 adapter = self.adapters.get(source.platform)
                 if adapter is not None and hasattr(adapter, "send"):
                     import asyncio as _asyncio
-                    thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    thread_meta = self._source_delivery_metadata(source)
                     coro = adapter.send(
                         chat_id=source.chat_id,
                         content=msg,
@@ -7254,8 +7331,9 @@ class GatewayRunner:
                     "audio_path": actual_path,
                     "reply_to": event.message_id,
                 }
-                if event.source.thread_id:
-                    send_kwargs["metadata"] = {"thread_id": event.source.thread_id}
+                event_metadata = self._source_delivery_metadata(event.source)
+                if event_metadata:
+                    send_kwargs["metadata"] = event_metadata
                 await adapter.send_voice(**send_kwargs)
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
@@ -7285,7 +7363,7 @@ class GatewayRunner:
             _, cleaned = adapter.extract_images(response)
             local_files, _ = adapter.extract_local_files(cleaned)
 
-            _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            _thread_meta = self._source_delivery_metadata(event.source)
 
             _AUDIO_EXTS = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
@@ -7441,7 +7519,7 @@ class GatewayRunner:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
             return
 
-        _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+        _thread_metadata = self._source_delivery_metadata(source)
 
         try:
             user_config = _load_gateway_config()
@@ -7622,7 +7700,7 @@ class GatewayRunner:
             logger.warning("No adapter for platform %s in /btw task %s", source.platform, task_id)
             return
 
-        _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
+        _thread_meta = self._source_delivery_metadata(source)
 
         try:
             user_config = _load_gateway_config()
@@ -8742,6 +8820,10 @@ class GatewayRunner:
             "session_key": session_key,
             "timestamp": datetime.now().isoformat(),
         }
+        if event.source.thread_id:
+            pending["thread_id"] = event.source.thread_id
+        if getattr(event.source, "agent_id", None):
+            pending["agent_id"] = event.source.agent_id
         _tmp_pending = pending_path.with_suffix(".tmp")
         _tmp_pending.write_text(json.dumps(pending))
         _tmp_pending.replace(pending_path)
@@ -8800,6 +8882,152 @@ class GatewayRunner:
         except RuntimeError:
             logger.debug("Skipping update notification watcher: no running event loop")
 
+    def _update_available_notifications_enabled(self) -> bool:
+        return is_truthy_value(
+            os.getenv("ELEVATE_UPDATE_AVAILABLE_NOTIFICATIONS"),
+            default=True,
+        )
+
+    def _update_available_check_interval(self) -> int:
+        raw = (os.getenv("ELEVATE_UPDATE_AVAILABLE_CHECK_SECONDS") or "").strip()
+        if raw:
+            try:
+                return max(60, int(float(raw)))
+            except ValueError:
+                logger.debug("Ignoring invalid ELEVATE_UPDATE_AVAILABLE_CHECK_SECONDS=%r", raw)
+        return _UPDATE_AVAILABLE_DEFAULT_INTERVAL
+
+    def _schedule_update_available_watcher(self) -> None:
+        """Notify configured home channels when origin/main has new commits."""
+        if not self._update_available_notifications_enabled():
+            return
+        existing_task = getattr(self, "_update_available_task", None)
+        if existing_task and not existing_task.done():
+            return
+
+        try:
+            self._update_available_task = asyncio.create_task(
+                self._update_available_watcher()
+            )
+        except RuntimeError:
+            logger.debug("Skipping update-available watcher: no running event loop")
+
+    async def _update_available_watcher(
+        self,
+        *,
+        initial_delay: float = 90.0,
+        interval: Optional[int] = None,
+    ) -> None:
+        """Background loop that checks for pushed releases and notifies once."""
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        while self._running:
+            try:
+                await self._notify_update_available_if_needed()
+            except Exception as exc:
+                logger.debug("Update-available check failed: %s", exc)
+
+            delay = interval or self._update_available_check_interval()
+            for _ in range(max(1, int(delay))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
+    async def _notify_update_available_if_needed(self) -> bool:
+        """Send a de-duplicated "updates available" notice to home channels."""
+        if not self._update_available_notifications_enabled():
+            return False
+
+        destinations = []
+        for platform, adapter in list(getattr(self, "adapters", {}).items()):
+            if platform not in self._UPDATE_ALLOWED_PLATFORMS:
+                continue
+            home = self.config.get_home_channel(platform)
+            if home and home.chat_id:
+                destinations.append((platform, adapter, home.chat_id))
+
+        if not destinations:
+            return False
+
+        def _check_update_state() -> Optional[Dict[str, Any]]:
+            from elevate_cli.banner import (
+                _resolve_repo_dir,
+                check_for_updates,
+                get_git_banner_state,
+            )
+            from elevate_cli.config import recommended_update_command
+
+            repo_dir = _resolve_repo_dir()
+            if repo_dir is None:
+                return None
+            behind = check_for_updates(force=True, cache_seconds=0)
+            git_state = get_git_banner_state(repo_dir) or {}
+            return {
+                "behind": behind,
+                "command": recommended_update_command(),
+                "local": git_state.get("local"),
+                "repo_dir": str(repo_dir),
+                "upstream": git_state.get("upstream"),
+            }
+
+        loop = asyncio.get_running_loop()
+        state = await loop.run_in_executor(None, _check_update_state)
+        if not state:
+            return False
+
+        behind = state.get("behind")
+        if not isinstance(behind, int) or behind <= 0:
+            return False
+
+        notify_path = _elevate_home / ".update_available_notified.json"
+        upstream = state.get("upstream")
+        dedupe_key = upstream or f"{state.get('local')}:{behind}"
+        try:
+            previous = json.loads(notify_path.read_text()) if notify_path.exists() else {}
+        except Exception:
+            previous = {}
+        if previous.get("dedupe_key") == dedupe_key:
+            return False
+
+        commit_word = "commit" if behind == 1 else "commits"
+        command = state.get("command") or "elevate update"
+        message = (
+            "Elevate update available.\n\n"
+            f"{behind} new {commit_word} are ready from origin/main.\n"
+            f"Run `{command}` in the terminal, or send `/update` here."
+        )
+
+        sent = 0
+        for platform, adapter, chat_id in destinations:
+            try:
+                await adapter.send(chat_id, message)
+                sent += 1
+                logger.info("Sent update-available notification to %s:%s", platform.value, chat_id)
+            except Exception as exc:
+                logger.debug(
+                    "Update-available notification failed for %s:%s: %s",
+                    platform.value,
+                    chat_id,
+                    exc,
+                )
+
+        if sent == 0:
+            return False
+
+        try:
+            notify_path.write_text(json.dumps({
+                "behind": behind,
+                "dedupe_key": dedupe_key,
+                "local": state.get("local"),
+                "notified_at": datetime.now().isoformat(),
+                "upstream": upstream,
+            }))
+        except Exception as exc:
+            logger.debug("Failed to record update-available notification: %s", exc)
+
+        return True
+
     async def _watch_update_progress(
         self,
         poll_interval: float = 2.0,
@@ -8827,6 +9055,7 @@ class GatewayRunner:
         adapter = None
         chat_id = None
         session_key = None
+        delivery_metadata: Optional[Dict[str, Any]] = None
         for path in (claimed_path, pending_path):
             if path.exists():
                 try:
@@ -8834,6 +9063,13 @@ class GatewayRunner:
                     platform_str = pending.get("platform")
                     chat_id = pending.get("chat_id")
                     session_key = pending.get("session_key")
+                    delivery_metadata = {}
+                    if pending.get("thread_id"):
+                        delivery_metadata["thread_id"] = pending.get("thread_id")
+                    if pending.get("agent_id"):
+                        delivery_metadata["agent_id"] = pending.get("agent_id")
+                    if not delivery_metadata:
+                        delivery_metadata = None
                     if platform_str and chat_id:
                         platform = Platform(platform_str)
                         adapter = self.adapters.get(platform)
@@ -8881,7 +9117,7 @@ class GatewayRunner:
             chunks = [clean[i:i + max_chunk] for i in range(0, len(clean), max_chunk)]
             for chunk in chunks:
                 try:
-                    await adapter.send(chat_id, f"```\n{chunk}\n```")
+                    await adapter.send(chat_id, f"```\n{chunk}\n```", metadata=delivery_metadata)
                 except Exception as e:
                     logger.debug("Update stream send failed: %s", e)
 
@@ -8904,9 +9140,13 @@ class GatewayRunner:
                     exit_code_raw = exit_code_path.read_text().strip() or "1"
                     exit_code = int(exit_code_raw)
                     if exit_code == 0:
-                        await adapter.send(chat_id, "✅ Elevate update finished.")
+                        await adapter.send(chat_id, "✅ Elevate update finished.", metadata=delivery_metadata)
                     else:
-                        await adapter.send(chat_id, "❌ Elevate update failed (exit code {}).".format(exit_code))
+                        await adapter.send(
+                            chat_id,
+                            "❌ Elevate update failed (exit code {}).".format(exit_code),
+                            metadata=delivery_metadata,
+                        )
                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
                 except Exception as e:
                     logger.warning("Update final notification failed: %s", e)
@@ -8951,12 +9191,19 @@ class GatewayRunner:
                         sent_buttons = False
                         if getattr(type(adapter), "send_update_prompt", None) is not None:
                             try:
-                                await adapter.send_update_prompt(
-                                    chat_id=chat_id,
-                                    prompt=prompt_text,
-                                    default=default,
-                                    session_key=session_key,
-                                )
+                                prompt_kwargs: Dict[str, Any] = {
+                                    "chat_id": chat_id,
+                                    "prompt": prompt_text,
+                                    "default": default,
+                                    "session_key": session_key,
+                                }
+                                try:
+                                    import inspect as _inspect
+                                    if "metadata" in _inspect.signature(adapter.send_update_prompt).parameters:
+                                        prompt_kwargs["metadata"] = delivery_metadata
+                                except Exception:
+                                    pass
+                                await adapter.send_update_prompt(**prompt_kwargs)
                                 sent_buttons = True
                             except Exception as btn_err:
                                 logger.debug("Button-based update prompt failed: %s", btn_err)
@@ -8967,7 +9214,8 @@ class GatewayRunner:
                                 f"▲ **Update needs your input:**\n\n"
                                 f"{prompt_text}{default_hint}\n\n"
                                 f"Reply `/approve` (yes) or `/deny` (no), "
-                                f"or type your answer directly."
+                                f"or type your answer directly.",
+                                metadata=delivery_metadata,
                             )
                         self._update_prompt_pending[session_key] = True
                         # Remove the prompt file so it isn't re-read on the
@@ -8987,7 +9235,11 @@ class GatewayRunner:
             exit_code_path.write_text("124")
             await _flush_buffer()
             try:
-                await adapter.send(chat_id, "❌ Elevate update timed out after 30 minutes.")
+                await adapter.send(
+                    chat_id,
+                    "❌ Elevate update timed out after 30 minutes.",
+                    metadata=delivery_metadata,
+                )
             except Exception:
                 pass
             for p in (pending_path, claimed_path, output_path,
@@ -9093,6 +9345,7 @@ class GatewayRunner:
             platform_str = data.get("platform")
             chat_id = data.get("chat_id")
             thread_id = data.get("thread_id")
+            agent_id = data.get("agent_id")
 
             if not platform_str or not chat_id:
                 return
@@ -9106,7 +9359,13 @@ class GatewayRunner:
                 )
                 return
 
-            metadata = {"thread_id": thread_id} if thread_id else None
+            metadata: Optional[Dict[str, Any]] = {}
+            if thread_id:
+                metadata["thread_id"] = thread_id
+            if agent_id:
+                metadata["agent_id"] = agent_id
+            if not metadata:
+                metadata = None
             await adapter.send(
                 chat_id,
                 "♻ Gateway restarted successfully. Your session continues.",
@@ -9122,7 +9381,7 @@ class GatewayRunner:
         finally:
             notify_path.unlink(missing_ok=True)
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(self, context: SessionContext, *, agent_id: str = "") -> list:
         """Set session context variables for the current async task.
 
         Uses ``contextvars`` instead of ``os.environ`` so that concurrent
@@ -9140,6 +9399,7 @@ class GatewayRunner:
             user_id=str(context.source.user_id) if context.source.user_id else "",
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
+            agent_id=agent_id,
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -10078,10 +10338,7 @@ class GatewayRunner:
             else bool(_plat_streaming)
         )
 
-        if source.thread_id:
-            _thread_metadata: Optional[Dict[str, Any]] = {"thread_id": source.thread_id}
-        else:
-            _thread_metadata = None
+        _thread_metadata: Optional[Dict[str, Any]] = self._source_delivery_metadata(source)
 
         if _streaming_enabled:
             try:
@@ -10447,7 +10704,14 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _progress_metadata = {}
+        if _progress_thread_id:
+            _progress_metadata["thread_id"] = _progress_thread_id
+        _progress_agent_id = str(getattr(source, "agent_id", "") or "").strip()
+        if _progress_agent_id:
+            _progress_metadata["agent_id"] = _progress_agent_id
+        if not _progress_metadata:
+            _progress_metadata = None
 
         async def send_progress_messages():
             if not progress_queue:
@@ -10473,6 +10737,23 @@ class GatewayRunner:
             can_edit = True          # False once an edit fails (platform doesn't support it)
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
+
+            async def _edit_progress_message(message_id: str, content: str):
+                try:
+                    return await adapter.edit_message(
+                        chat_id=source.chat_id,
+                        message_id=message_id,
+                        content=content,
+                        metadata=_progress_metadata,
+                    )
+                except TypeError as exc:
+                    if "metadata" not in str(exc):
+                        raise
+                    return await adapter.edit_message(
+                        chat_id=source.chat_id,
+                        message_id=message_id,
+                        content=content,
+                    )
 
             while True:
                 try:
@@ -10515,11 +10796,7 @@ class GatewayRunner:
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
-                        result = await adapter.edit_message(
-                            chat_id=source.chat_id,
-                            message_id=progress_msg_id,
-                            content=full_text,
-                        )
+                        result = await _edit_progress_message(progress_msg_id, full_text)
                         if not result.success:
                             _err = (getattr(result, "error", "") or "").lower()
                             if "flood" in _err or "retry after" in _err:
@@ -10569,11 +10846,7 @@ class GatewayRunner:
                     if can_edit and progress_lines and progress_msg_id:
                         full_text = "\n".join(progress_lines)
                         try:
-                            await adapter.edit_message(
-                                chat_id=source.chat_id,
-                                message_id=progress_msg_id,
-                                content=full_text,
-                            )
+                            await _edit_progress_message(progress_msg_id, full_text)
                         except Exception:
                             pass
                     return
@@ -10621,7 +10894,7 @@ class GatewayRunner:
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
-        _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _status_thread_metadata = _progress_metadata
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
@@ -11990,6 +12263,22 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     tick_count = 0
     while not stop_event.is_set():
         try:
+            from elevate_cli.agent_worker import tick as agent_worker_tick
+
+            worker_status = agent_worker_tick(actor="agent-worker:cron", reason="cron_ticker")
+            drained = worker_status.get("drained") if isinstance(worker_status, dict) else {}
+            drained_handoffs = int((drained or {}).get("handoffs") or 0)
+            drained_admin_runs = int((drained or {}).get("adminRuns") or 0)
+            if drained_handoffs or drained_admin_runs:
+                logger.info(
+                    "Agent worker drained %d handoff(s), %d admin run(s)",
+                    drained_handoffs,
+                    drained_admin_runs,
+                )
+        except Exception as e:
+            logger.debug("Agent worker tick error: %s", e)
+
+        try:
             cron_tick(verbose=False, adapters=adapters, loop=loop)
         except Exception as e:
             logger.debug("Cron tick error: %s", e)
@@ -12319,6 +12608,27 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if runner.exit_reason:
             logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
         return True
+
+    gateway_loop = asyncio.get_running_loop()
+
+    def _agent_worker_after_tick(status: dict):
+        try:
+            drained = status.get("drained") if isinstance(status, dict) else {}
+            if not (int((drained or {}).get("handoffs") or 0) or int((drained or {}).get("adminRuns") or 0)):
+                return
+            from cron.scheduler import tick as cron_tick
+
+            cron_tick(verbose=False, adapters=runner.adapters, loop=gateway_loop)
+        except Exception as exc:
+            logger.debug("Agent worker wake cron tick error: %s", exc)
+
+    try:
+        from elevate_cli.agent_worker import start_background_loop
+
+        start_background_loop(after_tick=_agent_worker_after_tick)
+        logger.info("Agent worker heartbeat/wake loop started")
+    except Exception as exc:
+        logger.debug("Agent worker loop start error: %s", exc)
     
     # Start background cron ticker so scheduled jobs fire automatically.
     # Pass the event loop so cron delivery can use live adapters (E2EE support).
@@ -12343,6 +12653,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+    try:
+        from elevate_cli.agent_worker import stop_background_loop
+
+        stop_background_loop()
+    except Exception:
+        pass
 
     # Close MCP server connections
     try:

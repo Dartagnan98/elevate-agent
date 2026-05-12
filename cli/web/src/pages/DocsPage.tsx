@@ -5,7 +5,7 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-export const ELEVATE_DOCS_URL = "https://elevate.ctrlstrategies.com/docs/";
+export const ELEVATE_DOCS_URL = "https://github.com/Dartagnan98/elevate-agent#readme";
 
 export default function DocsPage() {
   const { t } = useI18n();

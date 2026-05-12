@@ -238,13 +238,13 @@ def _candidate_tools_root(config: dict[str, Any]) -> Path:
     integrations_cfg = _as_dict(config.get("integrations"))
     env_root = os.getenv("ELEVATE_TOOLS_ROOT", "").strip()
     configured = str(sources_cfg.get("tools_root") or integrations_cfg.get("tools_root") or "").strip()
-    skyleigh_tmp = get_elevate_home() / "tmp" / "skyleigh-tools"
+    client_tools_tmp = get_elevate_home() / "tmp" / "client-tools"
     if env_root:
         return _expand_path(env_root)
     if configured:
         return _expand_path(configured)
-    if skyleigh_tmp.exists():
-        return skyleigh_tmp
+    if client_tools_tmp.exists():
+        return client_tools_tmp
     return get_elevate_home() / "tools"
 
 
@@ -257,8 +257,8 @@ def get_source_root_info(config: dict[str, Any] | None = None) -> dict[str, Any]
         root_source = "env"
     elif sources_cfg.get("tools_root"):
         root_source = "config"
-    elif (get_elevate_home() / "tmp" / "skyleigh-tools").exists():
-        root_source = "detected-skyleigh-tools"
+    elif (get_elevate_home() / "tmp" / "client-tools").exists():
+        root_source = "detected-client-tools"
     else:
         root_source = "default-local"
 

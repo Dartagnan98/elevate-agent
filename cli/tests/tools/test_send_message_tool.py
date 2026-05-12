@@ -127,7 +127,34 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            agent_id=None,
         )
+
+    def test_send_uses_current_agent_id_for_telegram_bot_selection(self):
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        config, _telegram_cfg = _make_config()
+        tokens = set_session_vars(platform="telegram", chat_id="123", agent_id="admin")
+        try:
+            with patch("gateway.config.load_gateway_config", return_value=config), \
+                 patch("tools.interrupt.is_interrupted", return_value=False), \
+                 patch("model_tools._run_async", side_effect=_run_async_immediately), \
+                 patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+                 patch("gateway.mirror.mirror_to_session", return_value=True):
+                result = json.loads(
+                    send_message_tool(
+                        {
+                            "action": "send",
+                            "target": "telegram:123",
+                            "message": "hello",
+                        }
+                    )
+                )
+        finally:
+            clear_session_vars(tokens)
+
+        assert result["success"] is True
+        assert send_mock.await_args.kwargs["agent_id"] == "admin"
 
     def test_display_label_target_resolves_via_channel_directory(self, tmp_path):
         config, telegram_cfg = _make_config()
@@ -165,6 +192,7 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+            agent_id=None,
         )
 
     def test_top_level_send_failure_redacts_query_token(self):
@@ -454,6 +482,31 @@ class TestSendToPlatformChunking:
         assert len(sent_calls) >= 3
         assert all(call == [] for call in sent_calls[:-1])
         assert sent_calls[-1] == media
+
+    def test_telegram_agent_id_uses_agent_bot_token(self):
+        sent_tokens = []
+
+        async def fake_send(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False):
+            sent_tokens.append(token)
+            return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": "1"}
+
+        with patch("tools.send_message_tool._send_telegram", fake_send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.TELEGRAM,
+                    SimpleNamespace(
+                        enabled=True,
+                        token="default-token",
+                        extra={"agent_bots": {"admin": {"token": "admin-token"}}},
+                    ),
+                    "123",
+                    "admin delivery",
+                    agent_id="admin",
+                )
+            )
+
+        assert result["success"] is True
+        assert sent_tokens == ["admin-token"]
 
     def test_matrix_media_uses_native_adapter_helper(self):
 

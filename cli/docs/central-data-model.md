@@ -72,7 +72,7 @@ collision happens during ingest, we merge.
 |---|---|---|
 | `id` | TEXT PK | |
 | `contact_id` | TEXT FK→contacts | |
-| `source_id` | TEXT | connector instance, e.g. `lofty-default`, `apple-messages`, `composio-gmail-skyleigh` |
+| `source_id` | TEXT | connector instance, e.g. `lofty-default`, `apple-messages`, `composio-gmail-primary` |
 | `channel` | TEXT | `email` \| `sms` \| `imessage` \| `messenger` \| `instagram` \| `whatsapp` \| `telegram` \| `voice` \| `crm` |
 | `thread_key` | TEXT | the source's native thread ID (for re-fetching) |
 | `status` | TEXT | `open` \| `done` \| `archived` |
@@ -612,7 +612,7 @@ status='proposed'  →  human reviews in /admin/templates  →  status='live'
 ```
 
 New templates never go straight to `live`. They sit in `proposed` until
-Skyleigh approves. The /admin/templates view shows proposed templates
+pilot realtor approves. The /admin/templates view shows proposed templates
 with the rationale ("AI noticed pattern X, suggests this") and the
 candidate body inline-editable.
 
@@ -664,7 +664,7 @@ survives.
   human-in-the-loop on new templates. Revisit when we see how often the
   AI actually proposes good ones.**
 
-## Production install paths (Skyleigh's Mac)
+## Production install paths (the pilot realtor's Mac)
 
 ```
 ~/.elevate/                                # ELEVATE_HOME (env override)
@@ -701,7 +701,7 @@ Single command. Idempotent. On first run:
 1. **Create new layout** — `~/.elevate/data/`, `~/.elevate/sources/`,
    `~/.elevate/logs/`. Initialize `operational.db` from schema.
 
-2. **Move source data** — rename `~/.elevate/tmp/skyleigh-tools/data/sources/`
+2. **Move source data** — rename `~/.elevate/tmp/client-tools/data/sources/`
    → `~/.elevate/sources/`. Leave a forwarding symlink at the old path
    for one release so any cron job not yet updated still works.
 
@@ -735,10 +735,10 @@ follow-up release.
 
 ## What's NOT in scope for v1
 
-- Cross-device sync (Supabase write-through) — gated behind `--cloud-backup`
+- Cross-device sync/write-through — gated behind `--cloud-backup`
   config flag, ship later
 - Multi-agent isolation (`agents/<slug>/`) — Dartagnan's dev box uses
-  `ELEVATE_HOME` to switch between Skyleigh's and a future realtor's
+  `ELEVATE_HOME` to switch between the pilot realtor's and a future realtor's
   sandbox; production CLI is single-tenant
 - Manual merge UI — start with auto-merge only, ship merge UI when we
   see real duplicates accumulate

@@ -1,5 +1,5 @@
 import { createContext } from "react";
-import type { ActionStatusResponse } from "@/lib/api";
+import type { ActionStatusResponse, UpdateStatusResponse } from "@/lib/api";
 
 export const SystemActionsContext = createContext<SystemActionsState | null>(
   null,
@@ -14,5 +14,7 @@ export interface SystemActionsState {
   isBusy: boolean;
   isRunning: boolean;
   pendingAction: SystemAction | null;
+  refreshUpdateStatus: (refresh?: boolean) => Promise<void>;
   runAction: (action: SystemAction) => Promise<void>;
+  updateStatus: UpdateStatusResponse | null;
 }

@@ -248,7 +248,7 @@ def _normalize(
     }
     if extra_context:
         # e.g. {"page_id": "...", "page_name": "..."} for FB so the UI can
-        # show "via Uppercuts Walnut Grove" without re-reading the raw payload.
+        # show "via Training Academy Walnut Grove" without re-reading the raw payload.
         record["context"] = extra_context
     return record
 

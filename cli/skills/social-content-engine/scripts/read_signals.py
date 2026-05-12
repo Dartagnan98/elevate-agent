@@ -54,9 +54,9 @@ def _resolve_source_root() -> Path:
     except Exception:
         pass
     elevate_home = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate")
-    skyleigh = elevate_home / "tmp" / "skyleigh-tools" / "data" / "sources"
-    if skyleigh.exists():
-        return skyleigh
+    client_tools = elevate_home / "tmp" / "client-tools" / "data" / "sources"
+    if client_tools.exists():
+        return client_tools
     return elevate_home / "tools" / "data" / "sources"
 
 

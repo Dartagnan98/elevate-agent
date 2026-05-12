@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +62,7 @@ LOCKED_STATUSES = {
     "canceled",
 }
 ACTIVE_AFFILIATION_STATUSES = {"active", "member", "verified"}
+DEV_DASHBOARD_UNLOCK_ENV = "ELEVATE_DEV_UNLOCK_REAL_ESTATE_DASHBOARDS"
 
 
 BASE_ACCESS_CONFIG: dict[str, Any] = {
@@ -388,6 +390,10 @@ def set_profile(profile: str) -> dict[str, Any]:
     return updated
 
 
+def _truthy_env(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def dashboard_access_status(access_config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return entitlement state shaped for dashboard route/pack gating."""
     access_config = (
@@ -414,13 +420,16 @@ def dashboard_access_status(access_config: dict[str, Any] | None = None) -> dict
             "manualLock": bool(entry.get("manual_lock")),
         }
 
-    sales = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_SALES, access_config)
-    marketing = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_MARKETING, access_config)
-    admin = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, access_config)
-    cma = is_entitlement_active(ENTITLEMENT_REAL_ESTATE_CMA, access_config)
+    dev_override = _truthy_env(DEV_DASHBOARD_UNLOCK_ENV)
+    sales = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_SALES, access_config)
+    marketing = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_MARKETING, access_config)
+    admin = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, access_config)
+    cma = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_CMA, access_config)
 
     return {
         "profile": access_config["profile"],
+        "devOverride": dev_override,
+        "mode": "development" if dev_override else "entitlement",
         "entitlements": entitlement_payload,
         "packs": {
             "realEstateSales": sales,

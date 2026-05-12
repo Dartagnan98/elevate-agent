@@ -106,7 +106,7 @@
 
           meta = with pkgs.lib; {
             description = "AI agent with advanced tool-calling capabilities";
-            homepage = "https://elevate.ctrlstrategies.com";
+            homepage = "https://github.com/Dartagnan98/elevate-agent";
             mainProgram = "elevate";
             license = licenses.mit;
             platforms = platforms.unix;

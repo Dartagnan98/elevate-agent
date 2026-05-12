@@ -18,7 +18,7 @@ Elevate should operate like this:
 observe → extract → reason → plan → ask approval → act → verify → log → resume
 ```
 
-For Skyleigh first:
+For pilot realtor first:
 
 ```text
 Controlled Browser → eXp Agent Centre province extraction → rules packs → Admin Hub → Transaction Heartbeat → calendar/deadline/missing-doc workflows
@@ -334,10 +334,10 @@ Use:
 ~/.elevate/rules-packs/<country>/<province>/<brokerage>/
 ```
 
-For Skyleigh eXp:
+For pilot realtor eXp:
 
 ```text
-~/.elevate/knowledge/skyleigh/admin/exp-agent-centre/all-provinces-raw/
+~/.elevate/knowledge/client/admin/exp-agent-centre/all-provinces-raw/
 ~/.elevate/rules-packs/canada/bc/exp/
 ~/.elevate/rules-packs/canada/ab/exp/
 ```
@@ -820,7 +820,7 @@ Input:
 
 ```json
 {
-  "account_context": "Skyleigh/eXp",
+  "account_context": "pilot realtor/eXp",
   "provinces": ["AB", "BC", "MB", "NB", "NL", "NS", "ON", "PEI", "QC", "SK", "YK"],
   "start_at": "AB",
   "allowed_domains": ["www.expagentcentre.ca", "exptransactionguide.com"],
@@ -920,7 +920,7 @@ Given a transaction + rules pack, return:
 
 **Files:**
 - Modify: `cron/jobs.py`
-- Add skill/job prompt under Skyleigh/admin if needed
+- Add skill/job prompt under pilot realtor/admin if needed
 
 Schedule suggestion:
 
@@ -1144,7 +1144,7 @@ curl -s http://127.0.0.1:9119/api/harness/jobs
 ```bash
 open -na "Google Chrome" --args \
   --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.elevate/chrome-skyleigh"
+  --user-data-dir="$HOME/.elevate/chrome-client"
 ```
 
 2. Login manually.
@@ -1159,7 +1159,7 @@ open -na "Google Chrome" --args \
 
 ```text
 ~/.elevate/harness/sources/
-~/.elevate/knowledge/skyleigh/admin/exp-agent-centre/all-provinces-raw/
+~/.elevate/knowledge/client/admin/exp-agent-centre/all-provinces-raw/
 ~/.elevate/rules-packs/canada/ab/exp/
 ```
 
@@ -1198,7 +1198,7 @@ MVP is done when:
 
 ---
 
-## Immediate Skyleigh Extraction Plan
+## Immediate pilot realtor Extraction Plan
 
 Until full harness is built, use the controlled Chrome CDP bridge, but run it province-by-province with checkpoints.
 
@@ -1225,7 +1225,7 @@ For each province:
 Output folder:
 
 ```text
-/Users/dartagnanpatricio/.elevate/knowledge/skyleigh/admin/exp-agent-centre/all-provinces-raw/<province>/
+/Users/dartagnanpatricio/.elevate/knowledge/client/admin/exp-agent-centre/all-provinces-raw/<province>/
 ```
 
 ---

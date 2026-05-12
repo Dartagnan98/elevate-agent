@@ -436,7 +436,7 @@ class ContextCompressor(ContextEngine):
         )
 
     def compact_for_retry(self, messages: List[Dict[str, Any]], error: str) -> tuple[List[Dict[str, Any]], bool, Dict[str, Any]]:
-        """jcode-style emergency context-limit recovery hook.
+        """memory-maintenance emergency context-limit recovery hook.
 
         If the provider rejects a turn for context size, run one hard compaction
         immediately so the caller can retry the same turn instead of failing the

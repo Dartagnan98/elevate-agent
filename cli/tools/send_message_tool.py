@@ -273,6 +273,11 @@ def _handle_send(args):
 
     try:
         from model_tools import _run_async
+        try:
+            from gateway.session_context import get_session_env
+            agent_id = get_session_env("ELEVATE_SESSION_AGENT_ID", "").strip() or None
+        except Exception:
+            agent_id = None
         result = _run_async(
             _send_to_platform(
                 platform,
@@ -281,6 +286,7 @@ def _handle_send(args):
                 cleaned_message,
                 thread_id=thread_id,
                 media_files=media_files,
+                agent_id=agent_id,
             )
         )
         if used_home_channel and isinstance(result, dict) and result.get("success"):
@@ -401,7 +407,7 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None):
+async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, agent_id=None):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
@@ -459,10 +465,18 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if platform == Platform.TELEGRAM:
         last_result = None
         disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
+        token = pconfig.token
+        agent_bots = pconfig.extra.get("agent_bots") if isinstance(getattr(pconfig, "extra", None), dict) else None
+        if agent_id and isinstance(agent_bots, dict):
+            bot_config = agent_bots.get(str(agent_id))
+            if isinstance(bot_config, dict):
+                token = str(bot_config.get("token") or "").strip() or token
+            elif bot_config:
+                token = str(bot_config).strip() or token
         for i, chunk in enumerate(chunks):
             is_last = (i == len(chunks) - 1)
             result = await _send_telegram(
-                pconfig.token,
+                token,
                 chat_id,
                 chunk,
                 media_files=media_files if is_last else [],

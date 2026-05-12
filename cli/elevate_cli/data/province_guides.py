@@ -61,6 +61,18 @@ _PREFIX_TO_PROVINCE = {
     "sk": "SK",
     "yk": "YK",
 }
+_PROVINCE_ALIASES = {
+    **{code.lower(): code for code in PROVINCE_LABELS},
+    **{label.lower(): code for code, label in PROVINCE_LABELS.items()},
+    **_LANDING_TO_PROVINCE,
+    **_PREFIX_TO_PROVINCE,
+    "newfoundland": "NL",
+    "nwt": "NT",
+    "northwest-territories": "NT",
+    "prince edward island": "PEI",
+    "p.e.i.": "PEI",
+    "yukon territory": "YK",
+}
 _PAGE_TYPES = {
     "boards": "boards",
     "deposit-instructions": "deposit_instructions",
@@ -166,6 +178,27 @@ def _page_type(slug: str) -> str:
         if slug.endswith(marker):
             return page_type
     return "other"
+
+
+def normalize_province_code(value: str | None) -> str | None:
+    """Return a canonical province code, or raise for unknown values.
+
+    Province guide import supports an explicit destructive prune path. Unknown
+    labels must fail closed so typos cannot delete all guide rows.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    code = text.upper()
+    if code in PROVINCE_LABELS:
+        return code
+    key = text.lower().replace("_", "-").strip()
+    if key in _PROVINCE_ALIASES:
+        return _PROVINCE_ALIASES[key]
+    spaced = key.replace("-", " ")
+    if spaced in _PROVINCE_ALIASES:
+        return _PROVINCE_ALIASES[spaced]
+    raise ValueError(f"unknown province {text!r}")
 
 
 def _row_to_reference_page(row: sqlite3.Row) -> dict[str, Any]:
@@ -396,13 +429,24 @@ def _upsert_conditional_doc(
         )
 
 
-def import_exp_agent_centre(conn: sqlite3.Connection, root: str | Path | None = None) -> dict[str, Any]:
+def import_exp_agent_centre(
+    conn: sqlite3.Connection,
+    root: str | Path | None = None,
+    *,
+    province: str | None = None,
+    prune_other_provinces: bool = False,
+) -> dict[str, Any]:
     """Import local eXp Agent Centre markdown/forms into SQLite.
 
     Missing roots return a summary instead of raising so fresh installs can run
-    without Skyleigh's private scrape output.
+    without private scrape output. By default the product imports all available
+    provinces so onboarding can show users their choices. When ``province`` is
+    provided, import can be narrowed to that province; ``prune_other_provinces``
+    is an explicit maintenance escape hatch, not the onboarding default.
     """
     base = Path(root).expanduser() if root is not None else default_exp_agent_centre_root()
+    target_province = normalize_province_code(province)
+    target_set = {target_province} if target_province else None
     if not base.exists():
         return {
             "ok": False,
@@ -429,6 +473,8 @@ def import_exp_agent_centre(conn: sqlite3.Connection, root: str | Path | None = 
             province = _province_for_page(slug)
             if not province:
                 continue
+            if target_set and province not in target_set:
+                continue
             raw = path.read_text(encoding="utf-8")
             meta, body = _split_frontmatter(raw)
             _upsert_reference_page(
@@ -446,7 +492,7 @@ def import_exp_agent_centre(conn: sqlite3.Connection, root: str | Path | None = 
             provinces.add(province)
 
     guide_root = base / "transaction-guide-bc"
-    if guide_root.exists():
+    if guide_root.exists() and (not target_set or "BC" in target_set):
         provinces.add("BC")
         for path in sorted(guide_root.glob("*.md")):
             raw = path.read_text(encoding="utf-8")
@@ -502,6 +548,12 @@ def import_exp_agent_centre(conn: sqlite3.Connection, root: str | Path | None = 
         for item in _DEFAULT_CONDITIONAL_DOCS:
             _upsert_conditional_doc(conn, now=now, **item)
             conditional_count += 1
+
+    if prune_other_provinces and target_set:
+        placeholders = ",".join("?" for _ in target_set)
+        params = tuple(sorted(target_set))
+        for table in ("province_reference_pages", "province_checklists", "province_forms", "conditional_docs"):
+            conn.execute(f"DELETE FROM {table} WHERE province NOT IN ({placeholders})", params)
 
     return {
         "ok": True,

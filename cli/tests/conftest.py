@@ -20,11 +20,14 @@ test runner at ``scripts/run_tests.sh``.
 """
 
 import asyncio
+import importlib.util
 import os
 import re
+import resource
 import signal
 import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +37,79 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# The gateway/API tests create many short-lived aiohttp servers and sockets.
+# macOS shells often start with a soft RLIMIT_NOFILE of 256, which makes the
+# full suite fail with unrelated "Too many open files" errors before cleanup
+# hooks can run. Raise the test-process soft limit when the OS permits it; keep
+# the hard limit unchanged.
+def _raise_nofile_limit_for_tests() -> None:
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return
+    target = min(max(soft, 4096), hard)
+    if target > soft:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        except (OSError, ValueError):
+            pass
+
+
+_raise_nofile_limit_for_tests()
+
+
+def _optional_dependency_available(module_name: str) -> bool:
+    """Return True when an optional test dependency is importable."""
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip optional-extra / platform-specific tests in default local runs.
+
+    These tests are still collected and run when their production extra or
+    platform exists; on a default macOS/dev install they should report clean
+    skips instead of masking real regressions behind missing optional deps.
+    """
+    missing_botocore = not _optional_dependency_available("botocore")
+    non_linux = not sys.platform.startswith("linux")
+
+    botocore_skip = pytest.mark.skip(reason="requires optional Bedrock extra: botocore")
+    linux_systemd_skip = pytest.mark.skip(reason="requires Linux/systemd platform")
+
+    for item in items:
+        nodeid = item.nodeid
+        if missing_botocore and nodeid.startswith("tests/agent/test_bedrock_adapter.py"):
+            item.add_marker(botocore_skip)
+        if non_linux and (
+            nodeid.startswith("tests/hermes_cli/test_gateway_service.py")
+            or nodeid.startswith("tests/hermes_cli/test_gateway_wsl.py")
+        ):
+            item.add_marker(linux_systemd_skip)
+
+
+def _install_faster_whisper_stub() -> None:
+    """Install a patch-target-only stub for faster_whisper when absent."""
+    if _optional_dependency_available("faster_whisper"):
+        return
+    if "faster_whisper" in sys.modules:
+        return
+    # Several transcription unit tests force _HAS_FASTER_WHISPER=True and then
+    # patch faster_whisper.WhisperModel. Provide a tiny placeholder module so
+    # unittest.mock.patch can target it without installing the heavy optional
+    # package. Tests that forget to patch still fail loudly at instantiation.
+    faster_whisper_stub = types.ModuleType("faster_whisper")
+
+    class _MissingWhisperModel:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("faster-whisper is not installed")
+
+    faster_whisper_stub.WhisperModel = _MissingWhisperModel
+    sys.modules["faster_whisper"] = faster_whisper_stub
 
 
 # ── Credential env-var filter ──────────────────────────────────────────────
@@ -231,6 +307,21 @@ def _hermetic_environment(tmp_path, monkeypatch):
     for name in _ELEVATE_BEHAVIORAL_VARS:
         monkeypatch.delenv(name, raising=False)
 
+    # 2b. Blank per-agent Telegram lane targets. These are not credentials,
+    # but local realtor/admin gateway setup can export them and change which
+    # cron delivery lane or first-message bootstrap path tests observe.
+    for name in list(os.environ.keys()):
+        if (
+            name.startswith("ELEVATE_AGENT_")
+            and name.endswith("_TELEGRAM_CHANNEL")
+        ) or name in {
+            "ELEVATE_ADMIN_AGENT_TELEGRAM_CHANNEL",
+            "TELEGRAM_ADMIN_AGENT_CHANNEL",
+            "ADMIN_AGENT_TELEGRAM_CHAT_ID",
+            "TELEGRAM_HOME_CHANNEL",
+        }:
+            monkeypatch.delenv(name, raising=False)
+
     # 3. Redirect ELEVATE_HOME to a per-test tempdir. Code that reads
     #    ``~/.elevate/*`` via ``get_elevate_home()`` now gets the tempdir.
     #
@@ -248,6 +339,15 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_elevate_home / "memories").mkdir()
     (fake_elevate_home / "skills").mkdir()
     monkeypatch.setenv("ELEVATE_HOME", str(fake_elevate_home))
+
+    # Scoped gateway locks intentionally default to a machine-global state dir
+    # in production so multiple profiles cannot claim the same external token
+    # or WhatsApp session concurrently. Tests, however, use fake identities and
+    # xdist workers; sharing the real lock dir lets a successful mocked connect()
+    # in one test make unrelated tests fail before they reach their cleanup
+    # assertions. Keep the production default intact and isolate scoped locks to
+    # the per-test ELEVATE_HOME sandbox.
+    monkeypatch.setenv("ELEVATE_GATEWAY_LOCK_DIR", str(fake_elevate_home / "gateway-locks"))
 
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
@@ -273,6 +373,26 @@ def _hermetic_environment(tmp_path, monkeypatch):
         monkeypatch.setattr(_plugins_mod, "_plugin_manager", None)
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _transcription_optional_stub(request):
+    """Let transcription unit tests patch faster_whisper without the extra.
+
+    The stub is scoped to transcription tests only so unrelated code still sees
+    the optional dependency as missing in a default install.
+    """
+    if "tests/tools/test_transcription" not in request.node.nodeid:
+        yield
+        return
+
+    had_real_module = "faster_whisper" in sys.modules
+    _install_faster_whisper_stub()
+    try:
+        yield
+    finally:
+        if not had_real_module and not _optional_dependency_available("faster_whisper"):
+            sys.modules.pop("faster_whisper", None)
 
 
 # Backward-compat alias — old tests reference this fixture name. Keep it

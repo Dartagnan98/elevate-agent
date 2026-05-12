@@ -38,22 +38,22 @@ def _facts(provider, limit=200):
 def _seed_rag_memory(provider):
     _tool(provider, {
         "action": "add",
-        "content": "Uppercuts Barber Academy teaches chair confidence with Alex Med inside a working barbershop.",
+        "content": "Training Academy teaches chair confidence with Lead Instructor inside a working barbershop.",
         "category": "project",
         "source_uri": "fact://uppercuts-positioning",
     })
     _tool(provider, {
         "action": "document_add",
-        "title": "Uppercuts Curriculum",
+        "title": "Training Curriculum",
         "source_uri": "doc://uppercuts-curriculum",
         "source_type": "brief",
         "chunks": [
-            "Uppercuts curriculum covers clipper control, consultations, sanitation, fading, and client handling.",
+            "training curriculum covers clipper control, consultations, sanitation, fading, and client handling.",
             "The Academy CTA is a form submit followed by a representative call to confirm the student's spot.",
         ],
     })
     provider.sync_turn(
-        "We decided Uppercuts copy should say classes, not cohorts.",
+        "We decided training copy should say classes, not cohorts.",
         "Saved.",
         session_id="session-1",
     )
@@ -84,7 +84,7 @@ def test_sync_turn_records_pending_journal_without_fact(tmp_path):
     provider = _provider(tmp_path)
 
     provider.sync_turn(
-        "Remember this: Skyleigh Elevate uses Telegram for quick testing.",
+        "Remember this: Elevate Demo uses Telegram for quick testing.",
         "Saved.",
         session_id="telegram-1",
     )
@@ -99,7 +99,7 @@ def test_sync_turn_records_pending_journal_without_fact(tmp_path):
 def test_organize_journal_promotes_explicit_memory(tmp_path):
     provider = _provider(tmp_path)
     provider.sync_turn(
-        "Remember this: Skyleigh Elevate uses Telegram for quick testing.",
+        "Remember this: Elevate Demo uses Telegram for quick testing.",
         "Saved.",
         session_id="telegram-1",
     )
@@ -114,7 +114,7 @@ def test_organize_journal_promotes_explicit_memory(tmp_path):
     assert result["pending"] == 0
     facts = _facts(provider)
     assert len(facts) == 1
-    assert facts[0]["content"] == "Skyleigh Elevate uses Telegram for quick testing"
+    assert facts[0]["content"] == "Elevate Demo uses Telegram for quick testing"
 
 
 def test_organize_every_n_turns_promotes_after_completed_turn(tmp_path):
@@ -161,7 +161,7 @@ def test_rag_query_mixes_facts_documents_recent_and_graph(tmp_path):
 
     result = _tool(provider, {
         "action": "rag_query",
-        "query": "What do we know about Uppercuts Barber Academy classes and curriculum?",
+        "query": "What do we know about Training Academy classes and curriculum?",
         "limit": 5,
     })
 
@@ -173,7 +173,7 @@ def test_rag_query_mixes_facts_documents_recent_and_graph(tmp_path):
     assert result["sections"]["graph"]
     assert result["citations"]
     assert "Elevate Native RAG" in result["context"]
-    assert "Uppercuts" in result["context"]
+    assert "Training Academy" in result["context"]
     assert result["raw_data"]["telemetry"]["counts"]["chunks"] >= 1
     assert result["keywords"]["low_level"]
     events = _tool(provider, {"action": "memory_events", "limit": 5})["events"]
@@ -188,9 +188,9 @@ def test_relation_backfill_and_document_search_diversity(tmp_path):
         "source_uri": "doc://one",
         "source_type": "brief",
         "chunks": [
-            "Alex Med teaches Uppercuts Barber Academy chair practice and student confidence.",
-            "Alex Med and Uppercuts Barber Academy repeat chair practice for confidence drills.",
-            "Alex Med runs Uppercuts Barber Academy curriculum checks with students.",
+            "Lead Instructor teaches Training Academy chair practice and student confidence.",
+            "Lead Instructor and Training Academy repeat chair practice for confidence drills.",
+            "Lead Instructor runs Training Academy curriculum checks with students.",
         ],
     })
     _tool(provider, {
@@ -198,7 +198,7 @@ def test_relation_backfill_and_document_search_diversity(tmp_path):
         "title": "Doc Two",
         "source_uri": "doc://two",
         "source_type": "brief",
-        "chunks": ["Uppercuts Barber Academy has pricing, curriculum, and launch planning notes."],
+        "chunks": ["Training Academy has pricing, curriculum, and launch planning notes."],
     })
 
     backfill = _tool(provider, {"action": "relation_backfill", "source_type": "brief"})
@@ -207,7 +207,7 @@ def test_relation_backfill_and_document_search_diversity(tmp_path):
 
     search = _tool(provider, {
         "action": "document_search",
-        "query": "Uppercuts Barber Academy curriculum confidence",
+        "query": "Training Academy curriculum confidence",
         "source_type": "brief",
         "limit": 2,
     })["results"]
@@ -225,7 +225,7 @@ def test_graph_reprocess_types_entities_and_relations(tmp_path):
             "Seller Jane signed the Listing Contract for \"123 Main Street\" and needs CMA follow up.",
             "Buyer Lead Robert requested a Showing for \"123 Main Street\" and the Showing Feedback mentioned price objections.",
             "Photographer Vendor is booked for the Listing Launch Campaign at \"123 Main Street\".",
-            "Alex Med works with Uppercuts Barber Academy on pricing classes and launch campaign planning.",
+            "Lead Instructor works with Training Academy on pricing classes and launch campaign planning.",
         ],
     })
     _tool(provider, {"action": "relation_backfill", "source_type": "brief"})
@@ -260,7 +260,7 @@ def test_rag_query_supports_naive_and_local_modes(tmp_path):
 
     local = _tool(provider, {
         "action": "rag_query",
-        "query": "Uppercuts Barber Academy Alex Med",
+        "query": "Training Academy Lead Instructor",
         "mode": "local",
         "limit": 3,
     })
@@ -281,10 +281,10 @@ def test_lightrag_prompt_bypass_and_raganything_multimodal_query(tmp_path):
         "limit": 4,
         "only_need_prompt": True,
         "response_type": "Bullet Points",
-        "conversation_history": [{"role": "user", "content": "We care about Uppercuts classes."}],
+        "conversation_history": [{"role": "user", "content": "We care about training classes."}],
         "multimodal_content": [{
             "type": "table",
-            "table_caption": ["Uppercuts class outcomes"],
+            "table_caption": ["training class outcomes"],
             "table_body": "Metric | Value\nStudent confidence | High after live chair practice",
             "page": 2,
         }],
@@ -313,7 +313,7 @@ def test_document_status_and_delete_cover_lightrag_doc_ops(tmp_path):
         "title": "Modal Doc",
         "source_uri": "doc://modal",
         "source_type": "brief",
-        "chunks": ["Uppercuts Barber Academy table and image notes."],
+        "chunks": ["Training Academy table and image notes."],
         "modal_assets": [{"type": "image", "caption": "Chair practice photo", "path": "image://chair"}],
     })
     assert added["chunks"] == 2
@@ -334,19 +334,19 @@ def test_community_reports_power_global_rag_mode(tmp_path):
     provider = _provider(tmp_path)
     first = _tool(provider, {
         "action": "add",
-        "content": "Uppercuts Barber Academy teaches hands-on barber classes with Alex Med inside a working shop.",
+        "content": "Training Academy teaches hands-on barber classes with Lead Instructor inside a working shop.",
         "category": "project",
         "tags": "uppercuts,barber",
     })
     second = _tool(provider, {
         "action": "add",
-        "content": "Uppercuts Academy CTA is form submit followed by a representative call to confirm spot details.",
+        "content": "Training Academy CTA is form submit followed by a representative call to confirm spot details.",
         "category": "project",
         "tags": "uppercuts,cta",
     })
     third = _tool(provider, {
         "action": "add",
-        "content": "Alex Med has trained 1000 plus barber students and has a 100K plus YouTube audience.",
+        "content": "Lead Instructor has trained 1000 plus barber students and has a 100K plus YouTube audience.",
         "category": "project",
         "tags": "uppercuts,alex-med",
     })
@@ -354,21 +354,21 @@ def test_community_reports_power_global_rag_mode(tmp_path):
     cluster = _tool(provider, {
         "action": "cluster",
         "fact_ids": [first["fact_id"], second["fact_id"], third["fact_id"]],
-        "query": "Uppercuts Academy Alex Med barber classes",
+        "query": "Training Academy Lead Instructor barber classes",
     })
     assert cluster["community_report"]["built"] is True
 
     reports = _tool(provider, {
         "action": "community_reports",
-        "query": "Uppercuts Academy barber classes",
+        "query": "Training Academy barber classes",
         "limit": 3,
     })
     assert reports["count"] >= 1
-    assert "Uppercuts" in reports["results"][0]["summary"]
+    assert "Training Academy" in reports["results"][0]["summary"]
 
     global_rag = _tool(provider, {
         "action": "rag_query",
-        "query": "Uppercuts Academy barber classes",
+        "query": "Training Academy barber classes",
         "mode": "global",
         "limit": 3,
         "max_chars": 2400,
@@ -383,18 +383,18 @@ def test_document_chunks_create_entity_links_and_relations(tmp_path):
     provider = _provider(tmp_path)
     _tool(provider, {
         "action": "document_add",
-        "title": "Uppercuts RAG Brief",
+        "title": "Training RAG Brief",
         "source_uri": "doc://uppercuts-rag-brief",
         "source_type": "brief",
         "chunks": [
-            "Alex Med teaches Uppercuts Barber Academy students in Kamloops with real chair practice.",
+            "Lead Instructor teaches Training Academy students in Kamloops with real chair practice.",
         ],
     })
 
-    wiki = _tool(provider, {"action": "wiki", "entity": "Alex Med", "limit": 5})
+    wiki = _tool(provider, {"action": "wiki", "entity": "Lead Instructor", "limit": 5})
     assert wiki["exists"] is True
     related = {item["entity"] for item in wiki["related_entities"]}
-    assert "Uppercuts Barber Academy" in related
+    assert "Training Academy" in related
 
 
 def test_document_add_accepts_multimodal_assets_as_rag_chunks(tmp_path):
@@ -608,18 +608,18 @@ def test_recent_action_is_scoped_to_session(tmp_path):
 def test_entity_wiki_returns_facts_and_backlinks(tmp_path):
     provider = _provider(tmp_path)
     provider._store.add_fact(
-        "Skyleigh Elevate uses Telegram Gateway for agent messages.",
+        "Elevate Demo uses Telegram Gateway for agent messages.",
         category="project",
     )
     provider._store.add_fact(
-        "Telegram Gateway routes Skyleigh Elevate replies to approved users.",
+        "Telegram Gateway routes Elevate Demo replies to approved users.",
         category="tool",
     )
 
-    wiki = _tool(provider, {"action": "wiki", "entity": "Skyleigh Elevate"})
+    wiki = _tool(provider, {"action": "wiki", "entity": "Elevate Demo"})
 
     assert wiki["exists"] is True
-    assert wiki["wiki_link"] == "[[Skyleigh Elevate]]"
+    assert wiki["wiki_link"] == "[[Elevate Demo]]"
     assert len(wiki["facts"]) == 2
     assert any(
         rel["wiki_link"] == "[[Telegram Gateway]]"
@@ -630,21 +630,21 @@ def test_entity_wiki_returns_facts_and_backlinks(tmp_path):
 def test_layered_prefetch_includes_recent_durable_and_graph(tmp_path):
     provider = _provider(tmp_path, durable_recall_limit="3", graph_recall_limit="2")
     provider.sync_turn(
-        "Remember this: Skyleigh Elevate memory should use recent session recall.",
+        "Remember this: Elevate Demo memory should use recent session recall.",
         "Saved.",
         session_id="telegram-1",
     )
     provider._store.add_fact(
-        "Skyleigh Elevate uses Telegram Gateway for approved user messages.",
+        "Elevate Demo uses Telegram Gateway for approved user messages.",
         category="project",
     )
     provider._store.add_fact(
-        "Telegram Gateway is connected to Skyleigh Elevate.",
+        "Telegram Gateway is connected to Elevate Demo.",
         category="tool",
     )
 
     context = provider.prefetch(
-        "How does Skyleigh Elevate use Telegram Gateway memory?",
+        "How does Elevate Demo use Telegram Gateway memory?",
         session_id="telegram-1",
     )
 
@@ -652,20 +652,20 @@ def test_layered_prefetch_includes_recent_durable_and_graph(tmp_path):
     assert "### Recent Session" in context
     assert "### Durable + Semantic" in context
     assert "### Graph Wiki" in context
-    assert "[[Skyleigh Elevate]]" in context
+    assert "[[Elevate Demo]]" in context
     assert "recent session recall" in context
 
 
 def test_layered_recall_tool_matches_prefetch_surface(tmp_path):
     provider = _provider(tmp_path)
     provider._store.add_fact(
-        "Skyleigh Elevate keeps memory local before promoting semantic facts.",
+        "Elevate Demo keeps memory local before promoting semantic facts.",
         category="project",
     )
 
     result = _tool(provider, {
         "action": "layered_recall",
-        "query": "Skyleigh Elevate semantic facts",
+        "query": "Elevate Demo semantic facts",
         "session_id": "cli-1",
     })
 
@@ -676,7 +676,7 @@ def test_layered_recall_tool_matches_prefetch_surface(tmp_path):
 def test_retrieval_updates_usage_signal_for_ranked_facts(tmp_path):
     provider = _provider(tmp_path)
     fact_id = provider._store.add_fact(
-        "Skyleigh Elevate recall should learn which durable facts are surfaced.",
+        "Elevate Demo recall should learn which durable facts are surfaced.",
         category="project",
     )
 
@@ -685,7 +685,7 @@ def test_retrieval_updates_usage_signal_for_ranked_facts(tmp_path):
 
     result = _tool(provider, {
         "action": "search",
-        "query": "Skyleigh Elevate recall durable facts surfaced",
+        "query": "Elevate Demo recall durable facts surfaced",
         "limit": 3,
     })
 
@@ -700,7 +700,7 @@ def test_source_aware_fact_fields_roundtrip(tmp_path):
 
     result = _tool(provider, {
         "action": "add",
-        "content": "Uppercuts Barber Academy CTA is form submit then representative call.",
+        "content": "Training Academy CTA is form submit then representative call.",
         "category": "project",
         "source_type": "plaud",
         "source_uri": "plaud:test-cta",
@@ -723,21 +723,21 @@ def test_document_add_search_and_recall_route(tmp_path):
         "source_type": "plaud",
         "source_uri": "plaud:academy-call",
         "title": "Academy Call",
-        "content": "Alex Med discussed Uppercuts Barber Academy classes and real-shop barber training.",
+        "content": "Lead Instructor discussed Training Academy classes and real-shop barber training.",
     })
     assert added["chunks"] == 1
 
     search = _tool(provider, {
         "action": "document_search",
         "source_type": "plaud",
-        "query": "real shop barber training Alex Med",
+        "query": "real shop barber training Lead Instructor",
     })
     assert search["count"] == 1
     assert search["results"][0]["source_uri"] == "plaud:academy-call"
 
     routed = _tool(provider, {
         "action": "recall_route",
-        "query": "What did we discuss on the Plaud call about Alex Med?",
+        "query": "What did we discuss on the Plaud call about Lead Instructor?",
     })
     assert "plaud" in routed["lanes"]
     assert routed["sections"]["plaud_chunks"][0]["source_uri"] == "plaud:academy-call"
@@ -746,7 +746,7 @@ def test_document_add_search_and_recall_route(tmp_path):
 def test_hygiene_reports_popular_and_source_gaps(tmp_path):
     provider = _provider(tmp_path)
     provider._store.add_fact(
-        "Skyleigh Elevate memory hygiene should find source gaps.",
+        "Elevate Demo memory hygiene should find source gaps.",
         category="project",
     )
     _tool(provider, {"action": "search", "query": "memory hygiene source gaps"})
@@ -757,19 +757,19 @@ def test_hygiene_reports_popular_and_source_gaps(tmp_path):
     assert report["source_gaps"]
 
 
-def test_jcode_memory_audit_replay_profile_and_supersession(tmp_path):
+def test_memory_memory_audit_replay_profile_and_supersession(tmp_path):
     provider = _provider(tmp_path)
 
     old = _tool(provider, {
         "action": "add",
-        "content": "Old CTA is tour-first for Uppercuts.",
+        "content": "Old CTA is tour-first for Training Academy.",
         "category": "project",
         "source_type": "manual",
         "memory_space": "uppercuts",
     })["fact_id"]
     new = _tool(provider, {
         "action": "add",
-        "content": "Uppercuts CTA is form submit followed by representative call.",
+        "content": "Training CTA is form submit followed by representative call.",
         "category": "project",
         "source_type": "manual",
         "memory_space": "uppercuts",
@@ -778,7 +778,7 @@ def test_jcode_memory_audit_replay_profile_and_supersession(tmp_path):
     result = _tool(provider, {"action": "supersede", "old_fact_id": old, "new_fact_id": new})
     assert result["superseded"] is True
 
-    context = provider.prefetch("Uppercuts CTA", session_id="telegram-a")
+    context = provider.prefetch("Training CTA", session_id="telegram-a")
     assert "representative call" in context
     assert "tour-first" not in context
 
@@ -795,7 +795,7 @@ def test_jcode_memory_audit_replay_profile_and_supersession(tmp_path):
     assert profile["memory_injections"] >= 1
 
     facts = _facts(provider)
-    assert {fact["content"] for fact in facts} == {"Uppercuts CTA is form submit followed by representative call."}
+    assert {fact["content"] for fact in facts} == {"Training CTA is form submit followed by representative call."}
 
 
 def test_topic_extraction_is_opt_in_and_promotes_on_shift(tmp_path):
@@ -807,11 +807,11 @@ def test_topic_extraction_is_opt_in_and_promotes_on_shift(tmp_path):
         organize_batch_limit="10",
     )
 
-    provider.sync_turn("Remember this: Uppercuts classes use real shop training.", "Saved.", session_id="topic-1")
+    provider.sync_turn("Remember this: training classes use real shop training.", "Saved.", session_id="topic-1")
     provider.sync_turn("Google ads OAuth callback uses localhost auth flow.", "Got it.", session_id="topic-1")
 
     facts = _facts(provider)
-    assert any("Uppercuts classes use real shop training" in fact["content"] for fact in facts)
+    assert any("training classes use real shop training" in fact["content"] for fact in facts)
     events = _tool(provider, {"action": "memory_events", "session_id": "topic-1", "limit": 20})
     assert any(event["event"] == "memory.topic_extract.started" for event in events["events"])
 
@@ -829,7 +829,7 @@ def test_repeated_prefetch_dedupes_injected_fact_within_session(tmp_path):
     second = provider.prefetch("Plaud RAG meeting recall", session_id="telegram-dedupe")
 
     assert "chunk-level RAG" in first
-    # Re-injecting the same fact every turn is what jcode avoided.
+    # Re-injecting the same fact every turn is what the memory dedupe guard avoids.
     assert "chunk-level RAG" not in second
     replay = _tool(provider, {"action": "memory_replay", "session_id": "telegram-dedupe"})
     assert replay["count"] == 1
@@ -847,7 +847,7 @@ def test_chunk_embedding_backfill_indexes_document_chunks_with_hash_backend(tmp_
         "source_uri": "plaud://test-barber-meeting",
         "source_type": "plaud",
         "title": "Test Barber Academy Meeting",
-        "content": "Alex Med discussed hands-on barber academy training and viewbook marketing. Students train in a real shop.",
+        "content": "Lead Instructor discussed hands-on barber academy training and viewbook marketing. Students train in a real shop.",
     })
     assert add["chunks"] >= 1
 
@@ -881,13 +881,13 @@ def test_chunk_embedding_backfill_indexes_document_chunks_with_hash_backend(tmp_
     assert rows[0].get("semantic_score", 0) >= 0
 
 
-def test_jcode_remaining_cluster_tag_confidence_prune_and_benchmark(tmp_path):
+def test_memory_remaining_cluster_tag_confidence_prune_and_benchmark(tmp_path):
     provider = _provider(tmp_path)
-    a = _tool(provider, {"action": "add", "content": "Uppercuts Academy uses live client practice with instructor coaching.", "category": "project", "tags": "uppercuts"})["fact_id"]
-    b = _tool(provider, {"action": "add", "content": "Alex Med anchors Uppercuts Academy training and student confidence.", "category": "project"})["fact_id"]
+    a = _tool(provider, {"action": "add", "content": "Training Academy uses live client practice with instructor coaching.", "category": "project", "tags": "training"})["fact_id"]
+    b = _tool(provider, {"action": "add", "content": "Lead Instructor anchors Training Academy training and student confidence.", "category": "project"})["fact_id"]
     c = _tool(provider, {"action": "add", "content": "Old weak note that should decay out.", "category": "general"})["fact_id"]
 
-    clustered = _tool(provider, {"action": "cluster", "fact_ids": f"{a},{b}", "query": "Uppercuts Academy instructor coaching"})
+    clustered = _tool(provider, {"action": "cluster", "fact_ids": f"{a},{b}", "query": "Training Academy instructor coaching"})
     assert clustered["clustered"] is True
     assert clustered["members"] == 2
     assert clustered["cluster_id"].startswith("cluster:")
@@ -905,7 +905,7 @@ def test_jcode_remaining_cluster_tag_confidence_prune_and_benchmark(tmp_path):
     assert profile["cluster_members"] >= 2
     assert "estimated_injection_tokens" in profile
 
-    bench = _tool(provider, {"action": "benchmark", "queries": "Uppercuts Academy instructor coaching", "limit": 3})
+    bench = _tool(provider, {"action": "benchmark", "queries": "Training Academy instructor coaching", "limit": 3})
     assert bench["ran"] if "ran" in bench else True
     assert bench["query_count"] == 1
     assert bench["queries"][0]["hits"] >= 1
@@ -917,7 +917,7 @@ def test_jcode_remaining_cluster_tag_confidence_prune_and_benchmark(tmp_path):
 def test_post_retrieval_maintenance_creates_cluster_and_infers_tags(tmp_path):
     provider = _provider(tmp_path)
     a = _tool(provider, {"action": "add", "content": "Google Ads search campaigns use open early keywords.", "category": "project"})["fact_id"]
-    b = _tool(provider, {"action": "add", "content": "Uppercuts Google Ads campaign reporting comes from Supabase.", "category": "project"})["fact_id"]
+    b = _tool(provider, {"action": "add", "content": "Google Ads campaign reporting comes from the reporting warehouse.", "category": "project"})["fact_id"]
     result = provider._store.post_retrieval_maintenance(verified_ids=[a, b], rejected_ids=[], query="Google Ads campaign reporting", session_id="s1")
     assert result["cluster"]["clustered"] is True
     assert result["tags"]["updated"] >= 1

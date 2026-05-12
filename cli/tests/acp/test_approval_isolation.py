@@ -13,6 +13,10 @@ Both fixed together by:
    threads don't collide.
 """
 
+import pytest
+
+pytest.importorskip("acp", reason="requires optional ACP extra: acp")
+
 import os
 import threading
 from unittest.mock import MagicMock

@@ -60,6 +60,26 @@ def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: l
     }
 
 
+_BACKGROUND_AUTOMATIONS: list[dict[str, Any]] = [
+    {
+        "id": "gmail-doc-router",
+        "name": "Gmail Doc Router",
+        "skill": "gmail-doc-router",
+        "kind": "cron",
+        "affectsStages": [2, 6, 7, 8],
+        "description": "Routes inbound Gmail attachments to the right deal and Drive folder.",
+    },
+    {
+        "id": "seller-update",
+        "name": "Seller Update",
+        "skill": "seller-update",
+        "kind": "cron",
+        "affectsStages": [5],
+        "description": "Pulls ShowingTime feedback and creates Gmail seller-update drafts.",
+    },
+]
+
+
 _BC: dict[str, Any] = {
     "packageKey": BC_PACKAGE_KEY,
     "country": "CA",
@@ -70,6 +90,7 @@ _BC: dict[str, Any] = {
         "defaultCurrency": "CAD",
         "preferredShowingSource": "Configured showing source",
     },
+    "backgroundAutomations": deepcopy(_BACKGROUND_AUTOMATIONS),
     "listing": {
         "stages": [
             _stage(
@@ -90,8 +111,8 @@ _BC: dict[str, Any] = {
                 triggers=[("cma-complete", "Run CMA skill", "cma")],
             ),
             _stage(
-                "Listing Initiated",
-                "Price + go-live setup",
+                "Listing Intake",
+                "Collect info for MLC",
                 [
                     _wf("Stage 1 complete", "Stage 1 Complete ✓"),
                 ],
@@ -103,11 +124,13 @@ _BC: dict[str, Any] = {
                     ("listingDate", "Planned go-live date"),
                     ("listingType", "Listing type"),
                 ],
+                triggers=[("mlc-intake", "Collect listing info for MLC", "mlc")],
             ),
             _stage(
-                "Documents Signed",
-                "MLC + brokerage file",
+                "MLC / Documents",
+                "Create docs + signing",
                 [
+                    ("mlc-package-prepared", "MLC package prepared"),
                     _wf("Title ordered", "Title Ordered?"),
                     _wf("Sign ordered", "Sign Ordered?"),
                     _wf("Stage 2 complete", "Stage 2 Complete ✓"),
@@ -119,7 +142,11 @@ _BC: dict[str, Any] = {
                 ],
                 docs=[("title_search", "Title search"), ("signed_envelope", "Signed listing envelope")],
                 forms=[("MLC", "Multiple Listing Contract"), ("FINTRAC", "FINTRAC identity form"), ("PDS", "Property Disclosure Statement")],
-                triggers=[("mlc-prepare", "Prepare MLC package", "mlc"), ("digisign-sync", "Sync signing status", "digisign")],
+                triggers=[
+                    ("mlc-prepare", "Prepare MLC package", "mlc"),
+                    ("signing-package-sync", "Sync signing status", "signing-package"),
+                    ("skyslope-doc-check", "Check SkySlope opening docs", "skyslope-sync"),
+                ],
             ),
             _stage(
                 "Photos Ready",
@@ -138,6 +165,7 @@ _BC: dict[str, Any] = {
                     _wf("AI: Flooring Types"),
                 ],
                 docs=[("listing_photos", "Listing photos")],
+                triggers=[("photo-cleanup", "Prepare listing-ready photos", "photo-cleanup")],
             ),
             _stage(
                 "MLS Entry",
@@ -154,7 +182,10 @@ _BC: dict[str, Any] = {
                     _wf("Realtor tour scheduled", "Realtor Tour Scheduled"),
                 ],
                 docs=[("feature_sheet", "Feature sheet")],
-                triggers=[("property-context", "Research prior listing context", "property-lookup"), ("listing-copy", "Prepare listing copy and assets", "marketing")],
+                triggers=[
+                    ("property-context", "Research prior listing context", "property-lookup"),
+                    ("listing-build", "Build MLS launch package", "listing-build"),
+                ],
             ),
             _stage(
                 "Listing Live / Marketing",
@@ -172,7 +203,7 @@ _BC: dict[str, Any] = {
                     _wf("Order sign up date", "Order Sign Up Date"),
                     _wf("Coming soon posts date", "Coming Soon Posts Date"),
                 ],
-                triggers=[("marketing-live", "Run listing-live marketing", "marketing"), ("seller-showing-update", "Generate ShowingTime seller update", "seller-updates")],
+                triggers=[("marketing-live", "Run listing-live marketing", "marketing")],
             ),
             _stage(
                 "Accepted Offer",
@@ -193,7 +224,7 @@ _BC: dict[str, Any] = {
                     ("completionDate", "Completion date"),
                 ],
                 docs=[("offer_pdf", "Offer PDF")],
-                triggers=[("gmail-offer-docs", "Route accepted-offer PDFs", "gmail-doc-router")],
+                triggers=[("offer-review", "Review accepted-offer package", "offer-review")],
             ),
             _stage(
                 "Subject Removal",
@@ -210,7 +241,10 @@ _BC: dict[str, Any] = {
                     _wf("Order sold rider date", "Order Sold Rider Date"),
                 ],
                 docs=[("subject_removal_form", "Subject removal form"), ("deposit_receipt", "Deposit receipt")],
-                triggers=[("subject-removal-docs", "Sync subject-removal signing", "digisign"), ("subject-doc-router", "Route subject-removal PDFs", "gmail-doc-router")],
+                triggers=[
+                    ("subject-removal", "Run subject-removal admin check", "subject-removal"),
+                    ("subject-removal-docs", "Sync subject-removal signing", "signing-package"),
+                ],
             ),
             _stage(
                 "Closing",
@@ -228,7 +262,7 @@ _BC: dict[str, Any] = {
                     ("possessionDate", "Possession date"),
                     _wf("Sign down scheduled date", "Sign Down Scheduled Date"),
                 ],
-                triggers=[("gmail-doc-router", "Route inbound closing PDFs", "gmail-doc-router")],
+                triggers=[("closing-admin", "Run closing admin check", "closing-admin")],
             ),
             _stage(
                 "Closed",
@@ -242,7 +276,10 @@ _BC: dict[str, Any] = {
                     _wf("Stage 9 complete", "Stage 9 Complete ✓"),
                 ],
                 fields=[("anniversaryDate", "Anniversary date")],
-                triggers=[("sold-marketing", "Create sold update and nurture handoff", "marketing")],
+                triggers=[
+                    ("skyslope-closeout", "Verify SkySlope closeout", "skyslope-sync"),
+                    ("sold-marketing", "Create sold update and nurture handoff", "marketing"),
+                ],
             ),
         ],
     },
@@ -427,6 +464,7 @@ def resolve_admin_deal_flow(
             ],
         ],
         "automationTriggers": current["automationTriggers"],
+        "backgroundAutomations": package.get("backgroundAutomations", []),
         "localOverrides": package["localOverrides"],
     }
 

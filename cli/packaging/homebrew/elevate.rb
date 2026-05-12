@@ -2,10 +2,10 @@ class Elevate < Formula
   include Language::Python::Virtualenv
 
   desc "AI chief of staff for real estate"
-  homepage "https://elevate.ctrlstrategies.com"
+  homepage "https://github.com/Dartagnan98/elevate-agent"
   # Stable source should point at the semver-named sdist asset attached by
   # scripts/release.py, not the CalVer tag tarball.
-  url "https://github.com/CtrlStrategies/elevate/releases/download/v2026.3.30/elevate-0.6.0.tar.gz"
+  url "https://github.com/Dartagnan98/elevate-agent/releases/download/v2026.3.30/elevate-0.6.0.tar.gz"
   sha256 "<replace-with-release-asset-sha256>"
   license "MIT"
 

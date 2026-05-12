@@ -7,7 +7,19 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import (
+    _build_job_prompt,
+    _deliver_result,
+    _delivery_metadata,
+    _preflight_admin_action_run,
+    _record_admin_action_delivery_status,
+    _resolve_delivery_target,
+    _resolve_origin,
+    _send_media_via_adapter,
+    _suppress_delivery_for_failed_job,
+    run_job,
+    SILENT_MARKER,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -261,6 +273,19 @@ class TestResolveDeliveryTarget:
             "platform": "discord",
             "chat_id": "1001234567890",
             "thread_id": None,
+        }
+
+
+class TestDeliveryMetadata:
+    def test_delivery_metadata_carries_agent_and_thread(self):
+        assert _delivery_metadata({"agent": "admin"}, "17585") == {
+            "thread_id": "17585",
+            "agent_id": "admin",
+        }
+
+    def test_delivery_metadata_falls_back_to_origin_agent(self):
+        assert _delivery_metadata({"origin": {"agent": "outreach"}}, None) == {
+            "agent_id": "outreach",
         }
 
 
@@ -691,6 +716,106 @@ class TestRunJobSessionPersistence:
                 },
             ),
         ]
+
+    def test_admin_hub_orphan_run_is_blocked_before_agent_runs(self, tmp_path):
+        job = {
+            "id": "orphan-admin-job",
+            "name": "admin:approval gated entry:deadbeef",
+            "prompt": "Admin action prompt",
+            "origin": {
+                "source": "admin_hub",
+                "deal_id": "deal_missing",
+                "run_id": "run_missing",
+            },
+        }
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+
+        with patch("cron.scheduler._elevate_home", tmp_path), \
+             patch("elevate_state.SessionDB", return_value=MagicMock()), \
+             patch("elevate_cli.data.connect", return_value=cm), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert "AdminActionRunPreflightError" in (error or "")
+        assert "run_missing" in output
+        mock_agent_cls.assert_not_called()
+
+    def test_admin_hub_preflight_reconciles_queued_run_to_running(self):
+        job = {
+            "id": "cron_123",
+            "origin": {
+                "source": "admin_hub",
+                "deal_id": "deal_123",
+                "run_id": "run_123",
+            },
+        }
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = {
+            "id": "run_123",
+            "deal_id": "deal_123",
+            "status": "queued",
+            "cron_job_id": None,
+            "live_deal_id": "deal_123",
+        }
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+
+        with patch("elevate_cli.data.connect", return_value=cm):
+            _preflight_admin_action_run(job)
+
+        update_sql = conn.execute.call_args_list[1].args[0]
+        update_params = conn.execute.call_args_list[1].args[1]
+        assert "SET status='running'" in update_sql
+        assert update_params[0] == "cron_123"
+        assert update_params[-1] == "run_123"
+
+    def test_admin_hub_preflight_errors_suppress_delivery(self):
+        job = {
+            "origin": {
+                "source": "admin_hub",
+                "deal_id": "deal_123",
+                "run_id": "run_123",
+            },
+        }
+        assert _suppress_delivery_for_failed_job(
+            job,
+            "AdminActionRunPreflightError: admin_action_runs row missing",
+        )
+        assert not _suppress_delivery_for_failed_job(job, "RuntimeError: model failed")
+
+    def test_admin_hub_delivery_status_is_written_to_run_payload(self):
+        job = {
+            "id": "cron_123",
+            "deliver": "telegram:123",
+            "origin": {
+                "source": "admin_hub",
+                "deal_id": "deal_123",
+                "run_id": "run_123",
+            },
+        }
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = {"payload_json": '{"existing":true}'}
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+
+        with patch("elevate_cli.data.connect", return_value=cm):
+            _record_admin_action_delivery_status(job, attempted=True, delivery_error=None)
+
+        update_sql = conn.execute.call_args_list[1].args[0]
+        update_params = conn.execute.call_args_list[1].args[1]
+        payload = json.loads(update_params[0])
+        assert "SET payload_json" in update_sql
+        assert update_params[-1] == "run_123"
+        assert payload["existing"] is True
+        assert payload["delivery"]["jobId"] == "cron_123"
+        assert payload["delivery"]["deliver"] == "telegram:123"
+        assert payload["delivery"]["attempted"] is True
+        assert payload["delivery"]["ok"] is True
 
     def test_run_job_passes_enabled_toolsets_to_agent(self, tmp_path):
         job = {
@@ -1642,6 +1767,44 @@ class TestParallelTick:
 
         assert seen["tg-job"] == {"platform": "telegram", "chat_id": "111"}
         assert seen["dc-job"] == {"platform": "discord", "chat_id": "222"}
+
+    def test_admin_preflight_failure_is_logged_but_not_delivered(self):
+        job = {
+            "id": "admin-orphan",
+            "name": "admin:approval gated entry:deadbeef",
+            "deliver": "telegram:123",
+            "origin": {
+                "source": "admin_hub",
+                "deal_id": "deal_missing",
+                "run_id": "run_missing",
+            },
+        }
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch(
+                 "cron.scheduler.run_job",
+                 return_value=(
+                     False,
+                     "blocked output",
+                     "",
+                     "AdminActionRunPreflightError: missing run",
+                 ),
+             ), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            result = tick(verbose=False)
+
+        assert result == 1
+        deliver_mock.assert_not_called()
+        mark_mock.assert_called_once_with(
+            "admin-orphan",
+            False,
+            "AdminActionRunPreflightError: missing run",
+            delivery_error=None,
+        )
 
     def test_max_parallel_env_var(self, monkeypatch):
         """ELEVATE_CRON_MAX_PARALLEL=1 should restore serial behaviour."""

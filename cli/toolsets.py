@@ -53,7 +53,7 @@ _ELEVATE_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task",
+    "execute_code", "delegate_task", "agent_handoff", "admin_profile",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -136,6 +136,18 @@ TOOLSETS = {
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
+        "includes": []
+    },
+
+    "agent_handoff": {
+        "description": "Durable visible-agent handoff bus for routing tasks between specialist agents",
+        "tools": ["agent_handoff"],
+        "includes": []
+    },
+
+    "admin_profile": {
+        "description": "Promote verified lead profiles into Admin deal files without duplicate people",
+        "tools": ["admin_profile"],
         "includes": []
     },
     

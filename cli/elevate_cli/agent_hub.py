@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from elevate_cli.access import PROFILE_LABELS, load_access_config
-from elevate_cli.config import get_config_path, get_elevate_home, load_config, redact_key
+from elevate_cli.config import get_config_path, get_elevate_home, get_env_value, load_config, redact_key
 from gateway.status import get_running_pid, read_runtime_status
 
 
@@ -30,15 +30,26 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "api_server", "webhook", "cron"],
+        "prompt": "All-in-one front desk and coordinator. Route work to specialist agents when a narrower agent owns the task, and synthesize final answers when work crosses domains.",
+        "metadata": {
+            "telegram_bot_token_env": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
+            "telegram_target_env": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+        },
     },
     {
         "id": "admin",
         "name": "Admin",
         "role": "support",
-        "description": "Operations, scheduling, and admin support.",
+        "description": "Operations, deal-file orchestration, and admin support.",
         "enabled": True,
-        "platforms": ["local"],
-        "session_sources": ["cli", "cron"],
+        "platforms": ["local", "telegram"],
+        "session_sources": ["cli", "telegram", "cron"],
+        "skills": ["admin-agent", "deal-matcher", "admin-result-writer"],
+        "prompt": "Own Admin workflow orchestration. Coordinate worker skills, write back to SQLite, and route human confirmations through the Admin Telegram lane.",
+        "metadata": {
+            "telegram_bot_token_env": "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+            "telegram_target_env": "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL",
+        },
     },
     {
         "id": "outreach",
@@ -46,8 +57,13 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "role": "support",
         "description": "Lead follow-up and relationship workflows.",
         "enabled": True,
-        "platforms": ["local"],
-        "session_sources": ["cli", "webhook"],
+        "platforms": ["local", "telegram"],
+        "session_sources": ["cli", "telegram", "webhook"],
+        "prompt": "Own lead follow-up, relationship notes, nurture timing, and client touchpoint drafts. Hand transaction/file tasks to Admin and broad routing back to Executive Assistant.",
+        "metadata": {
+            "telegram_bot_token_env": "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN",
+            "telegram_target_env": "ELEVATE_AGENT_OUTREACH_TELEGRAM_CHANNEL",
+        },
     },
     {
         "id": "ads",
@@ -55,8 +71,27 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "role": "support",
         "description": "Paid ads, listing campaigns, and email campaign workflows.",
         "enabled": True,
-        "platforms": ["local"],
-        "session_sources": ["cli", "cron"],
+        "platforms": ["local", "telegram"],
+        "session_sources": ["cli", "telegram", "cron"],
+        "prompt": "Own paid ads, campaign angles, listing promotion, audience/offer framing, and ad creative briefs. Hand operational checklist work to Admin.",
+        "metadata": {
+            "telegram_bot_token_env": "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN",
+            "telegram_target_env": "ELEVATE_AGENT_ADS_TELEGRAM_CHANNEL",
+        },
+    },
+    {
+        "id": "marketing",
+        "name": "Marketing",
+        "role": "support",
+        "description": "Listing marketing, seller updates, email campaigns, and creative direction.",
+        "enabled": True,
+        "platforms": ["local", "telegram"],
+        "session_sources": ["cli", "telegram", "cron"],
+        "prompt": "Own listing marketing, seller update drafts, email campaigns, creative direction, and launch assets. Hand checklist/status work to Admin and paid optimization to Ads.",
+        "metadata": {
+            "telegram_bot_token_env": "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN",
+            "telegram_target_env": "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL",
+        },
     },
     {
         "id": "social-media",
@@ -64,8 +99,13 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "role": "support",
         "description": "Organic social posts, captions, hooks, and content repurposing.",
         "enabled": True,
-        "platforms": ["local"],
-        "session_sources": ["cli"],
+        "platforms": ["local", "telegram"],
+        "session_sources": ["cli", "telegram"],
+        "prompt": "Own organic social hooks, captions, posting ideas, short-form content, and platform adaptation. Hand paid campaign strategy to Ads.",
+        "metadata": {
+            "telegram_bot_token_env": "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN",
+            "telegram_target_env": "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_CHANNEL",
+        },
     },
 )
 
@@ -85,6 +125,17 @@ def _slug(text: str) -> str:
     while "--" in slug:
         slug = slug.replace("--", "-")
     return slug.strip("-") or "agent"
+
+
+def _merge_unique(*values: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in _as_list(value):
+            if item not in seen:
+                seen.add(item)
+                merged.append(item)
+    return merged
 
 
 def _model_summary(config: dict[str, Any]) -> dict[str, Any]:
@@ -114,12 +165,28 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
     hub_cfg = config.get("agent_hub")
     if not isinstance(hub_cfg, dict):
         hub_cfg = {}
+    defaults_by_id = {
+        _slug(str(agent.get("id") or "")): copy.deepcopy(agent)
+        for agent in DEFAULT_AGENT_DEFS
+    }
 
     raw_agents = hub_cfg.get("agents")
     if raw_agents is None:
         raw_agents = config.get("agents")
     if not isinstance(raw_agents, list) or not raw_agents:
         raw_agents = [copy.deepcopy(agent) for agent in DEFAULT_AGENT_DEFS]
+    else:
+        raw_agents = [copy.deepcopy(agent) for agent in raw_agents]
+        configured_default_ids = {
+            _slug(str(agent.get("id") or agent.get("slug") or agent.get("name") or ""))
+            for agent in raw_agents
+            if isinstance(agent, dict)
+        }
+        for default in DEFAULT_AGENT_DEFS:
+            default_id = _slug(str(default.get("id") or ""))
+            if default_id and default_id not in configured_default_ids:
+                raw_agents.append(copy.deepcopy(default))
+                configured_default_ids.add(default_id)
 
     agents: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -138,21 +205,26 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
                 suffix += 1
             agent_id = f"{base}-{suffix}"
         seen.add(agent_id)
+        default = defaults_by_id.get(agent_id, {})
+        metadata = default.get("metadata") if isinstance(default.get("metadata"), dict) else {}
+        raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
         if not name:
-            name = agent_id.replace("-", " ").title()
+            name = str(default.get("name") or agent_id.replace("-", " ").title()).strip()
         agents.append(
             {
                 "id": agent_id,
                 "name": name,
-                "role": str(raw.get("role") or "support").strip().lower(),
-                "description": str(raw.get("description") or "").strip(),
+                "role": str(raw.get("role") or default.get("role") or "support").strip().lower(),
+                "description": str(raw.get("description") or default.get("description") or "").strip(),
                 "enabled": bool(raw.get("enabled", True)),
-                "platforms": _as_list(raw.get("platforms")),
-                "session_sources": _as_list(raw.get("session_sources")),
-                "skills": _as_list(raw.get("skills")),
-                "toolsets": _as_list(raw.get("toolsets")),
-                "prompt": str(raw.get("prompt") or raw.get("system_prompt") or "").strip(),
-                "metadata": raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
+                "platforms": _merge_unique(default.get("platforms"), raw.get("platforms")),
+                "session_sources": _merge_unique(default.get("session_sources"), raw.get("session_sources")),
+                "skills": _merge_unique(default.get("skills"), raw.get("skills")),
+                "toolsets": _merge_unique(default.get("toolsets"), raw.get("toolsets")),
+                "prompt": str(
+                    raw.get("prompt") or raw.get("system_prompt") or default.get("prompt") or ""
+                ).strip(),
+                "metadata": {**dict(metadata), **dict(raw_metadata)},
             }
         )
     return agents
@@ -245,12 +317,17 @@ def _platform_summary(runtime: dict[str, Any] | None = None) -> list[dict[str, A
         runtime_state = runtime_platforms.get(name) if isinstance(runtime_platforms, dict) else {}
         home = platform_cfg.home_channel.to_dict() if platform_cfg.home_channel else None
         extra = platform_cfg.extra if isinstance(platform_cfg.extra, dict) else {}
+        agent_bots = extra.get("agent_bots")
+        has_agent_bot_token = (
+            isinstance(agent_bots, dict)
+            and any((bot.get("token") if isinstance(bot, dict) else None) for bot in agent_bots.values())
+        )
         platforms.append(
             {
                 "name": name,
                 "enabled": bool(platform_cfg.enabled),
                 "configured": name in connected,
-                "token_configured": bool(platform_cfg.token or extra.get("token")),
+                "token_configured": bool(platform_cfg.token or extra.get("token") or has_agent_bot_token),
                 "api_key_configured": bool(platform_cfg.api_key),
                 "home_channel": home,
                 "reply_to_mode": platform_cfg.reply_to_mode,
@@ -268,6 +345,77 @@ def _platform_summary(runtime: dict[str, Any] | None = None) -> list[dict[str, A
             }
         )
     return platforms
+
+
+def _env_value(name: str) -> str:
+    try:
+        return str(get_env_value(name) or "").strip()
+    except Exception:
+        return ""
+
+
+def _agent_telegram_lane(agent: dict[str, Any]) -> dict[str, Any]:
+    """Return redacted readiness for one agent's Telegram lane."""
+    try:
+        from gateway.agent_lanes import (
+            agent_telegram_bot_token,
+            agent_telegram_bot_token_env_vars,
+            agent_telegram_env_vars,
+            agent_telegram_uses_shared_bot,
+            parse_telegram_target,
+        )
+    except Exception:
+        return {
+            "configured": False,
+            "tokenConfigured": False,
+            "targetConfigured": False,
+            "error": "agent lane helpers unavailable",
+        }
+
+    agent_id = str(agent.get("id") or "")
+    metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+    token_envs = [
+        str(metadata.get("telegram_bot_token_env") or "").strip(),
+        *agent_telegram_bot_token_env_vars(agent_id),
+    ]
+    target_envs = [
+        str(metadata.get("telegram_target_env") or "").strip(),
+        *agent_telegram_env_vars(agent_id),
+    ]
+    token_env = ""
+    token_value = ""
+    token_configured = False
+    for env_name in dict.fromkeys(name for name in token_envs if name):
+        if _env_value(env_name):
+            token_env = env_name
+            token_value = agent_telegram_bot_token(agent_id)
+            token_configured = True
+            break
+    target_env = ""
+    target_value = ""
+    for env_name in dict.fromkeys(name for name in target_envs if name):
+        value = _env_value(env_name)
+        if value:
+            target_env = env_name
+            target_value = value
+            break
+    chat_id, topic_id = parse_telegram_target(target_value)
+    target_configured = bool(chat_id)
+    uses_shared_bot = bool(
+        (token_env and not token_env.startswith("ELEVATE_AGENT_"))
+        or agent_telegram_uses_shared_bot(agent_id)
+    )
+    return {
+        "configured": token_configured and target_configured and not uses_shared_bot,
+        "tokenConfigured": token_configured,
+        "targetConfigured": target_configured,
+        "tokenEnv": token_env or (token_envs[0] if token_envs else ""),
+        "targetEnv": target_env or (target_envs[0] if target_envs else ""),
+        "chatConfigured": bool(chat_id),
+        "topicConfigured": bool(topic_id),
+        "usesSharedBot": uses_shared_bot,
+        "duplicateSharedBot": bool(token_value and uses_shared_bot),
+    }
 
 
 def _cron_summary() -> dict[str, Any]:
@@ -805,6 +953,8 @@ def _agent_summaries(
             status = "disabled"
         elif not model.get("configured"):
             status = "needs_model"
+        elif gateway_running and "telegram" in agent["platforms"] and not _agent_telegram_lane(agent).get("configured"):
+            status = "needs_telegram"
         elif gateway_running and any(platform != "local" for platform in agent["platforms"]):
             status = "online"
         elif gateway_running:
@@ -819,6 +969,7 @@ def _agent_summaries(
                 "active_session_count": active_count,
                 "toolsets": agent["toolsets"] or global_toolsets,
                 "has_prompt": bool(agent.get("prompt")),
+                "telegramLane": _agent_telegram_lane(agent) if "telegram" in agent["platforms"] else None,
             }
         )
     return result
@@ -838,6 +989,48 @@ def _orchestration_summary() -> dict[str, Any]:
         }
 
 
+def _handoff_summary() -> dict[str, Any]:
+    try:
+        from elevate_cli.data import agent_handoff_summary, connect
+
+        with connect() as conn:
+            return agent_handoff_summary(conn, limit=10)
+    except Exception as exc:
+        return {
+            "total": 0,
+            "queued": 0,
+            "running": 0,
+            "waitingHuman": 0,
+            "completed": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "open": 0,
+            "byAgent": [],
+            "recent": [],
+            "error": str(exc),
+        }
+
+
+def _agent_worker_summary(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from elevate_cli.agent_worker import snapshot
+
+        return snapshot(config=config)
+    except Exception as exc:
+        return {
+            "enabled": False,
+            "state": "error",
+            "lastTickAt": None,
+            "lastSuccessAt": None,
+            "lastError": str(exc),
+            "drained": {"handoffs": 0, "adminRuns": 0},
+            "limits": {"handoffs": 0, "adminRuns": 0},
+            "heartbeat": {"enabled": False, "intervalSeconds": 0, "lastBeatAt": None, "nextBeatAt": None},
+            "wake": {"enabled": False, "pending": False, "lastWakeAt": None, "lastReason": "", "count": 0},
+            "loop": {"running": False, "startedAt": None},
+        }
+
+
 def build_agent_hub_snapshot(*, include_profiles: bool = True) -> dict[str, Any]:
     """Return a redacted local snapshot for the dashboard Agent Hub."""
     config = load_config()
@@ -848,6 +1041,8 @@ def build_agent_hub_snapshot(*, include_profiles: bool = True) -> dict[str, Any]
     sessions = _session_summary()
     access = load_access_config(config)
     orchestration = _orchestration_summary()
+    handoffs = _handoff_summary()
+    agent_worker = _agent_worker_summary(config)
     memory = _memory_summary(config)
     skills = _skills_summary(config)
     toolsets = _toolsets_summary(config)
@@ -892,6 +1087,8 @@ def build_agent_hub_snapshot(*, include_profiles: bool = True) -> dict[str, Any]
             model=model,
         ),
         "orchestration": orchestration,
+        "handoffs": handoffs,
+        "agentWorker": agent_worker,
         "platforms": _platform_summary(runtime),
         "sessions": sessions,
         "memory": memory,

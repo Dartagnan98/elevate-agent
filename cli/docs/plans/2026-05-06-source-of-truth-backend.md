@@ -5,7 +5,7 @@ Status: planning
 
 ## Why this exists
 
-The Skyleigh Admin Hub kanban (PR-3) shows 10 stages × 2 sides with checklists,
+The Admin Hub kanban (PR-3) shows 10 stages × 2 sides with checklists,
 toggles, and conditions. Stage entry already fires `action_runs` rows via
 `evaluate()` in `elevate_cli/data/dispatch.py:507`, and the runtime hands those
 off to cron jobs that launch Codex with the named skill.
@@ -31,7 +31,7 @@ This plan is that spine.
 - `evaluate()` dispatcher with `stage_entry` and `toggle_change` triggers
 - Cron handoff to Codex with skill name + args
 - Browser-use harness with `harness_runs`, `harness_events`, `source_snapshots`
-- 25+ real-estate skills under `~/.elevate/skills/skyleigh/`
+- 25+ real-estate skills under `~/.elevate/skills/real-estate-admin/`
 - Real APIs already in use: Gmail (Composio), Mailjet, Buffer, Lofty CRM
 
 **Frontend**
@@ -184,6 +184,6 @@ If that round-trip works on one deal, we know the spine is right.
 ## Open questions
 
 - **Skill manifest format.** Today skills are markdown SKILL.md only. Adding `runtime` + `allowed_domains` either as YAML frontmatter in SKILL.md or a sidecar `manifest.yaml`. Frontmatter is less invasive.
-- **Per-user vs per-deal calendar.** Skyleigh's calendar vs deal calendar. Probably user calendar with deal-tagged events.
+- **Per-user vs per-deal calendar.** the pilot realtor's calendar vs deal calendar. Probably user calendar with deal-tagged events.
 - **Webhook ingress for Authentisign / DocuSign.** Need a public endpoint. Tunnel via cortextos infra or stand up a small public webhook receiver?
 - **What about the buyer side first?** Listing-side dogfood is heavier (paperwork, marketing). Buyer-side might be a faster first pass since it's mostly comms + scheduling.

@@ -888,6 +888,21 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         assert "NOUS SUBSCRIPTION BLOCK" in prompt
 
+    def test_includes_generated_admin_onboarding_memory(self, agent, tmp_path, monkeypatch):
+        monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+        memory_path = tmp_path / "memories" / "ADMIN_ONBOARDING.md"
+        memory_path.parent.mkdir(parents=True)
+        memory_path.write_text(
+            "# Admin onboarding memory\n\n- MLS provider: Matrix\n- Compliance/SkySlope provider: SkySlope\n",
+            encoding="utf-8",
+        )
+
+        prompt = agent._build_system_prompt()
+
+        assert "ADMIN ONBOARDING MEMORY (generated from SQLite)" in prompt
+        assert "MLS provider: Matrix" in prompt
+        assert "Compliance/SkySlope provider: SkySlope" in prompt
+
     def test_skills_prompt_derives_available_toolsets_from_loaded_tools(self):
         tools = _make_tool_defs("web_search", "skills_list", "skill_view", "skill_manage")
         toolset_map = {

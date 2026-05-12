@@ -342,7 +342,7 @@ function isRawToolPayload(text: string): boolean {
       "total_lines",
     ].some((key) => key in parsed);
   }
-  return clean.length > 420 && /^[{\[]/.test(clean);
+  return clean.length > 420 && /^(?:\{|\[)/.test(clean);
 }
 
 function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {

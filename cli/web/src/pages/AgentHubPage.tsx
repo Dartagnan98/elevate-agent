@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -10,9 +10,11 @@ import {
   Database,
   KeyRound,
   Loader2,
+  MessageSquare,
   Play,
   RefreshCw,
   RotateCw,
+  Save,
   Shield,
   Sparkles,
   Terminal,
@@ -25,12 +27,14 @@ import type {
   AgentHubAgent,
   AgentHubPlatform,
   AgentHubSnapshot,
+  EnvVarInfo,
   HarnessSnapshot,
 } from "@/lib/api";
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { MemoryConstellation } from "@/components/MemoryConstellation";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -42,13 +46,46 @@ const STATUS_COPY: Record<string, string> = {
   offline: "Offline",
   disabled: "Disabled",
   needs_model: "Needs model",
+  needs_telegram: "Needs Telegram",
 };
 
 function statusVariant(status: string): "success" | "warning" | "outline" | "secondary" {
   if (status === "online" || status === "ready") return "success";
-  if (status === "needs_model") return "warning";
+  if (status === "needs_model" || status === "needs_telegram") return "warning";
   if (status === "disabled") return "secondary";
   return "outline";
+}
+
+function envPlaceholder(
+  envVars: Record<string, EnvVarInfo> | null,
+  key: string,
+  fallback: string,
+) {
+  const info = envVars?.[key];
+  return info?.is_set && info.redacted_value ? info.redacted_value : fallback;
+}
+
+function agentTelegramEnvSegment(agentId: string) {
+  const segment = agentId.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return segment || "AGENT";
+}
+
+function telegramFieldForAgent(agentId: string, label?: string) {
+  const segment = agentTelegramEnvSegment(agentId);
+  return {
+    agentId,
+    tokenKey: `ELEVATE_AGENT_${segment}_TELEGRAM_BOT_TOKEN`,
+    key: `ELEVATE_AGENT_${segment}_TELEGRAM_CHANNEL`,
+    label: label || agentId,
+  };
+}
+
+const EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY = "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN";
+const EXECUTIVE_TELEGRAM_CHANNEL_KEY = "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL";
+
+function looksLikeTelegramBotToken(value: string) {
+  const text = value.trim().replace(/^telegram:/i, "");
+  return /^\d{6,}:[A-Za-z0-9_-]{20,}$/.test(text);
 }
 
 function Stat({
@@ -73,7 +110,47 @@ function Stat({
   );
 }
 
-function AgentCard({ agent }: { agent: AgentHubAgent }) {
+function AgentCard({
+  agent,
+  telegramBotTokenPlaceholder,
+  telegramBotTokenValue,
+  telegramLanePlaceholder,
+  telegramLaneValue,
+  onTelegramLaneSave,
+  onTelegramBotTokenChange,
+  onTelegramLaneChange,
+  savingTelegram,
+}: {
+  agent: AgentHubAgent;
+  telegramBotTokenPlaceholder?: string;
+  telegramBotTokenValue?: string;
+  telegramLanePlaceholder?: string;
+  telegramLaneValue?: string;
+  onTelegramLaneSave?: () => void;
+  onTelegramBotTokenChange?: (value: string) => void;
+  onTelegramLaneChange?: (value: string) => void;
+  savingTelegram?: boolean;
+}) {
+  const agentTelegramChanged = Boolean(
+    telegramBotTokenValue?.trim() || telegramLaneValue?.trim(),
+  );
+  const telegramLane = agent.telegramLane;
+  const telegramLaneReady = Boolean(telegramLane?.configured);
+  const telegramLaneState = telegramLaneReady
+    ? "Configured"
+    : telegramLane?.duplicateSharedBot
+      ? "Duplicate bot token"
+      : telegramLane?.usesSharedBot
+        ? "Needs own bot token"
+      : telegramLane?.tokenConfigured
+        ? "Missing chat target"
+        : telegramLane?.targetConfigured
+          ? "Missing bot token"
+          : "Missing bot token and chat target";
+  const telegramLaneDetail = telegramLane
+    ? `${telegramLane.tokenEnv || "agent token env"} + ${telegramLane.targetEnv || "agent chat env"}`
+    : "No Telegram lane required";
+
   return (
     <Card>
       <CardHeader className="gap-3">
@@ -97,6 +174,72 @@ function AgentCard({ agent }: { agent: AgentHubAgent }) {
         <ChipRow icon={Wrench} items={agent.toolsets} empty="Global tools" />
         {agent.skills.length > 0 && (
           <ChipRow icon={Sparkles} items={agent.skills} empty="No skills" />
+        )}
+        {onTelegramLaneChange && (
+          <div className="grid gap-1">
+            <div className="flex items-center gap-2 text-[0.68rem] font-medium text-muted-foreground">
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span>{agent.name} Telegram</span>
+            </div>
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+              <label className="grid gap-1 text-[0.68rem] font-medium text-muted-foreground">
+                <span>Bot token</span>
+                <Input
+                  autoComplete="new-password"
+                  type="password"
+                  value={telegramBotTokenValue ?? ""}
+                  placeholder={telegramBotTokenPlaceholder ?? "BotFather token"}
+                  onChange={(event) => onTelegramBotTokenChange?.(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && agentTelegramChanged && onTelegramLaneSave) {
+                      event.preventDefault();
+                      onTelegramLaneSave();
+                    }
+                  }}
+                />
+              </label>
+              <label className="grid gap-1 text-[0.68rem] font-medium text-muted-foreground">
+                <span>Chat/topic ID</span>
+                <Input
+                  value={telegramLaneValue ?? ""}
+                  placeholder={telegramLanePlaceholder ?? "Chat ID or chat:topic"}
+                  onChange={(event) => onTelegramLaneChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && agentTelegramChanged && onTelegramLaneSave) {
+                      event.preventDefault();
+                      onTelegramLaneSave();
+                    }
+                  }}
+                />
+              </label>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onTelegramLaneSave}
+                disabled={savingTelegram || !agentTelegramChanged}
+              >
+                {savingTelegram ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
+                Save
+              </Button>
+            </div>
+            {telegramLane && (
+              <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-muted-foreground">
+                <Badge variant={telegramLaneReady ? "success" : "warning"}>
+                  {telegramLaneState}
+                </Badge>
+                <span className="min-w-0 truncate">{telegramLaneDetail}</span>
+              </div>
+            )}
+            {telegramLane?.duplicateSharedBot && (
+              <div className="text-[0.68rem] leading-5 text-warning">
+                This agent is using the Executive bot token. Create a separate BotFather token for this agent.
+              </div>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>
@@ -176,6 +319,99 @@ function PlatformRow({ platform }: { platform: AgentHubPlatform }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function TelegramGatewayControls({
+  envVars,
+  hasChanges,
+  home,
+  onHomeChange,
+  onRestart,
+  onSave,
+  onTokenChange,
+  saving,
+  token,
+  tokenConfigured,
+}: {
+  envVars: Record<string, EnvVarInfo> | null;
+  hasChanges: boolean;
+  home: string;
+  onHomeChange: (value: string) => void;
+  onRestart: () => void;
+  onSave: () => void;
+  onTokenChange: (value: string) => void;
+  saving: boolean;
+  token: string;
+  tokenConfigured: boolean;
+}) {
+  const saveOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" && hasChanges) {
+      event.preventDefault();
+      onSave();
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-border bg-background/35 p-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <MessageSquare className="h-4 w-4 text-primary" />
+          <span className="text-sm font-semibold text-foreground">Executive Telegram</span>
+        </div>
+        <Badge variant={tokenConfigured ? "success" : "warning"}>
+          {tokenConfigured ? "Token" : "Needs token"}
+        </Badge>
+      </div>
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+        <div className="grid gap-1">
+          <div className="text-[0.68rem] font-medium text-muted-foreground">Executive bot token</div>
+          <Input
+            autoComplete="new-password"
+            type="password"
+            value={token}
+            placeholder={envPlaceholder(
+              envVars,
+              EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY,
+              envPlaceholder(envVars, "TELEGRAM_BOT_TOKEN", "Executive BotFather token"),
+            )}
+            onChange={(event) => onTokenChange(event.target.value)}
+            onKeyDown={saveOnEnter}
+          />
+        </div>
+        <div className="grid gap-1">
+          <div className="text-[0.68rem] font-medium text-muted-foreground">Executive chat/topic</div>
+          <Input
+            value={home}
+            placeholder={envPlaceholder(
+              envVars,
+              EXECUTIVE_TELEGRAM_CHANNEL_KEY,
+              envPlaceholder(envVars, "TELEGRAM_HOME_CHANNEL", "Executive chat ID"),
+            )}
+            onChange={(event) => onHomeChange(event.target.value)}
+            onKeyDown={saveOnEnter}
+          />
+        </div>
+        <div className="flex gap-2 md:justify-end">
+          <Button
+            size="sm"
+            onClick={onSave}
+            disabled={saving || !hasChanges}
+          >
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5" />
+            )}
+            Save
+          </Button>
+          <Button size="sm" variant="outline" onClick={onRestart}>
+            <RotateCw className="h-3.5 w-3.5" />
+            Restart
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -276,6 +512,146 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
             ))}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function handoffStatusVariant(status: string): "success" | "warning" | "outline" | "secondary" {
+  if (status === "completed") return "success";
+  if (status === "waiting_human" || status === "failed") return "warning";
+  if (status === "cancelled") return "secondary";
+  return "outline";
+}
+
+function HandoffBusCard({
+  busy,
+  handoffs,
+  onRunWorker,
+  onWakeWorker,
+  worker,
+}: {
+  busy: boolean;
+  handoffs: AgentHubSnapshot["handoffs"];
+  onRunWorker: () => void;
+  onWakeWorker: () => void;
+  worker: AgentHubSnapshot["agentWorker"];
+}) {
+  const active = handoffs.queued + handoffs.running + handoffs.waitingHuman;
+  const loopRunning = worker.loop?.running ?? false;
+  const heartbeat = worker.heartbeat;
+  const wake = worker.wake;
+  const workerHealthy = worker.enabled && worker.state !== "error" && worker.state !== "disabled" && loopRunning;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle>Agent handoffs</CardTitle>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span>Worker {worker.enabled ? worker.state : "disabled"}</span>
+              <span>Loop {loopRunning ? "running" : "stopped"}</span>
+              {worker.lastTickAt && <span>Tick {isoTimeAgo(worker.lastTickAt)}</span>}
+              {heartbeat?.lastBeatAt && <span>Heartbeat {isoTimeAgo(heartbeat.lastBeatAt)}</span>}
+              {wake?.lastWakeAt && <span>Wake {isoTimeAgo(wake.lastWakeAt)}</span>}
+              {worker.lastError && <span className="text-warning">{worker.lastError}</span>}
+            </div>
+            {handoffs.error && (
+              <div className="mt-1 text-xs text-warning">{handoffs.error}</div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant={active ? "warning" : "success"}>
+              {active} open
+            </Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onRunWorker}
+              disabled={busy}
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Run worker
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onWakeWorker}
+              disabled={busy}
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="h-3.5 w-3.5" />
+              )}
+              Wake loop
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
+          <MiniMetric label="Queued" value={handoffs.queued} />
+          <MiniMetric label="Running" value={handoffs.running} />
+          <MiniMetric label="Human" value={handoffs.waitingHuman} />
+          <MiniMetric label="Last handoffs" value={worker.drained.handoffs} />
+          <MiniMetric label="Last admin" value={worker.drained.adminRuns} />
+          <MiniMetric label="Wakes" value={wake?.count ?? 0} />
+        </div>
+        <div className="flex flex-wrap gap-1">
+          <Badge variant={workerHealthy ? "success" : "warning"}>
+            {worker.enabled ? "auto-drain on" : "auto-drain off"}
+          </Badge>
+          <Badge variant={loopRunning ? "success" : "warning"}>
+            wake loop {loopRunning ? "on" : "off"}
+          </Badge>
+          <Badge variant={heartbeat?.enabled ? "success" : "warning"}>
+            heartbeat {heartbeat?.intervalSeconds ?? "off"}s
+          </Badge>
+          {wake?.pending && <Badge variant="warning">wake pending</Badge>}
+          <Badge variant="outline">handoff cap {worker.limits.handoffs}</Badge>
+          <Badge variant="outline">admin cap {worker.limits.adminRuns}</Badge>
+        </div>
+        {handoffs.byAgent.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {handoffs.byAgent.slice(0, 8).map((agent) => (
+              <Badge key={agent.agentId} variant={agent.queued || agent.running ? "warning" : "outline"}>
+                {agent.agentId} {agent.queued + agent.running + agent.waitingHuman}/{agent.total}
+              </Badge>
+            ))}
+          </div>
+        )}
+        <div className="space-y-2">
+          {handoffs.recent.slice(0, 5).map((handoff) => (
+            <div
+              key={handoff.id}
+              className="rounded-2xl border border-border bg-muted/20 p-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 truncate text-sm font-medium">
+                  {handoff.title}
+                </div>
+                <Badge variant={handoffStatusVariant(handoff.status)}>
+                  {handoff.status.replace("_", " ")}
+                </Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span>{handoff.fromAgentId}</span>
+                <span>to</span>
+                <span>{handoff.toAgentId}</span>
+                <span>{isoTimeAgo(handoff.updatedAt)}</span>
+              </div>
+            </div>
+          ))}
+          {!handoffs.recent.length && (
+            <div className="py-4 text-sm text-muted-foreground">No handoffs yet</div>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -402,14 +778,28 @@ function SetupRunway({
 
 export default function AgentHubPage() {
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
+  const [envVars, setEnvVars] = useState<Record<string, EnvVarInfo> | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [savingTelegram, setSavingTelegram] = useState(false);
+  const [telegramToken, setTelegramToken] = useState("");
+  const [telegramHome, setTelegramHome] = useState("");
+  const [telegramLanes, setTelegramLanes] = useState<Record<string, string>>({});
+  const [telegramAgentTokens, setTelegramAgentTokens] = useState<Record<string, string>>({});
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
 
   const load = useCallback(async () => {
     try {
-      setSnapshot(await api.getAgentHub());
+      const [nextSnapshot, nextEnvVars] = await Promise.all([
+        api.getAgentHub(),
+        api.getEnvVars().catch(() => null),
+      ]);
+      setSnapshot(nextSnapshot);
+      if (nextEnvVars) {
+        setEnvVars(nextEnvVars);
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Agent Hub failed", "error");
     } finally {
@@ -460,6 +850,22 @@ export default function AgentHubPage() {
   const memoryEmbeddingLabel = snapshot?.memory.embedding.enabled
     ? `${snapshot.memory.embedding.provider}:${snapshot.memory.embedding.model}`
     : "off";
+  const telegramPlatform = snapshot?.platforms.find(
+    (platform) => platform.name.toLowerCase() === "telegram",
+  );
+  const telegramTokenConfigured = Boolean(
+    telegramPlatform?.token_configured ||
+      envVars?.TELEGRAM_BOT_TOKEN?.is_set ||
+      envVars?.[EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY]?.is_set,
+  );
+  const telegramHasChanges = Boolean(
+    telegramToken.trim() ||
+      telegramHome.trim() ||
+      (snapshot?.agents ?? []).some((agent) => {
+        const field = telegramFieldForAgent(agent.id, agent.name);
+        return Boolean((telegramAgentTokens[field.tokenKey] ?? "").trim() || (telegramLanes[field.key] ?? "").trim());
+      }),
+  );
 
   const runAction = async (name: "start" | "restart") => {
     setBusyAction(name);
@@ -471,6 +877,107 @@ export default function AgentHubPage() {
       showToast(error instanceof Error ? error.message : "Gateway action failed", "error");
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const runAgentWorker = async () => {
+    setHandoffBusy(true);
+    try {
+      const result = await api.runAgentWorkerTick();
+      showToast(
+        `Worker launched ${result.drained.handoffs} handoff${result.drained.handoffs === 1 ? "" : "s"} and ${result.drained.adminRuns} admin run${result.drained.adminRuns === 1 ? "" : "s"}`,
+        "success",
+      );
+      await load();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Agent worker failed", "error");
+    } finally {
+      setHandoffBusy(false);
+    }
+  };
+
+  const wakeAgentWorker = async () => {
+    setHandoffBusy(true);
+    try {
+      await api.wakeAgentWorker();
+      showToast("Worker wake queued. Gateway loop will drain it.", "success");
+      await load();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Agent worker wake failed", "error");
+    } finally {
+      setHandoffBusy(false);
+    }
+  };
+
+  const saveTelegramConfig = async () => {
+    const entries = new Map<string, string>();
+    const executiveField = telegramFieldForAgent("executive-assistant", "Executive Assistant");
+    const telegramTokenValue = telegramToken.trim();
+    const telegramHomeValue = telegramHome.trim();
+    const typedExecutiveToken = (telegramAgentTokens[executiveField.tokenKey] ?? "").trim();
+    const typedExecutiveHome = (telegramLanes[executiveField.key] ?? "").trim();
+    const executiveTokenCandidate = typedExecutiveToken || telegramTokenValue;
+    for (const agent of snapshot?.agents ?? []) {
+      if (agent.id === "executive-assistant") continue;
+      const field = telegramFieldForAgent(agent.id, agent.name);
+      const tokenValue = (telegramAgentTokens[field.tokenKey] ?? "").trim();
+      if (
+        tokenValue &&
+        ((telegramTokenValue && tokenValue === telegramTokenValue) ||
+          (executiveTokenCandidate && tokenValue === executiveTokenCandidate))
+      ) {
+        showToast(`${agent.name} needs its own BotFather token; it cannot reuse Executive.`, "error");
+        return;
+      }
+    }
+    if (telegramTokenValue) {
+      entries.set("TELEGRAM_BOT_TOKEN", telegramTokenValue);
+      if (!typedExecutiveToken) {
+        entries.set(EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY, telegramTokenValue);
+      }
+    }
+    if (telegramHomeValue) {
+      if (looksLikeTelegramBotToken(telegramHomeValue)) {
+        showToast("Home channel expects a chat/topic ID, not a bot token.", "error");
+        return;
+      }
+      entries.set("TELEGRAM_HOME_CHANNEL", telegramHomeValue);
+      if (!typedExecutiveHome) {
+        entries.set(EXECUTIVE_TELEGRAM_CHANNEL_KEY, telegramHomeValue);
+      }
+    }
+    for (const agent of snapshot?.agents ?? []) {
+      const field = telegramFieldForAgent(agent.id, agent.name);
+      const tokenValue = (telegramAgentTokens[field.tokenKey] ?? "").trim();
+      if (tokenValue) {
+        entries.set(field.tokenKey, tokenValue);
+      }
+      const value = (telegramLanes[field.key] ?? "").trim();
+      if (value) {
+        if (looksLikeTelegramBotToken(value)) {
+          showToast(`${agent.name}: paste the bot token into Bot token, not Chat/topic ID.`, "error");
+          return;
+        }
+        entries.set(field.key, value);
+      }
+    }
+    if (!entries.size) return;
+
+    setSavingTelegram(true);
+    try {
+      for (const [key, value] of entries.entries()) {
+        await api.setEnvVar(key, value);
+      }
+      setTelegramToken("");
+      setTelegramHome("");
+      setTelegramLanes({});
+      setTelegramAgentTokens({});
+      await load();
+      showToast("Telegram settings saved. Restart gateway to apply.", "success");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Telegram save failed", "error");
+    } finally {
+      setSavingTelegram(false);
     }
   };
 
@@ -527,6 +1034,7 @@ export default function AgentHubPage() {
               <div className="grid grid-cols-2 gap-2">
                 <MiniMetric label="Agent team" value={activeAgents.length} />
                 <MiniMetric label="Live chats" value={liveSessions.length} />
+                <MiniMetric label="Handoffs" value={snapshot.handoffs.open} />
                 <MiniMetric label="Memory queue" value={snapshot.memory.journal.pending} />
                 <MiniMetric label="Cron live" value={snapshot.cron.enabled} />
               </div>
@@ -611,14 +1119,71 @@ export default function AgentHubPage() {
                 </Badge>
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-3">
+              <TelegramGatewayControls
+                envVars={envVars}
+                hasChanges={telegramHasChanges}
+                home={telegramHome}
+                onHomeChange={setTelegramHome}
+                onRestart={() => void runAction("restart")}
+                onSave={() => void saveTelegramConfig()}
+                onTokenChange={setTelegramToken}
+                saving={savingTelegram}
+                token={telegramToken}
+                tokenConfigured={telegramTokenConfigured}
+              />
               <div className="grid gap-3 md:grid-cols-2">
-                {snapshot.agents.map((agent) => (
-                  <AgentCard key={agent.id} agent={agent} />
-                ))}
+                {snapshot.agents.map((agent) => {
+                  const telegramField = telegramFieldForAgent(agent.id, agent.name);
+                  return (
+                    <AgentCard
+                      key={agent.id}
+                      agent={agent}
+                      telegramBotTokenPlaceholder={
+                        telegramField
+                          ? envPlaceholder(envVars, telegramField.tokenKey, `${agent.name} bot token`)
+                          : undefined
+                      }
+                      telegramBotTokenValue={
+                        telegramField ? (telegramAgentTokens[telegramField.tokenKey] ?? "") : undefined
+                      }
+                      telegramLanePlaceholder={
+                        telegramField
+                          ? envPlaceholder(envVars, telegramField.key, "Chat ID or topic ID")
+                          : undefined
+                      }
+                      telegramLaneValue={telegramField ? (telegramLanes[telegramField.key] ?? "") : undefined}
+                      onTelegramBotTokenChange={
+                        telegramField
+                          ? (value) =>
+                              setTelegramAgentTokens((prev) => ({
+                                ...prev,
+                                [telegramField.tokenKey]: value,
+                              }))
+                          : undefined
+                      }
+                      onTelegramLaneChange={
+                        telegramField
+                          ? (value) =>
+                              setTelegramLanes((prev) => ({ ...prev, [telegramField.key]: value }))
+                          : undefined
+                      }
+                      onTelegramLaneSave={() => void saveTelegramConfig()}
+                      savingTelegram={savingTelegram}
+                    />
+                  );
+                })}
               </div>
             </CardContent>
           </Card>
+
+          <HandoffBusCard
+            busy={handoffBusy}
+            handoffs={snapshot.handoffs}
+            onRunWorker={() => void runAgentWorker()}
+            onWakeWorker={() => void wakeAgentWorker()}
+            worker={snapshot.agentWorker}
+          />
 
           <Card>
             <CardHeader>
@@ -647,9 +1212,11 @@ export default function AgentHubPage() {
                 nodes={snapshot.memory.graph.nodes}
                 edges={snapshot.memory.graph.edges}
               />
-              <div className="grid grid-cols-2 gap-2 px-4">
+              <div className="grid grid-cols-2 gap-2 px-4 md:grid-cols-4">
                 <MiniMetric label="Pending" value={snapshot.memory.journal.pending} />
                 <MiniMetric label="Segments" value={snapshot.memory.journal.session_segment_count} />
+                <MiniMetric label="Communities" value={snapshot.memory.community_reports} />
+                <MiniMetric label="Relations" value={snapshot.memory.relations} />
               </div>
               <div className="px-4 pb-4 text-xs text-muted-foreground">
                 {snapshot.memory.provider} memory / {memoryEmbeddingLabel}

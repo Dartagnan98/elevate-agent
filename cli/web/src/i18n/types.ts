@@ -119,6 +119,7 @@ export interface Translations {
     startedInBackground: string;
     stopped: string;
     updateElevate: string;
+    updatesAvailable: string;
     updatingElevate: string;
     waitingForOutput: string;
   };

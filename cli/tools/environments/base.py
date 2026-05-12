@@ -464,8 +464,50 @@ class BaseEnvironment(ABC):
         # U+FFFD substitution rather than clobbering the whole buffer.
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
+        def _close_stdout() -> None:
+            stdout = getattr(proc, "stdout", None)
+            if stdout is None:
+                return
+            close = getattr(stdout, "close", None)
+            if close is None:
+                return
+            try:
+                close()
+            except Exception:
+                pass
+
         def _drain():
-            fd = proc.stdout.fileno()
+            stdout = getattr(proc, "stdout", None)
+            if stdout is None:
+                return
+
+            fileno = getattr(stdout, "fileno", None)
+            if not callable(fileno):
+                try:
+                    for chunk in stdout:
+                        output_chunks.append(str(chunk))
+                except Exception:
+                    pass
+                return
+
+            try:
+                fd = fileno()
+            except Exception:
+                try:
+                    for chunk in stdout:
+                        output_chunks.append(str(chunk))
+                except Exception:
+                    pass
+                return
+
+            if not isinstance(fd, int):
+                try:
+                    for chunk in stdout:
+                        output_chunks.append(str(chunk))
+                except Exception:
+                    pass
+                return
+
             idle_after_exit = 0
             try:
                 while True:
@@ -539,6 +581,7 @@ class BaseEnvironment(ABC):
                             _tid, _pid, _iter_count, time.monotonic() - _activity_state["start"],
                         )
                     self._kill_process(proc)
+                    _close_stdout()
                     drain_thread.join(timeout=2)
                     return {
                         "output": "".join(output_chunks) + "\n[Command interrupted]",
@@ -552,6 +595,7 @@ class BaseEnvironment(ABC):
                             _tid, _pid, _iter_count, timeout,
                         )
                     self._kill_process(proc)
+                    _close_stdout()
                     drain_thread.join(timeout=2)
                     partial = "".join(output_chunks)
                     timeout_msg = f"\n[Command timed out after {timeout}s]"
@@ -600,6 +644,7 @@ class BaseEnvironment(ABC):
                 )
             try:
                 self._kill_process(proc)
+                _close_stdout()
                 drain_thread.join(timeout=2)
             except Exception:
                 pass  # cleanup is best-effort
@@ -610,10 +655,7 @@ class BaseEnvironment(ABC):
         # it means the non-blocking loop itself stopped cooperating.
         drain_thread.join(timeout=2)
 
-        try:
-            proc.stdout.close()
-        except Exception:
-            pass
+        _close_stdout()
 
         if _DEBUG_INTERRUPT:
             logger.info(

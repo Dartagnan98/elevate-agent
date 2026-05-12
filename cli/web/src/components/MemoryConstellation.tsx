@@ -415,6 +415,19 @@ export function MemoryConstellation({
     return connected;
   }, [activeNodeId, layout.edges]);
   const activeNode = activeNodeId ? layout.byId.get(activeNodeId) ?? null : null;
+  const activeEdgeTypes = useMemo(() => {
+    if (!activeNodeId) return [] as Array<{ type: string; count: number }>;
+    const counts = new Map<string, number>();
+    for (const edge of layout.edges) {
+      if (!isEdgeConnected(edge, activeNodeId)) continue;
+      const label = edge.type === "visual-cluster" ? "visual" : edge.type.replace(/_/g, " ");
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 4)
+      .map(([type, count]) => ({ type, count }));
+  }, [activeNodeId, layout.edges]);
   const focusNode = activeNode ?? layout.ranked[0] ?? null;
   const displayedLinks = activeNode
     ? layout.edges.filter((edge) => isEdgeConnected(edge, activeNode.node.id)).length
@@ -678,6 +691,18 @@ export function MemoryConstellation({
             <div className="mt-1 line-clamp-2 text-sm leading-5 text-foreground">
               {labelFor(focusNode.node)}
             </div>
+            {activeEdgeTypes.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {activeEdgeTypes.map((edge) => (
+                  <span
+                    key={edge.type}
+                    className="rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[0.66rem] text-muted-foreground"
+                  >
+                    {edge.type} {edge.count}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

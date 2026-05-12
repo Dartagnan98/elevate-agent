@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
@@ -623,6 +623,54 @@ class TestSendUpdateNotification:
         # Files should still be cleaned up
         assert not pending_path.exists()
         assert not exit_code_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# update-available notifications
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateAvailableNotification:
+    """Tests for pushed-release notifications to home channels."""
+
+    @pytest.mark.asyncio
+    async def test_sends_update_available_once_per_upstream(self, tmp_path):
+        runner = _make_runner()
+        runner.config = GatewayConfig(
+            platforms={
+                Platform.TELEGRAM: PlatformConfig(
+                    enabled=True,
+                    home_channel=HomeChannel(
+                        platform=Platform.TELEGRAM,
+                        chat_id="67890",
+                        name="Home",
+                    ),
+                ),
+            }
+        )
+        runner._running = True
+
+        mock_adapter = MagicMock()
+        mock_adapter.send = AsyncMock()
+        runner.adapters = {Platform.TELEGRAM: mock_adapter}
+
+        with patch("gateway.run._elevate_home", tmp_path), \
+             patch("elevate_cli.banner._resolve_repo_dir", return_value=tmp_path), \
+             patch("elevate_cli.banner.check_for_updates", return_value=2), \
+             patch("elevate_cli.banner.get_git_banner_state", return_value={
+                 "local": "aaa111",
+                 "upstream": "bbb222",
+             }), \
+             patch("elevate_cli.config.recommended_update_command", return_value="elevate update"):
+            first = await runner._notify_update_available_if_needed()
+            second = await runner._notify_update_available_if_needed()
+
+        assert first is True
+        assert second is False
+        mock_adapter.send.assert_called_once()
+        sent_text = mock_adapter.send.call_args[0][1]
+        assert "2 new commits" in sent_text
+        assert "elevate update" in sent_text
 
 
 # ---------------------------------------------------------------------------

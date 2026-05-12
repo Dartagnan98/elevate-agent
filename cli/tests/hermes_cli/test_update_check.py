@@ -58,6 +58,27 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
     assert mock_run.call_count == 2  # git fetch + git rev-list
 
 
+def test_check_for_updates_force_skips_fresh_cache(tmp_path, monkeypatch):
+    """Forced checks refresh refs even when the cache is fresh."""
+    from elevate_cli.banner import check_for_updates
+
+    repo_dir = tmp_path / "elevate"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3}))
+
+    mock_result = MagicMock(returncode=0, stdout="7\n")
+
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    with patch("elevate_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+        result = check_for_updates(force=True)
+
+    assert result == 7
+    assert mock_run.call_count == 2  # git fetch + git rev-list
+
+
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
     """Returns None when .git directory doesn't exist anywhere."""
     import elevate_cli.banner as banner

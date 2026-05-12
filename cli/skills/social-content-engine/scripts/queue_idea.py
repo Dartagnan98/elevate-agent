@@ -2,7 +2,7 @@
 
 The agent (running this skill weekly) calls this script once per idea after
 composing the hook + outline. The script resolves the tools root the same way
-the rest of Elevate does (env > config > detected skyleigh-tools > default)
+the rest of Elevate does (env > config > detected client-tools > default)
 and appends a task to ``data/sources/social/tasks.jsonl`` with shape that the
 ``/social-media`` page already understands.
 
@@ -54,9 +54,9 @@ def _resolve_source_dir() -> Path:
     except Exception:
         pass
     elevate_home = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate")
-    skyleigh = elevate_home / "tmp" / "skyleigh-tools" / "data" / "sources" / "social"
-    if skyleigh.parent.parent.exists():
-        return skyleigh
+    client_tools = elevate_home / "tmp" / "client-tools" / "data" / "sources" / "social"
+    if client_tools.parent.parent.exists():
+        return client_tools
     return elevate_home / "tools" / "data" / "sources" / "social"
 
 

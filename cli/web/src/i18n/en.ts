@@ -118,6 +118,7 @@ export const en: Translations = {
     startedInBackground: "Started in background — check logs for progress",
     stopped: "Stopped",
     updateElevate: "Update Elevate",
+    updatesAvailable: "Updates available",
     updatingElevate: "Updating Elevate…",
     waitingForOutput: "Waiting for output…",
   },

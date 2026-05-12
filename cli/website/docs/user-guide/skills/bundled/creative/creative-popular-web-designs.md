@@ -143,7 +143,7 @@ those carry more visual identity than the specific font face.
 | `raycast.md` | Raycast | Sleek dark chrome, vibrant gradient accents |
 | `resend.md` | Resend | Minimal dark theme, monospace accents |
 | `sentry.md` | Sentry | Dark dashboard, data-dense, pink-purple accent |
-| `supabase.md` | Supabase | Dark emerald theme, code-first developer tool |
+| `database-platform.md` | Database Platform | Dark emerald theme, code-first developer tool |
 | `superhuman.md` | Superhuman | Premium dark UI, keyboard-first, purple glow |
 | `vercel.md` | Vercel | Black and white precision, Geist font system |
 | `warp.md` | Warp | Dark IDE-like interface, block-based command UI |
@@ -201,7 +201,7 @@ those carry more visual identity than the specific font face.
 
 Match the design to the content:
 
-- **Developer tools / dashboards:** Linear, Vercel, Supabase, Raycast, Sentry
+- **Developer tools / dashboards:** Linear, Vercel, Database Platform, Raycast, Sentry
 - **Documentation / content sites:** Mintlify, Notion, Sanity, MongoDB
 - **Marketing / landing pages:** Stripe, Framer, Apple, SpaceX
 - **Dark mode UIs:** Linear, Cursor, ElevenLabs, Warp, Superhuman

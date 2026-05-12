@@ -1,5 +1,9 @@
 """Tests for acp_adapter.server — ElevateACPAgent ACP server."""
 
+import pytest
+
+pytest.importorskip("acp", reason="requires optional ACP extra: acp")
+
 import asyncio
 import os
 from types import SimpleNamespace

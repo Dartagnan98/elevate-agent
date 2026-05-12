@@ -317,6 +317,9 @@ class TestBuiltinDiscovery:
             "tools.tts_tool",
             "tools.vision_tools",
             "tools.web_tools",
+            "tools.admin_profile_tool",
+            "tools.agent_handoff_tool",
+            "tools.outreach_templates_tool",
         }
 
         with patch("tools.registry.importlib.import_module"):

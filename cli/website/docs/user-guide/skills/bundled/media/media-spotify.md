@@ -30,7 +30,7 @@ The following is the complete skill definition that Elevate loads when this skil
 
 # Spotify
 
-Control the user's Spotify account via the Elevate Spotify toolset (7 tools). Setup guide: https://elevate.ctrlstrategies.com/docs/user-guide/features/spotify
+Control the user's Spotify account via the Elevate Spotify toolset (7 tools). Setup guide: https://github.com/Dartagnan98/elevate-agent/docs/user-guide/features/spotify
 
 ## When to use this skill
 

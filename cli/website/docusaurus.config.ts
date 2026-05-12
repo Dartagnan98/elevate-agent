@@ -7,7 +7,7 @@ const config: Config = {
   tagline: 'AI chief of staff for real estate',
   favicon: 'img/favicon.ico',
 
-  url: 'https://elevate.ctrlstrategies.com',
+  url: 'https://github.com/Dartagnan98/elevate-agent',
   baseUrl: '/docs/',
 
   organizationName: 'CtrlStrategies',
@@ -91,7 +91,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://elevate.ctrlstrategies.com',
+          href: 'https://github.com/Dartagnan98/elevate-agent',
           label: 'Home',
           position: 'right',
         },
@@ -111,11 +111,11 @@ const config: Config = {
         {
           title: 'More',
           items: [
-            { label: 'Ctrl Strategies', href: 'https://ctrlstrategies.com' },
+            { label: 'Elevation Real Estate HQ', href: 'https://elevationrealestatehq.com' },
           ],
         },
       ],
-      copyright: `Built by <a href="https://ctrlstrategies.com">Ctrl Strategies</a> · MIT License · ${new Date().getFullYear()}`,
+      copyright: `Built by <a href="https://elevationrealestatehq.com">Elevation Real Estate HQ</a> · MIT License · ${new Date().getFullYear()}`,
     },
     prism: {
       theme: prismThemes.github,

@@ -26,11 +26,12 @@ import httpx
 from elevate_cli import license as elevate_license
 
 _MOUNT_DIR: Optional[Path] = None
+_MOUNTED_SKILLS: list[str] = []
 
 
 def _client() -> httpx.Client:
     return httpx.Client(
-        base_url=elevate_license.BACKEND_URL,
+        base_url=elevate_license.backend_url(),
         timeout=15.0,
         headers={"user-agent": "elevate-cli/0.11"},
     )
@@ -91,12 +92,18 @@ def _write_skill(root: Path, name: str, body: str, manifest: dict) -> None:
     (skill_dir / "SKILL.md").write_text(content)
 
 
+def mounted_skill_names() -> list[str]:
+    """Return the names mounted into the current process."""
+    return list(_MOUNTED_SKILLS)
+
+
 def mount_all() -> Optional[Path]:
     """Fetch all subscription skills and write to a tmp dir. Return the path."""
-    global _MOUNT_DIR
+    global _MOUNT_DIR, _MOUNTED_SKILLS
     if _MOUNT_DIR is not None:
         return _MOUNT_DIR
 
+    _MOUNTED_SKILLS = []
     try:
         skills = list_skills()
     except elevate_license.LicenseError as e:
@@ -109,14 +116,22 @@ def mount_all() -> Optional[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="elevate-skills-"))
     atexit.register(lambda: shutil.rmtree(tmp, ignore_errors=True))
 
+    mounted: list[str] = []
     for stub in skills:
         try:
             full = fetch_skill(stub["name"])
         except elevate_license.LicenseError:
             continue
-        _write_skill(tmp, full["name"], full.get("body", ""), full.get("manifest", {}))
+        name = full["name"]
+        _write_skill(tmp, name, full.get("body", ""), full.get("manifest", {}))
+        mounted.append(name)
+
+    if not mounted:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
 
     _MOUNT_DIR = tmp
+    _MOUNTED_SKILLS = mounted
     # Point Elevate's skill loader at the mount dir (additive).
     existing = os.environ.get("ELEVATE_EXTRA_SKILLS_PATH", "")
     os.environ["ELEVATE_EXTRA_SKILLS_PATH"] = (

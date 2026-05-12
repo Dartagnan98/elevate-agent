@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -157,6 +158,16 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except (OSError, ValueError):
         resolved = filepath
     normalized = os.path.normpath(os.path.expanduser(filepath))
+    # macOS exposes user tempdirs as /var/folders/... while realpath resolves
+    # them under /private/var/folders/... .  These are writable per-user temp
+    # workspaces and must not be caught by the broader /private/var guard.
+    try:
+        tmp_real = os.path.realpath(tempfile.gettempdir()).rstrip(os.sep) + os.sep
+        tmp_norm = os.path.normpath(tempfile.gettempdir()).rstrip(os.sep) + os.sep
+        if str(resolved).startswith(tmp_real) or str(normalized).startswith(tmp_norm):
+            return None
+    except Exception:
+        pass
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
@@ -428,8 +439,13 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
                 "last_key": None, "consecutive": 0,
-                "read_history": set(), "dedup": {},
+                "read_history": set(), "dedup": {}, "read_timestamps": {},
             })
+            # Backward compatible for tracker entries created before
+            # read_timestamps existed or by tests that seed partial state.
+            task_data.setdefault("read_history", set())
+            task_data.setdefault("dedup", {})
+            task_data.setdefault("read_timestamps", {})
             cached_mtime = task_data.get("dedup", {}).get(dedup_key)
 
         if cached_mtime is not None:

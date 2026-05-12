@@ -138,6 +138,11 @@ class HonchoSessionManager:
         self._async_thread: threading.Thread | None = None
         if write_frequency == "async":
             self._async_queue = queue.Queue()
+            # Small debounce before the worker consumes an item.  This gives
+            # flush_all()/shutdown() a deterministic chance to drain freshly
+            # queued work synchronously, and batches rapid turn-end writes
+            # without materially delaying background persistence.
+            self._async_dequeue_grace_seconds = 0.05
             self._async_thread = threading.Thread(
                 target=self._async_writer_loop,
                 name="honcho-async-writer",
@@ -369,6 +374,11 @@ class HonchoSessionManager:
         """Background daemon thread: drains the async write queue."""
         while True:
             try:
+                grace = getattr(self, "_async_dequeue_grace_seconds", 0.0)
+                if grace > 0:
+                    import time as _time
+                    _time.sleep(grace)
+
                 item = self._async_queue.get(timeout=5)
                 if item is _ASYNC_SHUTDOWN:
                     break

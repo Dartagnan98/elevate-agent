@@ -5,7 +5,7 @@ import {
   useCallback,
   useRef,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -293,6 +293,7 @@ function SessionRow({
 
   return (
     <div
+      id={`session-row-${session.id}`}
       className={`overflow-hidden rounded-2xl border bg-card/70 transition-colors ${
         session.is_active
           ? "border-success/30 bg-success/[0.03]"
@@ -434,6 +435,89 @@ function SessionRow({
   );
 }
 
+function LinkedSessionPanel({
+  onClose,
+  session,
+  sessionId,
+}: {
+  onClose: () => void;
+  session?: SessionInfo | null;
+  sessionId: string;
+}) {
+  const [messages, setMessages] = useState<SessionMessage[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { t } = useI18n();
+  const title =
+    session?.title && session.title !== "Untitled"
+      ? session.title
+      : session?.preview?.slice(0, 80) || "Selected chat";
+
+  useEffect(() => {
+    let cancelled = false;
+    setMessages(null);
+    setError(null);
+    setLoading(true);
+    api
+      .getSessionMessages(sessionId)
+      .then((resp) => {
+        if (!cancelled) setMessages(resp.messages);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  return (
+    <Card className="border-primary/25 bg-primary/[0.03]">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <CardTitle className="truncate text-base">{title}</CardTitle>
+            <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+              <Badge variant="outline" className="text-[10px]">
+                {session?.source ?? "session"}
+              </Badge>
+              <span className="font-mono-ui">{sessionId}</span>
+            </div>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            aria-label={t.common.close}
+            onClick={onClose}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {loading && (
+          <div className="flex items-center justify-center py-8">
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          </div>
+        )}
+        {error && (
+          <p className="text-sm text-destructive py-4 text-center">{error}</p>
+        )}
+        {messages && messages.length === 0 && (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            {t.sessions.noMessages}
+          </p>
+        )}
+        {messages && messages.length > 0 && <MessageList messages={messages} />}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [total, setTotal] = useState(0);
@@ -453,9 +537,24 @@ export default function SessionsPage() {
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { setAfterTitle, setEnd } = usePageHeader();
   const { activeAction, actionStatus, dismissLog } = useSystemActions();
   const resumeInChatEnabled = isDashboardEmbeddedChatEnabled();
+  const linkedSessionId = searchParams.get("session");
+  const linkedSession = linkedSessionId
+    ? sessions.find((s) => s.id === linkedSessionId) ??
+      overviewSessions.find((s) => s.id === linkedSessionId) ??
+      null
+    : null;
+  const clearLinkedSession = useCallback(() => {
+    setExpandedId(null);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("session");
+      return next;
+    });
+  }, [setSearchParams]);
 
   useLayoutEffect(() => {
     if (loading) {
@@ -589,16 +688,29 @@ export default function SessionsPage() {
   const openSessionInChat = useCallback(
     (id: string) => {
       if (!resumeInChatEnabled) {
-        showToast(
-          "Chat is not enabled for this dashboard. Restart with `elevate hub`.",
-          "error",
-        );
+        setExpandedId(id);
+        setSearchParams((prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("session", id);
+          return next;
+        });
         return;
       }
       navigate(`/chat?resume=${encodeURIComponent(id)}`);
     },
-    [navigate, resumeInChatEnabled, showToast],
+    [navigate, resumeInChatEnabled, setSearchParams],
   );
+
+  useEffect(() => {
+    if (!linkedSessionId) return;
+    setExpandedId(linkedSessionId);
+    const timer = window.setTimeout(() => {
+      document
+        .getElementById(`session-row-${linkedSessionId}`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [linkedSessionId, sessions]);
 
   // Build snippet map from search results (session_id → snippet)
   const snippetMap = new Map<string, string>();
@@ -752,6 +864,15 @@ export default function SessionsPage() {
               : t.status.waitingForOutput}
           </pre>
         </div>
+      )}
+
+      {linkedSessionId && (
+        <LinkedSessionPanel
+          key={linkedSessionId}
+          sessionId={linkedSessionId}
+          session={linkedSession}
+          onClose={clearLinkedSession}
+        />
       )}
 
       {platformEntries.length > 0 && status && (

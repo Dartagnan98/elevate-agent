@@ -55,6 +55,9 @@ export function resolvePageTitle(
   if (normalized === "/hub") {
     return "Agent Hub";
   }
+  if (normalized === "/desktop-setup") {
+    return "Desktop Setup";
+  }
   if (normalized === "/config") {
     return "Settings";
   }

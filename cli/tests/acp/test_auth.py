@@ -1,5 +1,9 @@
 """Tests for acp_adapter.auth — provider detection."""
 
+import pytest
+
+pytest.importorskip("acp", reason="requires optional ACP extra: acp")
+
 from acp_adapter.auth import has_provider, detect_provider
 
 

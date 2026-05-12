@@ -115,6 +115,7 @@ from elevate_cli.data.deals import (
     add_deal_attachment,
     add_deal_contact,
     create_deal,
+    DealPhaseGateBlocked,
     get_deal,
     get_deal_context,
     list_deal_action_runs,
@@ -124,6 +125,7 @@ from elevate_cli.data.deals import (
     list_deal_tasks,
     list_deals,
     move_deal_stage,
+    promote_profile_to_admin_deal,
     record_run_result,
     set_deal_dates,
     set_deal_fields,
@@ -136,16 +138,30 @@ from elevate_cli.data.dispatch import (
     delete_action,
     dispatch_action_run_to_cron,
     drain_queued_action_runs,
+    ensure_default_admin_actions,
     evaluate as evaluate_dispatch,
     get_action,
     list_action_runs,
     list_actions,
     list_conditional_docs,
+    mark_stale_action_runs,
     queue_action_run,
     record_date_trigger_firing,
     update_action,
     upsert_conditional_doc,
     verify_action_run_token,
+)
+from elevate_cli.data.agent_handoffs import (
+    agent_handoff_summary,
+    approve_agent_handoff,
+    create_agent_handoff,
+    dispatch_agent_handoff_to_cron,
+    drain_queued_agent_handoffs,
+    get_agent_handoff,
+    list_agent_handoffs,
+    mark_stale_agent_handoffs,
+    record_agent_handoff_message,
+    record_agent_handoff_result,
 )
 from elevate_cli.data.workflow_import import (
     import_listing_workflow_csv,
@@ -160,6 +176,16 @@ from elevate_cli.data.province_guides import (
     province_agent_memory,
     province_coverage,
     province_guide_summary,
+)
+from elevate_cli.data.admin_setup import (
+    admin_setup_memory_summary,
+    admin_setup_ready,
+    complete_admin_setup,
+    get_admin_setup,
+    require_admin_setup_ready,
+    sync_admin_setup_memory,
+    sync_admin_setup_runtime,
+    update_admin_setup,
 )
 
 
@@ -207,17 +233,25 @@ __all__ = [
     "template_stats_with_ambiguous",
     # deals
     "add_deal_attachment", "add_deal_contact", "create_deal",
+    "DealPhaseGateBlocked",
     "get_deal", "get_deal_context", "list_deal_action_runs",
     "list_deal_attachments", "list_deal_contacts", "list_deal_events",
     "list_deal_tasks", "list_deals", "move_deal_stage", "record_run_result",
-    "set_deal_dates", "set_deal_fields", "set_deal_money",
-    "set_deal_toggle",
+    "promote_profile_to_admin_deal", "set_deal_dates",
+    "set_deal_fields", "set_deal_money", "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)
     "approve_action_run", "create_action", "delete_action",
     "dispatch_action_run_to_cron", "drain_queued_action_runs",
-    "evaluate_dispatch", "get_action", "list_action_runs", "list_actions",
-    "list_conditional_docs", "queue_action_run", "record_date_trigger_firing",
+    "ensure_default_admin_actions", "evaluate_dispatch",
+    "get_action", "list_action_runs", "list_actions",
+    "list_conditional_docs", "mark_stale_action_runs",
+    "queue_action_run", "record_date_trigger_firing",
     "update_action", "upsert_conditional_doc", "verify_action_run_token",
+    # visible agent handoff bus
+    "agent_handoff_summary", "approve_agent_handoff", "create_agent_handoff",
+    "dispatch_agent_handoff_to_cron", "drain_queued_agent_handoffs",
+    "get_agent_handoff", "list_agent_handoffs", "mark_stale_agent_handoffs",
+    "record_agent_handoff_message", "record_agent_handoff_result",
     # workflow bootstrap import
     "import_listing_workflow_csv", "parse_listing_workflow_csv",
     # province guide reference store
@@ -225,6 +259,10 @@ __all__ = [
     "list_province_checklists", "list_province_forms",
     "list_province_reference_pages", "province_agent_memory", "province_coverage",
     "province_guide_summary",
+    # Admin setup readiness gate
+    "admin_setup_memory_summary", "admin_setup_ready", "complete_admin_setup",
+    "get_admin_setup", "require_admin_setup_ready", "sync_admin_setup_memory",
+    "sync_admin_setup_runtime", "update_admin_setup",
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
     "eligible_templates", "pick_template",

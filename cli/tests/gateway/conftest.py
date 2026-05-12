@@ -15,6 +15,7 @@ Individual test files may still call their own ``_ensure_telegram_mock``
 """
 
 import sys
+from typing import Any
 from unittest.mock import MagicMock
 
 
@@ -29,7 +30,7 @@ def _ensure_telegram_mock() -> None:
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return  # Real library is installed — nothing to mock
 
-    mod = MagicMock()
+    mod = sys.modules.get("telegram") or MagicMock()
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
     mod.constants.ParseMode.MARKDOWN = "Markdown"
     mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
@@ -38,6 +39,10 @@ def _ensure_telegram_mock() -> None:
     mod.constants.ChatType.GROUP = "group"
     mod.constants.ChatType.SUPERGROUP = "supergroup"
     mod.constants.ChatType.CHANNEL = "channel"
+    # Some tests import ``ChatType`` from the mocked root module because
+    # sys.modules["telegram.constants"] is the same object as sys.modules["telegram"].
+    mod.ParseMode = mod.constants.ParseMode
+    mod.ChatType = mod.constants.ChatType
 
     # Real exception classes so ``except (NetworkError, ...)`` clauses
     # in production code don't blow up with TypeError.
@@ -61,6 +66,27 @@ def _ensure_telegram_mock() -> None:
         sys.modules[name] = mod
     sys.modules["telegram.error"] = mod.error
 
+    # Full-suite collection can import gateway.platforms.telegram via another
+    # test subtree before this gateway conftest runs. Refresh already-bound
+    # module globals so gateway tests do not depend on collection order.
+    telegram_adapter = sys.modules.get("gateway.platforms.telegram")
+    if telegram_adapter is not None:
+        telegram_adapter.TELEGRAM_AVAILABLE = True
+        telegram_adapter.Update = mod.Update
+        telegram_adapter.Bot = mod.Bot
+        telegram_adapter.Message = mod.Message
+        telegram_adapter.InlineKeyboardButton = mod.InlineKeyboardButton
+        telegram_adapter.InlineKeyboardMarkup = mod.InlineKeyboardMarkup
+        telegram_adapter.Application = mod.Application
+        telegram_adapter.CommandHandler = mod.CommandHandler
+        telegram_adapter.CallbackQueryHandler = mod.CallbackQueryHandler
+        telegram_adapter.TelegramMessageHandler = mod.MessageHandler
+        telegram_adapter.ContextTypes = mod.ext.ContextTypes
+        telegram_adapter.filters = mod.ext.filters
+        telegram_adapter.ParseMode = mod.ParseMode
+        telegram_adapter.ChatType = mod.ChatType
+        telegram_adapter.HTTPXRequest = mod.HTTPXRequest
+
 
 def _ensure_discord_mock() -> None:
     """Install a comprehensive discord mock in sys.modules.
@@ -80,7 +106,7 @@ def _ensure_discord_mock() -> None:
 
     from types import SimpleNamespace
 
-    discord_mod = MagicMock()
+    discord_mod = sys.modules.get("discord") or MagicMock()
     discord_mod.Intents.default.return_value = MagicMock()
     discord_mod.Client = MagicMock
     discord_mod.File = MagicMock
@@ -89,6 +115,15 @@ def _ensure_discord_mock() -> None:
     discord_mod.ForumChannel = type("ForumChannel", (), {})
     discord_mod.Interaction = object
     discord_mod.Message = type("Message", (), {})
+
+    class _FakeAllowedMentions:
+        def __init__(self, *, everyone=True, roles=True, users=True, replied_user=True, **_):
+            self.everyone = everyone
+            self.roles = roles
+            self.users = users
+            self.replied_user = replied_user
+
+    discord_mod.AllowedMentions = _FakeAllowedMentions
 
     # Embed: accept the kwargs production code / tests use
     # (title, description, color). MagicMock auto-attributes work too,
@@ -178,6 +213,7 @@ def _ensure_discord_mock() -> None:
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
         choices=lambda **kwargs: (lambda fn: fn),
+        autocomplete=lambda **kwargs: (lambda fn: fn),
         Choice=lambda **kwargs: SimpleNamespace(**kwargs),
         Group=_FakeGroup,
         Command=_FakeCommand,
@@ -192,6 +228,17 @@ def _ensure_discord_mock() -> None:
         sys.modules[name] = discord_mod
     sys.modules["discord.ext"] = ext_mod
     sys.modules["discord.ext.commands"] = commands_mod
+
+    # Full-suite collection can import gateway.platforms.discord via another
+    # test subtree before this gateway conftest runs. Refresh already-bound
+    # module globals so gateway tests do not depend on collection order.
+    discord_adapter = sys.modules.get("gateway.platforms.discord")
+    if discord_adapter is not None:
+        discord_adapter.DISCORD_AVAILABLE = True
+        discord_adapter.discord = discord_mod
+        discord_adapter.DiscordMessage = getattr(discord_mod, "Message", Any)
+        discord_adapter.Intents = discord_mod.Intents
+        discord_adapter.commands = commands_mod
 
 
 # Run at collection time — before any test file's module-level imports.

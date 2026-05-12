@@ -78,6 +78,7 @@ class TestLoadConfigDefaults:
             "Admin",
             "Outreach",
             "Ads",
+            "Marketing",
             "Social Media",
         }.issubset({agent["name"] for agent in DEFAULT_CONFIG["agent_hub"]["agents"]})
 
@@ -319,6 +320,32 @@ class TestSanitizeEnvLines:
             "FIRECRAWL_API_KEY=222\n",
             "GITHUB_TOKEN=333\n",
         ]
+
+    def test_preserves_agent_telegram_bot_token_key(self):
+        """Agent bot token keys must not collapse into TELEGRAM_BOT_TOKEN."""
+        lines = [
+            "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN=222222222:ADMINbbbbbbbbbbbbbbbbbbbb\n",
+            "TELEGRAM_BOT_TOKEN=111111111:SHAREDaaaaaaaaaaaaaaaaaaaa\n",
+        ]
+        result = _sanitize_env_lines(lines)
+        assert result == lines
+
+    def test_save_env_value_keeps_shared_and_agent_telegram_tokens_separate(self, tmp_path):
+        with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
+            save_env_value("TELEGRAM_BOT_TOKEN", "111111111:SHAREDaaaaaaaaaaaaaaaaaaaa")
+            save_env_value(
+                "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+                "222222222:ADMINbbbbbbbbbbbbbbbbbbbb",
+            )
+            save_env_value("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "-1001234567890:42")
+
+            env_values = load_env()
+            assert env_values["TELEGRAM_BOT_TOKEN"] == "111111111:SHAREDaaaaaaaaaaaaaaaaaaaa"
+            assert (
+                env_values["ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN"]
+                == "222222222:ADMINbbbbbbbbbbbbbbbbbbbb"
+            )
+            assert env_values["ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL"] == "-1001234567890:42"
 
     def test_value_with_equals_sign_not_split(self):
         """A value containing '=' shouldn't be falsely split (lowercase in value)."""

@@ -101,4 +101,4 @@ exec "$PYTHON" -m pytest \
   --ignore=tests/integration \
   --ignore=tests/e2e \
   -m "not integration" \
-  "${ARGS[@]}"
+  "${ARGS[@]+"${ARGS[@]}"}"

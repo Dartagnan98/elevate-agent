@@ -11,6 +11,7 @@ Handles loading and validating configuration for:
 import logging
 import os
 import json
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
@@ -20,6 +21,19 @@ from elevate_cli.config import get_elevate_home
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
+
+
+def _gateway_env_values() -> Dict[str, str]:
+    """Return Elevate .env values overlaid with the live process env."""
+    values: Dict[str, str] = {}
+    try:
+        from elevate_cli.config import load_env
+
+        values.update(load_env())
+    except Exception:
+        pass
+    values.update({key: value for key, value in os.environ.items()})
+    return values
 
 
 def _coerce_bool(value: Any, default: bool = True) -> bool:
@@ -270,6 +284,14 @@ class GatewayConfig:
         connected = []
         for platform, config in self.platforms.items():
             if not config.enabled:
+                continue
+            if platform == Platform.TELEGRAM:
+                agent_bots = config.extra.get("agent_bots") if isinstance(config.extra, dict) else None
+                if config.token or config.api_key or (
+                    isinstance(agent_bots, dict)
+                    and any((bot.get("token") if isinstance(bot, dict) else None) for bot in agent_bots.values())
+                ):
+                    connected.append(platform)
                 continue
             # Weixin requires both a token and an account_id
             if platform == Platform.WEIXIN:
@@ -828,7 +850,13 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         if not pconfig.enabled:
             continue
         env_name = _token_env_names.get(platform)
-        if env_name and pconfig.token is not None and not pconfig.token.strip():
+        agent_bots = pconfig.extra.get("agent_bots") if isinstance(pconfig.extra, dict) else None
+        has_agent_bot_token = (
+            platform == Platform.TELEGRAM
+            and isinstance(agent_bots, dict)
+            and any((bot.get("token") if isinstance(bot, dict) else None) for bot in agent_bots.values())
+        )
+        if env_name and not has_agent_bot_token and pconfig.token is not None and not pconfig.token.strip():
             logger.warning(
                 "%s is enabled but %s is empty. "
                 "The adapter will likely fail to connect.",
@@ -864,9 +892,40 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
 
 def _apply_env_overrides(config: GatewayConfig) -> None:
     """Apply environment variable overrides to config."""
+    env_values = _gateway_env_values()
     
     # Telegram
-    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    telegram_token = env_values.get("TELEGRAM_BOT_TOKEN", "").strip()
+    agent_telegram_bot_envs = {}
+    for env_name in env_values:
+        match = re.match(r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_BOT_TOKEN$", env_name)
+        if not match:
+            continue
+        agent_id = match.group(1).lower().replace("_", "-")
+        agent_telegram_bot_envs[agent_id] = env_name
+    agent_bots = {}
+    for agent_id, env_name in agent_telegram_bot_envs.items():
+        token = env_values.get(env_name, "").strip()
+        if token and telegram_token and token == telegram_token and agent_id != "executive-assistant":
+            logger.warning(
+                "Ignoring Telegram token for agent %s because it matches TELEGRAM_BOT_TOKEN; each non-Executive agent needs its own bot token",
+                agent_id,
+            )
+            continue
+        if token:
+            agent_bots[agent_id] = {"agent_id": agent_id, "token": token, "token_env": env_name}
+    if agent_bots:
+        if Platform.TELEGRAM not in config.platforms:
+            config.platforms[Platform.TELEGRAM] = PlatformConfig()
+        config.platforms[Platform.TELEGRAM].enabled = True
+        existing_agent_bots = config.platforms[Platform.TELEGRAM].extra.get("agent_bots")
+        if isinstance(existing_agent_bots, dict):
+            merged_agent_bots = dict(existing_agent_bots)
+            merged_agent_bots.update(agent_bots)
+        else:
+            merged_agent_bots = agent_bots
+        config.platforms[Platform.TELEGRAM].extra["agent_bots"] = merged_agent_bots
+
     if telegram_token:
         if Platform.TELEGRAM not in config.platforms:
             config.platforms[Platform.TELEGRAM] = PlatformConfig()

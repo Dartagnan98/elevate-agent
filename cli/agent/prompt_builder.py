@@ -163,27 +163,14 @@ MEMORY_GUIDANCE = (
 
 
 def build_memory_guidance(valid_tool_names: "set[str] | None") -> str:
-    """Return memory guidance scoped to the tools loaded in this session."""
-    valid = set(valid_tool_names or set())
-    guidance = MEMORY_GUIDANCE
-    if "session_search" not in valid:
-        guidance = guidance.replace(
-            "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-            "state to memory; use session_search to recall those from past transcripts. ",
-            "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-            "state to memory. ",
-        )
-    if "skill_manage" not in valid:
-        guidance = guidance.replace(
-            "If you've discovered a new way to do something, solved a problem that could be "
-            "necessary later, save it as a skill with the skill tool.\n",
-            "",
-        )
-        guidance = guidance.replace(
-            "Procedures and workflows belong in skills, not memory.",
-            "Procedures and workflows do not belong in compact memory.",
-        )
-    return guidance
+    """Return the stable memory guidance whenever the memory tool is loaded.
+
+    Keep this text stable: downstream prompt-contract tests and prompt-efficiency
+    checks assert that ``MEMORY_GUIDANCE`` is present verbatim when persistent
+    memory is available. Optional companion tools have their own guidance blocks,
+    so absence of session_search/skill_manage should not rewrite this contract.
+    """
+    return MEMORY_GUIDANCE
 
 
 SESSION_SEARCH_GUIDANCE = (

@@ -48,6 +48,7 @@ _EXCLUDED_SUFFIXES = (
 _EXCLUDED_NAMES = {
     "gateway.pid",
     "cron.pid",
+    "elevate_state.db",
 }
 
 

@@ -39,7 +39,7 @@ def test_update_runs_git_from_parent_worktree_for_nested_cli(tmp_path, monkeypat
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                stdout="https://github.com/ctrlstrategies/elevate.git\n",
+                stdout="https://github.com/Dartagnan98/elevate-agent.git\n",
                 stderr="",
             )
         if "fetch origin" in joined:

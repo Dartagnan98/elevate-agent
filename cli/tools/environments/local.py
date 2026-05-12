@@ -360,7 +360,14 @@ class LocalEnvironment(BaseEnvironment):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
+            # Do not use preexec_fn=os.setsid here.  Popen's preexec_fn path is
+            # explicitly unsafe in threaded programs and can deadlock between
+            # fork() and exec() when LocalEnvironment.execute() is called from a
+            # worker thread (for example delegate/tool cleanup tests).  The
+            # subprocess module's start_new_session flag performs the same
+            # setsid() operation in the child without exposing arbitrary Python
+            # code in the forked process.
+            start_new_session=not _IS_WINDOWS,
             cwd=self.cwd,
         )
 

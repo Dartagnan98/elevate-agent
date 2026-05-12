@@ -1790,11 +1790,19 @@ def _run_single_child(
     _stale_count = [0]
 
     def _heartbeat_loop():
-        while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+        # Touch once immediately, then at the configured cadence.  This keeps
+        # gateway liveness fresh for short-but-slow child calls and removes a
+        # scheduling race where a child that spends most of its lifetime inside
+        # a tool can finish before enough delayed heartbeats are emitted.
+        while not _heartbeat_stop.is_set():
             if parent_agent is None:
+                if _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+                    break
                 continue
             touch = getattr(parent_agent, "_touch_activity", None)
             if not touch:
+                if _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+                    break
                 continue
             # Pull detail from the child's own activity tracker
             desc = f"delegate_task: subagent {task_index} working"
@@ -1857,8 +1865,20 @@ def _run_single_child(
                 touch(desc)
             except Exception:
                 pass
+            if _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+                break
 
     _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    # Synchronous start/end touches make delegation liveness independent of
+    # heartbeat thread scheduling under load while the loop still provides the
+    # steady-state cadence for long-running children.
+    if parent_agent is not None:
+        try:
+            touch = getattr(parent_agent, "_touch_activity", None)
+            if touch:
+                touch(f"delegate_task: subagent {task_index} started")
+        except Exception:
+            pass
     _heartbeat_thread.start()
 
     # Register the live agent in the module-level registry so the TUI can
@@ -1927,6 +1947,13 @@ def _run_single_child(
             )
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
+        if parent_agent is not None:
+            try:
+                touch = getattr(parent_agent, "_touch_activity", None)
+                if touch:
+                    touch(f"delegate_task: subagent {task_index} running")
+            except Exception:
+                pass
         try:
             result = _child_future.result(timeout=child_timeout)
         except Exception as _timeout_exc:
@@ -2259,7 +2286,16 @@ def _run_single_child(
 
     finally:
         # Stop the heartbeat thread so it doesn't keep touching parent activity
-        # after the child has finished (or failed).
+        # after the child has finished (or failed).  Emit one last touch before
+        # stopping so a quick return after a slow in-tool wait still refreshes
+        # gateway liveness even if the heartbeat thread was starved.
+        if parent_agent is not None:
+            try:
+                touch = getattr(parent_agent, "_touch_activity", None)
+                if touch:
+                    touch(f"delegate_task: subagent {task_index} finished")
+            except Exception:
+                pass
         _heartbeat_stop.set()
         _heartbeat_thread.join(timeout=5)
 

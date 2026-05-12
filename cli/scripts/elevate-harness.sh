@@ -353,7 +353,7 @@ YAML
 name: team-skill
 description: Team-only skill
 access:
-  entitlement: skyleigh_team_pack
+  entitlement: real_estate_team_pack
 ---
 
 Team skill body.
@@ -372,7 +372,7 @@ locked = json.loads(skill_view("team-skill"))
 assert locked["success"] is False, locked
 assert locked["readiness_status"] == "locked", locked
 PY
-        ELEVATE_HOME="$home/.elevate" ./elevate access profile skyleigh_downline >/dev/null
+        ELEVATE_HOME="$home/.elevate" ./elevate access profile team_pack >/dev/null
         ELEVATE_HOME="$home/.elevate" .venv/bin/python - <<'PY'
 import json
 from tools.skills_tool import skills_list, skill_view

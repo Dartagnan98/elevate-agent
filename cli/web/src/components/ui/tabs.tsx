@@ -44,6 +44,7 @@ export function TabsTrigger({
           : "hover:text-foreground",
         className,
       )}
+      value={value}
       onClick={onClick}
       {...props}
     />

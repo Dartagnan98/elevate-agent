@@ -73,6 +73,7 @@ import {
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { api, type CronJob, type SessionInfo } from "@/lib/api";
+import type { AccessStatusResponse } from "@/lib/api-types";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
@@ -92,6 +93,7 @@ import CronPage from "@/pages/CronPage";
 import SkillsPage from "@/pages/SkillsPage";
 import ChatPage from "@/pages/ChatPage";
 import AgentHubPage from "@/pages/AgentHubPage";
+import DesktopSetupPage from "@/pages/DesktopSetupPage";
 import ProjectPage from "@/pages/ProjectPage";
 const RealEstateAdminPage = lazy(() =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateAdminPage })),
@@ -126,6 +128,14 @@ function RootRedirect() {
   return <Navigate to="/today" replace />;
 }
 
+function CoreRootRedirect() {
+  return <Navigate to="/hub" replace />;
+}
+
+function LockedDashboardRedirect() {
+  return <Navigate to="/hub" replace />;
+}
+
 function MarketingRedirect() {
   return <Navigate to="/social-media" replace />;
 }
@@ -145,21 +155,10 @@ const CHAT_NAV_ITEM: NavItem = {
   icon: MessageSquare,
 };
 
-/** Built-in routes except /chat (only with `elevate dashboard --tui`). */
-const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
-  "/": RootRedirect,
-  "/today": RealEstateTodayPage,
-  "/leads": RealEstateLeadsPage,
-  "/admin": RealEstateAdminPage,
-  "/admin/templates": RealEstateTemplatesPage,
-  "/listings": AdminRedirect,
-  "/deals": AdminRedirect,
-  "/social-media": RealEstateSocialMediaPage,
-  "/marketing": MarketingRedirect,
-  "/tasks": RealEstateTasksPage,
-  "/approvals": ApprovalsRedirect,
-  "/memory": RealEstateMemoryPage,
+/** Built-in routes except paid pack dashboards and /chat. */
+const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/hub": AgentHubPage,
+  "/desktop-setup": DesktopSetupPage,
   "/project": ProjectPage,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
@@ -173,39 +172,14 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
 
 const BUILTIN_NAV_REST: NavItem[] = [
   {
-    path: "/today",
-    label: "Today",
-    icon: Home,
-  },
-  {
-    path: "/leads",
-    label: "Leads",
-    icon: Users,
-  },
-  {
-    path: "/admin",
-    label: "Admin",
-    icon: BriefcaseBusiness,
-  },
-  {
-    path: "/social-media",
-    label: "Social Media",
-    icon: Megaphone,
-  },
-  {
-    path: "/tasks",
-    label: "Tasks",
-    icon: ListChecks,
-  },
-  {
-    path: "/memory",
-    label: "Memory",
-    icon: Brain,
-  },
-  {
     path: "/hub",
     label: "Agent Hub",
     icon: Bot,
+  },
+  {
+    path: "/desktop-setup",
+    label: "Desktop Setup",
+    icon: ShieldCheck,
   },
   {
     path: "/sessions",
@@ -366,6 +340,47 @@ function buildRoutes(
   return routes;
 }
 
+type RealEstatePackAccess = AccessStatusResponse["packs"];
+
+const DEFAULT_REAL_ESTATE_PACKS: RealEstatePackAccess = {
+  realEstateSales: false,
+  realEstateMarketing: false,
+  realEstateAdmin: false,
+  realEstateCma: false,
+  realEstateAny: false,
+};
+
+function hasRealEstateDashboard(packs: RealEstatePackAccess): boolean {
+  return packs.realEstateSales || packs.realEstateMarketing || packs.realEstateAdmin;
+}
+
+function buildAccessControlledBuiltinRoutes(
+  embeddedChat: boolean,
+  packs: RealEstatePackAccess,
+): Record<string, ComponentType> {
+  const realEstateDashboard = hasRealEstateDashboard(packs);
+  return {
+    "/": realEstateDashboard ? RootRedirect : CoreRootRedirect,
+    "/today": realEstateDashboard ? RealEstateTodayPage : LockedDashboardRedirect,
+    "/leads": packs.realEstateSales ? RealEstateLeadsPage : LockedDashboardRedirect,
+    "/admin": packs.realEstateAdmin ? RealEstateAdminPage : LockedDashboardRedirect,
+    "/admin/templates": packs.realEstateAdmin
+      ? RealEstateTemplatesPage
+      : LockedDashboardRedirect,
+    "/listings": packs.realEstateAdmin ? AdminRedirect : LockedDashboardRedirect,
+    "/deals": packs.realEstateAdmin ? AdminRedirect : LockedDashboardRedirect,
+    "/social-media": packs.realEstateMarketing
+      ? RealEstateSocialMediaPage
+      : LockedDashboardRedirect,
+    "/marketing": packs.realEstateMarketing ? MarketingRedirect : LockedDashboardRedirect,
+    "/tasks": RealEstateTasksPage,
+    "/approvals": packs.realEstateAdmin ? ApprovalsRedirect : LockedDashboardRedirect,
+    "/memory": RealEstateMemoryPage,
+    ...BUILTIN_ROUTES_BASE,
+    ...(embeddedChat ? { "/chat": ChatPage } : {}),
+  };
+}
+
 export default function App() {
   const { t } = useI18n();
   const { pathname } = useLocation();
@@ -377,13 +392,29 @@ export default function App() {
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
+  const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAccessStatus()
+      .then((status) => {
+        if (!cancelled) setAccessStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setAccessStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const realEstatePacks = accessStatus?.packs ?? DEFAULT_REAL_ESTATE_PACKS;
+  const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
 
   const builtinRoutes = useMemo(
-    () => ({
-      ...BUILTIN_ROUTES_CORE,
-      ...(embeddedChat ? { "/chat": ChatPage } : {}),
-    }),
-    [embeddedChat],
+    () => buildAccessControlledBuiltinRoutes(embeddedChat, realEstatePacks),
+    [embeddedChat, realEstatePacks],
   );
 
   const builtinNav = useMemo(
@@ -449,7 +480,7 @@ export default function App() {
         className={cn(
           "lg:hidden fixed top-0 left-0 right-0 z-40 h-12",
           "flex items-center gap-2 px-3",
-          "bg-background-base/92 shadow-[0_1px_0_color-mix(in_srgb,var(--midground-base)_7%,transparent)] backdrop-blur-sm",
+          "bg-background-base shadow-[0_1px_0_color-mix(in_srgb,var(--midground-base)_7%,transparent)]",
         )}
       >
         <button
@@ -459,7 +490,7 @@ export default function App() {
           aria-expanded={mobileOpen}
           aria-controls="app-sidebar"
           className={cn(
-            "inline-flex h-8 w-8 items-center justify-center",
+            "inline-flex h-11 w-11 items-center justify-center",
             "text-midground/70 hover:text-midground transition-colors cursor-pointer",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
@@ -481,7 +512,7 @@ export default function App() {
           onClick={closeMobile}
           className={cn(
             "lg:hidden fixed inset-0 z-40",
-            "bg-black/60 backdrop-blur-sm cursor-pointer",
+            "bg-black/60 cursor-pointer",
           )}
         />
       )}
@@ -494,8 +525,8 @@ export default function App() {
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
-              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[19rem] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
-              "bg-[var(--sidebar-bg)] shadow-[inset_-1px_0_0_var(--sidebar-border)] backdrop-blur-sm",
+              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[312px] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
+              "bg-[var(--sidebar-bg)] shadow-[inset_-1px_0_0_var(--sidebar-border)]",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
@@ -505,6 +536,7 @@ export default function App() {
               embeddedChat={embeddedChat}
               navItems={navItems}
               onNavigate={closeMobile}
+              realEstatePacks={realEstatePacks}
             />
           </aside>
 
@@ -540,7 +572,15 @@ export default function App() {
                     {routes.map(({ key, path, element }) => (
                       <Route key={key} path={path} element={element} />
                     ))}
-                    <Route path="*" element={<Navigate to="/today" replace />} />
+                    <Route
+                      path="*"
+                      element={
+                        <Navigate
+                          to={realEstateDashboard ? "/today" : "/hub"}
+                          replace
+                        />
+                      }
+                    />
                   </Routes>
                 </Suspense>
               </div>
@@ -645,7 +685,7 @@ function cronSessionLabel(
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
-  if (!embeddedChat) return "/sessions";
+  if (!embeddedChat) return `/sessions?session=${encodeURIComponent(session.id)}`;
   return `/chat?resume=${encodeURIComponent(session.id)}`;
 }
 
@@ -683,10 +723,12 @@ function DesktopSidebar({
   embeddedChat,
   navItems,
   onNavigate,
+  realEstatePacks,
 }: {
   embeddedChat: boolean;
   navItems: NavItem[];
   onNavigate: () => void;
+  realEstatePacks: RealEstatePackAccess;
 }) {
   const { t } = useI18n();
   const location = useLocation();
@@ -710,8 +752,10 @@ function DesktopSidebar({
     readArchivedSessionIds(),
   );
   const [sessionMenu, setSessionMenu] = useState<SessionMenuState | null>(null);
-  const { isBusy, pendingAction, runAction } = useSystemActions();
   const { toast, showToast } = useToast();
+  const { themeName } = useTheme();
+  const sidebarLogoSrc =
+    themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
 
   const loadSessions = useCallback(() => {
     api
@@ -797,6 +841,24 @@ function DesktopSidebar({
     };
   }, [sessionMenu]);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName;
+      const isTyping =
+        target?.isContentEditable ||
+        tagName === "INPUT" ||
+        tagName === "TEXTAREA" ||
+        tagName === "SELECT";
+      if (isTyping) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const filteredSessions = useMemo(() => {
     const visibleSessions = sessions.filter(
       (session) => !archivedIds.includes(session.id),
@@ -833,7 +895,20 @@ function DesktopSidebar({
 
   const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
   const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
-
+  const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
+  const realEstateNavItems: NavItem[] = [];
+  if (realEstateDashboard) {
+    realEstateNavItems.push({ icon: Home, label: "Today", path: "/today" });
+  }
+  if (realEstatePacks.realEstateSales) {
+    realEstateNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
+  }
+  if (realEstatePacks.realEstateAdmin) {
+    realEstateNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });
+  }
+  if (realEstatePacks.realEstateMarketing) {
+    realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
+  }
   const go = (path: string) => {
     navigate(path);
     onNavigate();
@@ -888,7 +963,7 @@ function DesktopSidebar({
           ),
         );
         showToast("Session renamed", "success");
-      } catch (error) {
+      } catch {
         showToast("Failed to rename session", "error");
       }
     },
@@ -1047,42 +1122,21 @@ function DesktopSidebar({
           onOpenMiniWindow={openMiniWindow}
         />
       )}
-      <div className="flex h-[54px] shrink-0 items-center justify-between gap-3 px-3.5">
-        <div className="flex items-center gap-2.5" aria-hidden>
-          <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
-          <span className="h-2.5 w-2.5 rounded-full bg-[#ffbd2e]" />
-          <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
+      <div className="relative flex h-[50px] shrink-0 items-center px-3">
+        <div className="mx-auto flex h-9 w-[9.75rem] min-w-0 items-center">
+          <img
+            src={sidebarLogoSrc}
+            alt="Elevation"
+            className="h-8 w-full object-contain"
+          />
         </div>
-
-        <div className="flex min-w-0 flex-1 justify-center">
-          <div className="flex h-8 min-w-0 items-center rounded-xl bg-[#f7f7f7] px-2 shadow-[0_0_0_1px_rgba(27,42,74,0.12),0_10px_26px_rgba(0,0,0,0.16)]">
-            <img
-              src="/elevate-agent-wordmark.svg"
-              alt="Elevate Agent"
-              className="h-7 max-w-[8.7rem] object-contain"
-            />
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => void runAction("update")}
-          disabled={isBusy}
-          className={cn(
-            "hidden shrink-0 items-center rounded-full px-3 py-1.5 text-xs font-semibold",
-            "bg-primary text-primary-foreground transition-opacity hover:opacity-90",
-            "disabled:cursor-not-allowed disabled:opacity-50 sm:inline-flex",
-          )}
-        >
-          {pendingAction === "update" ? "Updating" : "Update"}
-        </button>
 
         <button
           type="button"
           onClick={onNavigate}
           aria-label={t.app.closeNavigation}
           className={cn(
-            "lg:hidden inline-flex h-8 w-8 shrink-0 items-center justify-center",
+            "absolute right-3 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 shrink-0 items-center justify-center lg:hidden",
             "rounded-lg text-muted-foreground hover:bg-accent hover:text-midground",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
@@ -1093,7 +1147,7 @@ function DesktopSidebar({
 
       <PluginSlot name="header-left" />
 
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-2.5">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-1.5">
         <div className="space-y-0.5">
           <button
             type="button"
@@ -1109,10 +1163,11 @@ function DesktopSidebar({
               ref={searchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              aria-label="Search chats and navigation"
               placeholder="Search"
               className={cn(
-                "h-9 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)]",
-                "pl-9 pr-9 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)]",
+                "h-11 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)] lg:h-8 lg:rounded-md",
+                "pl-9 pr-9 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)] lg:text-[0.86rem]",
                 "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
               )}
             />
@@ -1121,34 +1176,42 @@ function DesktopSidebar({
                 type="button"
                 onClick={() => setQuery("")}
                 aria-label={t.common.clear}
-                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)]"
+                className="absolute right-0.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-md text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)] lg:h-7 lg:w-7 lg:right-0.5"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
             ) : (
-              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-card/70 px-1.5 py-0.5 text-[0.7rem] leading-none text-[var(--sidebar-text-muted)]">
+              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-[var(--sidebar-row)] px-1.5 py-0.5 text-[0.72rem] leading-none text-[var(--sidebar-text-muted)]">
                 /
               </span>
             )}
           </div>
         </div>
 
-        <div className="mt-3">
-          <SidebarSectionLabel>Real Estate</SidebarSectionLabel>
-          <div className="space-y-0.5">
-            <SidebarAction icon={Home} label="Today" path="/today" onNavigate={go} />
-            <SidebarAction icon={Users} label="Leads" path="/leads" onNavigate={go} />
-            <SidebarAction icon={BriefcaseBusiness} label="Admin" path="/admin" onNavigate={go} />
-            <SidebarAction icon={Megaphone} label="Social Media" path="/social-media" onNavigate={go} />
+        {realEstateNavItems.length > 0 && (
+          <div className="mt-2.5">
+            <SidebarSectionLabel>Real Estate</SidebarSectionLabel>
+            <div className="space-y-0.5 lg:grid lg:grid-cols-2 lg:gap-0.5 lg:space-y-0">
+              {realEstateNavItems.map((item) => (
+                <SidebarAction
+                  key={item.path}
+                  icon={item.icon}
+                  label={item.label}
+                  path={item.path}
+                  onNavigate={go}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-2.5">
+          <SidebarSectionLabel>Agent</SidebarSectionLabel>
+          <div className="space-y-0.5 lg:grid lg:grid-cols-2 lg:gap-0.5 lg:space-y-0">
+            <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
             <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
-          </div>
-        </div>
-
-        <div className="mt-3">
-          <SidebarSectionLabel>Agent</SidebarSectionLabel>
-          <div className="space-y-0.5">
-            <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
+            <SidebarAction icon={ShieldCheck} label="Setup" path="/desktop-setup" onNavigate={go} />
             <SidebarAction icon={Puzzle} label="Skills" path="/skills" onNavigate={go} />
             <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
             <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
@@ -1203,7 +1266,7 @@ function DesktopSidebar({
         )}
 
         {toolNavItems.length > 0 && (
-          <div className="mt-4">
+          <div className="mt-3">
             <SidebarSectionLabel>Tools</SidebarSectionLabel>
             <div className="space-y-0.5">
               {toolNavItems.map((item) => (
@@ -1218,17 +1281,17 @@ function DesktopSidebar({
             </div>
           </div>
         )}
-      </div>
 
-      <SidebarSystemActions onNavigate={onNavigate} />
+        <SidebarSystemActions onNavigate={onNavigate} />
+      </div>
 
       <div className="shrink-0 px-2 pb-2">
         <button
           type="button"
           onClick={() => go("/config")}
           className={cn(
-            "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[0.92rem] font-medium",
-            "text-[var(--sidebar-text)] transition-colors hover:bg-accent hover:text-[var(--sidebar-text-active)]",
+            "flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.92rem] font-medium lg:min-h-8 lg:gap-2 lg:rounded-md lg:px-2 lg:py-1 lg:text-[0.9rem]",
+            "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
         >
@@ -1252,7 +1315,7 @@ function DesktopSidebar({
 
 function SidebarSectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1.5 px-2 text-[0.72rem] font-semibold normal-case text-[var(--sidebar-text-muted)]">
+    <div className="mb-1 px-2 text-[0.72rem] font-semibold normal-case text-[var(--sidebar-text-muted)]">
       {children}
     </div>
   );
@@ -1260,8 +1323,8 @@ function SidebarSectionLabel({ children }: { children: ReactNode }) {
 
 function sidebarActionClass(active: boolean, primary = false) {
   return cn(
-    "group flex min-h-8 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.92rem] font-medium",
-    "cursor-pointer transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+    "group flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.92rem] font-medium lg:min-h-8 lg:gap-2 lg:rounded-md lg:px-2 lg:py-1 lg:text-[0.9rem]",
+    "cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
     primary && "font-semibold text-[var(--sidebar-text-strong)]",
     active
       ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
@@ -1292,7 +1355,7 @@ function SidebarAction({
       }}
       className={({ isActive }) => sidebarActionClass(isActive, primary)}
     >
-      <Icon className="h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)]" />
+      <Icon className="h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)] lg:h-4 lg:w-4" />
       <span className="truncate">{label}</span>
     </NavLink>
   );
@@ -1322,7 +1385,7 @@ function SessionSection({
   unreadIds: string[];
 }) {
   return (
-    <div className="mt-3">
+    <div className="mt-3 lg:mt-2.5">
       <SidebarSectionLabel>{label}</SidebarSectionLabel>
       <div className="space-y-0.5">
         {sessions.map((session) => (
@@ -1357,7 +1420,6 @@ function SessionListItem({
   session,
   unread,
   displayTitle,
-  hideSourceTag,
 }: {
   embeddedChat: boolean;
   onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
@@ -1367,7 +1429,6 @@ function SessionListItem({
   session: SessionInfo;
   unread: boolean;
   displayTitle?: string;
-  hideSourceTag?: boolean;
 }) {
   const route = sessionRoute(session, embeddedChat);
   const location = useLocation();
@@ -1375,44 +1436,88 @@ function SessionListItem({
     embeddedChat &&
     location.pathname === "/chat" &&
     new URLSearchParams(location.search).get("resume") === session.id;
+  const title = displayTitle ?? sessionTitle(session);
   return (
-    <NavLink
-      to={route}
-      onClick={(event) => {
-        event.preventDefault();
-        onOpenSession(session);
-      }}
+    <div
       onContextMenu={(event) => onOpenContextMenu(session, event)}
       className={cn(
-        "group relative flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5",
-        "text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[34px] lg:rounded-md",
+        "transition-colors duration-150",
         active
           ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
           : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
       )}
     >
-      {session.is_active ? (
-        <Loader2
-          aria-label="Running"
-          className="h-3.5 w-3.5 shrink-0 animate-spin text-primary"
-        />
-      ) : unread ? (
-        <span
-          aria-label="Unread"
-          className="h-2 w-2 shrink-0 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-primary)_14%,transparent)]"
-        />
-      ) : (
-        <span className="h-3.5 w-3.5 shrink-0" />
-      )}
-      <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5">
-        {displayTitle ?? sessionTitle(session)}
-      </span>
-      <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.72rem] leading-none text-[var(--sidebar-text-muted)]">
-        {!hideSourceTag && session.source && session.source !== "local" && (
-          <span className="max-w-[3.25rem] truncate">{session.source}</span>
+      <NavLink
+        to={route}
+        onClick={(event) => {
+          event.preventDefault();
+          onOpenSession(session);
+        }}
+        className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-1"
+      >
+        {session.is_active ? (
+          <Loader2
+            aria-label="Running"
+            className="h-3.5 w-3.5 shrink-0 animate-spin text-primary lg:h-3 lg:w-3"
+          />
+        ) : unread ? (
+          <span
+            aria-label="Unread"
+            className="h-2 w-2 shrink-0 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-primary)_14%,transparent)] lg:h-1.5 lg:w-1.5"
+          />
+        ) : pinned ? (
+          <Pin
+            aria-label="Pinned"
+            className="h-3.5 w-3.5 shrink-0 text-[var(--sidebar-icon-muted)] lg:h-3 lg:w-3"
+          />
+        ) : (
+          null
         )}
-        <span className="tabular-nums">{compactSessionAge(session.last_active)}</span>
-      </span>
+        <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
+          {title}
+        </span>
+        <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem] lg:transition-opacity lg:duration-100 lg:group-hover:opacity-0 lg:group-focus-within:opacity-0">
+          <span className="tabular-nums">{compactSessionAge(session.last_active)}</span>
+        </span>
+        <span className="sr-only">
+          {title} · {session.is_active ? "running, " : ""}
+          {session.source ?? "local"} {timeAgo(session.last_active)}
+        </span>
+      </NavLink>
+      <div className="pointer-events-none absolute right-1 top-1/2 hidden -translate-y-1/2 items-center rounded-md bg-[var(--sidebar-row-hover)] opacity-0 shadow-[0_0_0_1px_var(--sidebar-border)] transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 lg:flex">
+        <button
+          type="button"
+          aria-label={pinned ? "Unpin chat" : "Pin chat"}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onTogglePinned(session.id);
+          }}
+          className={cn(
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
+            pinned
+              ? "text-primary"
+              : "text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)]",
+          )}
+        >
+          <Pin className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          aria-label="Open chat menu"
+          title="Open chat menu"
+          onClick={(event) => onOpenContextMenu(session, event)}
+          className={cn(
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+            "text-[var(--sidebar-icon-muted)] transition-colors",
+            "hover:text-[var(--sidebar-icon)]",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
+          )}
+        >
+          <MoreHorizontal className="h-3.5 w-3.5" />
+        </button>
+      </div>
       <button
         type="button"
         aria-label={pinned ? "Unpin chat" : "Pin chat"}
@@ -1422,18 +1527,13 @@ function SessionListItem({
           onTogglePinned(session.id);
         }}
         className={cn(
-          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-colors",
+          "flex h-11 w-11 shrink-0 items-center justify-center rounded-md transition-colors lg:hidden",
           pinned
             ? "text-primary"
             : "text-[var(--sidebar-icon-muted)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-icon)]",
         )}
       >
-        <Pin
-          className={cn(
-            "h-3.5 w-3.5 transition-opacity",
-            pinned ? "opacity-100" : "opacity-45 group-hover:opacity-100",
-          )}
-        />
+        <Pin className="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
@@ -1441,21 +1541,15 @@ function SessionListItem({
         title="Open chat menu"
         onClick={(event) => onOpenContextMenu(session, event)}
         className={cn(
-          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md",
-          "text-[var(--sidebar-icon-muted)] opacity-65 transition-all",
+          "mr-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md lg:hidden",
+          "text-[var(--sidebar-icon-muted)] transition-colors",
           "hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-icon)]",
-          "group-hover:opacity-100 focus-visible:opacity-100",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
         )}
       >
         <MoreHorizontal className="h-3.5 w-3.5" />
       </button>
-      <span className="sr-only">
-        {displayTitle ?? sessionTitle(session)} ·{" "}
-        {session.is_active ? "running, " : ""}
-        {session.source ?? "local"} {timeAgo(session.last_active)}
-      </span>
-    </NavLink>
+    </div>
   );
 }
 
@@ -1484,12 +1578,12 @@ function AutomationsSection({
 }) {
   const liveCount = sessions.filter((session) => session.is_active).length;
   return (
-    <div className="mt-3">
+    <div className="mt-3 lg:mt-2.5">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-1.5 px-2 py-0.5 text-left text-[0.72rem] font-semibold text-[var(--sidebar-text-muted)] hover:text-[var(--sidebar-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40 rounded"
+        className="flex min-h-11 w-full items-center gap-1.5 rounded px-2 py-2 text-left text-[0.75rem] font-semibold text-[var(--sidebar-text-muted)] hover:text-[var(--sidebar-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40 lg:min-h-8 lg:py-1"
       >
         {open ? (
           <ChevronDown className="h-3 w-3 shrink-0" />
@@ -1497,18 +1591,18 @@ function AutomationsSection({
           <ChevronRight className="h-3 w-3 shrink-0" />
         )}
         <span>Automations</span>
-        <span className="ml-1 text-[0.7rem] font-normal text-[var(--sidebar-text-muted)] tabular-nums">
+        <span className="ml-1 text-[0.72rem] font-normal text-[var(--sidebar-text-muted)] tabular-nums">
           {sessions.length}
         </span>
         {liveCount > 0 && (
-          <span className="ml-auto flex items-center gap-1 text-[0.7rem] font-medium text-primary">
+          <span className="ml-auto flex items-center gap-1 text-[0.72rem] font-medium text-primary">
             <Loader2 className="h-3 w-3 animate-spin" />
             {liveCount} live
           </span>
         )}
       </button>
       {open && (
-        <div className="mt-1 space-y-0.5">
+        <div className="mt-1 space-y-0.5 lg:mt-0.5">
           {sessions.map((session) => (
             <SessionListItem
               key={session.id}
@@ -1520,7 +1614,6 @@ function AutomationsSection({
               session={session}
               unread={unreadIds.includes(session.id)}
               displayTitle={cronSessionLabel(session, cronJobsById)}
-              hideSourceTag
             />
           ))}
         </div>
@@ -1682,8 +1775,9 @@ function SessionMenuButton({
 function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
   const { t } = useI18n();
   const navigate = useNavigate();
-  const { activeAction, isBusy, isRunning, pendingAction, runAction } =
+  const { activeAction, isBusy, isRunning, pendingAction, runAction, updateStatus } =
     useSystemActions();
+  const updateBehind = updateStatus?.available ? updateStatus.behind : null;
 
   const items: SystemActionItem[] = [
     {
@@ -1696,7 +1790,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
     {
       action: "update",
       icon: Download,
-      label: t.status.updateElevate,
+      label: updateStatus?.available ? t.status.updatesAvailable : t.status.updateElevate,
       runningLabel: t.status.updatingElevate,
       spin: false,
     },
@@ -1712,12 +1806,12 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
   return (
     <div
       className={cn(
-        "shrink-0 flex flex-col px-2 py-2",
+        "shrink-0 flex flex-col px-2 py-2 lg:py-1.5",
       )}
     >
       <span
         className={cn(
-          "px-2.5 pt-0.5 pb-1",
+          "px-2.5 pt-0.5 pb-1 lg:px-2 lg:pb-0.5",
           "text-[0.72rem] font-semibold tracking-normal text-[var(--sidebar-text-muted)]",
         )}
       >
@@ -1743,14 +1837,14 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
                 disabled={disabled}
                 aria-busy={busy}
                 className={cn(
-                  "group relative flex w-full items-center gap-3",
-                  "rounded-lg px-2.5 py-1.5",
-                  "text-[0.92rem] font-medium tracking-normal",
+                  "group relative flex w-full items-center gap-3 lg:gap-2",
+                  "min-h-11 rounded-lg px-2.5 py-2 lg:min-h-8 lg:rounded-md lg:px-2 lg:py-1",
+                  "text-[0.92rem] font-medium tracking-normal lg:text-[0.9rem]",
                   "text-left whitespace-nowrap transition-colors cursor-pointer",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
                   busy
-                    ? "bg-accent/85 text-[var(--sidebar-text-active)]"
-                    : "text-[var(--sidebar-text)] hover:bg-accent/55 hover:text-[var(--sidebar-text-active)]",
+                    ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
+                    : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                   "disabled:cursor-not-allowed disabled:opacity-30",
                 )}
               >
@@ -1759,7 +1853,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
                 ) : (
                   <Icon
                     className={cn(
-                      "h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)]",
+                      "h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)] lg:h-4 lg:w-4",
                       isActionRunning && spin && "animate-spin",
                       isActionRunning && !spin && "animate-pulse",
                     )}
@@ -1767,6 +1861,15 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
                 )}
 
                 <span className="truncate">{displayLabel}</span>
+
+                {action === "update" && updateBehind && updateBehind > 0 && !busy && (
+                  <span
+                    aria-label={`${updateBehind} update commits available`}
+                    className="ml-auto rounded-full bg-warning/15 px-1.5 py-0.5 text-[0.68rem] font-semibold leading-none text-warning"
+                  >
+                    {updateBehind}
+                  </span>
+                )}
 
                 {busy && (
                   <span

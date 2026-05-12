@@ -62,13 +62,24 @@ def _ensure_discord_mock():
         sys.modules.setdefault("discord.ext.commands", commands_mod)
 
     # Whether we just installed the mock OR another test module installed
-    # it first via its own _ensure_discord_mock, force the decorators we
-    # need onto discord.app_commands — the flat /skill command uses
-    # @app_commands.autocomplete and not every other mock stub exposes it.
+    # it first via its own _ensure_discord_mock, force the app_commands pieces
+    # needed by DiscordAdapter. Several gateway test modules install smaller
+    # stubs first; full-suite order should not change slash-command behavior.
     _app = getattr(sys.modules["discord"], "app_commands", None)
-    if _app is not None and not hasattr(_app, "autocomplete"):
+    if _app is not None:
         try:
-            _app.autocomplete = lambda **kwargs: (lambda fn: fn)
+            if not hasattr(_app, "describe"):
+                _app.describe = lambda **kwargs: (lambda fn: fn)
+            if not hasattr(_app, "choices"):
+                _app.choices = lambda **kwargs: (lambda fn: fn)
+            if not hasattr(_app, "autocomplete"):
+                _app.autocomplete = lambda **kwargs: (lambda fn: fn)
+            if not hasattr(_app, "Choice"):
+                _app.Choice = lambda **kwargs: SimpleNamespace(**kwargs)
+            if not hasattr(_app, "Group"):
+                _app.Group = _FakeGroup
+            if not hasattr(_app, "Command"):
+                _app.Command = _FakeCommand
         except Exception:
             pass
 

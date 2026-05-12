@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-05-04 — MLS private-search pipeline (Skyleigh)
+## 2026-05-04 — MLS private-search pipeline
 
 CRM-agnostic MLS active-buyer pipeline. Scrapes any MLS board for buyers
 with active private searches, writes their search criteria back to whatever
@@ -35,12 +35,12 @@ CRM the agent has configured.
 ### Changed
 
 - Tag taxonomy → `private-search` and `mls-buyer` (universal across MLS
-  boards). Was `pcs-hot-lead` and `xposure-pcs` (Skyleigh/Xposure-specific).
+  boards). Was `pcs-hot-lead` and `xposure-pcs` (client-specific).
 - Source label default → `mls-private-search`. Was `mls-pcs`.
 - `crm_find_lead` signature added keyword-only `phone` param. Backward
   compatible — single existing caller unchanged.
 
-### Skyleigh-specific (`~/skyleigh-tools/scripts/`)
+### Client-specific pilot script integration
 
 - `pcs-hot-leads-analyzer.cjs` refactored: removed inline `updateLoftyStage`
   function, removed Lofty API calls. After saving hot-leads JSON, spawns
@@ -66,7 +66,7 @@ CRM the agent has configured.
 
 ### Known gaps / follow-ups
 
-- Scraper still lives in `~/skyleigh-tools/scripts/`, not in the Elevate
+- Scraper still lives in `~/client-tools/scripts/`, not in the Elevate
   repo. For "elevate mls sync xposure" command, scraper needs to relocate
   to `elevate_cli/scrapers/mls/xposure/` with configurable Chrome profile
   path and Click subcommand wiring.

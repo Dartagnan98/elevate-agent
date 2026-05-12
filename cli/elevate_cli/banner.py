@@ -78,7 +78,7 @@ ELEVATE_AGENT_LOGO = """[bold #FFD700]███████╗██╗     █�
 [#FFBF00]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   [/]
 [#CD7F32]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   [/]
 [#CD7F32]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   [/]
-[dim #B8860B]REAL ESTATE AI CHIEF OF STAFF · CTRL STRATEGIES[/]"""
+[dim #B8860B]REAL ESTATE AI CHIEF OF STAFF · ELEVATION REAL ESTATE HQ[/]"""
 
 ELEVATE_PEAK = """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
@@ -130,7 +130,11 @@ def get_available_skills() -> Dict[str, List[str]]:
 _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 
 
-def check_for_updates() -> Optional[int]:
+def check_for_updates(
+    *,
+    force: bool = False,
+    cache_seconds: int = _UPDATE_CHECK_CACHE_SECONDS,
+) -> Optional[int]:
     """Check how many commits behind origin/main the local repo is.
 
     Does a ``git fetch`` at most once every 6 hours (cached to
@@ -147,9 +151,9 @@ def check_for_updates() -> Optional[int]:
     # Read cache
     now = time.time()
     try:
-        if cache_file.exists():
+        if not force and cache_file.exists():
             cached = json.loads(cache_file.read_text())
-            if now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS:
+            if now - cached.get("ts", 0) < cache_seconds:
                 return cached.get("behind")
     except Exception:
         pass
@@ -292,7 +296,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
 def format_banner_version_label() -> str:
     """Return the version label shown in the startup banner title."""
-    base = f"Elevate Agent v{VERSION} ({RELEASE_DATE})"
+    base = f"Elevate v{VERSION} ({RELEASE_DATE})"
     state = get_git_banner_state()
     if not state:
         return base
@@ -429,7 +433,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     if len(model_short) > 28:
         model_short = model_short[:25] + "..."
     ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
-    left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]Ctrl Strategies[/]")
+    left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]Elevation Real Estate HQ[/]")
     left_lines.append(f"[dim {dim}]{cwd}[/]")
     if session_id:
         left_lines.append(f"[dim {session_color}]Session: {session_id}[/]")

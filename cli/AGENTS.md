@@ -477,7 +477,7 @@ and is orchestrated by `agent/memory_manager.py`. Lifecycle hooks include
 - `plugins/memory/holographic/retrieval.py` — FTS/semantic/entity/HRR retrieval and scoring.
 - `plugins/memory/holographic/embeddings.py` — optional embedding backends and batch embedding.
 
-Before changing memory behavior, read those files plus `agent/memory_provider.py` and `agent/memory_manager.py`. Elevate holographic memory already includes SQLite facts, FTS5, optional semantic embeddings, trust feedback, entity graph/wiki recall, HRR/compositional recall, layered recall, and turn journaling. jcode-inspired work in `docs/jcode-memory-upgrade-plan.md` is additive on top of that existing provider.
+Before changing memory behavior, read those files plus `agent/memory_provider.py` and `agent/memory_manager.py`. Elevate holographic memory already includes SQLite facts, FTS5, optional semantic embeddings, trust feedback, entity graph/wiki recall, HRR/compositional recall, layered recall, and turn journaling. memory upgrade work in `docs/memory-upgrade-status.md` is additive on top of that existing provider.
 
 **CLI commands via `plugins/memory/<name>/cli.py`:** if a memory plugin
 defines `register_cli(subparser)`, `discover_plugin_cli_commands()` finds

@@ -335,9 +335,9 @@ class TestNormalizeNote:
     def test_picks_author_alternatives(self):
         for key in ("authorName", "author", "createdBy", "userName"):
             norm = sc._lofty_normalize_note(
-                {"content": "x", key: "Skyleigh"}, "lead-1"
+                {"content": "x", key: "Demo Agent"}, "lead-1"
             )
-            assert norm["author"] == "Skyleigh", key
+            assert norm["author"] == "Demo Agent", key
 
 
 class TestNormalizeTask:
@@ -422,7 +422,7 @@ def fake_lofty_source(tmp_path: Path, monkeypatch):
             "type": "lofty_note",
             "title": "Cold feet",
             "summary": "Buyer second-guessing",
-            "author": "Skyleigh",
+            "author": "Demo Agent",
             "timestamp": "2026-05-03T16:00:00Z",
         },
         {
@@ -448,7 +448,7 @@ def fake_lofty_source(tmp_path: Path, monkeypatch):
                 "account_label": "Lofty CRM",
                 "connection_type": "lofty_api",
                 "auth_status": "api_key_configured",
-                "owner_agent": "skyleigh",
+                "owner_agent": "team",
                 "enabled_ui_surfaces": ["Leads"],
                 "setup_status": "connected",
                 "last_sync_at": "2026-05-05T10:00:00Z",
@@ -486,7 +486,7 @@ class TestThreadContextSplit:
         notes = resp["notes"]
         assert len(notes) == 1
         assert notes[0]["title"] == "Cold feet"
-        assert notes[0]["author"] == "Skyleigh"
+        assert notes[0]["author"] == "Demo Agent"
 
         # tasks filtered to lofty_task rows only
         tasks = resp["tasks"]
