@@ -1657,7 +1657,7 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "BROWSERBASE_API_KEY": {
-        "description": "Browserbase API key for cloud browser (optional — local browser works without this)",
+        "description": "Legacy Browserbase API key for older direct cloud browser installs",
         "prompt": "Browserbase API key",
         "url": "https://browserbase.com/",
         "tools": ["browser_navigate", "browser_click"],
@@ -1665,7 +1665,7 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "BROWSERBASE_PROJECT_ID": {
-        "description": "Browserbase project ID (optional — only needed for cloud browser)",
+        "description": "Legacy Browserbase project ID for older direct cloud browser installs",
         "prompt": "Browserbase project ID",
         "url": "https://browserbase.com/",
         "tools": ["browser_navigate", "browser_click"],
@@ -1673,7 +1673,7 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "BROWSER_USE_API_KEY": {
-        "description": "Browser Use API key for cloud browser (optional — local browser works without this)",
+        "description": "Browser Use API key for cloud browser automation",
         "prompt": "Browser Use API key",
         "url": "https://browser-use.com/",
         "tools": ["browser_navigate", "browser_click"],
@@ -1688,7 +1688,7 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "CAMOFOX_URL": {
-        "description": "Camofox browser server URL for local anti-detection browsing (e.g. http://localhost:9377)",
+        "description": "Legacy Camofox server URL for old local browser installs",
         "prompt": "Camofox server URL",
         "url": "https://github.com/jo-inc/camofox-browser",
         "tools": ["browser_navigate", "browser_click"],
@@ -3869,7 +3869,6 @@ def show_config():
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),
         ("TAVILY_API_KEY", "Tavily"),
-        ("BROWSERBASE_API_KEY", "Browserbase"),
         ("BROWSER_USE_API_KEY", "Browser Use"),
         ("FAL_KEY", "FAL"),
     ]

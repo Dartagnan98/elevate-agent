@@ -248,12 +248,10 @@ def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkey
     out = helper._run_doctor_and_capture(monkeypatch, tmp_path, provider="")
 
     assert "Docker backend is not available inside Termux" in out
-    assert "Node.js not found (browser tools are optional in the tested Termux path)" in out
-    assert "Install Node.js on Termux with: pkg install nodejs" in out
-    assert "Termux browser setup:" in out
-    assert "1) pkg install nodejs" in out
-    assert "2) npm install -g agent-browser" in out
-    assert "3) agent-browser install" in out
+    assert "Browser Use not configured" in out
+    assert "1) Run elevate setup and choose Browser Use" in out
+    assert "2) Set BROWSER_USE_API_KEY, or activate managed Browser Use" in out
+    assert "Node.js not found (optional developer tooling in Termux)" in out
     assert "docker not found (optional)" not in out
 
 
@@ -347,8 +345,8 @@ def test_run_doctor_termux_does_not_mark_browser_available_without_agent_browser
     assert "✓ browser" not in out
     assert "browser" in out
     assert "system dependency not met" in out
-    assert "agent-browser is not installed (expected in the tested Termux path)" in out
-    assert "npm install -g agent-browser && agent-browser install" in out
+    assert "Browser Use not configured" in out
+    assert "Set BROWSER_USE_API_KEY, or activate managed Browser Use" in out
 
 
 def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, tmp_path):

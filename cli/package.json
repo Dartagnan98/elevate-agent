@@ -1,24 +1,21 @@
 {
   "name": "elevate",
   "version": "1.0.0",
-  "description": "An AI agent with advanced tool-calling capabilities, featuring a flexible toolsets system for organizing and managing tools.",
+  "description": "Elevate Agent local AI assistant runtime with memory, tasks, skills, and one-shot setup.",
   "private": true,
   "scripts": {
-    "postinstall": "echo '✅ Browser tools ready. Run: python run_agent.py --help'"
+    "postinstall": "echo 'Elevate developer tools ready. Run: python run_agent.py --help'"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NousResearch/Elevate.git"
+    "url": "git+https://github.com/Dartagnan98/elevate-agent.git"
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/NousResearch/Elevate/issues"
+    "url": "https://github.com/Dartagnan98/elevate-agent/issues"
   },
-  "homepage": "https://github.com/NousResearch/Elevate#readme",
-  "dependencies": {
-    "@askjo/camofox-browser": "^1.5.2",
-    "agent-browser": "^0.26.0"
-  },
+  "homepage": "https://github.com/Dartagnan98/elevate-agent#readme",
+  "dependencies": {},
   "overrides": {
     "lodash": "4.18.1"
   },

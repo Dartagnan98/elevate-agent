@@ -556,7 +556,6 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
         ),
         "browser": bool(
             get_env_value("BROWSER_USE_API_KEY")
-            or (get_env_value("BROWSERBASE_API_KEY") and get_env_value("BROWSERBASE_PROJECT_ID"))
         ),
     }
 
@@ -565,7 +564,7 @@ _GATEWAY_DIRECT_LABELS = {
     "web": "Firecrawl/Exa/Parallel/Tavily key",
     "image_gen": "FAL key",
     "tts": "OpenAI/ElevenLabs key",
-    "browser": "Browser Use/Browserbase key",
+    "browser": "Browser Use key",
 }
 
 _ALL_GATEWAY_KEYS = ("web", "image_gen", "tts", "browser")

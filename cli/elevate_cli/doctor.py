@@ -62,6 +62,22 @@ _PROVIDER_ENV_HINTS = (
 from elevate_constants import is_termux as _is_termux
 
 
+def _which(command: str) -> str | None:
+    """Platform-safe wrapper around ``shutil.which``.
+
+    Tests monkeypatch ``sys.platform`` to ``win32`` on non-Windows hosts to
+    validate Windows-specific skips.  ``shutil.which`` follows ``sys.platform``
+    and may call ``_winapi`` in that state, which is unavailable on macOS/Linux.
+    Treat that synthetic case as "not found" instead of crashing doctor.
+    """
+    try:
+        return shutil.which(command)
+    except AttributeError:
+        if sys.platform == "win32" and os.name != "nt":
+            return None
+        raise
+
+
 def _python_install_cmd() -> str:
     return "python -m pip install" if _is_termux() else "uv pip install"
 
@@ -74,15 +90,11 @@ def _system_package_install_cmd(pkg: str) -> str:
     return f"sudo apt install {pkg}"
 
 
-def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
-    steps: list[str] = []
-    step = 1
-    if not node_installed:
-        steps.append(f"{step}) pkg install nodejs")
-        step += 1
-    steps.append(f"{step}) npm install -g agent-browser")
-    steps.append(f"{step + 1}) agent-browser install")
-    return steps
+def _browser_use_setup_steps() -> list[str]:
+    return [
+        "1) Run elevate setup and choose Browser Use",
+        "2) Set BROWSER_USE_API_KEY, or activate managed Browser Use",
+    ]
 
 
 def _has_provider_env_config(content: str) -> bool:
@@ -795,36 +807,26 @@ def run_doctor(args):
             check_fail("daytona SDK not installed", "(pip install daytona)")
             issues.append("Install daytona SDK: pip install daytona")
 
-    # Node.js + agent-browser (for browser automation tools)
-    if shutil.which("node"):
-        check_ok("Node.js")
-        # Check if agent-browser is installed
-        agent_browser_path = PROJECT_ROOT / "node_modules" / "agent-browser"
-        if agent_browser_path.exists():
-            check_ok("agent-browser (Node.js)", "(browser automation)")
-        else:
-            if _is_termux():
-                check_info("agent-browser is not installed (expected in the tested Termux path)")
-                check_info("Install it manually later with: npm install -g agent-browser && agent-browser install")
-                check_info("Termux browser setup:")
-                for step in _termux_browser_setup_steps(node_installed=True):
-                    check_info(step)
-            else:
-                check_warn("agent-browser not installed", "(run: npm install)")
+    # Browser Use cloud is the supported base browser automation path. Node.js
+    # remains optional developer tooling and should not be required by doctor.
+    if os.getenv("BROWSER_USE_API_KEY"):
+        check_ok("Browser Use", "(BROWSER_USE_API_KEY configured)")
+    else:
+        check_info("Browser Use not configured (set BROWSER_USE_API_KEY or activate managed tools)")
+        for step in _browser_use_setup_steps():
+            check_info(step)
+
+    if _which("node"):
+        check_ok("Node.js", "(optional developer tooling)")
     else:
         if _is_termux():
-            check_info("Node.js not found (browser tools are optional in the tested Termux path)")
-            check_info("Install Node.js on Termux with: pkg install nodejs")
-            check_info("Termux browser setup:")
-            for step in _termux_browser_setup_steps(node_installed=False):
-                check_info(step)
+            check_info("Node.js not found (optional developer tooling in Termux)")
         else:
-            check_warn("Node.js not found", "(optional, needed for browser tools)")
+            check_info("Node.js not found (optional developer tooling)")
     
     # npm audit for all Node.js packages
-    if shutil.which("npm"):
+    if _which("npm"):
         npm_dirs = [
-            (PROJECT_ROOT, "Browser tools (agent-browser)"),
             (PROJECT_ROOT / "scripts" / "whatsapp-bridge", "WhatsApp bridge"),
         ]
         for npm_dir, label in npm_dirs:
