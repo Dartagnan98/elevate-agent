@@ -9,7 +9,13 @@ estate packs unlock through Elevation Real Estate HQ.
 
 ## One-Shot Install
 
-Recommended production install after the NPM bootstrap package is published:
+Works now:
+
+```bash
+npx --yes github:Dartagnan98/elevate-agent install
+```
+
+Future NPM registry install after the NPM bootstrap package is published:
 
 ```bash
 npx @elevationrealestate/elevate install
@@ -22,7 +28,7 @@ npm install -g @elevationrealestate/elevate
 elevate install
 ```
 
-Current private beta install:
+Private beta install, only if the repo is private again:
 
 ```bash
 export ELEVATE_GITHUB_TOKEN="$(gh auth token)"
@@ -38,14 +44,11 @@ package has not been published yet. Publish it from
 `Publish NPM bootstrap` GitHub Action after adding the `NPM_TOKEN` repository
 secret.
 
-Temporary GitHub fallback while the NPM package is unpublished:
+GitHub fallback while the NPM package is unpublished:
 
 ```bash
 npx --yes github:Dartagnan98/elevate-agent install
 ```
-
-That fallback still requires the GitHub repo or release artifact to be public,
-or a machine with GitHub access to the private beta repo.
 
 Direct shell installer, once the base installer is published publicly:
 
