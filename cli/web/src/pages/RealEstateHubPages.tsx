@@ -44,7 +44,6 @@ import {
   MessageSquare,
   Phone,
   Square as SquareIcon,
-  Timer,
   Share2,
   Smartphone,
   Network,
@@ -372,10 +371,8 @@ function HubShell({
         <div className="font-mono-ui flex items-center gap-2 text-[0.72rem] text-muted-foreground">
           <span
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1",
-              gatewayOnline
-                ? "border-success/45 bg-success/10 text-success"
-                : "border-destructive/45 bg-destructive/10 text-destructive",
+              "inline-flex items-center gap-1.5 text-xs",
+              gatewayOnline ? "text-muted-foreground" : "text-destructive",
             )}
           >
             <span
@@ -383,8 +380,8 @@ function HubShell({
             />
             Agent {gatewayOnline ? "online" : "offline"}
           </span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1">
-            <Timer className="h-3 w-3" />
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
             {activeJobs} job{activeJobs === 1 ? "" : "s"}
           </span>
         </div>
@@ -1890,14 +1887,8 @@ function DraftMessagesBoard({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <CardTitle>{title}</CardTitle>
-              <span
-                className={cn(
-                  "font-mono-ui inline-flex items-center rounded-full border px-2 py-0.5 text-[0.68rem] font-semibold",
-                  drafts.length
-                    ? "border-warning/45 bg-warning/10 text-warning"
-                    : "border-border bg-card text-muted-foreground",
-                )}
-              >
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className={cn("h-1.5 w-1.5 rounded-full", drafts.length ? "bg-warning" : "bg-muted-foreground/40")} />
                 {drafts.length} waiting
               </span>
             </div>
@@ -2032,7 +2023,7 @@ function DraftMessagesBoard({
                 }}
                 onMouseEnter={() => keyboard && setFocusedId(draft.id)}
                 className={cn(
-                  "group relative py-3 transition-colors first:pt-0 last:pb-0",
+                  "group/draft relative py-3 transition-colors first:pt-0 last:pb-0",
                   isFocused && "bg-primary/[0.06]",
                   isSelected && !isFocused && "bg-primary/[0.04]",
                   !isFocused && !isSelected && "hover:bg-foreground/[0.02]",
@@ -2088,7 +2079,7 @@ function DraftMessagesBoard({
                             <span aria-hidden className="opacity-50">·</span>
                             <span
                               className={cn(
-                                "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[0.66rem] font-semibold",
+                                "inline-flex items-center gap-1 text-[0.66rem]",
                                 heat.pill,
                               )}
                               title={draft.scoreReason ?? undefined}
@@ -2125,7 +2116,7 @@ function DraftMessagesBoard({
                         }}
                         title="Skip"
                         aria-label={`Skip draft for ${draft.personName}`}
-                        className="flex h-11 w-11 items-center justify-center rounded-full text-muted-foreground transition hover:bg-destructive/12 hover:text-destructive sm:h-9 sm:w-9"
+                        className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground/50 opacity-0 transition group-hover/draft:opacity-100 hover:text-destructive"
                       >
                         <XCircle className="h-4 w-4" />
                       </button>
@@ -2137,7 +2128,7 @@ function DraftMessagesBoard({
                         }}
                         title="Approve"
                         aria-label={`Approve draft for ${draft.personName}`}
-                        className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/15 text-primary transition hover:bg-primary/25 sm:h-9 sm:w-9"
+                        className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground/50 opacity-0 transition group-hover/draft:opacity-100 hover:text-primary"
                       >
                         <Send className="h-4 w-4" />
                       </button>
@@ -2308,14 +2299,17 @@ function LeadQueuePanel({
   title: string;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded-2xl border border-border bg-card">
-      <div className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between gap-3 py-2">
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-medium text-foreground">{title}</h3>
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className={cn("h-1.5 w-1.5 rounded-full", count ? "bg-foreground/50" : "bg-muted-foreground/30")} />
+            {count}
+          </span>
         </div>
-        <Badge variant={count ? "outline" : "secondary"}>{count}</Badge>
       </div>
+      <p className="mb-2 text-xs text-muted-foreground">{description}</p>
       <div>{children}</div>
     </div>
   );
@@ -3146,19 +3140,13 @@ function WorkflowStrip({
   }>;
 }) {
   return (
-    <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3 rounded-xl border border-border bg-card px-5 py-4">
+    <div className="flex flex-wrap items-baseline gap-x-1 gap-y-1 px-1 py-1 text-sm text-muted-foreground">
       {items.map((item, i) => (
-        <div key={item.label} className="flex items-baseline gap-2">
-          {i > 0 && (
-            <span aria-hidden="true" className="hidden text-border sm:inline-block">·</span>
-          )}
-          <span className="text-xl font-semibold tabular-nums text-foreground">
-            {item.value}
-          </span>
-          <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-            {item.label}
-          </span>
-        </div>
+        <span key={item.label} className="inline-flex items-baseline gap-1">
+          {i > 0 && <span aria-hidden="true" className="mx-1.5 text-border">·</span>}
+          <span className="font-medium tabular-nums text-foreground">{item.value}</span>
+          <span>{item.label}</span>
+        </span>
       ))}
     </div>
   );
@@ -3306,11 +3294,10 @@ function LeadFilterBar({
   }
 
   const renderStat = (stat: Stat) => (
-    <div key={stat.label} className="flex items-baseline gap-1.5">
+    <span key={stat.label} className="inline-flex items-baseline gap-1">
       <span
         className={cn(
-          "font-semibold tabular-nums leading-none",
-          stat.emphasis === "primary" ? "text-lg" : "text-sm",
+          "font-medium tabular-nums",
           stat.tone === "warning" && "text-warning",
           stat.tone === "destructive" && "text-destructive",
           stat.tone === "default" && "text-foreground",
@@ -3319,23 +3306,31 @@ function LeadFilterBar({
       >
         {stat.value}
       </span>
-      <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.12em] text-muted-foreground">
-        {stat.label}
-      </span>
-    </div>
+      <span className="text-muted-foreground">{stat.label}</span>
+    </span>
   );
 
   return (
-    <div className="rounded-2xl border border-border bg-card">
-      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 px-4 py-3">
-        {queueStats.map(renderStat)}
+    <div>
+      <div className="flex flex-wrap items-baseline gap-x-1 gap-y-1 px-1 py-1 text-sm text-muted-foreground">
+        {queueStats.map((stat, i) => (
+          <span key={stat.label} className="inline-flex items-baseline">
+            {i > 0 && <span aria-hidden="true" className="mx-1.5 text-border">·</span>}
+            {renderStat(stat)}
+          </span>
+        ))}
         {slaStats.length > 0 && (
-          <span aria-hidden="true" className="hidden h-4 self-center border-l border-border/60 sm:inline-block" />
+          <span aria-hidden="true" className="mx-2 text-border">|</span>
         )}
-        {slaStats.map(renderStat)}
+        {slaStats.map((stat, i) => (
+          <span key={stat.label} className="inline-flex items-baseline">
+            {i > 0 && <span aria-hidden="true" className="mx-1.5 text-border">·</span>}
+            {renderStat(stat)}
+          </span>
+        ))}
       </div>
       {options.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/40 px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-1.5 px-1 py-1.5">
           <span className="font-mono-ui mr-1 inline-flex items-center gap-1 text-[0.66rem] uppercase tracking-[0.14em] text-muted-foreground">
             <Filter className="h-3 w-3" />
             Filter

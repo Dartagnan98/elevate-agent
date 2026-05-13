@@ -896,6 +896,140 @@ async def get_access_status():
     return dashboard_access_status()
 
 
+# ---------------------------------------------------------------------------
+# License / Activation endpoints
+# ---------------------------------------------------------------------------
+
+class LicenseActivateBody(BaseModel):
+    email: str
+    password: str
+    backend_url: Optional[str] = None
+    skip_skill_sync: bool = False
+
+
+class LicenseLogoutBody(BaseModel):
+    pass
+
+
+@app.get("/api/license/status")
+async def get_license_status():
+    from elevate_cli import license as lic_mod
+
+    lic = lic_mod.load()
+    if not lic:
+        return {
+            "authenticated": False,
+            "email": None,
+            "tier": None,
+            "license_id": None,
+            "entitlements": [],
+            "expires_at": None,
+            "expired": True,
+            "status_text": lic_mod.status_text(),
+            "packs": dashboard_access_status().get("packs", {}),
+        }
+    return {
+        "authenticated": True,
+        "email": lic.email,
+        "tier": lic.tier,
+        "license_id": lic.license_id,
+        "entitlements": list(lic.entitlements or []),
+        "expires_at": lic.expires_at,
+        "expired": lic.is_expired(margin=0),
+        "status_text": lic_mod.status_text(lic),
+        "packs": dashboard_access_status().get("packs", {}),
+    }
+
+
+@app.post("/api/license/activate")
+async def activate_license(body: LicenseActivateBody, request: Request):
+    _require_token(request)
+
+    from elevate_cli import license as lic_mod
+
+    if body.backend_url:
+        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
+        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
+        try:
+            from elevate_cli.config import save_env_value
+            save_env_value("ELEVATE_BACKEND_URL", lic_mod.BACKEND_URL)
+        except Exception:
+            pass
+
+    try:
+        lic = lic_mod.login(body.email, body.password)
+    except lic_mod.LicenseError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    activation = lic_mod.activate_install(lic, sync_skills=not body.skip_skill_sync)
+    return {
+        "authenticated": True,
+        "email": lic.email,
+        "tier": lic.tier,
+        "license_id": lic.license_id,
+        "entitlements": list(lic.entitlements or []),
+        "expires_at": lic.expires_at,
+        "packs": activation.get("packs", {}),
+        "skill_count": activation.get("skill_count", 0),
+        "skill_names": activation.get("skill_names", []),
+        "skill_error": activation.get("skill_error"),
+    }
+
+
+@app.post("/api/license/sync-skills")
+async def sync_license_skills(request: Request):
+    _require_token(request)
+
+    from elevate_cli import license as lic_mod
+    from elevate_cli import cloud_skills
+
+    lic = lic_mod.load()
+    if not lic:
+        raise HTTPException(status_code=401, detail="Not authenticated. Activate first.")
+
+    try:
+        if lic.is_expired():
+            lic = lic_mod.refresh(lic)
+    except lic_mod.LicenseError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    try:
+        sync_result = cloud_skills.sync_all()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Skill sync failed: {exc}")
+
+    return {
+        "skill_count": sync_result.get("skill_count", 0),
+        "skill_names": sync_result.get("skill_names", []),
+        "path": sync_result.get("path"),
+        "removed": sync_result.get("removed", []),
+        "errors": sync_result.get("errors", []),
+        "packs": dashboard_access_status().get("packs", {}),
+    }
+
+
+@app.post("/api/license/logout")
+async def logout_license(request: Request):
+    _require_token(request)
+
+    from elevate_cli import license as lic_mod
+
+    cleared = lic_mod.clear()
+
+    from elevate_cli.access import REAL_ESTATE_ENTITLEMENTS, update_entitlement
+    for entitlement in REAL_ESTATE_ENTITLEMENTS:
+        try:
+            update_entitlement(entitlement, status="locked", owned_snapshot=False)
+        except Exception:
+            pass
+
+    return {
+        "authenticated": False,
+        "cleared": cleared,
+        "packs": dashboard_access_status().get("packs", {}),
+    }
+
+
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.cron import create_cron_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
@@ -2823,6 +2957,18 @@ class _AdminSetupUpdateBody(BaseModel):
     items: List[_AdminSetupItemBody] = []
 
 
+class _PackOnboardingItemBody(BaseModel):
+    key: str
+    status: str = "missing"
+    provider: Optional[str] = None
+    value: Any = None
+    notes: Optional[str] = None
+
+
+class _PackOnboardingUpdateBody(BaseModel):
+    items: List[_PackOnboardingItemBody] = []
+
+
 class _DealMoveBody(BaseModel):
     toStage: int
     force: bool = False
@@ -3421,6 +3567,62 @@ async def post_admin_setup_verify_endpoint():
     except Exception as exc:
         _log.exception("POST /api/admin/setup/verify failed")
         raise HTTPException(status_code=500, detail=f"Verify admin setup failed: {exc}")
+
+
+@app.get("/api/pack-onboarding")
+async def get_pack_onboarding_endpoint():
+    """Return pack-specific onboarding contracts for unlocked real estate packs."""
+    try:
+        from elevate_cli.data import connect, get_pack_onboarding
+
+        with connect() as conn:
+            return get_pack_onboarding(conn)
+    except Exception as exc:
+        _log.exception("GET /api/pack-onboarding failed")
+        raise HTTPException(status_code=500, detail=f"Pack onboarding failed: {exc}")
+
+
+@app.put("/api/pack-onboarding/{pack_id}")
+async def put_pack_onboarding_endpoint(pack_id: str, body: _PackOnboardingUpdateBody):
+    """Save onboarding answers for one paid pack."""
+    try:
+        from elevate_cli.data import connect, update_pack_onboarding
+
+        with connect() as conn:
+            return update_pack_onboarding(
+                conn,
+                pack_id,
+                items=[item.dict() for item in body.items],
+                actor=_WEB_ACTOR,
+            )
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/pack-onboarding/%s failed", pack_id)
+        raise HTTPException(status_code=500, detail=f"Update pack onboarding failed: {exc}")
+
+
+@app.post("/api/pack-onboarding/{pack_id}/complete")
+async def post_pack_onboarding_complete_endpoint(pack_id: str):
+    """Mark one pack onboarding complete once required fields are ready."""
+    try:
+        from elevate_cli.data import complete_pack_onboarding, connect
+
+        with connect() as conn:
+            return complete_pack_onboarding(conn, pack_id, actor=_WEB_ACTOR)
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/pack-onboarding/%s/complete failed", pack_id)
+        raise HTTPException(status_code=500, detail=f"Complete pack onboarding failed: {exc}")
 
 
 @app.get("/api/admin/province-guides")

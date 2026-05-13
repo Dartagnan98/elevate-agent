@@ -283,6 +283,23 @@ code { font-size: 0.875rem; }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes pack-unlock-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes pack-unlock-sheen {
+  from { transform: translateX(-130%) rotate(8deg); opacity: 0; }
+  18%  { opacity: 0.45; }
+  to   { transform: translateX(260%) rotate(8deg); opacity: 0; }
+}
+
+@keyframes pack-unlock-save {
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 35%, transparent); }
+  45%  { transform: scale(1.08); box-shadow: 0 0 0 10px color-mix(in srgb, var(--color-success) 0%, transparent); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 0%, transparent); }
+}
+
 @keyframes elevate-shimmer-sweep {
   from { transform: translateX(-120%); }
   to   { transform: translateX(240%); }
@@ -311,6 +328,48 @@ code { font-size: 0.875rem; }
 
 .memory-constellation {
   contain: layout paint;
+}
+
+.pack-unlock-card {
+  animation: pack-unlock-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.pack-unlock-panel::before {
+  content: '';
+  position: absolute;
+  inset-block: -20%;
+  left: 0;
+  width: 26%;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--midground-base) 16%, transparent),
+    transparent
+  );
+  animation: pack-unlock-sheen 900ms cubic-bezier(0.22, 1, 0.36, 1) 180ms both;
+}
+
+.pack-unlock-check {
+  border-color: color-mix(in srgb, var(--color-primary) 38%, transparent);
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--background-base));
+}
+
+.pack-unlock-check.is-saved {
+  animation: pack-unlock-save 720ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pack-step-enter {
+  animation: dialog-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pack-unlock-card,
+  .pack-unlock-panel::before,
+  .pack-unlock-check.is-saved,
+  .pack-step-enter {
+    animation: none !important;
+  }
 }
 
 .memory-constellation::after {
@@ -408,14 +467,30 @@ code { font-size: 0.875rem; }
 .memory-constellation-label {
   paint-order: stroke;
   stroke: color-mix(in srgb, var(--background-base) 92%, transparent);
-  stroke-width: 5px;
+  stroke-width: 4px;
   stroke-linejoin: round;
   font-family: var(--theme-font-sans);
-  font-size: 14px;
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 600;
   letter-spacing: 0;
   opacity: 0.84;
   pointer-events: none;
+}
+
+.memory-constellation-edge-label {
+  paint-order: stroke;
+  stroke: color-mix(in srgb, var(--background-base) 88%, transparent);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  font-family: var(--theme-font-sans);
+  font-size: 9px;
+  font-weight: 500;
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.memory-constellation-hulls polygon {
+  transition: opacity 220ms cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .elevate-thinking-shimmer {

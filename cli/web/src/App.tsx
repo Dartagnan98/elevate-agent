@@ -77,7 +77,7 @@ import type { AccessStatusResponse } from "@/lib/api-types";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
-import { SidebarFooter } from "@/components/SidebarFooter";
+import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { Toast } from "@/components/Toast";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
@@ -114,8 +114,6 @@ const RealEstateTasksPage = lazy(() =>
 const RealEstateTodayPage = lazy(() =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateTodayPage })),
 );
-import { LanguageSwitcher } from "@/components/LanguageSwitcher";
-import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
@@ -393,6 +391,7 @@ export default function App() {
   const isChatRoute = normalizedPath === "/chat";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
   const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
+  const [accessVersion, setAccessVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -407,6 +406,12 @@ export default function App() {
     return () => {
       cancelled = true;
     };
+  }, [accessVersion]);
+
+  useEffect(() => {
+    const handler = () => setAccessVersion((v) => v + 1);
+    window.addEventListener("elevate:auth-changed", handler);
+    return () => window.removeEventListener("elevate:auth-changed", handler);
   }, []);
 
   const realEstatePacks = accessStatus?.packs ?? DEFAULT_REAL_ESTATE_PACKS;
@@ -752,6 +757,7 @@ function DesktopSidebar({
     readArchivedSessionIds(),
   );
   const [sessionMenu, setSessionMenu] = useState<SessionMenuState | null>(null);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const { toast, showToast } = useToast();
   const { themeName } = useTheme();
   const sidebarLogoSrc =
@@ -770,8 +776,23 @@ function DesktopSidebar({
 
   useEffect(() => {
     loadSessions();
-    const id = window.setInterval(loadSessions, 5000);
-    return () => window.clearInterval(id);
+    if (typeof document === "undefined") return;
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (!id) id = window.setInterval(loadSessions, 5000);
+    };
+    const stop = () => {
+      if (id) { window.clearInterval(id); id = null; }
+    };
+    const onVisibility = () => {
+      if (document.hidden) stop(); else { loadSessions(); start(); }
+    };
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [loadSessions]);
 
   useEffect(() => {
@@ -950,16 +971,21 @@ function DesktopSidebar({
   );
 
   const renameSession = useCallback(
-    async (session: SessionInfo) => {
+    (session: SessionInfo) => {
       setSessionMenu(null);
-      const currentTitle = sessionTitle(session);
-      const title = window.prompt("Rename chat", currentTitle);
-      if (title === null) return;
+      setRenamingSessionId(session.id);
+    },
+    [],
+  );
+
+  const commitRename = useCallback(
+    async (sessionId: string, newTitle: string) => {
+      setRenamingSessionId(null);
       try {
-        const response = await api.renameSession(session.id, title.trim() || null);
+        const response = await api.renameSession(sessionId, newTitle.trim() || null);
         setSessions((prev) =>
           prev.map((item) =>
-            item.id === session.id ? { ...item, title: response.title } : item,
+            item.id === sessionId ? { ...item, title: response.title } : item,
           ),
         );
         showToast("Session renamed", "success");
@@ -1191,7 +1217,7 @@ function DesktopSidebar({
         {realEstateNavItems.length > 0 && (
           <div className="mt-2.5">
             <SidebarSectionLabel>Real Estate</SidebarSectionLabel>
-            <div className="space-y-0.5 lg:grid lg:grid-cols-2 lg:gap-0.5 lg:space-y-0">
+            <div className="space-y-0.5">
               {realEstateNavItems.map((item) => (
                 <SidebarAction
                   key={item.path}
@@ -1207,7 +1233,7 @@ function DesktopSidebar({
 
         <div className="mt-2.5">
           <SidebarSectionLabel>Agent</SidebarSectionLabel>
-          <div className="space-y-0.5 lg:grid lg:grid-cols-2 lg:gap-0.5 lg:space-y-0">
+          <div className="space-y-0.5">
             <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
             <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
             <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
@@ -1226,6 +1252,9 @@ function DesktopSidebar({
             onOpenSession={openSession}
             onTogglePinned={togglePinned}
             pinnedIds={pinnedIds}
+            renamingSessionId={renamingSessionId}
+            onCommitRename={commitRename}
+            onCancelRename={() => setRenamingSessionId(null)}
             sessions={spotlightSessions}
             unreadIds={unreadIds}
           />
@@ -1239,6 +1268,9 @@ function DesktopSidebar({
           onOpenSession={openSession}
           onTogglePinned={togglePinned}
           pinnedIds={pinnedIds}
+          renamingSessionId={renamingSessionId}
+          onCommitRename={commitRename}
+          onCancelRename={() => setRenamingSessionId(null)}
           sessions={chatSessions}
           unreadIds={unreadIds}
           statusText={
@@ -1286,28 +1318,7 @@ function DesktopSidebar({
       </div>
 
       <div className="shrink-0 px-2 pb-2">
-        <button
-          type="button"
-          onClick={() => go("/config")}
-          className={cn(
-            "flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.92rem] font-medium lg:min-h-8 lg:gap-2 lg:rounded-md lg:px-2 lg:py-1 lg:text-[0.9rem]",
-            "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
-            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-          )}
-        >
-          <Settings className="h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)]" />
-          <span className="truncate">Settings</span>
-        </button>
-
-        <div className="flex items-center justify-between gap-2 px-1 py-1.5">
-          <div className="flex min-w-0 items-center gap-2">
-            <PluginSlot name="header-right" />
-            <ThemeSwitcher dropUp />
-            <LanguageSwitcher />
-          </div>
-        </div>
-
-        <SidebarFooter />
+        <SidebarUserPill />
       </div>
     </div>
   );
@@ -1315,7 +1326,7 @@ function DesktopSidebar({
 
 function SidebarSectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1 px-2 text-[0.72rem] font-semibold normal-case text-[var(--sidebar-text-muted)]">
+    <div className="mb-0.5 mt-3 first:mt-0 px-2 text-[0.62rem] font-semibold uppercase tracking-wider text-[var(--sidebar-text-muted)]/60">
       {children}
     </div>
   );
@@ -1323,17 +1334,16 @@ function SidebarSectionLabel({ children }: { children: ReactNode }) {
 
 function sidebarActionClass(active: boolean, primary = false) {
   return cn(
-    "group flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.92rem] font-medium lg:min-h-8 lg:gap-2 lg:rounded-md lg:px-2 lg:py-1 lg:text-[0.9rem]",
+    "group flex min-h-8 w-full items-center rounded-md px-2 py-1 text-left text-sm",
     "cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-    primary && "font-semibold text-[var(--sidebar-text-strong)]",
+    primary && "font-medium text-[var(--sidebar-text-strong)]",
     active
-      ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
-      : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
+      ? "text-[var(--sidebar-text-active)] font-medium"
+      : "text-[var(--sidebar-text-muted)] hover:text-[var(--sidebar-text-active)]",
   );
 }
 
 function SidebarAction({
-  icon: Icon,
   label,
   onNavigate,
   path,
@@ -1355,7 +1365,6 @@ function SidebarAction({
       }}
       className={({ isActive }) => sidebarActionClass(isActive, primary)}
     >
-      <Icon className="h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)] lg:h-4 lg:w-4" />
       <span className="truncate">{label}</span>
     </NavLink>
   );
@@ -1365,10 +1374,13 @@ function SessionSection({
   embeddedChat,
   label,
   loading = false,
+  onCancelRename,
+  onCommitRename,
   onOpenContextMenu,
   onOpenSession,
   onTogglePinned,
   pinnedIds,
+  renamingSessionId,
   sessions,
   statusText,
   unreadIds,
@@ -1376,10 +1388,13 @@ function SessionSection({
   embeddedChat: boolean;
   label: string;
   loading?: boolean;
+  onCancelRename: () => void;
+  onCommitRename: (sessionId: string, title: string) => void;
   onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
   onOpenSession: (session: SessionInfo) => void;
   onTogglePinned: (sessionId: string) => void;
   pinnedIds: string[];
+  renamingSessionId: string | null;
   sessions: SessionInfo[];
   statusText?: string;
   unreadIds: string[];
@@ -1392,6 +1407,9 @@ function SessionSection({
           <SessionListItem
             key={session.id}
             embeddedChat={embeddedChat}
+            isRenaming={renamingSessionId === session.id}
+            onCancelRename={onCancelRename}
+            onCommitRename={onCommitRename}
             onOpenContextMenu={onOpenContextMenu}
             onOpenSession={onOpenSession}
             onTogglePinned={onTogglePinned}
@@ -1413,6 +1431,9 @@ function SessionSection({
 
 function SessionListItem({
   embeddedChat,
+  isRenaming = false,
+  onCancelRename,
+  onCommitRename,
   onOpenContextMenu,
   onOpenSession,
   onTogglePinned,
@@ -1422,6 +1443,9 @@ function SessionListItem({
   displayTitle,
 }: {
   embeddedChat: boolean;
+  isRenaming?: boolean;
+  onCancelRename?: () => void;
+  onCommitRename?: (sessionId: string, title: string) => void;
   onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
   onOpenSession: (session: SessionInfo) => void;
   onTogglePinned: (sessionId: string) => void;
@@ -1432,11 +1456,37 @@ function SessionListItem({
 }) {
   const route = sessionRoute(session, embeddedChat);
   const location = useLocation();
+  const renameRef = useRef<HTMLInputElement>(null);
   const active =
     embeddedChat &&
     location.pathname === "/chat" &&
     new URLSearchParams(location.search).get("resume") === session.id;
   const title = displayTitle ?? sessionTitle(session);
+
+  useEffect(() => {
+    if (isRenaming) renameRef.current?.focus();
+  }, [isRenaming]);
+
+  if (isRenaming) {
+    return (
+      <div className={cn(
+        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[34px] lg:rounded-md",
+        "bg-[var(--sidebar-row-active)]",
+      )}>
+        <input
+          ref={renameRef}
+          defaultValue={title}
+          className="min-w-0 flex-1 rounded-md bg-transparent px-2.5 py-2 text-[0.9rem] font-medium leading-5 text-[var(--sidebar-text-active)] outline-none ring-1 ring-[var(--color-primary)] lg:px-2 lg:py-1"
+          onBlur={(event) => onCommitRename?.(session.id, event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") { event.preventDefault(); onCommitRename?.(session.id, event.currentTarget.value); }
+            if (event.key === "Escape") { event.preventDefault(); onCancelRename?.(); }
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       onContextMenu={(event) => onOpenContextMenu(session, event)}
@@ -1662,23 +1712,45 @@ function SessionContextMenu({
       ? menu.y
       : Math.min(menu.y, Math.max(8, window.innerHeight - menuHeight - 8));
 
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    menuRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const run = (action: () => void) => {
     action();
     onClose();
   };
 
   return createPortal(
-    <div
-      role="menu"
-      aria-label={`Options for ${sessionTitle(menu.session)}`}
-      onClick={(event) => event.stopPropagation()}
-      onContextMenu={(event) => event.preventDefault()}
-      style={{ left, top }}
-      className={cn(
-        "fixed z-[100] w-[16.5rem] rounded-2xl p-1.5",
-        "bg-card/98 text-midground shadow-[0_18px_54px_color-mix(in_srgb,var(--midground-base)_22%,transparent),0_0_0_1px_color-mix(in_srgb,var(--midground-base)_14%,transparent)] backdrop-blur-xl",
-      )}
-    >
+    <>
+      <div
+        className="fixed inset-0 z-[99]"
+        onClick={onClose}
+        onContextMenu={(event) => { event.preventDefault(); onClose(); }}
+      />
+      <div
+        ref={menuRef}
+        role="menu"
+        aria-label={`Options for ${sessionTitle(menu.session)}`}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        onContextMenu={(event) => event.preventDefault()}
+        style={{ left, top }}
+        className={cn(
+          "fixed z-[100] w-[16.5rem] rounded-2xl p-1.5 outline-none",
+          "bg-card/98 text-midground shadow-[0_18px_54px_color-mix(in_srgb,var(--midground-base)_22%,transparent),0_0_0_1px_color-mix(in_srgb,var(--midground-base)_14%,transparent)] backdrop-blur-xl",
+        )}
+      >
       <SessionMenuButton
         icon={Pin}
         label={pinned ? "Unpin chat" : "Pin chat"}
@@ -1727,7 +1799,8 @@ function SessionContextMenu({
         label="Open in mini window"
         onClick={() => run(() => onOpenMiniWindow(menu.session))}
       />
-    </div>,
+    </div>
+    </>,
     document.body,
   );
 }

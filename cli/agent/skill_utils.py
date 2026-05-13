@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from elevate_constants import get_config_path, get_skills_dir
+from elevate_constants import get_config_path, get_elevate_home, get_skills_dir
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +208,7 @@ def get_external_skills_dirs() -> List[Path]:
 
     raw_dirs.extend(_split_extra_skill_paths(os.getenv("ELEVATE_EXTRA_SKILLS_PATH")))
     raw_dirs.extend(_split_extra_skill_paths(os.getenv("ELEVATE_EXTRA_SKILLS_DIRS")))
+    raw_dirs.append(str(get_elevate_home() / "cloud-skills"))
 
     if isinstance(raw_dirs, str):
         raw_dirs = [raw_dirs]

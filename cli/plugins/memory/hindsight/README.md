@@ -28,7 +28,7 @@ Connects to the Hindsight Cloud API. Requires an API key from [ui.hindsight.vect
 
 ### Local Embedded
 
-Elevate spins up a local Hindsight daemon with built-in PostgreSQL. Requires an LLM API key for memory extraction and synthesis. The daemon starts automatically in the background on first use and stops after 5 minutes of inactivity.
+Elevate spins up a local Hindsight daemon with its own embedded local storage. Requires an LLM API key for memory extraction and synthesis. The daemon starts automatically in the background on first use and stops after 5 minutes of inactivity.
 
 Supports any OpenAI-compatible LLM endpoint (llama.cpp, vLLM, LM Studio, etc.) — pick `openai_compatible` as the provider and enter the base URL.
 

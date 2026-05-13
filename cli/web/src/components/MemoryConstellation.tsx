@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { AgentHubMemoryEdge, AgentHubMemoryNode } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -218,7 +218,7 @@ function relaxConstellation(nodes: PositionedNode[], edges: AgentHubMemoryEdge[]
   const iterations = compact ? 46 : 76;
   const linkStrength = compact ? 0.01 : 0.011;
   const anchorStrength = compact ? 0.068 : 0.086;
-  const collisionPad = compact ? 16 : 30;
+  const collisionPad = compact ? 10 : 16;
 
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     for (const item of nodes) {
@@ -271,6 +271,41 @@ function relaxConstellation(nodes: PositionedNode[], edges: AgentHubMemoryEdge[]
   }
 }
 
+function convexHull(points: Array<{ x: number; y: number }>): Array<{ x: number; y: number }> {
+  if (points.length < 3) return points;
+  const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: Array<{ x: number; y: number }> = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper: Array<{ x: number; y: number }> = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function expandHull(hull: Array<{ x: number; y: number }>, pad: number): string {
+  if (hull.length < 2) return "";
+  const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
+  const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
+  return hull
+    .map((p) => {
+      const dx = p.x - cx;
+      const dy = p.y - cy;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      return `${p.x + (dx / d) * pad},${p.y + (dy / d) * pad}`;
+    })
+    .join(" ");
+}
+
 function isEdgeConnected(edge: AgentHubMemoryEdge, nodeId: string | null) {
   return Boolean(nodeId && (edge.source === nodeId || edge.target === nodeId));
 }
@@ -292,6 +327,47 @@ export function MemoryConstellation({
   const gridId = `memory-grid-${rawId}`;
   const glowId = `memory-glow-${rawId}`;
   const summaryId = `memory-summary-${rawId}`;
+
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panRef = useRef(pan);
+  panRef.current = pan;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const dragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 1.08 : 0.93;
+    setZoom((z) => clamp(z * delta, 0.4, 3));
+  }, []);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const target = e.target as Element;
+    if (target.closest(".memory-constellation-node")) return;
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    dragRef.current = { startX: e.clientX, startY: e.clientY, panX: panRef.current.x, panY: panRef.current.y };
+  }, []);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const z = zoomRef.current;
+    const scaleX = (VIEW_WIDTH * z) / rect.width;
+    const scaleY = (VIEW_HEIGHT * z) / rect.height;
+    setPan({
+      x: dragRef.current.panX - (e.clientX - dragRef.current.startX) * scaleX,
+      y: dragRef.current.panY - (e.clientY - dragRef.current.startY) * scaleY,
+    });
+  }, []);
+
+  const handlePointerUp = useCallback(() => {
+    dragRef.current = null;
+  }, []);
 
   const layout = useMemo(() => {
     const degree = new Map<string, number>();
@@ -333,7 +409,7 @@ export function MemoryConstellation({
         .forEach((node, index) => {
           const nodeDegree = degree.get(node.id) ?? 0;
           const weight = nodeWeight(node, nodeDegree);
-          const r = Math.min(compact ? 17 : 25, (compact ? 4.2 : 5.4) + Math.sqrt(weight) * (compact ? 1.85 : 2.35));
+          const r = Math.min(compact ? 10 : 12, (compact ? 2.8 : 3) + Math.sqrt(weight) * (compact ? 1.1 : 1.2));
           const isolatedIndex = isolatedRank.get(node.id);
           const isolated = isolatedIndex !== undefined;
           const ratio = isolated
@@ -348,8 +424,8 @@ export function MemoryConstellation({
               (index % 2 === 0 ? 1 : -1) * (0.06 + (hashString(node.id) % 9) / 180);
           const ring = isolated ? isolatedIndex % 3 : index % (compact ? 3 : 4);
           const orbit = isolated
-            ? (compact ? 220 : 338) + ring * (compact ? 20 : 31)
-            : (compact ? 146 : 232) + ring * (compact ? 42 : 62) + Math.floor(index / (compact ? 3 : 4)) * (compact ? 13 : 18);
+            ? (compact ? 180 : 280) + ring * (compact ? 16 : 24)
+            : (compact ? 120 : 190) + ring * (compact ? 34 : 50) + Math.floor(index / (compact ? 3 : 4)) * (compact ? 10 : 14);
           const weightedOrbit = isolated ? orbit : orbit - Math.min(weight, 18) * (compact ? 1.2 : 1.65);
           positioned.push({
             degree: nodeDegree,
@@ -391,6 +467,20 @@ export function MemoryConstellation({
     for (const item of positioned) {
       kinds.set(item.kind, (kinds.get(item.kind) ?? 0) + 1);
     }
+
+    const clusterGroups = new Map<string, PositionedNode[]>();
+    for (const item of positioned) {
+      const key = clusterKey(item.node);
+      clusterGroups.set(key, [...(clusterGroups.get(key) ?? []), item]);
+    }
+    const hulls: Array<{ key: string; kind: NodeKind; path: string }> = [];
+    for (const [key, members] of clusterGroups) {
+      if (members.length < 3) continue;
+      const hull = convexHull(members.map((m) => ({ x: m.x, y: m.y })));
+      if (hull.length < 3) continue;
+      hulls.push({ key, kind: members[0].kind, path: expandHull(hull, 28) });
+    }
+
     return {
       byId,
       edges: visualEdges,
@@ -398,6 +488,7 @@ export function MemoryConstellation({
         .sort((a, b) => b[1] - a[1])
         .map(([kind, total]) => ({ kind, name: NODE_TONE[kind].label, total }))
         .slice(0, compact ? 5 : 9),
+      hulls,
       positioned: [...positioned].sort((a, b) => a.r - b.r),
       ranked,
     };
@@ -505,12 +596,25 @@ export function MemoryConstellation({
         Press Enter to pin a node and reveal its connected memories.
       </p>
       <svg
+        ref={svgRef}
         aria-label="Memory knowledge graph"
         aria-describedby={summaryId}
-        className="absolute inset-0 h-full w-full"
+        className="absolute inset-0 h-full w-full cursor-grab active:cursor-grabbing"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onWheel={handleWheel}
         preserveAspectRatio="xMidYMid meet"
         role="img"
-        viewBox={`${VIEW_X} ${VIEW_Y} ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
+        viewBox={(() => {
+          const baseW = VIEW_WIDTH + Math.max(0, Math.sqrt(nodes.length) - 8) * 18;
+          const baseH = VIEW_HEIGHT + Math.max(0, Math.sqrt(nodes.length) - 8) * 12;
+          const w = baseW * zoom;
+          const h = baseH * zoom;
+          const cx = VIEW_X + baseW / 2 + pan.x;
+          const cy = VIEW_Y + baseH / 2 + pan.y;
+          return `${cx - w / 2} ${cy - h / 2} ${w} ${h}`;
+        })()}
       >
         <defs>
           <pattern id={gridId} width="48" height="48" patternUnits="userSpaceOnUse">
@@ -523,7 +627,22 @@ export function MemoryConstellation({
           </radialGradient>
         </defs>
         <rect x="-40" y="-40" width={WIDTH + 80} height={HEIGHT + 80} fill={`url(#${glowId})`} />
-        <rect x="-40" y="-40" width={WIDTH + 80} height={HEIGHT + 80} fill={`url(#${gridId})`} opacity="0.72" />
+        <rect x="-40" y="-40" width={WIDTH + 80} height={HEIGHT + 80} fill={`url(#${gridId})`} opacity="0.3" />
+        {!compact && (
+          <g className="memory-constellation-hulls">
+            {layout.hulls.map((hull) => (
+              <polygon
+                key={hull.key}
+                points={hull.path}
+                fill={NODE_TONE[hull.kind].halo}
+                stroke={NODE_TONE[hull.kind].accent}
+                strokeWidth="0.8"
+                strokeDasharray="4 3"
+                opacity="0.18"
+              />
+            ))}
+          </g>
+        )}
         <g>
           {layout.edges.map((edge, index) => {
             const source = layout.byId.get(edge.source);
@@ -532,25 +651,37 @@ export function MemoryConstellation({
             const visual = edge.type === "visual-cluster";
             const connected = isEdgeConnected(edge, activeNodeId);
             const dormant = Boolean(activeNodeId && !connected);
-            const prominent = !activeNodeId && !visual && index < 44;
+            const prominent = !activeNodeId && !visual && index < 8;
             return (
-              <line
-                key={`${edge.source}-${edge.target}-${index}`}
-                className={cn(
-                  "memory-constellation-edge",
-                  prominent && "memory-constellation-edge-flow",
-                  connected && "memory-constellation-edge-active",
+              <g key={`${edge.source}-${edge.target}-${index}`}>
+                <line
+                  className={cn(
+                    "memory-constellation-edge",
+                    prominent && "memory-constellation-edge-flow",
+                    connected && "memory-constellation-edge-active",
+                  )}
+                  x1={source.x}
+                  x2={target.x}
+                  y1={source.y}
+                  y2={target.y}
+                  opacity={dormant ? 0.06 : connected ? 0.9 : visual ? 0.14 : 0.38}
+                  stroke={connected ? "var(--memory-edge-active)" : visual ? "var(--memory-edge-soft)" : "var(--memory-edge)"}
+                  strokeLinecap="round"
+                  strokeWidth={connected ? 1.8 : visual ? 0.6 : 0.9}
+                  style={{ "--memory-edge-delay": `${index * 46}ms` } as CSSProperties}
+                />
+                {connected && edge.type !== "visual-cluster" && (
+                  <text
+                    x={(source.x + target.x) / 2}
+                    y={(source.y + target.y) / 2 - 5}
+                    className="memory-constellation-edge-label"
+                    fill="var(--memory-edge-active)"
+                    textAnchor="middle"
+                  >
+                    {edge.type.replace(/_/g, " ")}
+                  </text>
                 )}
-                x1={source.x}
-                x2={target.x}
-                y1={source.y}
-                y2={target.y}
-                opacity={dormant ? 0.06 : connected ? 0.9 : visual ? 0.2 : 0.54}
-                stroke={connected ? "var(--memory-edge-active)" : visual ? "var(--memory-edge-soft)" : "var(--memory-edge)"}
-                strokeLinecap="round"
-                strokeWidth={connected ? 2.45 : visual ? 0.85 : 1.25}
-                style={{ "--memory-edge-delay": `${index * 46}ms` } as CSSProperties}
-              />
+              </g>
             );
           })}
         </g>
@@ -563,7 +694,7 @@ export function MemoryConstellation({
             const linked = Boolean(activeNodeId && connected && !active);
             const muted = Boolean(activeNodeId && !connected);
             const label = labelFor(node);
-            const showLabel = !compact && (active || rank < 7 || (kind === "community" && rank < 12));
+            const showLabel = !compact && (active || linked || rank < 18 || (kind === "community" && rank < 24));
             const labelLeft = x > WIDTH - 240;
             return (
               <g
@@ -605,14 +736,14 @@ export function MemoryConstellation({
                   cy={y}
                   className="memory-constellation-halo"
                   fill={tone.halo}
-                  r={r * (active ? 3.25 : linked ? 2.8 : 2.35)}
+                  r={r * (active ? 2.2 : linked ? 1.9 : 1.6)}
                 />
                 <circle
                   cx={x}
                   cy={y}
                   className="memory-constellation-ring"
                   fill="none"
-                  r={r * 1.55}
+                  r={r * 1.2}
                   stroke={tone.accent}
                   strokeWidth={active ? 1.8 : 0.85}
                 />
@@ -622,13 +753,13 @@ export function MemoryConstellation({
                   className="memory-constellation-core"
                   fill={tone.fill}
                   opacity={muted ? 0.42 : opacity}
-                  r={active ? r + 2.5 : r}
+                  r={active ? r + 1.5 : r}
                   stroke={tone.accent}
                   strokeWidth={active ? 2 : 1}
                 />
                 {showLabel && (
                   <text
-                    x={labelLeft ? x - r - 11 : x + r + 11}
+                    x={labelLeft ? x - r - 7 : x + r + 7}
                     y={y + 4}
                     className="memory-constellation-label"
                     fill="var(--midground)"

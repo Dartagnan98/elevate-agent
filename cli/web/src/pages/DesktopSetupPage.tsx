@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   Bot,
+  ChevronRight,
   CheckCircle2,
   CircleAlert,
   Clock,
@@ -12,22 +13,29 @@ import {
   FolderOpen,
   KeyRound,
   Loader2,
+  LockKeyhole,
   MessageSquare,
   RefreshCw,
   RotateCw,
   Settings,
   ShieldCheck,
+  Sparkles,
   Terminal,
   type LucideIcon,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { LoginCard } from "@/components/LoginCard";
 import type {
+  AccessStatusResponse,
   AdminSetupSnapshot,
   AgentHubAgent,
   AgentHubSnapshot,
   ComposioStatus,
   HarnessSnapshot,
   OAuthProvidersResponse,
+  PackOnboardingItem,
+  PackOnboardingPack,
+  PackOnboardingSnapshot,
   SourceConnectorsResponse,
   StatusResponse,
   UpdateStatusResponse,
@@ -36,6 +44,7 @@ import { cn, isoTimeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -43,28 +52,89 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 type ReadinessTone = "success" | "warning" | "outline" | "destructive";
 
 interface LoadState {
+  access: AccessStatusResponse | null;
   adminSetup: AdminSetupSnapshot | null;
   composio: ComposioStatus | null;
   connectors: SourceConnectorsResponse | null;
   harness: HarnessSnapshot | null;
   hub: AgentHubSnapshot | null;
   oauth: OAuthProvidersResponse | null;
+  packOnboarding: PackOnboardingSnapshot | null;
   status: StatusResponse | null;
   updateStatus: UpdateStatusResponse | null;
 }
 
 const EMPTY_STATE: LoadState = {
+  access: null,
   adminSetup: null,
   composio: null,
   connectors: null,
   harness: null,
   hub: null,
   oauth: null,
+  packOnboarding: null,
   status: null,
   updateStatus: null,
 };
 
 const REQUIRED_AGENT_IDS = new Set(["executive-assistant", "admin"]);
+
+const PACK_ACCENT: Record<string, string> = {
+  elevate_core: "Basic",
+  real_estate_admin: "Admin",
+  real_estate_sales: "Leads",
+  real_estate_marketing: "Marketing",
+  real_estate_cma: "CMA",
+};
+
+const PACK_CREDENTIAL_FIELDS: Record<string, Array<{ key: string; label: string; password?: boolean }>> = {
+  elevate_core: [
+    { key: "OPENAI_API_KEY", label: "OpenAI API key", password: true },
+    { key: "OPENAI_EMBEDDING_MODEL", label: "Embedding model" },
+    { key: "OPENROUTER_API_KEY", label: "OpenRouter API key", password: true },
+    { key: "ANTHROPIC_API_KEY", label: "Anthropic API key", password: true },
+    { key: "GOOGLE_API_KEY", label: "Google/Gemini API key", password: true },
+    { key: "TELEGRAM_BOT_TOKEN", label: "Executive Assistant Telegram bot token", password: true },
+    { key: "TELEGRAM_ALLOWED_USERS", label: "Allowed Telegram user IDs" },
+    { key: "BROWSER_USE_PROVIDER", label: "Browser-use provider" },
+    { key: "BROWSER_USE_API_KEY", label: "Browser-use API key", password: true },
+    { key: "COMPOSIO_API_KEY", label: "Composio API key", password: true },
+    { key: "ELEVATE_UPDATE_CHANNEL", label: "Update channel" },
+  ],
+  real_estate_admin: [
+    { key: "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", label: "Admin Telegram bot token", password: true },
+    { key: "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", label: "Admin Telegram chat or topic ID" },
+    { key: "MLS_LOGIN_URL", label: "MLS login URL" },
+    { key: "MLS_USERNAME", label: "MLS username or credential ref" },
+    { key: "SKYSLOPE_USERNAME", label: "Compliance username or credential ref" },
+    { key: "SHOWINGTIME_USERNAME", label: "Showing platform username or credential ref" },
+    { key: "PHOTO_SOURCE_ROOT", label: "Photo source folder" },
+  ],
+  real_estate_sales: [
+    { key: "CRM_API_KEY", label: "CRM API key", password: true },
+    { key: "LOFTY_API_KEY", label: "Lofty API key", password: true },
+    { key: "GMAIL_CLIENT_ID", label: "Email/OAuth client ID" },
+    { key: "TWILIO_ACCOUNT_SID", label: "SMS account SID" },
+    { key: "MLS_USERNAME", label: "Buyer search credential ref" },
+  ],
+  real_estate_marketing: [
+    { key: "GMAIL_CLIENT_ID", label: "Email/OAuth client ID" },
+    { key: "AYRSHARE_API_KEY", label: "Social scheduler key", password: true },
+    { key: "GOOGLE_DRIVE_ACCOUNT", label: "Asset storage account/ref" },
+    { key: "MARKETING_ASSET_ROOT", label: "Marketing asset folder" },
+    { key: "PHOTO_SOURCE_ROOT", label: "Approved listing media folder" },
+  ],
+  real_estate_cma: [
+    { key: "MLS_LOGIN_URL", label: "MLS/CMA login URL" },
+    { key: "MLS_USERNAME", label: "MLS credential ref" },
+    { key: "CLOUD_CMA_API_KEY", label: "Cloud CMA API key", password: true },
+    { key: "CMA_TEMPLATE_PATH", label: "CMA template path" },
+    { key: "CMA_OUTPUT_ROOT", label: "CMA output folder" },
+  ],
+};
+
+const ADMIN_MIRROR_PACK_ID = "real_estate_admin";
+const BASIC_PACK_ID = "elevate_core";
 
 function badgeTone(ready: boolean, warning = false): ReadinessTone {
   if (ready) return "success";
@@ -221,6 +291,323 @@ function safeHarness(value: AgentHubSnapshot["harness"] | HarnessSnapshot | null
   return value;
 }
 
+function packTone(pack: PackOnboardingPack): ReadinessTone {
+  if (!pack.unlocked) return "outline";
+  if (pack.complete) return "success";
+  if (pack.completedRequiredCount > 0) return "warning";
+  return "outline";
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function providerSeed(item: PackOnboardingItem): string {
+  const value = recordValue(item.value);
+  return String(item.provider || value.provider || "");
+}
+
+function PackUnlockOnboarding({
+  adminSetup,
+  notify,
+  onSaved,
+  snapshot,
+}: {
+  adminSetup: AdminSetupSnapshot | null;
+  notify: (message: string, type: "success" | "error") => void;
+  onSaved: () => Promise<void>;
+  snapshot: PackOnboardingSnapshot | null;
+}) {
+  const packs = snapshot?.packs ?? [];
+  const activePacks = packs.filter((pack) => pack.unlocked);
+  const defaultPackId =
+    activePacks.find((pack) => pack.launchRequired)?.packId ??
+    activePacks.find((pack) => pack.packId === BASIC_PACK_ID)?.packId ??
+    activePacks.find((pack) => pack.packId === ADMIN_MIRROR_PACK_ID)?.packId ??
+    activePacks[0]?.packId ??
+    packs[0]?.packId ??
+    ADMIN_MIRROR_PACK_ID;
+  const [selectedPackId, setSelectedPackId] = useState(defaultPackId);
+  const [step, setStep] = useState<"celebrate" | "providers" | "credentials">("celebrate");
+  const [saving, setSaving] = useState(false);
+  const [providerValues, setProviderValues] = useState<Record<string, string>>({});
+  const [notesValues, setNotesValues] = useState<Record<string, string>>({});
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+  const [savedPulse, setSavedPulse] = useState(false);
+
+  const selectedPack = packs.find((pack) => pack.packId === selectedPackId) ?? packs[0] ?? null;
+  const credentialFields = selectedPack ? PACK_CREDENTIAL_FIELDS[selectedPack.packId] ?? [] : [];
+  const visibleItems = selectedPack?.items ?? [];
+
+  useEffect(() => {
+    setSelectedPackId(defaultPackId);
+  }, [defaultPackId]);
+
+  useEffect(() => {
+    if (!selectedPack) return;
+    const nextProviders: Record<string, string> = {};
+    const nextNotes: Record<string, string> = {};
+    for (const item of selectedPack.items) {
+      nextProviders[item.key] = providerSeed(item);
+      nextNotes[item.key] = item.notes ?? "";
+    }
+    setProviderValues(nextProviders);
+    setNotesValues(nextNotes);
+    setEnvValues({});
+    setStep("celebrate");
+  }, [selectedPack?.packId, selectedPack?.updatedAt]);
+
+  if (!snapshot || !selectedPack) {
+    return null;
+  }
+
+  const unlockedTitle =
+    selectedPack.packId === BASIC_PACK_ID
+      ? "Congratulations on installing Elevate Basic"
+      : selectedPack.unlocked
+        ? `Congratulations on unlocking ${selectedPack.label}`
+        : `${selectedPack.label} is locked`;
+  const activeLabel = PACK_ACCENT[selectedPack.packId] ?? selectedPack.label;
+
+  async function savePack() {
+    if (!selectedPack) return;
+    setSaving(true);
+    setSavedPulse(false);
+    try {
+      const itemUpdates = visibleItems.map((item) => {
+        const provider = providerValues[item.key]?.trim() ?? "";
+        const notes = notesValues[item.key]?.trim() ?? "";
+        return {
+          key: item.key,
+          status: provider || notes ? "configured" as const : "missing" as const,
+          provider: provider || null,
+          notes: notes || null,
+          value: {
+            provider: provider || null,
+            envKeys: item.envKeys,
+            source: "desktop_setup",
+          },
+        };
+      });
+      for (const [key, value] of Object.entries(envValues)) {
+        if (!value.trim()) continue;
+        await api.setEnvVar(key, value.trim());
+      }
+      await api.updatePackOnboarding(selectedPack.packId, { items: itemUpdates });
+      if (selectedPack.packId === ADMIN_MIRROR_PACK_ID) {
+        await api.updateAdminSetup({ items: itemUpdates });
+        await api.verifyAdminSetup().catch(() => undefined);
+      }
+      await onSaved();
+      setSavedPulse(true);
+      setTimeout(() => setSavedPulse(false), 900);
+      notify(`${selectedPack.label} onboarding saved.`, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Pack onboarding save failed", "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="pack-unlock-shell overflow-hidden rounded-[1.5rem] border border-border bg-card/70">
+      <div className="grid gap-0 xl:grid-cols-[21rem_minmax(0,1fr)]">
+        <div className="border-b border-border/60 p-4 xl:border-b-0 xl:border-r">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div>
+              <div className="text-xs font-medium text-muted-foreground">Unlocked pack onboarding</div>
+              <div className="text-lg font-semibold text-foreground">
+                {snapshot.completedActiveCount}/{snapshot.activeCount} ready
+              </div>
+            </div>
+            <Sparkles className="h-4 w-4 text-primary" />
+          </div>
+          <div className="space-y-2">
+            {packs.map((pack, index) => {
+              const selected = pack.packId === selectedPack.packId;
+              return (
+                <button
+                  key={pack.packId}
+                  type="button"
+                  className={cn(
+                    "pack-unlock-card group w-full rounded-2xl border px-3 py-3 text-left transition-colors",
+                    selected
+                      ? "border-primary/50 bg-primary/10 text-foreground"
+                      : "border-border/60 bg-background/35 text-muted-foreground hover:bg-background/55 hover:text-foreground",
+                    !pack.unlocked && "opacity-60",
+                  )}
+                  style={{ animationDelay: `${index * 70}ms` }}
+                  onClick={() => {
+                    setSelectedPackId(pack.packId);
+                    setStep("celebrate");
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-semibold">{pack.label}</span>
+                        {!pack.unlocked ? <LockKeyhole className="h-3.5 w-3.5" /> : null}
+                      </div>
+                      <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {pack.unlocked ? `${pack.completedRequiredCount}/${pack.requiredCount} fields ready` : "Unlock to configure"}
+                      </div>
+                    </div>
+                    <Badge variant={packTone(pack)}>{pack.unlocked ? `${pack.completionPct}%` : "locked"}</Badge>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="min-w-0 p-4">
+          <div className="pack-unlock-panel relative overflow-hidden rounded-[1.25rem] border border-border/60 bg-background/40 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <Badge variant={selectedPack.unlocked ? "success" : "outline"}>{activeLabel}</Badge>
+                <h3 className="mt-3 text-2xl font-semibold tracking-normal text-foreground">{unlockedTitle}</h3>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+                  {selectedPack.packId === BASIC_PACK_ID
+                    ? "Connect the model, memory, messaging, browser-use, and update settings that every Elevate install needs before paid packs start."
+                    : selectedPack.unlocked
+                      ? "Connect the providers and credential references this pack needs. Elevate stores the workflow contract in SQLite and saves secrets or account refs into the local .env file."
+                      : "This pack stays hidden from production users until their license unlocks it."}
+                </p>
+              </div>
+              <div className={cn("pack-unlock-check flex h-12 w-12 items-center justify-center rounded-full border", savedPulse && "is-saved")}>
+                <Sparkles className="h-5 w-5 text-primary" />
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              {(["celebrate", "providers", "credentials"] as const).map((name, index) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={cn(
+                    "inline-flex min-h-9 items-center gap-2 rounded-full border px-3 text-xs font-medium transition-colors",
+                    step === name
+                      ? "border-primary/50 bg-primary/10 text-foreground"
+                      : "border-border/60 bg-card/40 text-muted-foreground hover:text-foreground",
+                  )}
+                  onClick={() => setStep(name)}
+                  disabled={!selectedPack.unlocked}
+                >
+                  <span>{index + 1}</span>
+                  {name === "celebrate" ? "Unlock" : name === "providers" ? "Providers" : "Credentials"}
+                </button>
+              ))}
+            </div>
+
+            {step === "celebrate" ? (
+              <div className="pack-step-enter mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+                <div className="rounded-2xl border border-border/60 bg-card/45 p-4">
+                  <div className="text-sm font-semibold text-foreground">Before this pack can run</div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {selectedPack.items.slice(0, 6).map((item) => (
+                      <div key={item.key} className="rounded-xl border border-border/55 bg-background/35 px-3 py-2">
+                        <div className="truncate text-xs font-medium text-foreground">{item.label}</div>
+                        <div className="mt-1 truncate text-xs text-muted-foreground">{item.status}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col justify-between rounded-2xl border border-border/60 bg-card/45 p-4">
+                  <div>
+                    <div className="text-sm font-semibold text-foreground">Next form</div>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      Start with provider names, then add credential refs or keys. Nothing launches until the setup gate is ready.
+                    </p>
+                  </div>
+                  <Button
+                    className="mt-4 w-full"
+                    disabled={!selectedPack.unlocked}
+                    onClick={() => setStep("providers")}
+                  >
+                    Start setup
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {step === "providers" ? (
+              <div className="pack-step-enter mt-5 space-y-3">
+                <div className="grid gap-3 md:grid-cols-2">
+                  {visibleItems.map((item) => (
+                    <label key={item.key} className="rounded-2xl border border-border/60 bg-card/45 p-3">
+                      <span className="text-xs font-medium text-muted-foreground">{item.label}</span>
+                      <Input
+                        className="mt-2"
+                        value={providerValues[item.key] ?? ""}
+                        placeholder="Provider, account, or credential ref"
+                        onChange={(event) =>
+                          setProviderValues((prev) => ({ ...prev, [item.key]: event.target.value }))
+                        }
+                      />
+                      <Input
+                        className="mt-2"
+                        value={notesValues[item.key] ?? ""}
+                        placeholder="Notes for this workflow"
+                        onChange={(event) =>
+                          setNotesValues((prev) => ({ ...prev, [item.key]: event.target.value }))
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" onClick={() => setStep("celebrate")}>Back</Button>
+                  <Button onClick={() => setStep("credentials")}>
+                    Continue
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {step === "credentials" ? (
+              <div className="pack-step-enter mt-5 space-y-3">
+                <div className="rounded-2xl border border-border/60 bg-card/45 p-3 text-xs leading-5 text-muted-foreground">
+                  Values entered here are saved through the dashboard env endpoint into the local Elevate `.env`. Use API keys,
+                  tokens, account IDs, or credential refs. Avoid raw passwords unless the local operator explicitly wants that.
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {credentialFields.map((field) => (
+                    <label key={field.key} className="rounded-2xl border border-border/60 bg-card/45 p-3">
+                      <span className="text-xs font-medium text-muted-foreground">{field.label}</span>
+                      <Input
+                        className="mt-2 font-mono-ui text-xs"
+                        type={field.password ? "password" : "text"}
+                        value={envValues[field.key] ?? ""}
+                        placeholder={field.key}
+                        onChange={(event) =>
+                          setEnvValues((prev) => ({ ...prev, [field.key]: event.target.value }))
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs text-muted-foreground">
+                    {adminSetup?.memory?.synced ? "Admin memory is synced." : "Memory sync will update after save."}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={() => setStep("providers")}>Back</Button>
+                    <Button disabled={saving} onClick={() => void savePack()}>
+                      {saving ? "Saving..." : "Save onboarding"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function DesktopSetupPage() {
   const [state, setState] = useState<LoadState>(EMPTY_STATE);
   const [loading, setLoading] = useState(true);
@@ -232,10 +619,12 @@ export default function DesktopSetupPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [status, hub, adminSetup, oauth, connectors, composio, harness, updateStatus] = await Promise.all([
+      const [status, access, hub, adminSetup, packOnboarding, oauth, connectors, composio, harness, updateStatus] = await Promise.all([
         api.getStatus(),
+        api.getAccessStatus().catch(() => null),
         api.getAgentHub(),
         api.getAdminSetup().catch(() => null),
+        api.getPackOnboarding().catch(() => null),
         api.getOAuthProviders().catch(() => null),
         api.getSourceConnectors().catch(() => null),
         api.getComposioStatus().catch(() => null),
@@ -243,12 +632,14 @@ export default function DesktopSetupPage() {
         api.getUpdateStatus().catch(() => null),
       ]);
       setState({
+        access,
         adminSetup,
         composio,
         connectors,
         harness,
         hub,
         oauth,
+        packOnboarding,
         status,
         updateStatus,
       });
@@ -313,6 +704,10 @@ export default function DesktopSetupPage() {
   const setup = state.adminSetup;
   const setupReady = Boolean(setup?.canStartAdmin || setup?.complete);
   const setupWarning = Boolean(setup && !setupReady && setup.completedRequiredCount > 0);
+  const packSetupReady = Boolean(state.packOnboarding?.complete);
+  const packSetupWarning = Boolean(
+    state.packOnboarding && !packSetupReady && state.packOnboarding.completedActiveCount > 0,
+  );
   const gatewayReady = Boolean(state.status?.gateway_running && state.hub?.gateway.running);
   const worker = state.hub?.agentWorker;
   const workerReady = Boolean(worker?.enabled && worker.state !== "error" && worker.state !== "disabled");
@@ -321,8 +716,8 @@ export default function DesktopSetupPage() {
   const reliabilityReady = Boolean(harness || state.hub?.cron.total || state.hub?.memory.db_exists);
   const updatesAvailable = Boolean(state.updateStatus?.available && state.updateStatus.behind);
 
-  const readySections = [setupReady, runtimeReady, lanesReady, accountReady, reliabilityReady].filter(Boolean).length;
-  const totalSections = 5;
+  const readySections = [packSetupReady, setupReady, runtimeReady, lanesReady, accountReady, reliabilityReady].filter(Boolean).length;
+  const totalSections = 6;
   const overallReady = readySections === totalSections;
 
   useLayoutEffect(() => {
@@ -348,6 +743,13 @@ export default function DesktopSetupPage() {
     };
   }, [load, loading, overallReady, readySections, setAfterTitle, setEnd, updatedAt]);
 
+  const handleAuthChange = useCallback(
+    (authenticated: boolean) => {
+      if (authenticated) void load();
+    },
+    [load],
+  );
+
   if (loading && !state.status && !state.hub) {
     return (
       <div className="flex items-center justify-center py-24">
@@ -359,6 +761,10 @@ export default function DesktopSetupPage() {
   return (
     <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
       <Toast toast={toast} />
+
+      <section className="grid gap-4 xl:grid-cols-2">
+        <LoginCard onAuthChange={handleAuthChange} />
+      </section>
 
       <section className="overflow-hidden rounded-[1.5rem] border border-border bg-card/70">
         <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_24rem]">
@@ -374,6 +780,9 @@ export default function DesktopSetupPage() {
               <Badge variant={lanesReady ? "success" : "warning"}>{separateLaneCount}/2 Telegram lanes</Badge>
               <Badge variant={updatesAvailable ? "warning" : "outline"}>
                 {updatesAvailable ? `${state.updateStatus?.behind} updates available` : "up to date"}
+              </Badge>
+              <Badge variant={packSetupReady ? "success" : packSetupWarning ? "warning" : "outline"}>
+                {state.packOnboarding?.activeCount ?? 0} packs active
               </Badge>
             </div>
             <h2 className="mt-4 text-2xl font-semibold tracking-normal text-foreground sm:text-3xl">
@@ -415,6 +824,12 @@ export default function DesktopSetupPage() {
 
           <div className="grid gap-2">
             <RunwayStep
+              icon={Sparkles}
+              label="Unlocked pack onboarding"
+              tone={packSetupReady ? "success" : packSetupWarning ? "warning" : "outline"}
+              description={`${state.packOnboarding?.completedActiveCount ?? 0}/${state.packOnboarding?.activeCount ?? 0} active packs ready.`}
+            />
+            <RunwayStep
               icon={ShieldCheck}
               label="Admin setup"
               tone={setupReady ? "success" : setupWarning ? "warning" : "outline"}
@@ -447,6 +862,13 @@ export default function DesktopSetupPage() {
           </div>
         </div>
       </section>
+
+      <PackUnlockOnboarding
+        adminSetup={state.adminSetup}
+        notify={showToast}
+        snapshot={state.packOnboarding}
+        onSaved={load}
+      />
 
       <section className="grid gap-4 xl:grid-cols-2">
         <ReadinessCard

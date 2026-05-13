@@ -1,5 +1,5 @@
-// Hardcoded fixture data used when ELEVATE_DEV_FIXTURE=1.
-// Lets us verify the round trip without a live HQ database.
+// Fallback fixture data used by the file-backed HQ store.
+// Repo-seeded skill folders are added on top of these in skill-seeds.ts.
 
 export const FIXTURE_USER = {
   id: "00000000-0000-0000-0000-000000000001",
@@ -17,6 +17,7 @@ export const FIXTURE_SKILLS = [
     manifest: {
       description: "Generate a comparative market analysis from MLS + local comps.",
       tags: ["real-estate", "pricing"],
+      entitlement: "real_estate_cma",
     },
     body: "# CMA Generator\n\nProduce a full CMA for the provided listing...\n\n(stub fixture body — real skill loads from the HQ skill store in prod)\n",
   },
@@ -27,6 +28,7 @@ export const FIXTURE_SKILLS = [
     manifest: {
       description: "Draft seller outreach messages tuned to the listing's condition.",
       tags: ["real-estate", "outreach"],
+      entitlement: "real_estate_sales",
     },
     body: "# Listing Outreach\n\nGiven a seller and their listing context, draft tone-appropriate messages...\n\n(stub fixture body)\n",
   },
@@ -36,6 +38,7 @@ export const FIXTURE_SKILLS = [
     tier_required: "builder",
     manifest: {
       description: "Advanced skill — only visible at builder tier.",
+      entitlement: "real_estate_admin",
     },
     body: "# Builder-Only\n\nThis would only show up for builder-tier subs.\n",
   },

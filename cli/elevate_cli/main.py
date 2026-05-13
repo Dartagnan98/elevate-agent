@@ -7506,6 +7506,12 @@ For more help on a command:
     cloud_fetch.add_argument("name")
     cloud_fetch.add_argument("--json", action="store_true")
     cloud_fetch.set_defaults(func=elevate_cloud_skills.cmd_cloud_fetch)
+    cloud_sync = cloud_sub.add_parser(
+        "sync",
+        help="Install or update all paid cloud skills for this profile",
+    )
+    cloud_sync.add_argument("--json", action="store_true")
+    cloud_sync.set_defaults(func=elevate_cloud_skills.cmd_cloud_sync)
 
     from elevate_cli import access as elevate_access
 

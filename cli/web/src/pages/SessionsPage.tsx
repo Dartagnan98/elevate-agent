@@ -49,9 +49,9 @@ import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 const SOURCE_CONFIG: Record<string, { icon: typeof Terminal; color: string }> =
   {
     cli: { icon: Terminal, color: "text-primary" },
-    telegram: { icon: MessageCircle, color: "text-[oklch(0.65_0.15_250)]" },
-    discord: { icon: Hash, color: "text-[oklch(0.65_0.15_280)]" },
-    slack: { icon: MessageSquare, color: "text-[oklch(0.7_0.15_155)]" },
+    telegram: { icon: MessageCircle, color: "text-info" },
+    discord: { icon: Hash, color: "text-accent" },
+    slack: { icon: MessageSquare, color: "text-success" },
     whatsapp: { icon: Globe, color: "text-success" },
     cron: { icon: Clock, color: "text-warning" },
   };
@@ -241,7 +241,7 @@ function MessageList({
   return (
     <div
       ref={containerRef}
-      className="flex flex-col gap-3 max-h-[600px] overflow-y-auto pr-2"
+      className="flex flex-col gap-3 min-h-0 flex-1 overflow-y-auto pr-2"
     >
       {messages.map((msg, i) => (
         <MessageBubble key={i} msg={msg} highlight={highlight} />
@@ -300,17 +300,10 @@ function SessionRow({
           : "border-border"
       }`}
     >
-      <div
-        className="flex items-center justify-between p-3 cursor-pointer hover:bg-secondary/30 transition-colors"
+      <button
+        type="button"
+        className="flex w-full items-center justify-between p-3 text-left cursor-pointer hover:bg-secondary/30 transition-colors"
         onClick={onOpenChat}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onOpenChat();
-          }
-        }}
-        role="button"
-        tabIndex={0}
         title={
           resumeInChatEnabled
             ? t.sessions.resumeInChat
@@ -409,7 +402,7 @@ function SessionRow({
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
-      </div>
+      </button>
 
       {isExpanded && (
         <div className="border-t border-border bg-background/50 p-4">

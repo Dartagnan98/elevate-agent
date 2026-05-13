@@ -112,6 +112,26 @@ def compute_onboarding_status() -> dict[str, Any]:
     except Exception as exc:
         checks.append({"id": "templates_seeded", "label": "Active templates available for every lane", "ok": False, "detail": str(exc)})
 
+    # 6. Every unlocked pack has completed its own setup contract.
+    try:
+        from elevate_cli.data import connect, get_pack_onboarding
+
+        with connect() as conn:
+            pack_setup = get_pack_onboarding(conn)
+        missing = pack_setup.get("launchRequiredPacks") or []
+        checks.append({
+            "id": "pack_onboarding",
+            "label": "Unlocked pack onboarding complete",
+            "ok": not missing,
+            "detail": (
+                f"{pack_setup.get('completedActiveCount', 0)}/{pack_setup.get('activeCount', 0)} active packs ready"
+                if not missing
+                else "needs setup: " + ", ".join(str(item) for item in missing)
+            ),
+        })
+    except Exception as exc:
+        checks.append({"id": "pack_onboarding", "label": "Unlocked pack onboarding complete", "ok": False, "detail": str(exc)})
+
     required_checks = [c for c in checks if not c.get("optional")]
     ready = all(c["ok"] for c in required_checks) if required_checks else False
 

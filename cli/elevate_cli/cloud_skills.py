@@ -4,29 +4,31 @@ Cloud skill access — fetch skill bodies from the Elevate backend.
 Skills live server-side, gated by subscription tier. This module:
   - lists skills available to the user (manifest only, no body)
   - fetches a skill body on demand (GET /api/skills/run)
-  - mounts all available skills into a session-ephemeral tmp dir so the
-    existing Elevate skill loader picks them up
+  - syncs all available skills into ELEVATE_HOME/cloud-skills so the
+    existing Elevate skill loader picks them up across restarts
 
-The tmp dir is wiped when the process exits.
+The cloud-skills directory is profile-local and entitlement-controlled by the
+backend. Sync removes previously synced cloud skills that are no longer
+available at the current tier.
 """
 
 from __future__ import annotations
 
-import atexit
 import json
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from elevate_cli import license as elevate_license
+from elevate_constants import get_elevate_home
 
 _MOUNT_DIR: Optional[Path] = None
 _MOUNTED_SKILLS: list[str] = []
+_MARKER = ".elevate-cloud-skill.json"
 
 
 def _client() -> httpx.Client:
@@ -68,28 +70,100 @@ def fetch_skill(name: str, args: Optional[dict] = None) -> dict:
     return resp.json()
 
 
+def cloud_skills_dir() -> Path:
+    override = os.environ.get("ELEVATE_CLOUD_SKILLS_DIR", "").strip()
+    return Path(override).expanduser() if override else get_elevate_home() / "cloud-skills"
+
+
+def _skill_dir_name(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in name.strip())
+    safe = safe.strip(".-")
+    return safe or "cloud-skill"
+
+
+def _add_extra_skills_path(path: Path) -> None:
+    """Expose the persistent cloud skill dir to this process, if needed."""
+    resolved = str(path.resolve())
+    existing = os.environ.get("ELEVATE_EXTRA_SKILLS_PATH", "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if resolved not in parts:
+        parts.append(resolved)
+        os.environ["ELEVATE_EXTRA_SKILLS_PATH"] = os.pathsep.join(parts)
+
+
 def _write_skill(root: Path, name: str, body: str, manifest: dict) -> None:
-    skill_dir = root / name
+    skill_dir = root / _skill_dir_name(name)
     skill_dir.mkdir(parents=True, exist_ok=True)
 
     # Build SKILL.md with YAML frontmatter from the manifest
-    front = ["---", f"name: {name}"]
+    front = ["---", f"name: {json.dumps(name)}"]
     desc = manifest.get("description")
     if desc:
-        front.append(f"description: {desc}")
+        front.append(f"description: {json.dumps(str(desc))}")
     tags = manifest.get("tags")
     if tags:
-        front.append(f"tags: [{', '.join(tags)}]")
+        front.append(f"tags: {json.dumps(list(tags))}")
     entitlement = (
         manifest.get("entitlement")
         or manifest.get("requires_entitlement")
         or manifest.get("required_entitlement")
     )
     if entitlement:
-        front.extend(["access:", f"  entitlement: {entitlement}"])
+        front.extend(["access:", f"  entitlement: {json.dumps(str(entitlement))}"])
     front.append("---")
     content = "\n".join(front) + "\n\n" + body
-    (skill_dir / "SKILL.md").write_text(content)
+    skill_tmp = skill_dir / "SKILL.md.tmp"
+    skill_tmp.write_text(content, encoding="utf-8")
+    skill_tmp.replace(skill_dir / "SKILL.md")
+
+    marker_tmp = skill_dir / f"{_MARKER}.tmp"
+    marker_tmp.write_text(
+        json.dumps(
+            {
+                "name": name,
+                "source": "elevation-real-estate-hq",
+                "manifest": manifest,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    marker_tmp.replace(skill_dir / _MARKER)
+
+
+def _read_marker_name(path: Path) -> Optional[str]:
+    try:
+        marker = json.loads((path / _MARKER).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    name = marker.get("name")
+    return str(name) if name else None
+
+
+def _remove_stale_synced_skills(root: Path, available_names: set[str]) -> list[str]:
+    removed: list[str] = []
+    if not root.exists():
+        return removed
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        name = _read_marker_name(child)
+        if not name or name in available_names:
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+        removed.append(name)
+    return removed
+
+
+def _existing_synced_names(root: Path) -> list[str]:
+    names: list[str] = []
+    if not root.exists():
+        return names
+    for child in root.iterdir():
+        if not child.is_dir() or not (child / "SKILL.md").exists():
+            continue
+        names.append(_read_marker_name(child) or child.name)
+    return sorted(names)
 
 
 def mounted_skill_names() -> list[str]:
@@ -97,47 +171,80 @@ def mounted_skill_names() -> list[str]:
     return list(_MOUNTED_SKILLS)
 
 
-def mount_all() -> Optional[Path]:
-    """Fetch all subscription skills and write to a tmp dir. Return the path."""
+def sync_all(target_dir: Optional[Path] = None) -> dict:
+    """Fetch all subscription skills and persist them to disk."""
     global _MOUNT_DIR, _MOUNTED_SKILLS
-    if _MOUNT_DIR is not None:
-        return _MOUNT_DIR
-
+    root = target_dir or cloud_skills_dir()
     _MOUNTED_SKILLS = []
     try:
         skills = list_skills()
     except elevate_license.LicenseError as e:
         print(f"cloud skills unavailable: {e}", file=sys.stderr)
-        return None
+        return {
+            "path": None,
+            "skill_count": 0,
+            "skill_names": [],
+            "removed": [],
+            "errors": [str(e)],
+        }
 
     if not skills:
-        return None
+        return {
+            "path": str(root),
+            "skill_count": 0,
+            "skill_names": [],
+            "removed": _remove_stale_synced_skills(root, set()),
+            "errors": [],
+        }
 
-    tmp = Path(tempfile.mkdtemp(prefix="elevate-skills-"))
-    atexit.register(lambda: shutil.rmtree(tmp, ignore_errors=True))
+    root.mkdir(parents=True, exist_ok=True)
+    available_names = {str(stub.get("name", "")).strip() for stub in skills if stub.get("name")}
+    removed = _remove_stale_synced_skills(root, available_names)
 
     mounted: list[str] = []
+    errors: list[str] = []
     for stub in skills:
         try:
             full = fetch_skill(stub["name"])
-        except elevate_license.LicenseError:
+        except elevate_license.LicenseError as exc:
+            errors.append(f"{stub.get('name')}: {exc}")
             continue
         name = full["name"]
-        _write_skill(tmp, name, full.get("body", ""), full.get("manifest", {}))
+        _write_skill(root, name, full.get("body", ""), full.get("manifest", {}))
         mounted.append(name)
 
-    if not mounted:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return None
-
-    _MOUNT_DIR = tmp
+    _MOUNT_DIR = root if mounted else None
     _MOUNTED_SKILLS = mounted
-    # Point Elevate's skill loader at the mount dir (additive).
-    existing = os.environ.get("ELEVATE_EXTRA_SKILLS_PATH", "")
-    os.environ["ELEVATE_EXTRA_SKILLS_PATH"] = (
-        f"{existing}:{tmp}" if existing else str(tmp)
-    )
-    return tmp
+    if mounted:
+        _add_extra_skills_path(root)
+    return {
+        "path": str(root),
+        "skill_count": len(mounted),
+        "skill_names": mounted,
+        "removed": removed,
+        "errors": errors,
+    }
+
+
+def mount_all() -> Optional[Path]:
+    """Sync subscription skills and expose the persistent dir to this process."""
+    global _MOUNT_DIR, _MOUNTED_SKILLS
+    if _MOUNT_DIR is not None:
+        _add_extra_skills_path(_MOUNT_DIR)
+        return _MOUNT_DIR
+    root = cloud_skills_dir()
+    existing = _existing_synced_names(root)
+    if existing:
+        _MOUNT_DIR = root
+        _MOUNTED_SKILLS = existing
+        _add_extra_skills_path(root)
+        return root
+    result = sync_all()
+    path = result.get("path")
+    if not path or not result.get("skill_count"):
+        return None
+    _MOUNT_DIR = Path(path)
+    return _MOUNT_DIR
 
 
 # --- CLI subcommands ---
@@ -167,4 +274,37 @@ def cmd_cloud_fetch(args) -> int:
         print(json.dumps(skill, indent=2))
     else:
         print(skill.get("body", ""))
+    return 0
+
+
+def cmd_cloud_sync(args) -> int:
+    try:
+        result = sync_all()
+    except elevate_license.LicenseError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return 0
+
+    path = result.get("path")
+    count = result.get("skill_count", 0)
+    print(f"paid skills synced: {count}")
+    if path:
+        print(f"path: {path}")
+    names = result.get("skill_names") or []
+    for name in names:
+        print(f"  {name}")
+    removed = result.get("removed") or []
+    if removed:
+        print("removed stale skills:")
+        for name in removed:
+            print(f"  {name}")
+    errors = result.get("errors") or []
+    if errors:
+        print("warnings:", file=sys.stderr)
+        for item in errors:
+            print(f"  {item}", file=sys.stderr)
+        return 1 if count == 0 else 0
     return 0

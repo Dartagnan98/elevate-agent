@@ -37,7 +37,7 @@ from typing import Any, Optional
 
 import httpx
 
-DEFAULT_BACKEND = ""
+DEFAULT_BACKEND = "https://api.elevationrealestatehq.com"
 BACKEND_URL = os.environ.get("ELEVATE_BACKEND_URL", DEFAULT_BACKEND).rstrip("/")
 
 LICENSE_PATH = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate") / "license.json"
@@ -310,11 +310,11 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
         try:
             from elevate_cli import cloud_skills
 
-            mount_dir = cloud_skills.mount_all()
-            names = cloud_skills.mounted_skill_names()
-            result["skills_path"] = str(mount_dir) if mount_dir else None
-            result["skill_count"] = len(names)
-            result["skill_names"] = names
+            sync_result = cloud_skills.sync_all()
+            result["skills_path"] = sync_result.get("path")
+            result["skill_count"] = sync_result.get("skill_count", 0)
+            result["skill_names"] = sync_result.get("skill_names", [])
+            result["skill_sync_warnings"] = sync_result.get("errors", [])
         except Exception as exc:
             result["skill_error"] = str(exc)
 
@@ -365,9 +365,11 @@ def cmd_activate(args) -> int:
         if activation.get("skill_error"):
             print(f"paid skill sync warning: {activation['skill_error']}", file=sys.stderr)
         elif activation.get("skill_count"):
-            print(f"paid skills ready: {activation['skill_count']}")
+            print(f"paid skills ready: {activation['skill_count']} at {activation.get('skills_path')}")
         else:
             print("paid skills ready: none returned for this tier")
+        for warning in activation.get("skill_sync_warnings") or []:
+            print(f"paid skill warning: {warning}", file=sys.stderr)
     print("next: run `elevate` or `elevate dashboard`.")
     return 0
 

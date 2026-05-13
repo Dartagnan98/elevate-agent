@@ -1,16 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
-import { supabase } from "@/lib/supabase";
+import {
+  findUserByStripeCustomer,
+  revokeLicensesForUser,
+  updateUserSubscription,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
-  apiVersion: "2025-03-31.basil" as Stripe.LatestApiVersion,
-});
-
-const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
-
 export async function POST(req: NextRequest) {
+  const secretKey = process.env.STRIPE_SECRET_KEY || "";
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
+  if (!secretKey || !webhookSecret) {
+    return NextResponse.json({ error: "stripe webhook is not configured" }, { status: 503 });
+  }
+
+  const stripe = new Stripe(secretKey, {
+    apiVersion: "2025-03-31.basil" as Stripe.LatestApiVersion,
+  });
   const sig = req.headers.get("stripe-signature");
   if (!sig) return NextResponse.json({ error: "missing signature" }, { status: 400 });
 
@@ -43,37 +50,27 @@ export async function POST(req: NextRequest) {
 }
 
 async function upsertSubscription(sub: Stripe.Subscription) {
-  const { data: user } = await supabase
-    .from("users")
-    .select("id")
-    .eq("stripe_customer", sub.customer as string)
-    .maybeSingle();
+  const user = findUserByStripeCustomer(sub.customer as string);
   if (!user) return;
 
   const tier = sub.items.data[0]?.price.id === process.env.STRIPE_PRICE_BUILDER_MONTHLY ? "builder" : "pro";
 
-  await supabase.from("subscriptions").upsert(
-    {
-      user_id: user.id,
-      stripe_sub_id: sub.id,
-      status: sub.status,
-      tier,
-      current_period_end: (sub as unknown as { current_period_end?: number }).current_period_end
-        ? new Date((sub as unknown as { current_period_end: number }).current_period_end * 1000).toISOString()
-        : null,
-      cancel_at_period_end: sub.cancel_at_period_end,
-    },
-    { onConflict: "stripe_sub_id" },
-  );
+  updateUserSubscription(user.id, {
+    status: ["active", "trialing"].includes(sub.status)
+      ? (sub.status as "active" | "trialing")
+      : sub.status === "past_due"
+        ? "past_due"
+        : "canceled",
+    tier,
+    current_period_end: (sub as unknown as { current_period_end?: number }).current_period_end
+      ? new Date((sub as unknown as { current_period_end: number }).current_period_end * 1000).toISOString()
+      : null,
+  });
 }
 
 async function revokeLicenses(stripeCustomerId: string) {
-  const { data: user } = await supabase
-    .from("users")
-    .select("id")
-    .eq("stripe_customer", stripeCustomerId)
-    .maybeSingle();
+  const user = findUserByStripeCustomer(stripeCustomerId);
   if (!user) return;
 
-  await supabase.from("licenses").update({ revoked: true }).eq("user_id", user.id);
+  revokeLicensesForUser(user.id);
 }

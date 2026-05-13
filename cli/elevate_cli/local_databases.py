@@ -40,9 +40,32 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
 
         path = operational_db_path()
         with connect() as conn:
+            # Make a fresh install usable before any dashboard page is opened.
+            # The migrations create the tables; these idempotent calls seed the
+            # default Admin actions, setup rows, pack onboarding rows, and any
+            # local province guide material already present in ELEVATE_HOME.
+            from elevate_cli.data.admin_setup import get_admin_setup
+            from elevate_cli.data.dispatch import ensure_default_admin_actions
+            from elevate_cli.data.pack_onboarding import get_pack_onboarding
+            from elevate_cli.data.province_guides import import_exp_agent_centre
+
+            ensure_default_admin_actions(conn)
+            get_admin_setup(conn)
+            get_pack_onboarding(conn)
+            import_exp_agent_centre(conn)
             applied = conn.execute("SELECT COUNT(*) FROM _schema_migrations").fetchone()
+            admin_actions = conn.execute("SELECT COUNT(*) FROM admin_action_registry").fetchone()
+            pack_items = conn.execute("SELECT COUNT(*) FROM pack_onboarding_items").fetchone()
         count = int(applied[0] if applied else 0)
-        results.append(_ok("operational", path, f"{count} schema migrations applied"))
+        action_count = int(admin_actions[0] if admin_actions else 0)
+        pack_item_count = int(pack_items[0] if pack_items else 0)
+        results.append(
+            _ok(
+                "operational",
+                path,
+                f"{count} schema migrations applied; {action_count} admin actions; {pack_item_count} onboarding items",
+            )
+        )
     except Exception as exc:  # pragma: no cover - surfaced in installer output
         try:
             from elevate_cli.data.paths import operational_db_path
@@ -84,6 +107,23 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
             except Exception:
                 path = Path("~/.elevate/memory_store.db").expanduser()
             results.append(_fail("memory", path, exc))
+
+    try:
+        from elevate_cli import outreach_db
+
+        seeded = outreach_db.seed_all_templates()
+        path = outreach_db.db_path()
+        inserted = len(seeded.get("inserted", []))
+        skipped = len(seeded.get("skipped", []))
+        results.append(_ok("outreach", path, f"{inserted} templates inserted; {skipped} already present"))
+    except Exception as exc:  # pragma: no cover - surfaced in installer output
+        try:
+            from elevate_cli import outreach_db
+
+            path = outreach_db.db_path()
+        except Exception:
+            path = Path("~/.elevate/tools/data/outreach/outreach.db").expanduser()
+        results.append(_fail("outreach", path, exc))
 
     return results
 

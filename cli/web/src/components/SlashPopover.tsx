@@ -565,13 +565,18 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
 
     let lastGroup = "";
 
+    const listboxId = "slash-popover-listbox";
+    const activeItemId = items[selected] ? `slash-item-${selected}` : undefined;
+
     return (
       <div
+        aria-activedescendant={activeItemId}
         className={cn(
           "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[20rem] overflow-y-auto rounded-2xl p-1.5",
           "bg-[var(--chat-surface-soft)] text-[var(--chat-text)]",
           "shadow-[0_18px_54px_rgba(0,0,0,0.32),inset_0_0_0_1px_var(--chat-border)] backdrop-blur-xl",
         )}
+        id={listboxId}
         role="listbox"
       >
         {items.map((item, index) => {
@@ -595,6 +600,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
                     ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)]"
                     : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
                 )}
+                id={`slash-item-${index}`}
                 onClick={() => apply(item)}
                 onMouseEnter={() => setSelected(index)}
                 role="option"

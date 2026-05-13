@@ -187,6 +187,14 @@ from elevate_cli.data.admin_setup import (
     sync_admin_setup_runtime,
     update_admin_setup,
 )
+from elevate_cli.data.pack_onboarding import (
+    complete_pack_onboarding,
+    get_pack_onboarding,
+    pack_onboarding_memory_summary,
+    pack_onboarding_ready,
+    sync_pack_onboarding_memory,
+    update_pack_onboarding,
+)
 
 
 __all__ = [
@@ -263,6 +271,10 @@ __all__ = [
     "admin_setup_memory_summary", "admin_setup_ready", "complete_admin_setup",
     "get_admin_setup", "require_admin_setup_ready", "sync_admin_setup_memory",
     "sync_admin_setup_runtime", "update_admin_setup",
+    # paid pack onboarding
+    "complete_pack_onboarding", "get_pack_onboarding",
+    "pack_onboarding_memory_summary", "pack_onboarding_ready",
+    "sync_pack_onboarding_memory", "update_pack_onboarding",
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
     "eligible_templates", "pick_template",

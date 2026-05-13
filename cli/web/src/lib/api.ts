@@ -1,6 +1,10 @@
 const BASE = "";
 
 import type {
+  LicenseStatusResponse,
+  LicenseActivateResponse,
+  LicenseSyncSkillsResponse,
+  LicenseLogoutResponse,
   AccessStatusResponse,
   SourceConnectorsResponse,
   SourceRecordsResponse,
@@ -29,6 +33,8 @@ import type {
   AdminJurisdictionUpdateRequest,
   AdminSetupSnapshot,
   AdminSetupUpdateRequest,
+  PackOnboardingSnapshot,
+  PackOnboardingUpdateRequest,
   AdminDealsResponse,
   AdminContactsResponse,
   ComposioStatus,
@@ -140,6 +146,21 @@ async function getSessionToken(): Promise<string> {
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getAccessStatus: () => fetchJSON<AccessStatusResponse>("/api/access"),
+  getLicenseStatus: () => fetchJSON<LicenseStatusResponse>("/api/license/status"),
+  activateLicense: (email: string, password: string, backendUrl?: string) =>
+    fetchJSON<LicenseActivateResponse>("/api/license/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, backend_url: backendUrl || undefined }),
+    }),
+  syncLicenseSkills: () =>
+    fetchJSON<LicenseSyncSkillsResponse>("/api/license/sync-skills", {
+      method: "POST",
+    }),
+  logoutLicense: () =>
+    fetchJSON<LicenseLogoutResponse>("/api/license/logout", {
+      method: "POST",
+    }),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
@@ -612,6 +633,17 @@ export const api = {
     }),
   completeAdminSetup: () =>
     fetchJSON<AdminSetupSnapshot>("/api/admin/setup/complete", {
+      method: "POST",
+    }),
+  getPackOnboarding: () => fetchJSON<PackOnboardingSnapshot>("/api/pack-onboarding"),
+  updatePackOnboarding: (packId: string, body: PackOnboardingUpdateRequest) =>
+    fetchJSON<PackOnboardingSnapshot>(`/api/pack-onboarding/${encodeURIComponent(packId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  completePackOnboarding: (packId: string) =>
+    fetchJSON<PackOnboardingSnapshot>(`/api/pack-onboarding/${encodeURIComponent(packId)}/complete`, {
       method: "POST",
     }),
   getAdminJurisdiction: () => fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction"),

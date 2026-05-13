@@ -1,5 +1,45 @@
 import type { DashboardTheme } from "@/themes/types";
 
+export interface LicenseStatusResponse {
+  authenticated: boolean;
+  email: string | null;
+  tier: string | null;
+  license_id: string | null;
+  entitlements: string[];
+  expires_at: number | null;
+  expired: boolean;
+  status_text: string;
+  packs: AccessStatusResponse["packs"];
+}
+
+export interface LicenseActivateResponse {
+  authenticated: boolean;
+  email: string;
+  tier: string;
+  license_id: string;
+  entitlements: string[];
+  expires_at: number;
+  packs: AccessStatusResponse["packs"];
+  skill_count: number;
+  skill_names: string[];
+  skill_error: string | null;
+}
+
+export interface LicenseSyncSkillsResponse {
+  skill_count: number;
+  skill_names: string[];
+  path: string | null;
+  removed: string[];
+  errors: string[];
+  packs: AccessStatusResponse["packs"];
+}
+
+export interface LicenseLogoutResponse {
+  authenticated: false;
+  cleared: boolean;
+  packs: AccessStatusResponse["packs"];
+}
+
 export interface AccessEntitlementState {
   status: string;
   active: boolean;
@@ -732,6 +772,64 @@ export interface AdminSetupSnapshot {
 
 export interface AdminSetupUpdateRequest {
   profile?: Partial<AdminSetupProfile>;
+  items?: Array<{
+    key: string;
+    status: AdminSetupItemStatus;
+    provider?: string | null;
+    value?: unknown;
+    notes?: string | null;
+  }>;
+}
+
+export interface PackOnboardingItem {
+  packId: string;
+  key: string;
+  category: string;
+  label: string;
+  description?: string | null;
+  required: boolean;
+  status: AdminSetupItemStatus;
+  provider?: string | null;
+  envKeys: string[];
+  value?: unknown;
+  notes?: string | null;
+  sortOrder: number;
+  updatedAt?: string | null;
+  source?: string;
+}
+
+export interface PackOnboardingPack {
+  packId: string;
+  label: string;
+  entitlement: string;
+  description: string;
+  unlocked: boolean;
+  status: AdminSetupItemStatus;
+  complete: boolean;
+  launchRequired: boolean;
+  requiredCount: number;
+  completedRequiredCount: number;
+  missingRequiredKeys: string[];
+  completionPct: number;
+  completedAt?: string | null;
+  updatedAt?: string | null;
+  items: PackOnboardingItem[];
+}
+
+export interface PackOnboardingSnapshot {
+  packs: PackOnboardingPack[];
+  activeCount: number;
+  completedActiveCount: number;
+  launchRequiredPacks: string[];
+  complete: boolean;
+  memory?: {
+    path?: string;
+    synced?: boolean;
+    bytes?: number;
+  };
+}
+
+export interface PackOnboardingUpdateRequest {
   items?: Array<{
     key: string;
     status: AdminSetupItemStatus;

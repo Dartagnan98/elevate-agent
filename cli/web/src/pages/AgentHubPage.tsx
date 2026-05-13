@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type Keyboa
 import { Link } from "react-router-dom";
 import {
   Activity,
-  Bot,
   Brain,
   CalendarClock,
   CheckCircle2,
@@ -15,12 +14,10 @@ import {
   RefreshCw,
   RotateCw,
   Save,
-  Shield,
   Sparkles,
   Terminal,
   Users,
   Wrench,
-  Settings,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
@@ -31,9 +28,7 @@ import type {
   HarnessSnapshot,
 } from "@/lib/api";
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { MemoryConstellation } from "@/components/MemoryConstellation";
 import { Toast } from "@/components/Toast";
@@ -48,13 +43,6 @@ const STATUS_COPY: Record<string, string> = {
   needs_model: "Needs model",
   needs_telegram: "Needs Telegram",
 };
-
-function statusVariant(status: string): "success" | "warning" | "outline" | "secondary" {
-  if (status === "online" || status === "ready") return "success";
-  if (status === "needs_model" || status === "needs_telegram") return "warning";
-  if (status === "disabled") return "secondary";
-  return "outline";
-}
 
 function envPlaceholder(
   envVars: Record<string, EnvVarInfo> | null,
@@ -89,7 +77,6 @@ function looksLikeTelegramBotToken(value: string) {
 }
 
 function Stat({
-  icon: Icon,
   label,
   value,
 }: {
@@ -98,15 +85,10 @@ function Stat({
   value: string | number;
 }) {
   return (
-    <div className="rounded-2xl border border-border bg-muted/20 px-3 py-2">
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        <span className="text-[0.68rem] font-medium">
-          {label}
-        </span>
-      </div>
-      <div className="mt-1 text-lg font-semibold text-foreground">{value}</div>
-    </div>
+    <span className="text-sm text-muted-foreground">
+      <span className="font-medium tabular-nums text-foreground">{value}</span>{" "}
+      {label}
+    </span>
   );
 }
 
@@ -152,20 +134,26 @@ function AgentCard({
     : "No Telegram lane required";
 
   return (
-    <Card>
-      <CardHeader className="gap-3">
+    <div className="rounded-md p-2 hover:bg-foreground/5">
+      <div className="space-y-1">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Bot className="h-4 w-4 text-primary" />
-            <CardTitle>{agent.name}</CardTitle>
+            <span className="text-sm font-medium">{agent.name}</span>
           </div>
-          <Badge variant={statusVariant(agent.status)}>
+          <span className={cn(
+            "inline-flex items-center gap-1.5 text-xs",
+            agent.status === "active" ? "text-muted-foreground" : "text-warning"
+          )}>
+            <span className={cn(
+              "inline-block h-1.5 w-1.5 rounded-full",
+              agent.status === "active" ? "bg-emerald-500" : "bg-amber-500"
+            )} />
             {STATUS_COPY[agent.status] ?? agent.status}
-          </Badge>
+          </span>
         </div>
         <div className="text-xs text-muted-foreground">{agent.description || agent.role}</div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+      </div>
+      <div className="mt-2 space-y-3">
         <div className="grid grid-cols-2 gap-2">
           <MiniMetric label="Sessions" value={agent.session_count} />
           <MiniMetric label="Active" value={agent.active_session_count} />
@@ -228,9 +216,9 @@ function AgentCard({
             </div>
             {telegramLane && (
               <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-muted-foreground">
-                <Badge variant={telegramLaneReady ? "success" : "warning"}>
+                <span className={cn("text-[0.68rem]", telegramLaneReady ? "text-muted-foreground" : "text-warning")}>
                   {telegramLaneState}
-                </Badge>
+                </span>
                 <span className="min-w-0 truncate">{telegramLaneDetail}</span>
               </div>
             )}
@@ -241,24 +229,23 @@ function AgentCard({
             )}
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
 function MiniMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="rounded-2xl border border-border bg-background/30 px-2 py-2">
-      <div className="text-[0.68rem] font-medium text-muted-foreground">
+    <div className="py-1">
+      <div className="text-[0.68rem] text-muted-foreground">
         {label}
       </div>
-      <div className="text-base font-semibold">{value}</div>
+      <div className="text-sm font-medium">{value}</div>
     </div>
   );
 }
 
 function ChipRow({
-  icon: Icon,
   items,
   empty,
 }: {
@@ -267,15 +254,12 @@ function ChipRow({
   empty: string;
 }) {
   return (
-    <div className="flex items-start gap-2">
-      <Icon className="mt-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-      <div className="flex min-w-0 flex-wrap gap-1">
-        {(items.length ? items : [empty]).slice(0, 7).map((item) => (
-          <Badge key={item} variant="outline" className="max-w-full truncate">
-            {item}
-          </Badge>
-        ))}
-      </div>
+    <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+      {(items.length ? items : [empty]).slice(0, 7).map((item) => (
+        <span key={item} className="max-w-full truncate">
+          {item}
+        </span>
+      ))}
     </div>
   );
 }
@@ -296,26 +280,27 @@ function PlatformRow({ platform }: { platform: AgentHubPlatform }) {
             <div className="text-xs text-muted-foreground">{runtimeState}</div>
           </div>
         </div>
-        <div className="flex shrink-0 gap-1">
-          {platform.token_configured && <Badge variant="success">Token</Badge>}
-          {platform.api_key_configured && <Badge variant="success">Key</Badge>}
+        <div className="flex shrink-0 gap-2 text-xs text-muted-foreground">
+          {platform.token_configured && <span>token</span>}
+          {platform.api_key_configured && <span>key</span>}
         </div>
       </div>
-      <div className="mt-2 flex flex-wrap gap-1">
-        <Badge variant="outline">{platform.approved_users} paired</Badge>
-        <Badge variant={platform.pending_pairings.length ? "warning" : "outline"}>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>{platform.approved_users} paired</span>
+        <span>·</span>
+        <span className={platform.pending_pairings.length ? "text-warning" : ""}>
           {platform.pending_pairings.length} pending
-        </Badge>
+        </span>
         {platform.home_channel?.name && (
-          <Badge variant="outline">{platform.home_channel.name}</Badge>
+          <><span>·</span><span>{platform.home_channel.name}</span></>
         )}
       </div>
       {platform.pending_pairings.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
+        <div className="mt-1 flex flex-wrap gap-2 text-xs text-warning">
           {platform.pending_pairings.map((pairing) => (
-            <Badge key={`${platform.name}-${pairing.code}`} variant="warning">
+            <span key={`${platform.name}-${pairing.code}`}>
               {pairing.code}
-            </Badge>
+            </span>
           ))}
         </div>
       )}
@@ -354,15 +339,15 @@ function TelegramGatewayControls({
   };
 
   return (
-    <div className="rounded-2xl border border-border bg-background/35 p-3">
+    <div className="py-2">
       <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-primary" />
-          <span className="text-sm font-semibold text-foreground">Executive Telegram</span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm font-medium text-foreground">Executive Telegram</span>
+          <span className="text-xs text-muted-foreground">·</span>
+          <span className={cn("text-xs", tokenConfigured ? "text-muted-foreground" : "text-warning")}>
+            {tokenConfigured ? "configured" : "needs token"}
+          </span>
         </div>
-        <Badge variant={tokenConfigured ? "success" : "warning"}>
-          {tokenConfigured ? "Token" : "Needs token"}
-        </Badge>
       </div>
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
         <div className="grid gap-1">
@@ -428,14 +413,12 @@ function formatSavings(value: number | null | undefined) {
 function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
   if (!isHarnessSnapshot(harness)) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Harness</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
+      <div className="px-1">
+        <div className="mb-2 text-sm font-medium">Harness</div>
+        <div className="text-sm text-muted-foreground">
           Harness snapshot unavailable
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     );
   }
 
@@ -444,16 +427,12 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
   const connectedClients = harness.server.clients.filter((client) => client.connected);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle>Harness</CardTitle>
-          <Badge variant={harness.server.gateway_running ? "success" : "warning"}>
-            {harness.server.pattern}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    <div>
+      <div className="mb-3 flex items-center gap-2 px-1">
+        <span className="text-sm font-medium">Harness</span>
+        <span className="text-xs text-muted-foreground">· {harness.server.pattern}</span>
+      </div>
+      <div className="space-y-3 px-1">
         <div className="grid grid-cols-2 gap-2">
           <MiniMetric label="Clients" value={`${connectedClients.length}/${harness.server.clients.length}`} />
           <MiniMetric label="Routed" value={harness.orchestration.route_labeled_runs} />
@@ -464,7 +443,7 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
           <MiniMetric label="Memory Flow" value={harness.memory.pipeline.state} />
         </div>
         {harness.performance.available ? (
-          <div className="rounded-2xl border border-border bg-muted/20 p-2 text-xs">
+          <div className="text-xs">
             <div className="flex justify-between gap-2">
               <span className="text-muted-foreground">Baseline</span>
               <span>{harness.performance.baseline_request_tokens ?? 0} tokens</span>
@@ -483,19 +462,17 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
             </div>
           </div>
         ) : (
-          <div className="rounded-2xl border border-border bg-muted/20 p-2 text-xs text-muted-foreground">
+          <div className="text-xs text-muted-foreground">
             {harness.performance.error || "Performance profiles skipped"}
           </div>
         )}
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
           {harness.orchestration.lifecycle_states.slice(0, 7).map((state) => (
-            <Badge key={state} variant="outline">
-              {state}
-            </Badge>
+            <span key={state}>{state}</span>
           ))}
         </div>
         {harness.memory.pipeline.recent_events?.length ? (
-          <div className="rounded-2xl border border-border bg-muted/20 p-2 text-xs">
+          <div className="text-xs">
             <div className="mb-1 text-muted-foreground">Memory activity</div>
             {harness.memory.pipeline.recent_events.slice(0, 3).map((event, index) => (
               <div key={`${event.timestamp ?? "event"}-${index}`} className="truncate">
@@ -512,16 +489,9 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
             ))}
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
-}
-
-function handoffStatusVariant(status: string): "success" | "warning" | "outline" | "secondary" {
-  if (status === "completed") return "success";
-  if (status === "waiting_human" || status === "failed") return "warning";
-  if (status === "cancelled") return "secondary";
-  return "outline";
 }
 
 function HandoffBusCard({
@@ -544,27 +514,27 @@ function HandoffBusCard({
   const workerHealthy = worker.enabled && worker.state !== "error" && worker.state !== "disabled" && loopRunning;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <CardTitle>Agent handoffs</CardTitle>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span>Worker {worker.enabled ? worker.state : "disabled"}</span>
-              <span>Loop {loopRunning ? "running" : "stopped"}</span>
-              {worker.lastTickAt && <span>Tick {isoTimeAgo(worker.lastTickAt)}</span>}
-              {heartbeat?.lastBeatAt && <span>Heartbeat {isoTimeAgo(heartbeat.lastBeatAt)}</span>}
-              {wake?.lastWakeAt && <span>Wake {isoTimeAgo(wake.lastWakeAt)}</span>}
-              {worker.lastError && <span className="text-warning">{worker.lastError}</span>}
-            </div>
-            {handoffs.error && (
-              <div className="mt-1 text-xs text-warning">{handoffs.error}</div>
-            )}
-          </div>
+    <div className="px-1">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
           <div className="flex items-center gap-2">
-            <Badge variant={active ? "warning" : "success"}>
-              {active} open
-            </Badge>
+            <span className="text-sm font-medium">Agent handoffs</span>
+            <span className="text-xs text-muted-foreground">· {active} open</span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>Worker {worker.enabled ? worker.state : "disabled"}</span>
+            <span>·</span>
+            <span>Loop {loopRunning ? "running" : "stopped"}</span>
+            {worker.lastTickAt && (<><span>·</span><span>Tick {isoTimeAgo(worker.lastTickAt)}</span></>)}
+            {heartbeat?.lastBeatAt && (<><span>·</span><span>Heartbeat {isoTimeAgo(heartbeat.lastBeatAt)}</span></>)}
+            {wake?.lastWakeAt && (<><span>·</span><span>Wake {isoTimeAgo(wake.lastWakeAt)}</span></>)}
+            {worker.lastError && <span className="text-warning">{worker.lastError}</span>}
+          </div>
+          {handoffs.error && (
+            <div className="mt-1 text-xs text-warning">{handoffs.error}</div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
             <Button
               size="sm"
               variant="outline"
@@ -593,8 +563,7 @@ function HandoffBusCard({
             </Button>
           </div>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+      <div className="space-y-3">
         <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
           <MiniMetric label="Queued" value={handoffs.queued} />
           <MiniMetric label="Running" value={handoffs.running} />
@@ -603,47 +572,51 @@ function HandoffBusCard({
           <MiniMetric label="Last admin" value={worker.drained.adminRuns} />
           <MiniMetric label="Wakes" value={wake?.count ?? 0} />
         </div>
-        <div className="flex flex-wrap gap-1">
-          <Badge variant={workerHealthy ? "success" : "warning"}>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", workerHealthy ? "bg-emerald-500" : "bg-amber-500")} />
             {worker.enabled ? "auto-drain on" : "auto-drain off"}
-          </Badge>
-          <Badge variant={loopRunning ? "success" : "warning"}>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", loopRunning ? "bg-emerald-500" : "bg-amber-500")} />
             wake loop {loopRunning ? "on" : "off"}
-          </Badge>
-          <Badge variant={heartbeat?.enabled ? "success" : "warning"}>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", heartbeat?.enabled ? "bg-emerald-500" : "bg-amber-500")} />
             heartbeat {heartbeat?.intervalSeconds ?? "off"}s
-          </Badge>
-          {wake?.pending && <Badge variant="warning">wake pending</Badge>}
-          <Badge variant="outline">handoff cap {worker.limits.handoffs}</Badge>
-          <Badge variant="outline">admin cap {worker.limits.adminRuns}</Badge>
+          </span>
+          {wake?.pending && <span className="text-warning">wake pending</span>}
+          <span>handoff cap {worker.limits.handoffs}</span>
+          <span>admin cap {worker.limits.adminRuns}</span>
         </div>
         {handoffs.byAgent.length > 0 && (
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
             {handoffs.byAgent.slice(0, 8).map((agent) => (
-              <Badge key={agent.agentId} variant={agent.queued || agent.running ? "warning" : "outline"}>
+              <span key={agent.agentId} className={agent.queued || agent.running ? "text-warning" : ""}>
                 {agent.agentId} {agent.queued + agent.running + agent.waitingHuman}/{agent.total}
-              </Badge>
+              </span>
             ))}
           </div>
         )}
-        <div className="space-y-2">
+        <div className="space-y-0.5">
           {handoffs.recent.slice(0, 5).map((handoff) => (
             <div
               key={handoff.id}
-              className="rounded-2xl border border-border bg-muted/20 p-2"
+              className="rounded-md px-1 py-1.5 hover:bg-foreground/5"
             >
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
                 <div className="min-w-0 truncate text-sm font-medium">
                   {handoff.title}
                 </div>
-                <Badge variant={handoffStatusVariant(handoff.status)}>
+                <span className="shrink-0 text-xs text-muted-foreground">
                   {handoff.status.replace("_", " ")}
-                </Badge>
+                </span>
               </div>
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span>{handoff.fromAgentId}</span>
-                <span>to</span>
+                <span>→</span>
                 <span>{handoff.toAgentId}</span>
+                <span>·</span>
                 <span>{isoTimeAgo(handoff.updatedAt)}</span>
               </div>
             </div>
@@ -652,8 +625,8 @@ function HandoffBusCard({
             <div className="py-4 text-sm text-muted-foreground">No handoffs yet</div>
           )}
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -708,20 +681,17 @@ function SetupRunway({
   ];
 
   return (
-    <Card className="bg-card/72">
-      <CardHeader>
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle>Setup runway</CardTitle>
-          <Link
-            to="/config"
-            className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
-          >
-            <Settings className="h-3.5 w-3.5" />
-            Full settings
-          </Link>
-        </div>
-      </CardHeader>
-      <CardContent className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+    <div className="px-1">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className="text-sm font-medium">Setup runway</span>
+        <Link
+          to="/config"
+          className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          Full settings
+        </Link>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
         {items.map((item) => {
           const Icon = item.icon;
           const content = (
@@ -731,17 +701,24 @@ function SetupRunway({
                   <Icon className="h-4 w-4 shrink-0 text-primary" />
                   <span className="truncate text-sm font-semibold text-foreground">{item.label}</span>
                 </div>
-                <Badge
-                  variant={
+                <span className={cn(
+                  "inline-flex items-center gap-1.5 text-xs",
+                  item.state === "ready" || item.state === "online"
+                    ? "text-muted-foreground"
+                    : item.state === "review" || item.state === "needs setup"
+                      ? "text-warning"
+                      : "text-muted-foreground"
+                )}>
+                  <span className={cn(
+                    "inline-block h-1.5 w-1.5 rounded-full",
                     item.state === "ready" || item.state === "online"
-                      ? "success"
+                      ? "bg-emerald-500"
                       : item.state === "review" || item.state === "needs setup"
-                        ? "warning"
-                        : "outline"
-                  }
-                >
+                        ? "bg-amber-500"
+                        : "bg-border"
+                  )} />
                   {item.state}
-                </Badge>
+                </span>
               </div>
               <p className="mt-2 text-xs leading-5 text-muted-foreground">{item.detail}</p>
             </>
@@ -754,7 +731,7 @@ function SetupRunway({
                 type="button"
                 onClick={item.action}
                 disabled={busyAction !== null}
-                className="rounded-2xl border border-border/70 bg-background/35 p-3 text-left transition-colors hover:bg-foreground/5 disabled:opacity-60"
+                className="p-2 text-left transition-colors hover:bg-foreground/5 disabled:opacity-60 rounded-md"
               >
                 {content}
               </button>
@@ -765,14 +742,14 @@ function SetupRunway({
             <Link
               key={item.label}
               to={item.to ?? "/config"}
-              className="rounded-2xl border border-border/70 bg-background/35 p-3 transition-colors hover:bg-foreground/5"
+              className="p-2 transition-colors hover:bg-foreground/5 rounded-md"
             >
               {content}
             </Link>
           );
         })}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -1001,19 +978,16 @@ export default function AgentHubPage() {
     <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
       <Toast toast={toast} />
 
-      <section className="overflow-hidden rounded-[1.6rem] border border-border bg-card/70 shadow-[0_24px_90px_rgba(0,0,0,0.16)]">
-        <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
-          <div className="min-w-0 space-y-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={snapshot.gateway.running ? "success" : "warning"}>
+      <section className="px-1">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+          <div className="min-w-0 space-y-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <span className={cn("inline-block h-1.5 w-1.5 rounded-full", snapshot.gateway.running ? "bg-emerald-500" : "bg-amber-500")} />
                 {snapshot.gateway.running ? "Gateway online" : "Gateway offline"}
-              </Badge>
-              <Badge variant="outline">
-                {snapshot.model.provider || "model"} / {snapshot.model.model || "not set"}
-              </Badge>
-              <Badge variant={snapshot.memory.embedding.enabled ? "success" : "outline"}>
-                Memory {memoryEmbeddingLabel}
-              </Badge>
+              </span>
+              <span>{snapshot.model.provider || "model"} / {snapshot.model.model || "not set"}</span>
+              <span>Memory {memoryEmbeddingLabel}</span>
             </div>
 
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
@@ -1041,16 +1015,14 @@ export default function AgentHubPage() {
             </div>
           </div>
 
-          <Card className="bg-background/35">
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle>Gateway</CardTitle>
-                <Badge variant={snapshot.gateway.running ? "success" : "warning"}>
-                  {snapshot.gateway.pid ? `PID ${snapshot.gateway.pid}` : "Stopped"}
-                </Badge>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">Gateway</span>
+              <span className="text-xs text-muted-foreground">
+                {snapshot.gateway.pid ? `PID ${snapshot.gateway.pid}` : "Stopped"}
+              </span>
+            </div>
+            <div className="space-y-3">
               <div className="flex gap-2">
                 <Button
                   className="flex-1"
@@ -1087,17 +1059,22 @@ export default function AgentHubPage() {
                   value={snapshot.gateway.updated_at ? isoTimeAgo(snapshot.gateway.updated_at) : "unknown"}
                 />
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
         </div>
       </section>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1">
         <Stat icon={Activity} label="Gateway" value={snapshot.gateway.running ? "Online" : "Offline"} />
+        <span className="text-border">·</span>
         <Stat icon={Users} label="Agents" value={snapshot.agents.length} />
+        <span className="text-border">·</span>
         <Stat icon={Terminal} label="Active" value={snapshot.sessions.active} />
+        <span className="text-border">·</span>
         <Stat icon={Brain} label="Facts" value={snapshot.memory.facts} />
+        <span className="text-border">·</span>
         <Stat icon={Database} label="Entities" value={snapshot.memory.entities} />
+        <span className="text-border">·</span>
         <Stat icon={CalendarClock} label="Cron" value={snapshot.cron.enabled} />
       </div>
 
@@ -1108,18 +1085,14 @@ export default function AgentHubPage() {
         snapshot={snapshot}
       />
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <div className="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle>Agent Orchestration</CardTitle>
-                <Badge variant={snapshot.gateway.running ? "success" : "warning"}>
-                  {activeAgents.length} enabled
-                </Badge>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <div className="flex flex-col gap-6">
+          <div>
+            <div className="mb-3 flex items-center gap-2 px-1">
+              <span className="text-sm font-medium">Agent Orchestration</span>
+              <span className="text-xs text-muted-foreground">· {activeAgents.length} enabled</span>
+            </div>
+            <div className="space-y-3">
               <TelegramGatewayControls
                 envVars={envVars}
                 hasChanges={telegramHasChanges}
@@ -1174,8 +1147,8 @@ export default function AgentHubPage() {
                   );
                 })}
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
 
           <HandoffBusCard
             busy={handoffBusy}
@@ -1185,59 +1158,60 @@ export default function AgentHubPage() {
             worker={snapshot.agentWorker}
           />
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Runtime</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-4">
+          <div>
+            <div className="mb-2 px-1 text-sm font-medium">Runtime</div>
+            <div className="grid gap-3 md:grid-cols-4 px-1">
               <MiniMetric label="Model" value={snapshot.model.model || "Not set"} />
               <MiniMetric label="Toolsets" value={snapshot.toolsets.enabled.length} />
               <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
               <MiniMetric label="Pairings" value={pendingPairings} />
-            </CardContent>
-          </Card>
+            </div>
+          </div>
 
           <HarnessCard harness={snapshot.harness} />
         </div>
 
-        <div className="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Memory Graph</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 p-0">
+        <div className="flex flex-col gap-6">
+          <div>
+            <div className="mb-2 px-1 text-sm font-medium">Memory Graph</div>
+            <div className="space-y-3">
               <MemoryConstellation
                 compact
-                className="min-h-[21rem] rounded-none"
+                className="min-h-[21rem] rounded-md"
                 nodes={snapshot.memory.graph.nodes}
                 edges={snapshot.memory.graph.edges}
               />
-              <div className="grid grid-cols-2 gap-2 px-4 md:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 px-1 md:grid-cols-4">
                 <MiniMetric label="Pending" value={snapshot.memory.journal.pending} />
                 <MiniMetric label="Segments" value={snapshot.memory.journal.session_segment_count} />
                 <MiniMetric label="Communities" value={snapshot.memory.community_reports} />
                 <MiniMetric label="Relations" value={snapshot.memory.relations} />
               </div>
-              <div className="px-4 pb-4 text-xs text-muted-foreground">
+              <div className="px-1 pb-2 text-xs text-muted-foreground">
                 {snapshot.memory.provider} memory / {memoryEmbeddingLabel}
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Sessions</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
+          <div>
+            <div className="mb-2 px-1 text-sm font-medium">Sessions</div>
+            <div className="space-y-0.5">
               {snapshot.sessions.recent.slice(0, 8).map((session) => (
-                <div key={session.id} className="rounded-2xl border border-border bg-muted/20 p-2">
-                  <div className="flex items-center justify-between gap-2">
+                <div key={session.id} className="rounded-md px-1 py-1.5 hover:bg-foreground/5">
+                  <div className="flex items-center gap-2">
                     <span className="truncate text-sm">{session.title || "Untitled session"}</span>
-                    {session.is_active && <Badge variant="success">Live</Badge>}
+                    {session.is_active && (
+                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        live
+                      </span>
+                    )}
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                     <span>{session.source}</span>
+                    <span>·</span>
                     <span>{session.message_count} msgs</span>
+                    <span>·</span>
                     <span>{timeAgo(session.last_active)}</span>
                   </div>
                 </div>
@@ -1245,13 +1219,11 @@ export default function AgentHubPage() {
               {!snapshot.sessions.recent.length && (
                 <div className="py-4 text-sm text-muted-foreground">No sessions yet</div>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Connections</CardTitle>
-            </CardHeader>
+          <div>
+            <div className="mb-2 px-1 text-sm font-medium">Connections</div>
             <div className="max-h-[24rem] overflow-y-auto">
               {(connectedPlatforms.length ? connectedPlatforms : snapshot.platforms.slice(0, 5)).map(
                 (platform) => (
@@ -1259,49 +1231,43 @@ export default function AgentHubPage() {
                 ),
               )}
             </div>
-          </Card>
+          </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Access</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
+          <div>
+            <div className="mb-2 px-1 text-sm font-medium">Access</div>
+            <div className="space-y-2 px-1">
               <div className="flex items-center gap-2">
-                <Shield className="h-4 w-4 text-primary" />
                 <span className="text-sm font-medium">{snapshot.access.label}</span>
               </div>
-              <div className="flex flex-wrap gap-1">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                 {Object.entries(snapshot.access.entitlements).map(([name, entitlement]) => (
-                  <Badge
+                  <span
                     key={name}
-                    variant={entitlement.status === "active" ? "success" : "outline"}
+                    className="inline-flex items-center gap-1.5"
                   >
-                    {name}
-                  </Badge>
+                    <span className={cn(
+                      "inline-block h-1.5 w-1.5 rounded-full",
+                      entitlement.status === "active" ? "bg-emerald-500" : "bg-border"
+                    )} />
+                    <span className="text-muted-foreground">{name}</span>
+                  </span>
                 ))}
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <KeyRound className="h-3.5 w-3.5" />
                 <span className="truncate">{snapshot.config_path}</span>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Tools</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap gap-1">
-                {snapshot.toolsets.enabled.slice(0, 16).map((toolset) => (
-                  <Badge key={toolset} variant="outline">
-                    {toolset}
-                  </Badge>
-                ))}
-                {!snapshot.toolsets.enabled.length && <Badge variant="warning">No toolsets</Badge>}
-              </div>
-            </CardContent>
-          </Card>
+          <div>
+            <div className="mb-2 px-1 text-sm font-medium">Tools</div>
+            <div className="flex flex-wrap gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
+              {snapshot.toolsets.enabled.slice(0, 16).map((toolset) => (
+                <span key={toolset}>{toolset}</span>
+              ))}
+              {!snapshot.toolsets.enabled.length && <span className="text-warning">No toolsets</span>}
+            </div>
+          </div>
         </div>
       </div>
 

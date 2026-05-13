@@ -34,17 +34,13 @@ import {
   GitBranch,
   PanelRightOpen,
   Loader2,
-  Mic,
-  MicOff,
   Pin,
   Plug,
   Send,
-  Shield,
   ShieldAlert,
   Sparkles,
   SquareTerminal,
   Wrench,
-  Users,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -228,6 +224,17 @@ type PendingPrompt =
       type: "secret";
     };
 
+function useCopyToClipboard() {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback((text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    }).catch(() => {});
+  }, []);
+  return { copied, copy };
+}
+
 const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
 const PREVIEW_PANEL_MIN_WIDTH = 480;
@@ -245,6 +252,10 @@ function clampPreviewPanelWidth(width: number): number {
 
 function defaultPreviewPanelWidth(): number {
   if (typeof window === "undefined") return 720;
+  try {
+    const stored = localStorage.getItem("elevate-preview-width");
+    if (stored) { const n = parseInt(stored, 10); if (Number.isFinite(n) && n > 0) return clampPreviewPanelWidth(n); }
+  } catch {}
   return clampPreviewPanelWidth(window.innerWidth * 0.5);
 }
 
@@ -1071,6 +1082,7 @@ function previewKind(path: string, contentType: string): "html" | "image" | "off
     return "image";
   }
   if (type.includes("html") || ext === ".html" || ext === ".htm") return "html";
+  if (/^https?:\/\//i.test(path) && !ext) return "html";
   if (
     type.startsWith("text/") ||
     [".csv", ".json", ".log", ".md", ".txt", ".yaml", ".yml"].includes(ext)
@@ -1296,7 +1308,8 @@ export default function ChatPage() {
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
-  const [composerScrollTop, setComposerScrollTop] = useState(0);
+  const composerScrollTopRef = useRef(0);
+  const richLayerRef = useRef<HTMLDivElement>(null);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
@@ -1321,7 +1334,7 @@ export default function ChatPage() {
   );
   const [narrow, setNarrow] = useState(() =>
     typeof window !== "undefined"
-      ? window.matchMedia("(max-width: 1279px)").matches
+      ? window.matchMedia("(max-width: 1023px)").matches
       : false,
   );
 
@@ -1422,18 +1435,25 @@ export default function ChatPage() {
       const pointerId = event.pointerId;
       const startX = event.clientX;
       const startWidth = previewPanelWidth;
+      const shell = target.closest(".elevate-chat-shell") as HTMLElement | null;
 
       target.setPointerCapture(pointerId);
 
       const onPointerMove = (moveEvent: PointerEvent) => {
         const delta = startX - moveEvent.clientX;
-        setPreviewPanelWidth(clampPreviewPanelWidth(startWidth + delta));
+        const clamped = clampPreviewPanelWidth(startWidth + delta);
+        if (shell) shell.style.setProperty("--preview-panel-width", `${clamped}px`);
       };
 
       const stopResize = () => {
         if (target.hasPointerCapture(pointerId)) {
           target.releasePointerCapture(pointerId);
         }
+        const finalWidth = shell
+          ? parseInt(shell.style.getPropertyValue("--preview-panel-width") || String(startWidth), 10)
+          : startWidth;
+        setPreviewPanelWidth(clampPreviewPanelWidth(finalWidth));
+        try { localStorage.setItem("elevate-preview-width", String(clampPreviewPanelWidth(finalWidth))); } catch {}
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", stopResize);
         window.removeEventListener("pointercancel", stopResize);
@@ -1472,7 +1492,7 @@ export default function ChatPage() {
   );
 
   useEffect(() => {
-    const mql = window.matchMedia("(max-width: 1279px)");
+    const mql = window.matchMedia("(max-width: 1023px)");
     const sync = () => setNarrow(mql.matches);
     sync();
     mql.addEventListener("change", sync);
@@ -1486,6 +1506,15 @@ export default function ChatPage() {
     window.addEventListener("resize", sync);
     return () => window.removeEventListener("resize", sync);
   }, []);
+
+  useEffect(() => {
+    if (!previewArtifact) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setPreviewArtifact(null); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [previewArtifact]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2267,7 +2296,8 @@ export default function ChatPage() {
       if (!trimmed || !sessionId) return;
 
       setInput("");
-      setComposerScrollTop(0);
+      composerScrollTopRef.current = 0;
+      if (richLayerRef.current) richLayerRef.current.style.transform = "translateY(0px)";
       setBanner(null);
       setAgentMenuOpen(false);
 
@@ -2544,7 +2574,7 @@ export default function ChatPage() {
           onClick={() => setPreviewArtifact(null)}
           type="button"
         />
-        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70]">
+        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70] animate-in fade-in slide-in-from-bottom-4 duration-200">
           <ArtifactPreviewPane
             artifact={previewArtifact}
             onClose={() => setPreviewArtifact(null)}
@@ -2563,7 +2593,7 @@ export default function ChatPage() {
         <section
           className={cn(
             "flex min-h-0 flex-1 flex-col",
-            previewArtifact && "xl:basis-1/2",
+            previewArtifact && "lg:basis-1/2",
           )}
         >
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-5 sm:px-6">
@@ -2639,10 +2669,12 @@ export default function ChatPage() {
                 <div className="relative min-h-14">
                   <ComposerRichInputLayer
                     input={input}
-                    scrollTop={composerScrollTop}
+                    layerRef={richLayerRef}
                   />
                   <textarea
                     ref={inputRef}
+                    aria-autocomplete="list"
+                    aria-controls="slash-popover-listbox"
                     aria-label="Message Elevate Agent"
                     className={cn(
                       "relative z-10 max-h-40 min-h-14 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
@@ -2656,6 +2688,9 @@ export default function ChatPage() {
                       setInput(event.target.value);
                       setCaretIndex(event.currentTarget.selectionStart ?? event.target.value.length);
                       setAgentMenuOpen(false);
+                      const el = event.currentTarget;
+                      el.style.height = "auto";
+                      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
                     }}
                     onClick={(event) =>
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
@@ -2664,9 +2699,11 @@ export default function ChatPage() {
                     onKeyUp={(event) =>
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
                     }
-                    onScroll={(event) =>
-                      setComposerScrollTop(event.currentTarget.scrollTop)
-                    }
+                    onScroll={(event) => {
+                      const top = event.currentTarget.scrollTop;
+                      composerScrollTopRef.current = top;
+                      if (richLayerRef.current) richLayerRef.current.style.transform = `translateY(-${top}px)`;
+                    }}
                     onSelect={(event) =>
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
                     }
@@ -2675,7 +2712,7 @@ export default function ChatPage() {
                         ? "Message Elevate Agent..."
                         : "Connecting..."
                     }
-                    rows={2}
+                    rows={1}
                     spellCheck
                     value={input}
                   />
@@ -2708,7 +2745,7 @@ export default function ChatPage() {
 
         <aside
           className={cn(
-            "hidden min-h-0 shrink-0 flex-col py-5 pr-5 xl:flex",
+            "hidden min-h-0 shrink-0 flex-col py-5 pr-5 lg:flex",
             previewArtifact ? "pl-0" : "w-[23rem] pl-0",
           )}
           style={
@@ -2721,11 +2758,11 @@ export default function ChatPage() {
             {previewArtifact && (
               <button
                 aria-label="Resize artifact preview"
-                className="absolute -left-3 top-6 z-20 flex h-[calc(100%-3rem)] w-6 touch-none cursor-col-resize items-center justify-center rounded-full text-[var(--chat-muted)] transition hover:text-[var(--chat-text)]"
+                className="absolute -left-5 top-6 z-20 flex h-[calc(100%-3rem)] w-11 touch-none cursor-col-resize items-center justify-center rounded-full text-[var(--chat-muted)] transition hover:text-[var(--chat-text)]"
                 onPointerDown={startPreviewResize}
                 type="button"
               >
-                <span className="h-12 w-1 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)]" />
+                <span className="h-12 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)] transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
               </button>
             )}
             {previewArtifact ? (
@@ -3014,10 +3051,10 @@ function parseComposerSegments(input: string): ComposerSegment[] {
 
 function ComposerRichInputLayer({
   input,
-  scrollTop,
+  layerRef,
 }: {
   input: string;
-  scrollTop: number;
+  layerRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const segments = useMemo(() => parseComposerSegments(input), [input]);
 
@@ -3026,8 +3063,8 @@ function ComposerRichInputLayer({
   return (
     <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)]">
       <div
+        ref={layerRef}
         className="whitespace-pre-wrap break-words"
-        style={{ transform: `translateY(-${scrollTop}px)` }}
       >
         {segments.map((segment, index) => {
           if (segment.type === "text") {
@@ -3135,105 +3172,103 @@ function ComposerActionBar({
   voiceSupported: boolean;
 }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+    <div className="mt-2 flex items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
+      <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto scrollbar-none">
         <div className="relative">
           <button
             type="button"
             onClick={onToggleAgentMenu}
             className={cn(
-              "inline-flex h-7 max-w-[12rem] items-center gap-1.5 rounded-full px-2.5",
-              "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
-              "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
-              agentMenuOpen &&
-                "bg-[var(--chat-accent-soft)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-accent)]",
+              "inline-flex max-w-[12rem] items-center gap-1.5 text-[0.7rem]",
+              "text-[var(--chat-muted-strong)] transition-colors",
+              "hover:text-[var(--chat-text)]",
+              agentMenuOpen && "text-[var(--chat-text)]",
             )}
             title="Choose agent lane"
           >
-            <Users className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">{selectedAgent.name}</span>
-            <ChevronUp className="h-3 w-3 shrink-0 opacity-70" />
+            <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />
           </button>
 
           {agentMenuOpen && (
-            <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[18rem] overflow-hidden rounded-2xl bg-[var(--chat-surface)] p-1.5 text-left shadow-[0_18px_54px_rgba(0,0,0,0.22),inset_0_0_0_1px_var(--chat-border-strong)]">
-              {agents.map((agent) => (
-                <button
-                  key={agent.id}
-                  type="button"
-                  onClick={() => onSelectAgent(agent)}
-                  className={cn(
-                    "flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
-                    selectedAgent.id === agent.id
-                      ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
-                      : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-                  )}
-                >
-                  <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-semibold">
-                      {agent.name}
+            <>
+              <div className="fixed inset-0 z-20" onClick={onToggleAgentMenu} />
+              <div
+                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[18rem] overflow-hidden rounded-2xl bg-[var(--chat-surface)] p-1.5 text-left shadow-[0_18px_54px_rgba(0,0,0,0.22),inset_0_0_0_1px_var(--chat-border-strong)]"
+                onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onToggleAgentMenu(); } }}
+                role="menu"
+              >
+                {agents.map((agent) => (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => onSelectAgent(agent)}
+                    className={cn(
+                      "flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
+                      selectedAgent.id === agent.id
+                        ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+                        : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+                    )}
+                  >
+                    <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-semibold">
+                        {agent.name}
+                      </span>
+                      <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
+                        {agent.role || agent.description || agent.status || "Agent lane"}
+                      </span>
                     </span>
-                    <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
-                      {agent.role || agent.description || agent.status || "Agent lane"}
-                    </span>
-                  </span>
-                </button>
-              ))}
-            </div>
+                  </button>
+                ))}
+              </div>
+            </>
           )}
         </div>
 
         <span
-          className={cn(
-            "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
-            "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
-          )}
+          className="text-[0.7rem] text-[var(--chat-muted-strong)]"
           title="Tool access"
         >
-          <Shield className="h-3 w-3" />
           Full access
         </span>
+
+        <span aria-hidden className="text-[0.6rem] text-[var(--chat-muted)]">·</span>
 
         <button
           type="button"
           onClick={onOpenModel}
           disabled={!canPickModel}
           className={cn(
-            "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
-            "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
+            "text-[0.7rem] text-[var(--chat-muted-strong)] transition-colors",
+            "hover:text-[var(--chat-text)]",
             "disabled:cursor-not-allowed disabled:opacity-50",
           )}
           title="Change model"
         >
-          <Bot className="h-3 w-3" />
           {modelLabel(info)}
-          <ChevronDown className="h-3 w-3 opacity-70" />
         </button>
 
+        <span aria-hidden className="text-[0.6rem] text-[var(--chat-muted)]">·</span>
+
         <ContextRing usage={usage} />
+
+        <span aria-hidden className="text-[0.6rem] text-[var(--chat-muted)]">·</span>
 
         <button
           type="button"
           onClick={onToggleVoice}
           disabled={!voiceSupported}
           className={cn(
-            "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5",
-            "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
+            "text-[0.7rem] text-[var(--chat-muted-strong)] transition-colors",
+            "hover:text-[var(--chat-text)]",
             "disabled:cursor-not-allowed disabled:opacity-45",
-            voiceListening &&
-              "bg-[var(--chat-accent-soft)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-accent)]",
+            voiceListening && "text-[var(--chat-text)]",
           )}
           title={voiceSupported ? "Voice to text" : "Voice input unavailable"}
         >
-          {voiceListening ? (
-            <MicOff className="h-3 w-3" />
-          ) : (
-            <Mic className="h-3 w-3" />
-          )}
-          Voice
+          {voiceListening ? "Stop" : "Voice"}
         </button>
       </div>
 
@@ -3431,18 +3466,8 @@ function InlineArtifactCard({
   artifact: ArtifactEntry;
   onOpenArtifact(artifact: ArtifactEntry): void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
-
-  const copy = () => {
-    navigator.clipboard
-      .writeText(copyText)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch(() => {});
-  };
 
   return (
     <div className="max-w-[38rem] rounded-2xl bg-[var(--chat-surface)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)]">
@@ -3471,7 +3496,7 @@ function InlineArtifactCard({
         </button>
         <button
           className="rounded-full border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
-          onClick={copy}
+          onClick={() => copy(copyText)}
           type="button"
         >
           {copied ? "Copied" : "Copy"}
@@ -3589,7 +3614,7 @@ function ArtifactPreviewPane({
 }) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [contentType, setContentType] = useState("");
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [textPreview, setTextPreview] = useState<string | null>(
@@ -3640,16 +3665,6 @@ function ArtifactPreviewPane({
     };
   }, [artifact]);
 
-  const copy = () => {
-    navigator.clipboard
-      .writeText(copyText)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch(() => {});
-  };
-
   const openExternal = () => {
     if (!blobUrl) return;
     window.open(blobUrl, "_blank", "noopener,noreferrer");
@@ -3690,7 +3705,7 @@ function ArtifactPreviewPane({
           <Button
             aria-label="Copy artifact path"
             className="h-8 w-8 rounded-full p-0"
-            onClick={copy}
+            onClick={() => copy(copyText)}
             size="sm"
             title={copied ? "Copied" : "Copy"}
             type="button"
@@ -3717,9 +3732,10 @@ function ArtifactPreviewPane({
 
       <div className="min-h-0 flex-1 border-t border-[var(--chat-border)] bg-[var(--chat-surface-soft)]">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--chat-muted)]">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            Opening local preview...
+          <div className="flex h-full flex-col gap-3 p-6">
+            <div className="h-4 w-2/3 animate-pulse rounded-lg bg-[var(--chat-border)]" />
+            <div className="h-4 w-1/2 animate-pulse rounded-lg bg-[var(--chat-border)]" />
+            <div className="mt-2 flex-1 animate-pulse rounded-2xl bg-[var(--chat-border)]" />
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center p-6">
@@ -3729,15 +3745,22 @@ function ArtifactPreviewPane({
             </div>
           </div>
         ) : kind === "pdf" && blobUrl ? (
-          <iframe
-            className="h-full w-full bg-[var(--chat-bg)]"
-            src={blobUrl}
-            title={artifact.title}
-          />
+          <div className="relative h-full w-full">
+            <iframe
+              className="absolute inset-0 h-full w-full bg-[var(--chat-bg)]"
+              src={blobUrl}
+              title={artifact.title}
+            />
+            <noscript>
+              <div className="flex h-full items-center justify-center p-6 text-sm text-[var(--chat-muted)]">
+                PDF preview requires a browser with embedded PDF support.
+              </div>
+            </noscript>
+          </div>
         ) : kind === "html" && blobUrl ? (
           <iframe
             className="h-full w-full bg-white"
-            sandbox=""
+            sandbox="allow-scripts allow-same-origin"
             src={blobUrl}
             title={artifact.title}
           />
@@ -3777,7 +3800,7 @@ function ArtifactPreviewPane({
                   <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
                   Open
                 </Button>
-                <Button onClick={copy} size="sm" type="button" variant="outline">
+                <Button onClick={() => copy(copyText)} size="sm" type="button" variant="outline">
                   {copied ? "Copied" : "Copy path"}
                 </Button>
               </div>
@@ -3797,19 +3820,9 @@ function ArtifactCard({
   onOpenArtifact(artifact: ArtifactEntry): void;
 }) {
   const [open, setOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
   const Icon = artifact.kind === "diff" ? FileCode2 : FileText;
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
-
-  const copy = () => {
-    navigator.clipboard
-      .writeText(copyText)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch(() => {});
-  };
 
   return (
     <div
@@ -3855,7 +3868,7 @@ function ArtifactCard({
         <button
           aria-label="Copy artifact"
           className="mt-0.5 rounded-md p-1 text-[var(--chat-muted)] opacity-55 transition hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_60%,transparent)] hover:text-[var(--chat-text)] hover:opacity-100 group-hover:opacity-85"
-          onClick={copy}
+          onClick={() => copy(copyText)}
           type="button"
         >
           {copied ? (
