@@ -2920,6 +2920,77 @@ def _setup_whatsapp():
     cmd_whatsapp(argparse.Namespace())
 
 
+def _is_interactive_terminal() -> bool:
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+def _truthy_env_value(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _telegram_startup_preflight() -> None:
+    """Collect missing Telegram user/home values before starting.
+
+    ``elevate gateway setup`` collects these values, but users commonly paste
+    only the BotFather token and then run ``elevate gateway start``.  Without
+    the numeric user ID, the gateway can start but deny messages or have no
+    default delivery chat for cron/admin notifications.
+    """
+    token = str(get_env_value("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        return
+
+    allowed_users = str(get_env_value("TELEGRAM_ALLOWED_USERS") or "").strip()
+    home_channel = str(get_env_value("TELEGRAM_HOME_CHANNEL") or "").strip()
+    open_access = _truthy_env_value(get_env_value("GATEWAY_ALLOW_ALL_USERS"))
+
+    if (allowed_users or open_access) and home_channel:
+        return
+
+    if not _is_interactive_terminal():
+        missing = []
+        if not allowed_users and not open_access:
+            missing.append("TELEGRAM_ALLOWED_USERS")
+        if not home_channel:
+            missing.append("TELEGRAM_HOME_CHANNEL")
+        print_warning(
+            "Telegram is configured but missing "
+            + ", ".join(missing)
+            + ". Run 'elevate gateway setup' in a terminal, or set them in ~/.elevate/.env."
+        )
+        return
+
+    print()
+    print_warning("Telegram needs your numeric user ID before the gateway starts.")
+    print_info("  Message @userinfobot in Telegram, copy the numeric ID it replies with,")
+    print_info("  then paste it here. This is not the bot token.")
+
+    if not allowed_users and not open_access:
+        value = prompt("Telegram numeric user ID (comma-separated if multiple)")
+        if value:
+            allowed_users = value.replace(" ", "")
+            save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users)
+            print_success("Saved TELEGRAM_ALLOWED_USERS")
+        else:
+            print_warning("No allowed user saved - Telegram will deny unknown users.")
+
+    if not home_channel:
+        first_user = allowed_users.split(",")[0].strip() if allowed_users else ""
+        if first_user and prompt_yes_no(f"Use {first_user} as the Telegram home channel?", True):
+            save_env_value("TELEGRAM_HOME_CHANNEL", first_user)
+            print_success("Saved TELEGRAM_HOME_CHANNEL")
+        else:
+            value = prompt("Telegram home channel ID (leave empty to set later with /set-home)")
+            if value:
+                save_env_value("TELEGRAM_HOME_CHANNEL", value.strip())
+                print_success("Saved TELEGRAM_HOME_CHANNEL")
+            else:
+                print_info("Skipped home channel - set it later with /set-home in Telegram.")
+
+
 def _setup_email():
     """Configure Email via the standard platform setup."""
     email_platform = next(p for p in _PLATFORMS if p["key"] == "email")
@@ -3884,6 +3955,7 @@ def _gateway_command_inner(args):
     
     # Default to run if no subcommand
     if subcmd is None or subcmd == "run":
+        _telegram_startup_preflight()
         verbose = getattr(args, 'verbose', 0)
         quiet = getattr(args, 'quiet', False)
         replace = getattr(args, 'replace', False)
@@ -3965,6 +4037,7 @@ def _gateway_command_inner(args):
     elif subcmd == "start":
         system = getattr(args, 'system', False)
         start_all = getattr(args, 'all', False)
+        _telegram_startup_preflight()
 
         if start_all:
             # Kill all stale gateway processes across all profiles before starting
