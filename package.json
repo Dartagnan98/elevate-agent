@@ -1,0 +1,16 @@
+{
+  "name": "elevate-agent-bootstrap",
+  "version": "0.11.0",
+  "description": "GitHub fallback bootstrap for Elevate Agent.",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "elevate": "cli/packaging/npm/elevate/bin/elevate.js"
+  },
+  "scripts": {
+    "smoke:npx-github": "node cli/packaging/npm/elevate/bin/elevate.js --help && node cli/packaging/npm/elevate/bin/elevate.js install --dry-run --skip-setup"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}
