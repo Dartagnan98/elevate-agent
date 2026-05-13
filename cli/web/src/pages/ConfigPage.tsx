@@ -10,7 +10,6 @@ import {
   Upload,
   X,
   Settings2,
-  FileText,
   Settings,
   Bot,
   Monitor,
@@ -27,7 +26,6 @@ import {
   MessageCircle,
   Wrench,
   FileQuestion,
-  Filter,
   Network,
   ShieldCheck,
   Copy,
@@ -108,37 +106,6 @@ const ADVANCED_CATEGORIES = new Set([
   "voice",
 ]);
 
-const SETTINGS_LANES = [
-  {
-    id: "real-estate",
-    icon: Users,
-    label: "Real estate",
-    description: "Profile, access, and local team posture.",
-    categories: ["access", "agent_hub", "platforms"],
-  },
-  {
-    id: "agent",
-    icon: Bot,
-    label: "Agent runtime",
-    description: "Models, delegation, orchestration, and behavior.",
-    categories: ["agent", "delegation", "general"],
-  },
-  {
-    id: "tools",
-    icon: Wrench,
-    label: "Tools and connectors",
-    description: "Platforms, plugins, browser, terminal, and voice.",
-    categories: ["platforms", "plugins", "terminal", "browser", "voice", "stt", "tts"],
-  },
-  {
-    id: "memory",
-    icon: Brain,
-    label: "Memory",
-    description: "Embeddings, session memory, graph state, and recall.",
-    categories: ["memory", "compression"],
-  },
-] as const;
-
 const SETUP_STEPS = [
   {
     label: "1. Connect the model",
@@ -156,15 +123,6 @@ const SETUP_STEPS = [
     command: "elevate gateway restart",
   },
 ] as const;
-
-function modelProvider(config: Record<string, unknown> | null): string {
-  const model = config?.model;
-  if (model && typeof model === "object" && !Array.isArray(model)) {
-    const provider = (model as Record<string, unknown>).provider;
-    if (typeof provider === "string" && provider.trim()) return provider;
-  }
-  return "not selected";
-}
 
 function connectorRecordTotal(connector: SourceConnectorStatus): number {
   return Object.values(connector.recordCounts).reduce((total, value) => total + value, 0);
@@ -1456,6 +1414,7 @@ export default function ConfigPage() {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("");
+  const [activePane, setActivePane] = useState<"config" | "composio" | "connectors" | "crm" | "setup">("config");
   const [showAdvanced, setShowAdvanced] = useState(true);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const { toast, showToast } = useToast();
@@ -1480,32 +1439,9 @@ export default function ConfigPage() {
   }, [location.hash]);
 
   useLayoutEffect(() => {
-    if (!config || !schema) {
-      setEnd(null);
-      return;
-    }
-    setEnd(
-      <div className="relative w-full min-w-0 sm:max-w-xs">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-        <Input
-          className="h-8 pl-8 pr-7 text-xs"
-          placeholder={t.common.search}
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-        {searchQuery && (
-          <button
-            type="button"
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            onClick={() => setSearchQuery("")}
-          >
-            <X className="h-3 w-3" />
-          </button>
-        )}
-      </div>,
-    );
+    setEnd(null);
     return () => setEnd(null);
-  }, [config, schema, searchQuery, setEnd, t.common.search]);
+  }, [setEnd]);
 
   function prettyCategoryName(cat: string): string {
     const key = cat as keyof typeof t.config.categories;
@@ -1561,17 +1497,6 @@ export default function ConfigPage() {
     }
   }, [activeCategory, visibleCategories]);
 
-  /* ---- Category field counts ---- */
-  const categoryCounts = useMemo(() => {
-    if (!schema) return {};
-    const counts: Record<string, number> = {};
-    for (const s of Object.values(schema)) {
-      const cat = String(s.category ?? "general");
-      counts[cat] = (counts[cat] || 0) + 1;
-    }
-    return counts;
-  }, [schema]);
-
   /* ---- Search ---- */
   const isSearching = searchQuery.trim().length > 0;
   const lowerSearch = searchQuery.toLowerCase();
@@ -1597,19 +1522,6 @@ export default function ConfigPage() {
       ([, s]) => String(s.category ?? "general") === activeCategory
     );
   }, [schema, activeCategory, isSearching]);
-
-  const laneSummaries = useMemo(
-    () =>
-      SETTINGS_LANES.map((lane) => {
-        const count = lane.categories.reduce(
-          (total, category) => total + (categoryCounts[category] || 0),
-          0,
-        );
-        const ready = lane.categories.filter((category) => categories.includes(category));
-        return { ...lane, count, ready };
-      }),
-    [categories, categoryCounts],
-  );
 
   /* ---- Handlers ---- */
   const handleSave = async () => {
@@ -1704,7 +1616,7 @@ export default function ConfigPage() {
   const renderFields = (fields: [string, Record<string, unknown>][], showCategory = false) => {
     let lastSection = "";
     let lastCat = "";
-    return fields.map(([key, s]) => {
+    return fields.map(([key, s], idx) => {
       const parts = key.split(".");
       const section = parts.length > 1 ? parts[0] : "";
       const cat = String(s.category ?? "general");
@@ -1716,23 +1628,23 @@ export default function ConfigPage() {
       return (
         <div key={key}>
           {showCatBadge && (
-            <div className="flex items-center gap-2 pt-4 pb-2 first:pt-0">
-              <CategoryIcon category={cat} className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs font-semibold tracking-normal text-muted-foreground">
-                {prettyCategoryName(cat)}
-              </span>
-              <div className="flex-1 border-t border-border" />
+            <div className="mt-8 mb-3 first:mt-0">
+              <div className="flex items-center gap-2">
+                <CategoryIcon category={cat} className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-semibold text-foreground">
+                  {prettyCategoryName(cat)}
+                </span>
+              </div>
             </div>
           )}
           {showSection && (
-            <div className="flex items-center gap-2 pt-4 pb-2 first:pt-0">
-              <span className="text-xs font-semibold tracking-normal text-muted-foreground">
-                {section.replace(/_/g, " ")}
+            <div className="mt-8 mb-3 first:mt-0">
+              <span className="text-sm font-semibold text-foreground">
+                {section.charAt(0).toUpperCase() + section.slice(1).replace(/_/g, " ")}
               </span>
-              <div className="flex-1 border-t border-border" />
             </div>
           )}
-          <div className="py-1">
+          <div className={idx > 0 ? "border-t border-border/40 py-4" : "py-4"}>
             <AutoField
               schemaKey={key}
               schema={s}
@@ -1745,323 +1657,278 @@ export default function ConfigPage() {
     });
   };
 
+  const sidebarItems = [
+    ...visibleCategories.map((cat) => ({
+      id: cat,
+      pane: "config" as const,
+      label: prettyCategoryName(cat),
+      icon: <CategoryIcon category={cat} className="h-4 w-4" />,
+    })),
+  ];
+
+  const integrationItems = [
+    { id: "composio", pane: "composio" as const, label: "Composio", icon: <Plug className="h-4 w-4" /> },
+    { id: "connectors", pane: "connectors" as const, label: "Source connectors", icon: <Network className="h-4 w-4" /> },
+    { id: "crm", pane: "crm" as const, label: "CRM", icon: <Users className="h-4 w-4" /> },
+    { id: "setup", pane: "setup" as const, label: "Setup commands", icon: <Wrench className="h-4 w-4" /> },
+  ];
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex -mx-6 -mt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
       <Toast toast={toast} />
+      <input ref={fileInputRef} type="file" accept=".json,.yaml,.yml" className="hidden" onChange={handleImport} />
 
-      <section className="rounded-[1.45rem] border border-border bg-card/70 p-4 shadow-[0_20px_70px_color-mix(in_srgb,var(--background-base)_48%,transparent)]">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-              <Settings2 className="h-3.5 w-3.5 text-primary" />
-              ElevateOS settings
-            </div>
-            <h2 className="mt-1 text-xl font-semibold text-foreground">
-              Configure the agent, real estate workspace, tools, and memory.
-            </h2>
-            <div className="mt-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-              <code className="truncate rounded-md bg-muted/50 px-2 py-1">
-                {t.config.configPath}
-              </code>
-              <Badge variant="outline">Provider {modelProvider(config)}</Badge>
-              <Badge variant={showAdvanced ? "warning" : "outline"}>
-                {showAdvanced ? "Advanced visible" : "Core view"}
-              </Badge>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Button
-              variant={showAdvanced ? "default" : "outline"}
-              size="sm"
-              onClick={() => setShowAdvanced((value) => !value)}
-              className="gap-1.5"
-            >
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Advanced options
-            </Button>
-            <Button variant="ghost" size="sm" onClick={handleExport} title={t.config.exportConfig} aria-label={t.config.exportConfig}>
-              <Download className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => fileInputRef.current?.click()}
-              title={t.config.importConfig}
-              aria-label={t.config.importConfig}
-              className="gap-1.5"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              Import
-            </Button>
-            <input ref={fileInputRef} type="file" accept=".json,.yaml,.yml" className="hidden" onChange={handleImport} />
-            <Button variant="ghost" size="sm" onClick={handleReset} title={t.config.resetDefaults} aria-label={t.config.resetDefaults}>
-              <RotateCcw className="h-3.5 w-3.5" />
-            </Button>
-
-            <div className="mx-1 h-5 w-px bg-border" />
-
-            <Button
-              variant={yamlMode ? "default" : "outline"}
-              size="sm"
-              onClick={() => setYamlMode(!yamlMode)}
-              className="gap-1.5"
-            >
-              {yamlMode ? (
-                <>
-                  <FormInput className="h-3.5 w-3.5" />
-                  {t.common.form}
-                </>
-              ) : (
-                <>
-                  <Code className="h-3.5 w-3.5" />
-                  YAML
-                </>
-              )}
-            </Button>
-
-            {yamlMode ? (
-              <Button size="sm" onClick={handleYamlSave} disabled={yamlSaving} className="gap-1.5">
-                <Save className="h-3.5 w-3.5" />
-                {yamlSaving ? t.common.saving : t.common.save}
-              </Button>
-            ) : (
-              <Button size="sm" onClick={handleSave} disabled={saving} className="gap-1.5">
-                <Save className="h-3.5 w-3.5" />
-                {saving ? t.common.saving : t.common.save}
-              </Button>
-            )}
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]">
-          <div className="grid gap-2 md:grid-cols-3">
-            {SETUP_STEPS.map((step) => (
-              <div
-                key={step.label}
-                className="rounded-2xl border border-border/70 bg-background/35 p-3"
-              >
-                <div className="text-sm font-semibold text-foreground">{step.label}</div>
-                <p className="mt-1 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">
-                  {step.description}
-                </p>
+      {/* ---- Sidebar ---- */}
+      <aside className="w-52 shrink-0 border-r border-border/50 overflow-y-auto">
+        <div className="py-3">
+          {/* Search */}
+          <div className="px-3 pb-3">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                className="h-8 pl-8 pr-7 text-xs"
+                placeholder={t.common.search}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              {searchQuery && (
                 <button
                   type="button"
-                  onClick={() => void copyCommand(step.command)}
-                  className="mt-3 flex w-full items-center justify-between gap-2 rounded-xl bg-foreground/[0.055] px-2.5 py-2 text-left text-[0.72rem] text-muted-foreground transition-colors hover:bg-foreground/[0.09] hover:text-foreground"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  onClick={() => setSearchQuery("")}
                 >
-                  <code className="truncate bg-transparent p-0">{step.command}</code>
-                  <Copy className="h-3.5 w-3.5 shrink-0" />
+                  <X className="h-3 w-3" />
                 </button>
-                {copiedCommand === step.command && (
-                  <div className="mt-1 text-[0.68rem] text-success">Copied</div>
-                )}
-              </div>
-            ))}
-          </div>
-
-          <div className="rounded-2xl border border-border/70 bg-background/35 p-3">
-            <div className="text-sm font-semibold text-foreground">Import / onboarding</div>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Bring in an exported Elevate config, edit raw YAML, or jump to keys and OAuth. Imported files are staged until you click Save.
-            </p>
-            <div className="mt-3 grid gap-2">
-              <Button size="sm" onClick={() => fileInputRef.current?.click()} className="justify-start">
-                <Upload className="h-3.5 w-3.5" />
-                Import JSON/YAML
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => setYamlMode(true)} className="justify-start">
-                <Code className="h-3.5 w-3.5" />
-                Edit raw YAML
-              </Button>
-              <Link
-                to="/env"
-                className="inline-flex h-8 items-center justify-start gap-2 rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
-              >
-                <KeyRound className="h-3.5 w-3.5" />
-                Keys and OAuth
-              </Link>
+              )}
             </div>
           </div>
-        </div>
 
-        <div className="mt-4 grid gap-2 lg:grid-cols-4">
-          {laneSummaries.map((lane) => {
-            const Icon = lane.icon;
-            const target = lane.ready.find((category) => visibleCategories.includes(category)) ?? lane.ready[0];
-            return (
-              <button
-                key={lane.id}
-                type="button"
-                onClick={() => {
-                  if (target) {
-                    if (ADVANCED_CATEGORIES.has(target)) setShowAdvanced(true);
+          {/* Config categories */}
+          <nav className="flex flex-col gap-px px-2">
+            {sidebarItems.map((item) => {
+              const isActive = !isSearching && activePane === "config" && activeCategory === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
                     setSearchQuery("");
-                    setActiveCategory(target);
-                  }
-                }}
-                className="rounded-2xl border border-border/70 bg-background/35 p-3 text-left transition-colors hover:bg-foreground/5"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Icon className="h-4 w-4 shrink-0 text-primary" />
-                    <div className="truncate text-sm font-semibold text-foreground">{lane.label}</div>
-                  </div>
-                  <Badge variant="outline">{lane.count}</Badge>
-                </div>
-                <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  {lane.description}
-                </p>
-              </button>
-            );
-          })}
+                    setActivePane("config");
+                    setActiveCategory(item.id);
+                  }}
+                  className={`
+                    flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.82rem]
+                    transition-colors
+                    ${isActive
+                      ? "bg-foreground/8 text-foreground font-medium"
+                      : "text-muted-foreground hover:text-foreground hover:bg-foreground/[0.04]"
+                    }
+                  `}
+                >
+                  <span className={isActive ? "text-foreground" : "text-muted-foreground/70"}>{item.icon}</span>
+                  <span className="flex-1 truncate">{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Advanced toggle */}
+          <div className="px-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-[0.78rem] text-muted-foreground/70 transition-colors hover:text-foreground hover:bg-foreground/[0.04]"
+            >
+              <span>{showAdvanced ? "Hide advanced" : "Show advanced"}</span>
+              <ShieldCheck className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Divider */}
+          <div className="mx-3 my-3 border-t border-border/50" />
+          <div className="px-4 pb-1.5 text-[0.68rem] font-medium uppercase tracking-wider text-muted-foreground/50">
+            Integrations
+          </div>
+
+          <nav className="flex flex-col gap-px px-2">
+            {integrationItems.map((item) => {
+              const isActive = activePane === item.pane;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setActivePane(item.pane);
+                  }}
+                  className={`
+                    flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.82rem]
+                    transition-colors
+                    ${isActive
+                      ? "bg-foreground/8 text-foreground font-medium"
+                      : "text-muted-foreground hover:text-foreground hover:bg-foreground/[0.04]"
+                    }
+                  `}
+                >
+                  <span className={isActive ? "text-foreground" : "text-muted-foreground/70"}>{item.icon}</span>
+                  <span className="flex-1 truncate">{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
         </div>
-      </section>
+      </aside>
 
-      <section>
-        <ComposioPanel />
-      </section>
+      {/* ---- Content ---- */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl px-8 py-6">
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(24rem,0.95fr)]">
-        <SourceConnectorSettingsPanel />
-        <CrmIntegrationSettingsPanel />
-      </section>
+          {/* ---- Composio pane ---- */}
+          {activePane === "composio" && <ComposioPanel />}
 
-      {/* ═══════════════ YAML Mode ═══════════════ */}
-      {yamlMode ? (
-        <Card>
-          <CardHeader className="py-3 px-4">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              {t.config.rawYaml}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {yamlLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          {/* ---- Source connectors pane ---- */}
+          {activePane === "connectors" && <SourceConnectorSettingsPanel />}
+
+          {/* ---- CRM pane ---- */}
+          {activePane === "crm" && <CrmIntegrationSettingsPanel />}
+
+          {/* ---- Setup commands pane ---- */}
+          {activePane === "setup" && (
+            <div>
+              <h2 className="text-lg font-semibold text-foreground">Setup commands</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Run these in your terminal to configure the agent runtime.
+              </p>
+              <div className="mt-6 space-y-4">
+                {SETUP_STEPS.map((step) => (
+                  <div key={step.label} className="border-b border-border/40 pb-4 last:border-0">
+                    <div className="text-sm font-medium text-foreground">{step.label}</div>
+                    <p className="mt-1 text-sm text-muted-foreground">{step.description}</p>
+                    <button
+                      type="button"
+                      onClick={() => void copyCommand(step.command)}
+                      className="mt-2 flex items-center gap-2 rounded-lg bg-foreground/[0.05] px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-foreground/[0.09] hover:text-foreground"
+                    >
+                      <code className="truncate bg-transparent p-0">{step.command}</code>
+                      <Copy className="h-3.5 w-3.5 shrink-0" />
+                    </button>
+                    {copiedCommand === step.command && (
+                      <div className="mt-1 text-[0.68rem] text-success">Copied</div>
+                    )}
+                  </div>
+                ))}
               </div>
-            ) : (
-              <textarea
-                className="flex min-h-[600px] w-full bg-transparent px-4 py-3 text-sm font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none border-t border-border"
-                value={yamlText}
-                onChange={(e) => setYamlText(e.target.value)}
-                spellCheck={false}
-              />
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        /* ═══════════════ Form Mode ═══════════════ */
-        <div className="flex flex-col sm:flex-row gap-4">
-          {/* ---- Filter panel ---- */}
-          <aside aria-label={t.config.filters} className="sm:w-56 sm:shrink-0">
-            <div className="sm:sticky sm:top-4">
-              <div className="flex flex-col rounded-2xl border border-border bg-muted/20">
-                {/* Panel heading */}
-                <div className="hidden sm:flex items-center gap-2 px-3 py-2 border-b border-border">
-                  <Filter className="h-3 w-3 text-muted-foreground" />
-                  <span className="text-[0.68rem] font-medium tracking-normal text-muted-foreground">
-                    {t.config.filters}
-                  </span>
-                </div>
 
-                {/* Sections heading (hidden on mobile since it becomes a horizontal scroll) */}
-                <div className="hidden px-3 pt-2 pb-1 text-[0.68rem] font-medium tracking-normal text-muted-foreground/70 sm:block">
-                  {t.config.sections}
-                </div>
-
-                {/* Category nav — horizontal scroll on mobile, pill list on sm+ */}
-                <div className="flex sm:flex-col gap-1 sm:gap-px p-2 sm:pt-1 overflow-x-auto sm:overflow-x-visible scrollbar-none sm:max-h-[calc(100vh-260px)] sm:overflow-y-auto">
-                  {visibleCategories.map((cat) => {
-                    const isActive = !isSearching && activeCategory === cat;
-
-                    return (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => {
-                          setSearchQuery("");
-                          setActiveCategory(cat);
-                        }}
-                        className={`
-                          group flex items-center gap-2 px-2 py-1
-                          rounded-xl text-left text-[11px] cursor-pointer whitespace-nowrap
-                          transition-colors
-                          ${
-                            isActive
-                              ? "bg-foreground/10 text-foreground"
-                              : "text-muted-foreground hover:text-foreground hover:bg-foreground/5"
-                          }
-                        `}
-                      >
-                        <CategoryIcon category={cat} className="h-3.5 w-3.5 shrink-0" />
-                        <span className="flex-1 truncate">{prettyCategoryName(cat)}</span>
-                        <span
-                          className={`text-[10px] tabular-nums ${
-                            isActive
-                              ? "text-foreground/60"
-                              : "text-muted-foreground/50"
-                          }`}
-                        >
-                          {categoryCounts[cat] || 0}
-                        </span>
-                      </button>
-                    );
-                  })}
+              <div className="mt-8">
+                <h3 className="text-sm font-semibold text-foreground">Import / Export</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Bring in an exported config, edit raw YAML, or manage API keys.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()}>
+                    <Upload className="h-3.5 w-3.5" />
+                    Import JSON/YAML
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleExport}>
+                    <Download className="h-3.5 w-3.5" />
+                    Export
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => { setYamlMode(true); setActivePane("config"); }}>
+                    <Code className="h-3.5 w-3.5" />
+                    Edit raw YAML
+                  </Button>
+                  <Link
+                    to="/env"
+                    className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    Keys and OAuth
+                  </Link>
                 </div>
               </div>
             </div>
-          </aside>
+          )}
 
-          {/* ---- Content ---- */}
-          <div className="flex-1 min-w-0">
-            {isSearching ? (
-              /* Search results */
-              <Card>
-                <CardHeader className="py-3 px-4">
+          {/* ---- Config pane ---- */}
+          {activePane === "config" && (
+            <>
+              {/* YAML mode */}
+              {yamlMode ? (
+                <div>
                   <div className="flex items-center justify-between">
-                    <CardTitle className="text-sm flex items-center gap-2">
-                      <Search className="h-4 w-4" />
-                      {t.config.searchResults}
-                    </CardTitle>
-                    <Badge variant="secondary" className="text-[10px]">
-                      {searchMatchedFields.length} {t.config.fields.replace("{s}", searchMatchedFields.length !== 1 ? "s" : "")}
-                    </Badge>
+                    <h2 className="text-lg font-semibold text-foreground">{t.config.rawYaml}</h2>
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setYamlMode(false)}>
+                        <FormInput className="h-3.5 w-3.5" />
+                        {t.common.form}
+                      </Button>
+                      <Button size="sm" onClick={handleYamlSave} disabled={yamlSaving}>
+                        <Save className="h-3.5 w-3.5" />
+                        {yamlSaving ? t.common.saving : t.common.save}
+                      </Button>
+                    </div>
                   </div>
-                </CardHeader>
-                <CardContent className="grid gap-2 px-4 pb-4">
-                  {searchMatchedFields.length === 0 ? (
-                    <p className="text-sm text-muted-foreground text-center py-8">
-                      {t.config.noFieldsMatch.replace("{query}", searchQuery)}
-                    </p>
-                  ) : (
-                    renderFields(searchMatchedFields, true)
-                  )}
-                </CardContent>
-              </Card>
-            ) : (
-              /* Active category */
-              <Card>
-                <CardHeader className="py-3 px-4">
+                  <div className="mt-4 rounded-xl border border-border overflow-hidden">
+                    {yamlLoading ? (
+                      <div className="flex items-center justify-center py-12">
+                        <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                      </div>
+                    ) : (
+                      <textarea
+                        className="flex min-h-[600px] w-full bg-transparent px-4 py-3 text-sm font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none"
+                        value={yamlText}
+                        onChange={(e) => setYamlText(e.target.value)}
+                        spellCheck={false}
+                      />
+                    )}
+                  </div>
+                </div>
+              ) : isSearching ? (
+                /* Search results */
+                <div>
+                  <h2 className="text-lg font-semibold text-foreground">{t.config.searchResults}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {searchMatchedFields.length} {t.config.fields.replace("{s}", searchMatchedFields.length !== 1 ? "s" : "")} matching &ldquo;{searchQuery}&rdquo;
+                  </p>
+                  <div className="mt-4">
+                    {searchMatchedFields.length === 0 ? (
+                      <p className="text-sm text-muted-foreground text-center py-12">
+                        {t.config.noFieldsMatch.replace("{query}", searchQuery)}
+                      </p>
+                    ) : (
+                      renderFields(searchMatchedFields, true)
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Active category */
+                <div>
                   <div className="flex items-center justify-between">
-                    <CardTitle className="text-sm flex items-center gap-2">
-                      <CategoryIcon category={activeCategory} className="h-4 w-4" />
-                      {prettyCategoryName(activeCategory)}
-                    </CardTitle>
-                    <Badge variant="secondary" className="text-[10px]">
-                      {activeFields.length} {t.config.fields.replace("{s}", activeFields.length !== 1 ? "s" : "")}
-                    </Badge>
+                    <div>
+                      <h2 className="text-lg font-semibold text-foreground">{prettyCategoryName(activeCategory)}</h2>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {activeFields.length} settings
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button variant="ghost" size="sm" onClick={handleReset} title={t.config.resetDefaults}>
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="sm" onClick={handleSave} disabled={saving}>
+                        <Save className="h-3.5 w-3.5" />
+                        {saving ? t.common.saving : t.common.save}
+                      </Button>
+                    </div>
                   </div>
-                </CardHeader>
-                <CardContent className="grid gap-2 px-4 pb-4">
-                  {renderFields(activeFields)}
-                </CardContent>
-              </Card>
-            )}
-          </div>
+                  <div className="mt-6">
+                    {renderFields(activeFields)}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
