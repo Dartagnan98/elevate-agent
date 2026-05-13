@@ -5,8 +5,13 @@
 # Installation script for Linux, macOS, and Android/Termux.
 # Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
 #
-# Usage:
+# Public release usage:
 #   curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
+#
+# Private beta usage:
+#   export ELEVATE_GITHUB_TOKEN="$(gh auth token)"
+#   curl -fsSL -H "Authorization: Bearer $ELEVATE_GITHUB_TOKEN" \
+#     https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -793,6 +798,7 @@ download_repo_archive() {
 
 clone_repo() {
     local checkout_dir="$INSTALL_DIR"
+    local token="${ELEVATE_DOWNLOAD_TOKEN:-${ELEVATE_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}}"
     log_info "Installing to $checkout_dir..."
 
     if [ -d "$checkout_dir" ]; then
@@ -864,13 +870,18 @@ clone_repo() {
                 log_success "Cloned via SSH"
             else
                 rm -rf "$checkout_dir" 2>/dev/null  # Clean up partial SSH clone
-                log_info "SSH failed, trying HTTPS..."
-                if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$checkout_dir"; then
-                    log_success "Cloned via HTTPS"
-                else
-                    rm -rf "$checkout_dir" 2>/dev/null
-                    log_warn "Git clone failed — falling back to source archive."
+                if [ -n "$token" ]; then
+                    log_info "SSH failed; token detected, installing source archive..."
                     download_repo_archive "$checkout_dir"
+                else
+                    log_info "SSH failed, trying HTTPS..."
+                    if GIT_TERMINAL_PROMPT=0 git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$checkout_dir"; then
+                        log_success "Cloned via HTTPS"
+                    else
+                        rm -rf "$checkout_dir" 2>/dev/null
+                        log_warn "Git clone failed — falling back to source archive."
+                        download_repo_archive "$checkout_dir"
+                    fi
                 fi
             fi
             resolve_project_dir "$checkout_dir"
