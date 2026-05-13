@@ -73,9 +73,16 @@ going. No hosted database project is required for the local runtime.
 
 ```bash
 elevate model      # choose or verify the LLM provider
-elevate configure  # run the setup wizard
+elevate configure  # run the setup wizard, including memory + embeddings
 elevate            # start the agent
 elevate dashboard  # open the local dashboard
+```
+
+Quick setup now walks through the local memory graph and semantic embeddings.
+To configure that section directly:
+
+```bash
+elevate setup memory
 ```
 
 The base dashboard shows the local operating system: Agent Hub, Tasks, Memory,

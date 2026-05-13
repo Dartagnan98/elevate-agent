@@ -485,6 +485,33 @@ def _print_setup_summary(config: dict, elevate_home):
     else:
         tool_status.append(("RL Training (Tinker)", False, "TINKER_API_KEY"))
 
+    # Local memory + semantic embeddings
+    mem_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    memory_store = (
+        (config.get("plugins") or {}).get("elevate-memory-store")
+        if isinstance(config.get("plugins"), dict)
+        else {}
+    )
+    if not isinstance(memory_store, dict):
+        memory_store = {}
+    memory_provider = str(mem_config.get("provider") or "").strip()
+    if memory_provider == "holographic":
+        tool_status.append(("Memory (local graph recall)", True, None))
+        embeddings_on = _truthy_config_value(memory_store.get("embedding_enabled"), False)
+        if embeddings_on and not _memory_openai_key_missing(memory_store):
+            embedding_provider = str(memory_store.get("embedding_provider") or "openai")
+            tool_status.append((f"Memory Embeddings ({embedding_provider})", True, None))
+        elif embeddings_on:
+            env_name = str(memory_store.get("embedding_api_key_env") or "OPENAI_API_KEY")
+            tool_status.append(("Memory Embeddings", False, env_name))
+        else:
+            tool_status.append(("Memory Embeddings", False, "run 'elevate setup memory'"))
+    elif memory_provider:
+        tool_status.append((f"Memory Provider ({memory_provider})", True, None))
+    else:
+        tool_status.append(("Memory (built-in prompt memory)", True, None))
+        tool_status.append(("Memory Embeddings", False, "run 'elevate setup memory'"))
+
     # Home Assistant
     if get_env_value("HASS_TOKEN"):
         tool_status.append(("Smart Home (Home Assistant)", True, None))
@@ -575,6 +602,7 @@ def _print_setup_summary(config: dict, elevate_home):
     print()
     print(f"   {color('elevate setup', Colors.GREEN)}          Re-run the full wizard")
     print(f"   {color('elevate setup model', Colors.GREEN)}    Change model/provider")
+    print(f"   {color('elevate setup memory', Colors.GREEN)}   Configure memory/embeddings")
     print(f"   {color('elevate setup terminal', Colors.GREEN)} Change terminal backend")
     print(f"   {color('elevate setup gateway', Colors.GREEN)}  Configure messaging")
     print(f"   {color('elevate setup tools', Colors.GREEN)}    Configure tool providers")
@@ -1695,7 +1723,215 @@ def setup_agent_settings(config: dict):
 
 
 # =============================================================================
-# Section 4: Messaging Platforms (Gateway)
+# Section 4: Memory & Embeddings
+# =============================================================================
+
+
+def _truthy_config_value(value: Any, default: bool = False) -> bool:
+    """Coerce bool-ish setup values from config.yaml."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _default_holographic_memory_config() -> dict:
+    """Return the default local memory-store plugin config."""
+    return copy.deepcopy(
+        DEFAULT_CONFIG.get("plugins", {}).get("elevate-memory-store", {})
+    )
+
+
+def _holographic_memory_config(config: dict) -> dict:
+    plugins = config.setdefault("plugins", {})
+    memory_store = plugins.setdefault("elevate-memory-store", {})
+    if not isinstance(memory_store, dict):
+        memory_store = {}
+        plugins["elevate-memory-store"] = memory_store
+
+    defaults = _default_holographic_memory_config()
+    for key, value in defaults.items():
+        memory_store.setdefault(key, copy.deepcopy(value))
+    return memory_store
+
+
+def _memory_openai_key_missing(memory_store: dict) -> bool:
+    provider = str(memory_store.get("embedding_provider") or "openai").strip().lower()
+    if provider not in {"openai", "openai_compatible", "compatible"}:
+        return False
+    env_name = str(memory_store.get("embedding_api_key_env") or "OPENAI_API_KEY").strip()
+    if get_env_value(env_name):
+        return False
+    if env_name != "OPENAI_API_KEY" and get_env_value("OPENAI_API_KEY"):
+        return False
+    return True
+
+
+def _memory_quick_setup_needed(config: dict) -> bool:
+    mem_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    provider = str(mem_config.get("provider") or "").strip()
+    if provider and provider != "holographic":
+        return False
+
+    memory_store = (
+        (config.get("plugins") or {}).get("elevate-memory-store")
+        if isinstance(config.get("plugins"), dict)
+        else {}
+    )
+    if not isinstance(memory_store, dict):
+        memory_store = {}
+
+    if not mem_config.get("setup_completed"):
+        return True
+
+    if (
+        provider == "holographic"
+        and _truthy_config_value(memory_store.get("embedding_enabled"), False)
+        and _memory_openai_key_missing(memory_store)
+    ):
+        return True
+
+    return False
+
+
+def _initialize_memory_store(config: dict) -> None:
+    """Create/open the configured local memory SQLite store once."""
+    memory_store = _holographic_memory_config(config)
+    db_path = str(memory_store.get("db_path") or "$ELEVATE_HOME/memory_store.db")
+    elevate_home = str(get_elevate_home())
+    db_path = db_path.replace("$ELEVATE_HOME", elevate_home).replace("${ELEVATE_HOME}", elevate_home)
+
+    try:
+        from plugins.memory.holographic.store import MemoryStore
+
+        store = MemoryStore(db_path=db_path)
+        try:
+            store.close()
+        except Exception:
+            pass
+        print_success(f"Local memory database ready: {db_path}")
+    except Exception as exc:
+        print_warning(f"Could not initialize memory database now: {exc}")
+
+
+def setup_memory(config: dict, first_install: bool = False):
+    """Configure local memory, graph recall, and optional semantic embeddings."""
+    print_header("Memory & Embeddings")
+    print_info("Elevate can keep local long-term memory, graph recall, and semantic")
+    print_info("embeddings in SQLite under ~/.elevate.")
+    print()
+
+    mem_config = config.setdefault("memory", {})
+    mem_config["memory_enabled"] = True
+    mem_config["user_profile_enabled"] = True
+
+    current_provider = str(mem_config.get("provider") or "").strip()
+    if current_provider and current_provider != "holographic":
+        print_info(f"Current external memory provider: {current_provider}")
+        if not prompt_yes_no("Switch to Elevate local memory store?", False):
+            mem_config["setup_completed"] = True
+            save_config(config)
+            print_info("Keeping current memory provider.")
+            return
+
+    if not prompt_yes_no("Enable Elevate local memory graph?", True):
+        mem_config["provider"] = ""
+        mem_config["setup_completed"] = True
+        save_config(config)
+        print_info("Using built-in prompt memory only. You can enable graph memory later with 'elevate setup memory'.")
+        return
+
+    mem_config["provider"] = "holographic"
+    memory_store = _holographic_memory_config(config)
+    memory_store.update({
+        "turn_journal_enabled": True,
+        "organize_on_session_end": True,
+        "daily_organize_enabled": True,
+        "layered_prefetch_enabled": True,
+        "recent_recall_enabled": True,
+        "graph_recall_enabled": True,
+    })
+
+    embedding_enabled = _truthy_config_value(memory_store.get("embedding_enabled"), False)
+    default_embedding_yes = first_install or not mem_config.get("setup_completed") or embedding_enabled
+    if prompt_yes_no("Enable semantic memory embeddings? (recommended)", default_embedding_yes):
+        choices = [
+            "OpenAI API key (recommended)",
+            "Ollama/local embedding server",
+            "Skip semantic embeddings for now",
+        ]
+        current_provider = str(memory_store.get("embedding_provider") or "openai").strip().lower()
+        default_idx = {"openai": 0, "ollama": 1}.get(current_provider, 0)
+        idx = prompt_choice("Embedding backend:", choices, default_idx)
+
+        if idx == 0:
+            memory_store["embedding_enabled"] = True
+            memory_store["embedding_provider"] = "openai"
+            memory_store["embedding_model"] = str(
+                memory_store.get("embedding_model") or "text-embedding-3-small"
+            )
+            memory_store["embedding_api_key_env"] = "OPENAI_API_KEY"
+            memory_store.setdefault("embedding_dimensions", "")
+            memory_store.setdefault("embedding_base_url", "")
+
+            existing = get_env_value("OPENAI_API_KEY")
+            if existing:
+                print_success("OPENAI_API_KEY is already configured for embeddings.")
+                if prompt_yes_no("Update the OpenAI API key?", False):
+                    api_key = prompt("OpenAI API key", password=True).strip()
+                    if api_key:
+                        save_env_value("OPENAI_API_KEY", api_key)
+                        print_success("OpenAI API key saved")
+            else:
+                print_info("Get an OpenAI API key from https://platform.openai.com/api-keys")
+                api_key = prompt("OpenAI API key", password=True).strip()
+                if api_key:
+                    save_env_value("OPENAI_API_KEY", api_key)
+                    print_success("OpenAI API key saved")
+                else:
+                    memory_store["embedding_enabled"] = False
+                    print_warning("No OpenAI key saved - semantic embeddings are off for now.")
+
+        elif idx == 1:
+            memory_store["embedding_enabled"] = True
+            memory_store["embedding_provider"] = "ollama"
+            memory_store["embedding_model"] = prompt(
+                "Ollama embedding model",
+                str(memory_store.get("embedding_model") or "mxbai-embed-large"),
+            )
+            memory_store["embedding_base_url"] = prompt(
+                "Ollama base URL",
+                str(memory_store.get("embedding_base_url") or "http://localhost:11434"),
+            )
+            memory_store["embedding_api_key_env"] = ""
+            print_success("Ollama embeddings configured")
+        else:
+            memory_store["embedding_enabled"] = False
+            print_info("Semantic embeddings skipped. Local memory and graph recall remain enabled.")
+    else:
+        memory_store["embedding_enabled"] = False
+        print_info("Semantic embeddings skipped. Local memory and graph recall remain enabled.")
+
+    mem_config["setup_completed"] = True
+    save_config(config)
+    _initialize_memory_store(config)
+
+    if _truthy_config_value(memory_store.get("embedding_enabled"), False):
+        print_success(
+            f"Memory embeddings enabled: {memory_store.get('embedding_provider')} / {memory_store.get('embedding_model')}"
+        )
+    print_success("Memory setup complete.")
+
+
+# =============================================================================
+# Section 5: Messaging Platforms (Gateway)
 # =============================================================================
 
 
@@ -2468,7 +2704,7 @@ def setup_gateway(config: dict):
 
 
 # =============================================================================
-# Section 5: Tool Configuration (delegates to unified tools_config.py)
+# Section 6: Tool Configuration (delegates to unified tools_config.py)
 # =============================================================================
 
 
@@ -2594,6 +2830,27 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
         if platforms:
             return ", ".join(platforms)
         return None  # No platforms configured — section must run
+
+    elif section_key == "memory":
+        mem_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+        provider = str(mem_config.get("provider") or "").strip() or "built-in"
+        memory_store = (
+            (config.get("plugins") or {}).get("elevate-memory-store")
+            if isinstance(config.get("plugins"), dict)
+            else {}
+        )
+        if not isinstance(memory_store, dict):
+            memory_store = {}
+        if provider == "holographic":
+            embedding = (
+                "embeddings on"
+                if _truthy_config_value(memory_store.get("embedding_enabled"), False)
+                else "embeddings off"
+            )
+            return f"local graph ({embedding})"
+        if mem_config.get("setup_completed"):
+            return provider
+        return None
 
     elif section_key == "tools":
         tools = []
@@ -2888,6 +3145,7 @@ SETUP_SECTIONS = [
     ("model", "Model & Provider", setup_model_provider),
     ("tts", "Text-to-Speech", setup_tts),
     ("terminal", "Terminal Backend", setup_terminal_backend),
+    ("memory", "Memory & Embeddings", setup_memory),
     ("gateway", "Messaging Platforms (Gateway)", setup_gateway),
     ("tools", "Tools", setup_tools),
     ("agent", "Agent Settings", setup_agent_settings),
@@ -2899,6 +3157,7 @@ SETUP_SECTIONS = [
 RETURNING_USER_MENU_SECTION_KEYS = [
     "model",
     "terminal",
+    "memory",
     "gateway",
     "tools",
     "agent",
@@ -3030,6 +3289,7 @@ def run_setup_wizard(args):
             "Full Setup - reconfigure everything",
             "Model & Provider",
             "Terminal Backend",
+            "Memory & Embeddings",
             "Messaging Platforms (Gateway)",
             "Tools",
             "Agent Settings",
@@ -3044,10 +3304,10 @@ def run_setup_wizard(args):
         elif choice == 1:
             # Full setup — fall through to run all sections
             pass
-        elif choice == 7:
+        elif choice == 8:
             print_info("Exiting. Run 'elevate setup' again when ready.")
             return
-        elif 2 <= choice <= 6:
+        elif 2 <= choice <= 7:
             # Individual section — map by key, not by position.
             # SETUP_SECTIONS includes TTS but the returning-user menu skips it,
             # so positional indexing (choice - 2) would dispatch the wrong section.
@@ -3069,7 +3329,7 @@ def run_setup_wizard(args):
             config = load_config()
 
         setup_mode = prompt_choice("How would you like to set up Elevate?", [
-            "Quick setup — provider, model & messaging (recommended)",
+            "Quick setup — model, memory, embeddings & messaging (recommended)",
             "Full setup — configure everything",
         ], 0)
 
@@ -3104,11 +3364,15 @@ def run_setup_wizard(args):
     if not (migration_ran and _skip_configured_section(config, "agent", "Agent Settings")):
         setup_agent_settings(config)
 
-    # Section 4: Messaging Platforms
+    # Section 4: Memory & Embeddings
+    if not (migration_ran and _skip_configured_section(config, "memory", "Memory & Embeddings")):
+        setup_memory(config)
+
+    # Section 5: Messaging Platforms
     if not (migration_ran and _skip_configured_section(config, "gateway", "Messaging Platforms")):
         setup_gateway(config)
 
-    # Section 5: Tools
+    # Section 6: Tools
     if not (migration_ran and _skip_configured_section(config, "tools", "Tools")):
         setup_tools(config, first_install=not is_existing)
 
@@ -3149,11 +3413,10 @@ def _offer_launch_chat():
 
 
 def _run_first_time_quick_setup(config: dict, elevate_home, is_existing: bool):
-    """Streamlined first-time setup: provider + model only.
+    """Streamlined first-time setup: provider, model, memory, and messaging.
 
-    Applies sensible defaults for TTS (Edge), terminal (local), agent
-    settings, and tools — the user can customize later via
-    ``elevate setup <section>``.
+    Applies sensible defaults for TTS (Edge), terminal (local), agent settings,
+    and tools — the user can customize later via ``elevate setup <section>``.
     """
     # Step 1: Model & Provider (essential — skips rotation/vision/TTS)
     setup_model_provider(config, quick=True)
@@ -3164,7 +3427,11 @@ def _run_first_time_quick_setup(config: dict, elevate_home, is_existing: bool):
 
     save_config(config)
 
-    # Step 3: Offer messaging gateway setup
+    # Step 3: Memory and embeddings
+    setup_memory(config, first_install=True)
+    save_config(config)
+
+    # Step 4: Offer messaging gateway setup
     print()
     gateway_choice = prompt_choice(
         "Connect a messaging platform? (Telegram, Discord, etc.)",
@@ -3212,12 +3479,14 @@ def _run_quick_setup(config: dict, elevate_home):
     ]
     missing_config = get_missing_config_fields()
     current_ver, latest_ver = check_config_version()
+    memory_missing = _memory_quick_setup_needed(config)
 
     has_anything_missing = (
         missing_required
         or missing_optional
         or missing_config
         or current_ver < latest_ver
+        or memory_missing
     )
 
     if not has_anything_missing:
@@ -3340,6 +3609,9 @@ def _run_quick_setup(config: dict, elevate_home):
                 else:
                     print_warning("  Skipped")
                 print()
+
+    if memory_missing:
+        setup_memory(config)
 
     # Handle missing config fields
     if missing_config:

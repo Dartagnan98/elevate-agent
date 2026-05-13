@@ -7351,12 +7351,12 @@ For more help on a command:
         aliases=["configure"],
         help="Interactive setup wizard",
         description="Configure Elevate with an interactive wizard. "
-        "Run a specific section: elevate setup model|tts|terminal|gateway|tools|agent",
+        "Run a specific section: elevate setup model|tts|terminal|memory|gateway|tools|agent",
     )
     setup_parser.add_argument(
         "section",
         nargs="?",
-        choices=["model", "tts", "terminal", "gateway", "tools", "agent"],
+        choices=["model", "tts", "terminal", "memory", "gateway", "tools", "agent"],
         default=None,
         help="Run a specific setup section instead of the full wizard",
     )
@@ -8474,9 +8474,11 @@ Examples:
     # =========================================================================
     memory_parser = subparsers.add_parser(
         "memory",
-        help="Configure external memory provider",
+        help="Manage memory provider, status, and maintenance",
         description=(
-            "Set up and manage external memory provider plugins.\n\n"
+            "Set up and manage memory provider plugins and maintenance.\n\n"
+            "For the normal local memory + embeddings wizard, run:\n"
+            "  elevate setup memory\n\n"
             "Available providers: honcho, openviking, mem0, hindsight,\n"
             "holographic, retaindb, byterover.\n\n"
             "Only one external provider can be active at a time.\n"

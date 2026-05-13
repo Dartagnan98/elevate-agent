@@ -8,7 +8,7 @@ import pytest
 from elevate_cli.auth import get_active_provider
 from elevate_cli.config import load_config, save_config
 from elevate_cli import setup as setup_mod
-from elevate_cli.setup import setup_model_provider
+from elevate_cli.setup import setup_memory, setup_model_provider
 
 
 def _maybe_keep_current_tts(question, choices):
@@ -221,6 +221,53 @@ def test_setup_gateway_in_container_shows_docker_guidance(monkeypatch, capsys):
     assert "Messaging platforms configured!" in out
     assert "docker" in out.lower() or "Docker" in out
     assert "restart" in out.lower()
+
+
+def test_setup_memory_enables_holographic_openai_embeddings(tmp_path, monkeypatch):
+    """The setup wizard should configure local memory and prompt for OpenAI embeddings."""
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    config = load_config()
+
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *args, **kwargs: True)
+    monkeypatch.setattr(setup_mod, "prompt_choice", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        setup_mod,
+        "prompt",
+        lambda question, default=None, password=False: (
+            "sk-test-openai" if "OpenAI API key" in question else (default or "")
+        ),
+    )
+
+    setup_memory(config, first_install=True)
+
+    reloaded = load_config()
+    memory = reloaded["memory"]
+    memory_store = reloaded["plugins"]["elevate-memory-store"]
+
+    assert memory["provider"] == "holographic"
+    assert memory["setup_completed"] is True
+    assert memory_store["embedding_enabled"] is True
+    assert memory_store["embedding_provider"] == "openai"
+    assert memory_store["embedding_model"] == "text-embedding-3-small"
+    assert setup_mod.get_env_value("OPENAI_API_KEY") == "sk-test-openai"
+
+
+def test_memory_quick_setup_needed_for_uninitialized_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+
+    config = load_config()
+
+    assert setup_mod._memory_quick_setup_needed(config) is True
+
+    config.setdefault("memory", {})["provider"] = "holographic"
+    config["memory"]["setup_completed"] = True
+    config.setdefault("plugins", {}).setdefault("elevate-memory-store", {})[
+        "embedding_enabled"
+    ] = False
+
+    assert setup_mod._memory_quick_setup_needed(config) is False
 
 
 def test_setup_syncs_custom_provider_removal_from_disk(tmp_path, monkeypatch):

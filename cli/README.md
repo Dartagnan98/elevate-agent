@@ -84,7 +84,7 @@ use `elevate activate`.
 After activation:
 
 ```bash
-elevate configure       # run the setup wizard
+elevate configure       # run setup, including memory + embeddings
 elevate model           # choose or verify the LLM provider
 elevate                 # start the agent
 elevate dashboard       # open the local dashboard
@@ -115,6 +115,7 @@ local, global, hybrid, naive, mix, and prompt/context modes without requiring an
 external LightRAG server.
 
 ```bash
+elevate setup memory
 elevate memory setup
 elevate memory status
 elevate memory organize --drain
@@ -122,8 +123,9 @@ elevate memory daily --force
 ```
 
 Semantic embeddings are optional. Configure them in Agent Hub or through
-`elevate memory setup` with OpenAI, Ollama, OpenAI-compatible endpoints, or the
-local MiniLM option.
+`elevate setup memory` with OpenAI or Ollama. The lower-level
+`elevate memory setup` command remains available when you want to switch to an
+external memory provider such as Honcho, Mem0, or Hindsight.
 
 ## Updates
 
