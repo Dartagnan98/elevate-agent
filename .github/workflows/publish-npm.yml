@@ -1,0 +1,50 @@
+name: Publish NPM bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run checks without publishing"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  push:
+    tags:
+      - "npm-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli/packaging/npm/elevate
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+          cache-dependency-path: cli/packaging/npm/elevate/package.json
+
+      - name: Smoke test package
+        run: npm run smoke
+
+      - name: Check package contents
+        run: npm pack --dry-run
+
+      - name: Publish package
+        if: ${{ github.event_name == 'push' || inputs.dry_run != 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

@@ -19,15 +19,36 @@ node bin/elevate.js install --dry-run --skip-setup
 
 ## Publish
 
-```bash
-cd cli/packaging/npm/elevate
-npm publish --access public
-```
-
-First release target:
+The package must be published to NPM before this works:
 
 ```bash
 npx @elevationrealestate/elevate install
+```
+
+Local publish:
+
+```bash
+cd cli/packaging/npm/elevate
+npm login
+npm publish --access public
+```
+
+GitHub Actions publish:
+
+1. Create an NPM automation token with publish access.
+2. Add it to the GitHub repo as `NPM_TOKEN`.
+3. Run the "Publish NPM bootstrap" workflow manually, or push a tag:
+
+   ```bash
+   git tag npm-v0.11.0
+   git push origin npm-v0.11.0
+   ```
+
+After publish, verify:
+
+```bash
+npm view @elevationrealestate/elevate version
+npx @elevationrealestate/elevate install --help
 ```
 
 For private beta builds, pass a GitHub token through the environment:

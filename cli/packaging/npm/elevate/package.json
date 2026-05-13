@@ -31,6 +31,7 @@
     "node": ">=18.17.0"
   },
   "scripts": {
+    "prepublishOnly": "npm run smoke && npm run pack:check",
     "smoke": "node bin/elevate.js --help && node bin/elevate.js install --dry-run --skip-setup",
     "pack:check": "npm pack --dry-run"
   }
