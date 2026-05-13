@@ -7351,12 +7351,12 @@ For more help on a command:
         aliases=["configure"],
         help="Interactive setup wizard",
         description="Configure Elevate with an interactive wizard. "
-        "Run a specific section: elevate setup model|tts|terminal|memory|gateway|tools|agent",
+        "Run a specific section: elevate setup model|tts|terminal|memory|admin|gateway|tools|agent",
     )
     setup_parser.add_argument(
         "section",
         nargs="?",
-        choices=["model", "tts", "terminal", "memory", "gateway", "tools", "agent"],
+        choices=["model", "tts", "terminal", "memory", "admin", "gateway", "tools", "agent"],
         default=None,
         help="Run a specific setup section instead of the full wizard",
     )

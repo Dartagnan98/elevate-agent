@@ -5,8 +5,10 @@ Modular wizard with independently-runnable sections:
   1. Model & Provider — choose your AI provider and model
   2. Terminal Backend — where your agent runs commands
   3. Agent Settings — iterations, compression, session reset
-  4. Messaging Platforms — connect Telegram, Discord, etc.
-  5. Tools — configure TTS, web search, image generation, etc.
+  4. Memory & Embeddings — local recall and semantic search
+  5. Realtor Admin Setup — province docs, providers, and portal refs
+  6. Messaging Platforms — connect Telegram, Discord, etc.
+  7. Tools — configure TTS, web search, image generation, etc.
 
 Config files are stored in ~/.elevate/ for easy access.
 """
@@ -1931,7 +1933,439 @@ def setup_memory(config: dict, first_install: bool = False):
 
 
 # =============================================================================
-# Section 5: Messaging Platforms (Gateway)
+# Section 5: Realtor Admin Setup
+# =============================================================================
+
+
+_ADMIN_PROVIDER_DEFAULTS = {
+    "email": "Gmail",
+    "calendar": "Google Calendar",
+    "drive": "Google Drive",
+    "crm": "CRM",
+    "mls": "MLS portal",
+    "forms_provider": "WEBForms",
+    "signing_provider": "E-sign provider",
+    "compliance_platform": "SkySlope",
+    "showing_platform": "ShowingTime",
+    "fintrac_workflow": "FINTRAC / ID workflow",
+}
+
+
+def _split_csv(value: str | None) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _setup_item(snapshot: dict, key: str) -> dict:
+    for item in snapshot.get("items") or []:
+        if isinstance(item, dict) and item.get("key") == key:
+            return item
+    return {}
+
+
+def _setup_item_value(snapshot: dict, key: str) -> dict:
+    value = _setup_item(snapshot, key).get("value")
+    return value if isinstance(value, dict) else {}
+
+
+def _setup_item_provider(snapshot: dict, key: str, fallback: str = "") -> str:
+    item = _setup_item(snapshot, key)
+    value = item.get("provider") or fallback
+    return str(value or "").strip()
+
+
+def _admin_status_for(value: str | None, *, allow_manual: bool = False) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "missing"
+    return "manual" if allow_manual else "configured"
+
+
+def _province_choice_label(code: str, label: str, coverage: dict[str, dict]) -> str:
+    item = coverage.get(code) or {}
+    pages = int(item.get("referencePages") or 0)
+    checklists = int(item.get("checklists") or 0)
+    forms = int(item.get("forms") or 0)
+    suffix = ""
+    if pages or checklists or forms:
+        suffix = f" — docs: {pages} pages, {checklists} checklists, {forms} forms"
+    return f"{code} — {label}{suffix}"
+
+
+def _default_province_index(
+    choices: list[tuple[str, str]],
+    current: str | None,
+    coverage: dict[str, dict],
+) -> int:
+    current = str(current or "").upper()
+    if current:
+        for idx, (code, _label) in enumerate(choices):
+            if code == current:
+                return idx
+    best_code = ""
+    best_score = -1
+    for code, _label in choices:
+        item = coverage.get(code) or {}
+        score = (
+            int(item.get("referencePages") or 0)
+            + int(item.get("checklists") or 0) * 4
+            + int(item.get("forms") or 0) * 2
+        )
+        if score > best_score:
+            best_code = code
+            best_score = score
+    if best_code:
+        for idx, (code, _label) in enumerate(choices):
+            if code == best_code:
+                return idx
+    return 0
+
+
+def _admin_quick_setup_needed() -> bool:
+    """Return True when the local Admin setup has missing required items."""
+    try:
+        from elevate_cli.data import connect, get_admin_setup
+
+        with connect() as conn:
+            snapshot = get_admin_setup(conn)
+        return bool(snapshot.get("launchRequired"))
+    except Exception:
+        logger.debug("Could not inspect admin setup readiness", exc_info=True)
+        return False
+
+
+def setup_admin(config: dict, quick: bool = False):
+    """Configure realtor/admin onboarding in the SQLite source of truth."""
+    del config
+    print_header("Realtor Admin Setup")
+    print_info("This saves province docs, provider choices, portal playbooks, and")
+    print_info("approval defaults into SQLite. Agents read the generated Admin memory")
+    print_info("so they do not keep asking for the same setup details.")
+    print_info("Do not paste passwords here; use credential references like 1Password item names.")
+    print()
+
+    try:
+        from elevate_cli.data import (
+            connect,
+            get_admin_setup,
+            import_exp_agent_centre,
+            province_agent_memory,
+            province_coverage,
+            sync_admin_setup_runtime,
+            update_admin_setup,
+        )
+        from elevate_cli.data.province_guides import PROVINCE_LABELS
+    except Exception as exc:
+        print_error(f"Admin setup is not available: {exc}")
+        return
+
+    with connect() as conn:
+        import_summary = import_exp_agent_centre(conn)
+        coverage_rows = province_coverage(conn)
+        snapshot = get_admin_setup(conn)
+
+    if import_summary.get("ok"):
+        imported = ", ".join(import_summary.get("provinces") or []) or "none"
+        print_info(
+            "Province docs checked: "
+            f"{import_summary.get('pages', 0)} pages, "
+            f"{import_summary.get('checklists', 0)} checklists, "
+            f"{import_summary.get('forms', 0)} forms ({imported})."
+        )
+    else:
+        print_warning(
+            "No local province guide folder was found yet. You can still select "
+            "a province now; docs can be synced later."
+        )
+    print()
+
+    coverage = {str(row.get("province")): row for row in coverage_rows if isinstance(row, dict)}
+    province_choices = list(PROVINCE_LABELS.items())
+    profile = snapshot.get("profile") or {}
+    province_labels = [
+        _province_choice_label(code, label, coverage) for code, label in province_choices
+    ]
+    province_idx = prompt_choice(
+        "Primary province for admin docs and deal workflows:",
+        province_labels,
+        _default_province_index(province_choices, profile.get("province"), coverage),
+    )
+    province, province_label = province_choices[province_idx]
+
+    setup_mode = 0 if quick else prompt_choice(
+        "How much admin setup do you want to do now?",
+        [
+            "Fast setup — profile, province docs, and provider names",
+            "Full setup — also add portal URLs and credential refs",
+        ],
+        0,
+    )
+    full_setup = setup_mode == 1
+
+    print()
+    print_header("Realtor Profile")
+    realtor_name = prompt("Licensed / legal realtor name", profile.get("realtorLegalName") or "")
+    license_name = prompt("Public license name", profile.get("licenseName") or realtor_name)
+    brokerage_name = prompt("Brokerage name", profile.get("brokerageName") or "")
+    team_name = prompt("Team / PREC name (optional)", profile.get("teamName") or "")
+    market = prompt("Primary market / service area", profile.get("market") or "")
+    current_boards = ", ".join(profile.get("boardMemberships") or [])
+    boards = _split_csv(prompt("Board memberships (comma-separated, optional)", current_boards))
+
+    print()
+    print_header("Core Providers")
+    providers: dict[str, str] = {}
+    for key, label in (
+        ("email", "Email provider"),
+        ("calendar", "Calendar provider"),
+        ("drive", "Document storage"),
+        ("crm", "CRM / lead source"),
+        ("mls", "MLS provider"),
+        ("forms_provider", "Forms provider"),
+        ("signing_provider", "Signing provider"),
+        ("compliance_platform", "Compliance platform"),
+        ("showing_platform", "Showing feedback platform"),
+        ("fintrac_workflow", "FINTRAC / ID workflow"),
+    ):
+        providers[key] = prompt(
+            label,
+            _setup_item_provider(snapshot, key, _ADMIN_PROVIDER_DEFAULTS.get(key, "")),
+        )
+
+    print()
+    print_header("Approval Lane")
+    approval_default = str(profile.get("approvalChannel") or _setup_item_provider(snapshot, "approval_channel", "telegram"))
+    approval_channel = prompt("Where should Admin ask for approvals?", approval_default)
+    approval_notes = prompt(
+        "Approval policy note",
+        (
+            (profile.get("approvalPolicy") or {}).get("notes")
+            if isinstance(profile.get("approvalPolicy"), dict)
+            else None
+        )
+        or "Ask before external sends, signatures, MLS changes, and client-visible messages.",
+    )
+
+    browser_value = _setup_item_value(snapshot, "browser_workflows")
+    playbooks = browser_value.get("playbooks") if isinstance(browser_value.get("playbooks"), dict) else {}
+    browser_notes = str(browser_value.get("notes") or "")
+    next_playbooks: dict[str, dict[str, str]] = {}
+
+    if full_setup:
+        print()
+        print_header("Browser Portal Playbooks")
+        for key, label, provider_key in (
+            ("mls", "MLS portal", "mls"),
+            ("compliance", "Compliance / transaction portal", "compliance_platform"),
+            ("showing", "Showing portal", "showing_platform"),
+        ):
+            existing = playbooks.get(key) if isinstance(playbooks, dict) else {}
+            existing = existing if isinstance(existing, dict) else {}
+            print()
+            print_info(label)
+            next_playbooks[key] = {
+                "provider": prompt("  Provider", existing.get("provider") or providers.get(provider_key) or ""),
+                "loginUrl": prompt("  Login URL", existing.get("loginUrl") or ""),
+                "credentialRef": prompt(
+                    "  Credential reference (not the password)",
+                    existing.get("credentialRef") or "",
+                ),
+                "notes": prompt("  Browser-use notes", existing.get("notes") or ""),
+            }
+        browser_notes = prompt("Shared browser-use notes", browser_notes)
+    else:
+        for key, provider_key in (
+            ("mls", "mls"),
+            ("compliance", "compliance_platform"),
+            ("showing", "showing_platform"),
+        ):
+            existing = playbooks.get(key) if isinstance(playbooks, dict) else {}
+            existing = existing if isinstance(existing, dict) else {}
+            next_playbooks[key] = {
+                "provider": existing.get("provider") or providers.get(provider_key) or "",
+                "loginUrl": existing.get("loginUrl") or "",
+                "credentialRef": existing.get("credentialRef") or "",
+                "notes": existing.get("notes") or "",
+            }
+
+    print()
+    print_header("Photo Workflow")
+    photo_value = _setup_item_value(snapshot, "photo_processing")
+    photo_provider = prompt(
+        "Photo cleanup workflow",
+        str(photo_value.get("provider") or _setup_item_provider(snapshot, "photo_processing", "Drive/Dropbox + Higgsfield or Nano Banana")),
+    )
+    photo_source = prompt("Photo source folder/provider", str(photo_value.get("source") or "Google Drive"))
+    photo_notes = prompt(
+        "Photo workflow notes",
+        str(photo_value.get("notes") or "Human approves final listing-ready photos before launch."),
+    )
+
+    print()
+    print_header("Regional Memory")
+    regional_memory = profile.get("regionalMemory") if isinstance(profile.get("regionalMemory"), dict) else {}
+    guide_row = coverage.get(province) or {}
+    regional_notes = prompt(
+        "Local/regional notes for Admin memory",
+        str(regional_memory.get("notes") or ""),
+    )
+
+    profile_update = {
+        "realtorLegalName": realtor_name,
+        "licenseName": license_name,
+        "brokerageName": brokerage_name,
+        "teamName": team_name,
+        "country": "CA",
+        "province": province,
+        "market": market,
+        "boardMemberships": boards,
+        "emailProvider": providers["email"],
+        "calendarProvider": providers["calendar"],
+        "driveProvider": providers["drive"],
+        "crmProvider": providers["crm"],
+        "mlsProvider": providers["mls"],
+        "formsProvider": providers["forms_provider"],
+        "signingProvider": providers["signing_provider"],
+        "complianceProvider": providers["compliance_platform"],
+        "showingProvider": providers["showing_platform"],
+        "fintracProvider": providers["fintrac_workflow"],
+        "approvalChannel": approval_channel,
+        "regionalMemory": {
+            "province": province,
+            "provinceLabel": province_label,
+            "docsSource": "sqlite:province_guides",
+            "coverage": {
+                "referencePages": int(guide_row.get("referencePages") or 0),
+                "checklists": int(guide_row.get("checklists") or 0),
+                "forms": int(guide_row.get("forms") or 0),
+                "hasTransactionGuide": bool(guide_row.get("hasTransactionGuide")),
+            },
+            "notes": regional_notes,
+        },
+        "approvalPolicy": {
+            "channel": approval_channel,
+            "notes": approval_notes,
+            "humanRequiredFor": [
+                "external_send",
+                "signatures",
+                "mls_change",
+                "client_visible_message",
+                "phase_completion",
+            ],
+        },
+    }
+
+    identity_ready = bool(realtor_name and brokerage_name)
+    jurisdiction_ready = bool(province and market)
+    browser_has_full_contract = all(
+        str(playbook.get("provider") or "").strip()
+        and any(
+            str(playbook.get(field) or "").strip()
+            for field in ("loginUrl", "credentialRef", "notes")
+        )
+        for playbook in next_playbooks.values()
+    )
+
+    item_updates = [
+        {
+            "key": "identity_profile",
+            "status": _admin_status_for(realtor_name if identity_ready else ""),
+            "provider": brokerage_name,
+            "value": {
+                "realtorLegalName": realtor_name,
+                "licenseName": license_name,
+                "brokerageName": brokerage_name,
+                "teamName": team_name,
+            },
+        },
+        {
+            "key": "jurisdiction",
+            "status": _admin_status_for(province if jurisdiction_ready else ""),
+            "provider": province,
+            "value": {
+                "country": "CA",
+                "province": province,
+                "provinceLabel": province_label,
+                "market": market,
+                "boardMemberships": boards,
+            },
+        },
+        {
+            "key": "approval_channel",
+            "status": _admin_status_for(approval_channel),
+            "provider": approval_channel,
+            "value": {"channel": approval_channel, "policy": profile_update["approvalPolicy"]},
+        },
+        {
+            "key": "browser_workflows",
+            "status": "configured" if browser_has_full_contract else "missing",
+            "provider": "browser-use",
+            "value": {
+                "mode": "browser-use",
+                "playbooks": next_playbooks,
+                "notes": browser_notes,
+            },
+        },
+        {
+            "key": "photo_processing",
+            "status": _admin_status_for(photo_provider),
+            "provider": photo_provider,
+            "value": {
+                "provider": photo_provider,
+                "source": photo_source,
+                "notes": photo_notes,
+            },
+        },
+        {
+            "key": "regional_memory",
+            "status": "configured" if (regional_notes or guide_row) else "missing",
+            "provider": province,
+            "value": profile_update["regionalMemory"],
+        },
+    ]
+    for key, provider in providers.items():
+        item_updates.append(
+            {
+                "key": key,
+                "status": _admin_status_for(provider),
+                "provider": provider,
+                "value": {"provider": provider},
+            }
+        )
+
+    with connect() as conn:
+        snapshot = update_admin_setup(
+            conn,
+            profile=profile_update,
+            items=item_updates,
+            actor="setup_admin",
+        )
+        guide_memory = province_agent_memory(conn, province)
+        snapshot = sync_admin_setup_runtime(
+            conn,
+            province_guide=guide_memory,
+            actor="setup_admin",
+        )
+
+    print()
+    print_success("Admin setup saved to SQLite and synced to agent memory.")
+    memory = snapshot.get("memory") or {}
+    if memory.get("path"):
+        print_info(f"Admin memory: {memory['path']}")
+    complete = snapshot.get("complete")
+    missing = snapshot.get("missingRequiredKeys") or []
+    if complete:
+        print_success("Admin automation gate is ready.")
+    else:
+        print_warning(
+            "Admin automation gate still needs: "
+            + ", ".join(missing)
+        )
+        print_info("Usually this clears after connector/account verification or full portal refs are added.")
+        print_info("Run again any time with: elevate setup admin")
+
+
+# =============================================================================
+# Section 6: Messaging Platforms (Gateway)
 # =============================================================================
 
 
@@ -3146,6 +3580,7 @@ SETUP_SECTIONS = [
     ("tts", "Text-to-Speech", setup_tts),
     ("terminal", "Terminal Backend", setup_terminal_backend),
     ("memory", "Memory & Embeddings", setup_memory),
+    ("admin", "Realtor Admin Setup", setup_admin),
     ("gateway", "Messaging Platforms (Gateway)", setup_gateway),
     ("tools", "Tools", setup_tools),
     ("agent", "Agent Settings", setup_agent_settings),
@@ -3158,6 +3593,7 @@ RETURNING_USER_MENU_SECTION_KEYS = [
     "model",
     "terminal",
     "memory",
+    "admin",
     "gateway",
     "tools",
     "agent",
@@ -3172,6 +3608,8 @@ def run_setup_wizard(args):
       elevate setup model     — just model/provider
       elevate setup tts       — just text-to-speech
       elevate setup terminal  — just terminal backend
+      elevate setup memory    — just memory/embeddings
+      elevate setup admin     — just realtor admin/province setup
       elevate setup gateway   — just messaging platforms
       elevate setup tools     — just tool configuration
       elevate setup agent     — just agent settings
@@ -3284,15 +3722,11 @@ def run_setup_wizard(args):
         print_success("You already have Elevate configured.")
         print()
 
+        labels_by_key = {key: label for key, label, _func in SETUP_SECTIONS}
         menu_choices = [
             "Quick Setup - configure missing items only",
             "Full Setup - reconfigure everything",
-            "Model & Provider",
-            "Terminal Backend",
-            "Memory & Embeddings",
-            "Messaging Platforms (Gateway)",
-            "Tools",
-            "Agent Settings",
+            *[labels_by_key.get(key, key) for key in RETURNING_USER_MENU_SECTION_KEYS],
             "Exit",
         ]
         choice = prompt_choice("What would you like to do?", menu_choices, 0)
@@ -3304,10 +3738,10 @@ def run_setup_wizard(args):
         elif choice == 1:
             # Full setup — fall through to run all sections
             pass
-        elif choice == 8:
+        elif choice == len(menu_choices) - 1:
             print_info("Exiting. Run 'elevate setup' again when ready.")
             return
-        elif 2 <= choice <= 7:
+        elif 2 <= choice < len(menu_choices) - 1:
             # Individual section — map by key, not by position.
             # SETUP_SECTIONS includes TTS but the returning-user menu skips it,
             # so positional indexing (choice - 2) would dispatch the wrong section.
@@ -3329,7 +3763,7 @@ def run_setup_wizard(args):
             config = load_config()
 
         setup_mode = prompt_choice("How would you like to set up Elevate?", [
-            "Quick setup — model, memory, embeddings & messaging (recommended)",
+            "Quick setup — model, memory, admin profile & messaging (recommended)",
             "Full setup — configure everything",
         ], 0)
 
@@ -3368,11 +3802,15 @@ def run_setup_wizard(args):
     if not (migration_ran and _skip_configured_section(config, "memory", "Memory & Embeddings")):
         setup_memory(config)
 
-    # Section 5: Messaging Platforms
+    # Section 5: Realtor Admin Setup
+    if not (migration_ran and _skip_configured_section(config, "admin", "Realtor Admin Setup")):
+        setup_admin(config)
+
+    # Section 6: Messaging Platforms
     if not (migration_ran and _skip_configured_section(config, "gateway", "Messaging Platforms")):
         setup_gateway(config)
 
-    # Section 6: Tools
+    # Section 7: Tools
     if not (migration_ran and _skip_configured_section(config, "tools", "Tools")):
         setup_tools(config, first_install=not is_existing)
 
@@ -3431,7 +3869,20 @@ def _run_first_time_quick_setup(config: dict, elevate_home, is_existing: bool):
     setup_memory(config, first_install=True)
     save_config(config)
 
-    # Step 4: Offer messaging gateway setup
+    # Step 4: Offer realtor/admin setup
+    print()
+    admin_choice = prompt_choice(
+        "Set up realtor admin docs and provider defaults?",
+        [
+            "Set up now (recommended for real estate workflows)",
+            "Skip — set up later with 'elevate setup admin'",
+        ],
+        0,
+    )
+    if admin_choice == 0:
+        setup_admin(config, quick=True)
+
+    # Step 5: Offer messaging gateway setup
     print()
     gateway_choice = prompt_choice(
         "Connect a messaging platform? (Telegram, Discord, etc.)",
@@ -3450,6 +3901,8 @@ def _run_first_time_quick_setup(config: dict, elevate_home, is_existing: bool):
     print_success("Setup complete! You're ready to go.")
     print()
     print_info("  Configure all settings:    elevate setup")
+    if admin_choice != 0:
+        print_info("  Realtor admin setup:       elevate setup admin")
     if gateway_choice != 0:
         print_info("  Connect Telegram/Discord:  elevate setup gateway")
     print()
@@ -3480,6 +3933,7 @@ def _run_quick_setup(config: dict, elevate_home):
     missing_config = get_missing_config_fields()
     current_ver, latest_ver = check_config_version()
     memory_missing = _memory_quick_setup_needed(config)
+    admin_missing = _admin_quick_setup_needed()
 
     has_anything_missing = (
         missing_required
@@ -3487,6 +3941,7 @@ def _run_quick_setup(config: dict, elevate_home):
         or missing_config
         or current_ver < latest_ver
         or memory_missing
+        or admin_missing
     )
 
     if not has_anything_missing:
@@ -3612,6 +4067,17 @@ def _run_quick_setup(config: dict, elevate_home):
 
     if memory_missing:
         setup_memory(config)
+
+    if admin_missing:
+        print()
+        print_header("Realtor Admin Setup")
+        if prompt_yes_no(
+            "Set up province docs, providers, and Admin memory now?",
+            True,
+        ):
+            setup_admin(config, quick=True)
+        else:
+            print_info("Skipped. Run 'elevate setup admin' when you are ready.")
 
     # Handle missing config fields
     if missing_config:

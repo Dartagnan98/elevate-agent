@@ -153,6 +153,8 @@ class TestNonInteractiveSetup:
         model_section = MagicMock()
         tts_section = MagicMock()
         terminal_section = MagicMock()
+        memory_section = MagicMock()
+        admin_section = MagicMock()
         gateway_section = MagicMock()
         tools_section = MagicMock()
         agent_section = MagicMock()
@@ -176,6 +178,8 @@ class TestNonInteractiveSetup:
                     ("model", "Model & Provider", model_section),
                     ("tts", "Text-to-Speech", tts_section),
                     ("terminal", "Terminal Backend", terminal_section),
+                    ("memory", "Memory & Embeddings", memory_section),
+                    ("admin", "Realtor Admin Setup", admin_section),
                     ("gateway", "Messaging Platforms (Gateway)", gateway_section),
                     ("tools", "Tools", tools_section),
                     ("agent", "Agent Settings", agent_section),
@@ -223,6 +227,8 @@ class TestNonInteractiveSetup:
             "Full Setup - reconfigure everything",
             "Model & Provider",
             "Terminal Backend",
+            "Memory & Embeddings",
+            "Realtor Admin Setup",
             "Messaging Platforms (Gateway)",
             "Tools",
             "Agent Settings",
@@ -244,3 +250,19 @@ class TestNonInteractiveSetup:
         main_mod.main()
 
         assert received["section"] == "tts"
+
+    def test_main_accepts_admin_setup_section(self, monkeypatch):
+        """`elevate setup admin` should parse and dispatch like other setup sections."""
+        from elevate_cli import main as main_mod
+
+        received = {}
+
+        def fake_cmd_setup(args):
+            received["section"] = args.section
+
+        monkeypatch.setattr(main_mod, "cmd_setup", fake_cmd_setup)
+        monkeypatch.setattr("sys.argv", ["elevate", "setup", "admin"])
+
+        main_mod.main()
+
+        assert received["section"] == "admin"

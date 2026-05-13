@@ -85,10 +85,16 @@ After activation:
 
 ```bash
 elevate configure       # run setup, including memory + embeddings
+elevate setup admin     # province docs, providers, portal refs, approval policy
 elevate model           # choose or verify the LLM provider
 elevate                 # start the agent
 elevate dashboard       # open the local dashboard
 ```
+
+`elevate setup admin` writes to the local SQLite Admin setup profile and syncs
+the generated Admin onboarding memory. Use it to choose the province docs
+package, realtor profile, CRM, forms/signing, MLS, compliance, showing, photo
+workflow, and human approval lane without pasting passwords into chat.
 
 ## Gateway
 

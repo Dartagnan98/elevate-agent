@@ -74,15 +74,19 @@ going. No hosted database project is required for the local runtime.
 ```bash
 elevate model      # choose or verify the LLM provider
 elevate configure  # run the setup wizard, including memory + embeddings
+elevate setup admin # province docs, realtor profile, providers, portal refs
 elevate            # start the agent
 elevate dashboard  # open the local dashboard
 ```
 
 Quick setup now walks through the local memory graph and semantic embeddings.
-To configure that section directly:
+It can also save realtor admin setup into SQLite so Admin agents remember the
+selected province package, connected providers, MLS/SkySlope/ShowingTime-style
+portal references, and approval policy. To configure a section directly:
 
 ```bash
 elevate setup memory
+elevate setup admin
 ```
 
 The base dashboard shows the local operating system: Agent Hub, Tasks, Memory,

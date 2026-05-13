@@ -270,6 +270,77 @@ def test_memory_quick_setup_needed_for_uninitialized_memory(tmp_path, monkeypatc
     assert setup_mod._memory_quick_setup_needed(config) is False
 
 
+def test_setup_admin_saves_realtor_profile_to_sqlite(tmp_path, monkeypatch):
+    """Admin setup should write province/provider choices to operational.db and memory."""
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+
+    from elevate_cli.data.connection import _reset_schema_cache
+
+    _reset_schema_cache()
+
+    def fake_prompt_choice(question, choices, default=0, description=None):
+        if "Primary province" in question:
+            return next(i for i, label in enumerate(choices) if label.startswith("BC"))
+        return default
+
+    prompt_values = {
+        "Licensed / legal realtor name": "Skyleigh Smith",
+        "Public license name": "Skyleigh Smith",
+        "Brokerage name": "Elevation Real Estate HQ",
+        "Team / PREC name (optional)": "Skyleigh Real Estate",
+        "Primary market / service area": "Kamloops",
+        "Board memberships (comma-separated, optional)": "AOIR, BCREA",
+        "Email provider": "Gmail",
+        "Calendar provider": "Google Calendar",
+        "Document storage": "Google Drive",
+        "CRM / lead source": "Lofty",
+        "MLS provider": "Matrix",
+        "Forms provider": "WEBForms",
+        "Signing provider": "DigiSign",
+        "Compliance platform": "SkySlope",
+        "Showing feedback platform": "ShowingTime",
+        "FINTRAC / ID workflow": "Fintracker",
+        "Where should Admin ask for approvals?": "telegram",
+        "Approval policy note": "Ask Admin Telegram before external sends.",
+        "Photo cleanup workflow": "Google Drive + Higgsfield",
+        "Photo source folder/provider": "Google Drive",
+        "Photo workflow notes": "Human approves final listing photos.",
+        "Local/regional notes for Admin memory": "Use BC docs and Kamloops market notes.",
+    }
+
+    monkeypatch.setattr(setup_mod, "prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr(
+        setup_mod,
+        "prompt",
+        lambda question, default=None, password=False: prompt_values.get(question, default or ""),
+    )
+
+    setup_mod.setup_admin({}, quick=True)
+
+    from elevate_cli.data import connect, get_admin_setup
+
+    with connect() as conn:
+        snapshot = get_admin_setup(conn)
+
+    profile = snapshot["profile"]
+    assert profile["province"] == "BC"
+    assert profile["market"] == "Kamloops"
+    assert profile["brokerageName"] == "Elevation Real Estate HQ"
+    assert profile["boardMemberships"] == ["AOIR", "BCREA"]
+
+    items = {item["key"]: item for item in snapshot["items"]}
+    assert items["crm"]["provider"] == "Lofty"
+    assert items["mls"]["provider"] == "Matrix"
+    assert items["photo_processing"]["value"]["provider"] == "Google Drive + Higgsfield"
+    assert items["regional_memory"]["status"] == "configured"
+
+    memory_path = tmp_path / "memories" / "ADMIN_ONBOARDING.md"
+    assert memory_path.exists()
+    memory_text = memory_path.read_text()
+    assert "Skyleigh Smith" in memory_text
+    assert "BC / Kamloops" in memory_text
+
+
 def test_setup_syncs_custom_provider_removal_from_disk(tmp_path, monkeypatch):
     """Removing the last custom provider in model setup should persist."""
     monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
