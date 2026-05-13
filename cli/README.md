@@ -84,6 +84,7 @@ use `elevate activate`.
 After activation:
 
 ```bash
+elevate configure       # run the setup wizard
 elevate model           # choose or verify the LLM provider
 elevate                 # start the agent
 elevate dashboard       # open the local dashboard

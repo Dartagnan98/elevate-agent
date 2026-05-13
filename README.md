@@ -73,6 +73,7 @@ going. No hosted database project is required for the local runtime.
 
 ```bash
 elevate model      # choose or verify the LLM provider
+elevate configure  # run the setup wizard
 elevate            # start the agent
 elevate dashboard  # open the local dashboard
 ```

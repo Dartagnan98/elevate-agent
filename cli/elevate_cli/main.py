@@ -1126,6 +1126,7 @@ def cmd_chat(args):
         )
         print()
         print("  Run:  elevate setup")
+        print("  Or:   elevate configure")
         print()
 
         from elevate_cli.setup import (
@@ -1147,7 +1148,7 @@ def cmd_chat(args):
             cmd_setup(args)
             return
         print()
-        print("You can run 'elevate setup' at any time to configure.")
+        print("You can run 'elevate setup' or 'elevate configure' at any time.")
         sys.exit(1)
 
     # Start update check in background (runs while other init happens)
@@ -7347,6 +7348,7 @@ For more help on a command:
     # =========================================================================
     setup_parser = subparsers.add_parser(
         "setup",
+        aliases=["configure"],
         help="Interactive setup wizard",
         description="Configure Elevate with an interactive wizard. "
         "Run a specific section: elevate setup model|tts|terminal|gateway|tools|agent",
