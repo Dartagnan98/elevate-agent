@@ -1,0 +1,37 @@
+{
+  "name": "@elevationrealestate/elevate",
+  "version": "0.11.0",
+  "description": "Public bootstrap installer for Elevate Agent.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "elevate": "bin/elevate.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dartagnan98/elevate-agent.git",
+    "directory": "cli/packaging/npm/elevate"
+  },
+  "bugs": {
+    "url": "https://github.com/Dartagnan98/elevate-agent/issues"
+  },
+  "homepage": "https://github.com/Dartagnan98/elevate-agent#readme",
+  "keywords": [
+    "elevate",
+    "real-estate",
+    "agent",
+    "ai",
+    "assistant"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "scripts": {
+    "smoke": "node bin/elevate.js --help && node bin/elevate.js install --dry-run --skip-setup",
+    "pack:check": "npm pack --dry-run"
+  }
+}

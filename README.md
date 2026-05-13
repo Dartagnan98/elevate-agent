@@ -9,18 +9,30 @@ estate packs unlock through Elevation Real Estate HQ.
 
 ## One-Shot Install
 
+Recommended production install:
+
+```bash
+npx @elevationrealestate/elevate install
+```
+
+Or keep the bootstrap command installed:
+
+```bash
+npm install -g @elevationrealestate/elevate
+elevate install
+```
+
 Current private beta install:
 
 ```bash
 export ELEVATE_GITHUB_TOKEN="$(gh auth token)"
-curl -fsSL -H "Authorization: Bearer $ELEVATE_GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
+npx @elevationrealestate/elevate install
 ```
 
 If you are using a personal access token instead of GitHub CLI auth, set
 `ELEVATE_GITHUB_TOKEN` to a token with read access to `Dartagnan98/elevate-agent`.
 
-Public release install, once the base installer is published publicly:
+Direct shell installer, once the base installer is published publicly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
