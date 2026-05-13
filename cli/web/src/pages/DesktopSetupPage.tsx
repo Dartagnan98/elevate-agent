@@ -617,7 +617,7 @@ export default function DesktopSetupPage() {
             <>
               <SetupLink to="/memory">Memory</SetupLink>
               <SetupLink to="/logs">Logs</SetupLink>
-              <SetupLink to="/sessions">Sessions</SetupLink>
+              <SetupLink to="/tasks">Tasks</SetupLink>
             </>
           }
         >

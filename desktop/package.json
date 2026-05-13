@@ -1,0 +1,40 @@
+{
+  "name": "@elevationrealestate/elevate-desktop",
+  "version": "0.11.0",
+  "description": "Elevate desktop app shell.",
+  "private": true,
+  "main": "src/main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack:mac": "electron-builder --mac dir",
+    "build:mac": "electron-builder --mac dmg zip"
+  },
+  "build": {
+    "appId": "com.elevationrealestate.elevate",
+    "productName": "Elevate",
+    "artifactName": "Elevate-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null
+    },
+    "dmg": {
+      "title": "Elevate"
+    }
+  },
+  "devDependencies": {
+    "electron": "^38.4.0",
+    "electron-builder": "^26.0.12"
+  }
+}

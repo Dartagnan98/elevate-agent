@@ -129,7 +129,7 @@ function RootRedirect() {
 }
 
 function CoreRootRedirect() {
-  return <Navigate to="/hub" replace />;
+  return <Navigate to={isDashboardEmbeddedChatEnabled() ? "/chat" : "/hub"} replace />;
 }
 
 function LockedDashboardRedirect() {
@@ -685,7 +685,7 @@ function cronSessionLabel(
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
-  if (!embeddedChat) return `/sessions?session=${encodeURIComponent(session.id)}`;
+  if (!embeddedChat) return "/hub";
   return `/chat?resume=${encodeURIComponent(session.id)}`;
 }
 
@@ -740,9 +740,9 @@ function DesktopSidebar({
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
     try {
-      return window.localStorage.getItem("elevate.sidebar.automations") !== "0";
+      return window.localStorage.getItem("elevate.sidebar.automations.v2") === "1";
     } catch {
-      return true;
+      return false;
     }
   });
   const [query, setQuery] = useState("");
@@ -797,7 +797,7 @@ function DesktopSidebar({
   useEffect(() => {
     try {
       window.localStorage.setItem(
-        "elevate.sidebar.automations",
+        "elevate.sidebar.automations.v2",
         automationsOpen ? "1" : "0",
       );
     } catch {
@@ -1799,7 +1799,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
   const handleClick = (action: SystemAction) => {
     if (isBusy) return;
     void runAction(action);
-    navigate("/sessions");
+    navigate("/tasks");
     onNavigate();
   };
 

@@ -8,6 +8,9 @@
     "elevate": "cli/packaging/npm/elevate/bin/elevate.js"
   },
   "scripts": {
+    "desktop": "npm --prefix desktop start",
+    "desktop:pack:mac": "npm --prefix desktop run pack:mac",
+    "desktop:build:mac": "npm --prefix desktop run build:mac",
     "smoke:npx-github": "node cli/packaging/npm/elevate/bin/elevate.js --help && node cli/packaging/npm/elevate/bin/elevate.js install --dry-run --skip-setup"
   },
   "engines": {

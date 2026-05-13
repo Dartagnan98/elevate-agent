@@ -3,6 +3,7 @@ import type { StatusResponse } from "@/lib/api";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 
 /** Gateway + session summary for the System sidebar block (no separate strip chrome). */
 export function SidebarStatusStrip() {
@@ -19,10 +20,11 @@ export function SidebarStatusStrip() {
 
   const gw = gatewayLine(status, t);
   const { activeSessionsLabel, gatewayStatusLabel } = t.app;
+  const overviewPath = isDashboardEmbeddedChatEnabled() ? "/chat" : "/tasks";
 
   return (
     <Link
-      to="/sessions"
+      to={overviewPath}
       title={t.app.statusOverview}
       className={cn(
         "flex min-h-11 items-center text-left lg:min-h-0",
