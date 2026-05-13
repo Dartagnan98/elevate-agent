@@ -1699,6 +1699,40 @@ def setup_agent_settings(config: dict):
 # =============================================================================
 
 
+def _print_telegram_pairing_next_steps():
+    """Explain Telegram's runtime pairing order."""
+    print_info("Telegram DM pairing is enabled.")
+    print_info("Next steps:")
+    print_info("  1. Start the gateway: elevate gateway start")
+    print_info("  2. Open your Telegram bot and send /start")
+    print_info("  3. The bot replies with a pairing code")
+    print_info("  4. Approve it: elevate pairing approve telegram <code>")
+    print_info("  5. After approval, send /set-home so cron/admin notifications know where to go")
+
+
+def _configure_telegram_access_without_allowlist():
+    """Choose Telegram behavior when no numeric user ID is entered."""
+    print()
+    print_warning("No Telegram user allowlist was entered.")
+    access_choices = [
+        "Use DM pairing after the gateway starts (recommended)",
+        "Enable open access (anyone can message the bot)",
+        "Deny unknown users until configured later",
+    ]
+    access_idx = prompt_choice("How should Telegram authorize users?", access_choices, 0)
+    if access_idx == 0:
+        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "pair")
+        print_success("Telegram pairing mode saved")
+        _print_telegram_pairing_next_steps()
+    elif access_idx == 1:
+        save_env_value("GATEWAY_ALLOW_ALL_USERS", "true")
+        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "ignore")
+        print_warning("Open access enabled - anyone who finds your bot can use it.")
+    else:
+        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "ignore")
+        print_info("Telegram will ignore unknown users until you add TELEGRAM_ALLOWED_USERS.")
+
+
 def _setup_telegram():
     """Configure Telegram bot credentials and allowlist."""
     print_header("Telegram")
@@ -1707,14 +1741,18 @@ def _setup_telegram():
         print_info("Telegram: already configured")
         if not prompt_yes_no("Reconfigure Telegram?", False):
             # Check missing allowlist on existing config
-            if not get_env_value("TELEGRAM_ALLOWED_USERS"):
-                print_info("⚠️  Telegram has no user allowlist - anyone can use your bot!")
+            if not get_env_value("TELEGRAM_ALLOWED_USERS") and not get_env_value("GATEWAY_ALLOW_ALL_USERS"):
+                print_warning("Telegram has no user allowlist configured.")
                 if prompt_yes_no("Add allowed users now?", True):
                     print_info("   To find your Telegram user ID: message @userinfobot")
                     allowed_users = prompt("Allowed user IDs (comma-separated)")
                     if allowed_users:
                         save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users.replace(" ", ""))
                         print_success("Telegram allowlist configured")
+                    else:
+                        _configure_telegram_access_without_allowlist()
+                elif not get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"):
+                    _configure_telegram_access_without_allowlist()
             return
 
     print_info("Create a bot via @BotFather on Telegram")
@@ -1741,13 +1779,14 @@ def _setup_telegram():
     print_info("   2. It will reply with your numeric ID (e.g., 123456789)")
     print()
     allowed_users = prompt(
-        "Allowed user IDs (comma-separated, leave empty for open access)"
+        "Allowed user IDs (comma-separated, leave empty for DM pairing)"
     )
     if allowed_users:
         save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users.replace(" ", ""))
+        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "ignore")
         print_success("Telegram allowlist configured - only listed users can use the bot")
     else:
-        print_info("⚠️  No allowlist set - anyone who finds your bot can use it!")
+        _configure_telegram_access_without_allowlist()
 
     print()
     print_info("📬 Home Channel: where Elevate delivers cron job results,")
@@ -1763,6 +1802,8 @@ def _setup_telegram():
             home_channel = prompt("Home channel ID (or leave empty to set later with /set-home in Telegram)")
             if home_channel:
                 save_env_value("TELEGRAM_HOME_CHANNEL", home_channel)
+    elif str(get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or "").strip().lower() == "pair":
+        print_info("   Pair first, then set this from Telegram with /set-home.")
     else:
         print_info("   You can also set this later by typing /set-home in your Telegram chat.")
         home_channel = prompt("Home channel ID (leave empty to set later)")

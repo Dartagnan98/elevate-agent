@@ -1347,6 +1347,43 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 name=os.getenv("QQBOT_HOME_CHANNEL_NAME") or os.getenv(qq_home_name_env, "Home"),
             )
 
+    # Explicit unauthorized-DM behavior from env. This is written by the setup
+    # wizard when an owner chooses pairing or "deny unknown users" without an
+    # allowlist, so runtime behavior matches the setup choice.
+    unauthorized_behavior_envs = {
+        Platform.TELEGRAM: "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.DISCORD: "DISCORD_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.WHATSAPP: "WHATSAPP_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.SLACK: "SLACK_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.SIGNAL: "SIGNAL_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.MATTERMOST: "MATTERMOST_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.MATRIX: "MATRIX_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.EMAIL: "EMAIL_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.SMS: "SMS_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.DINGTALK: "DINGTALK_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.FEISHU: "FEISHU_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.WECOM: "WECOM_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.WECOM_CALLBACK: "WECOM_CALLBACK_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.WEIXIN: "WEIXIN_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.BLUEBUBBLES: "BLUEBUBBLES_UNAUTHORIZED_DM_BEHAVIOR",
+        Platform.QQBOT: "QQ_UNAUTHORIZED_DM_BEHAVIOR",
+    }
+    for platform, env_name in unauthorized_behavior_envs.items():
+        raw_behavior = env_values.get(env_name, "").strip()
+        if not raw_behavior:
+            continue
+        behavior = _normalize_unauthorized_dm_behavior(raw_behavior, "")
+        if not behavior:
+            logger.warning(
+                "Ignoring invalid %s=%r; expected 'pair' or 'ignore'",
+                env_name,
+                raw_behavior,
+            )
+            continue
+        if platform not in config.platforms:
+            config.platforms[platform] = PlatformConfig()
+        config.platforms[platform].extra["unauthorized_dm_behavior"] = behavior
+
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
     if idle_minutes:

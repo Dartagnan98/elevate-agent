@@ -357,6 +357,22 @@ class TestLoadGatewayConfig:
         assert config.unauthorized_dm_behavior == "ignore"
         assert config.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
 
+    def test_bridges_telegram_unauthorized_dm_behavior_from_env(self, tmp_path, monkeypatch):
+        elevate_home = tmp_path / ".elevate"
+        elevate_home.mkdir()
+
+        monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+        monkeypatch.setenv(
+            "TELEGRAM_BOT_TOKEN",
+            "123456789:abcdefghijklmnopqrstuvwxyzABCDE",
+        )
+        monkeypatch.setenv("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "pair")
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.TELEGRAM].extra["unauthorized_dm_behavior"] == "pair"
+        assert config.get_unauthorized_dm_behavior(Platform.TELEGRAM) == "pair"
+
     def test_bridges_telegram_disable_link_previews_from_config_yaml(self, tmp_path, monkeypatch):
         elevate_home = tmp_path / ".elevate"
         elevate_home.mkdir()

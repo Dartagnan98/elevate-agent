@@ -2881,12 +2881,15 @@ def _setup_standard_platform(platform: dict):
                 access_idx = prompt_choice("  How should unauthorized users be handled?", access_choices, 1)
                 if access_idx == 0:
                     save_env_value("GATEWAY_ALLOW_ALL_USERS", "true")
+                    _save_platform_unauthorized_behavior(platform, "ignore")
                     print_warning("  Open access enabled — anyone can use your bot!")
                 elif access_idx == 1:
-                    print_success("  DM pairing mode — users will receive a code to request access.")
-                    print_info("  Approve with: elevate pairing approve <platform> <code>")
+                    _save_platform_unauthorized_behavior(platform, "pair")
+                    _print_pairing_next_steps(platform)
                 else:
-                    print_info("  Skipped — configure later with 'elevate gateway setup'")
+                    _save_platform_unauthorized_behavior(platform, "ignore")
+                    print_info("  Skipped — unknown users will be ignored until configured.")
+                    print_info("  Configure later with 'elevate gateway setup'.")
             continue
 
         value = prompt(f"  {var['prompt']}", password=var.get("password", False))
@@ -2931,6 +2934,34 @@ def _truthy_env_value(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _platform_unauthorized_behavior_env(platform: dict) -> str | None:
+    """Return the env var used to persist per-platform unauthorized DM behavior."""
+    for var in platform.get("vars", []):
+        name = str(var.get("name") or "")
+        if name.endswith("_ALLOWED_USERS"):
+            return name.removesuffix("_ALLOWED_USERS") + "_UNAUTHORIZED_DM_BEHAVIOR"
+    return None
+
+
+def _save_platform_unauthorized_behavior(platform: dict, behavior: str) -> None:
+    env_name = _platform_unauthorized_behavior_env(platform)
+    if env_name:
+        save_env_value(env_name, behavior)
+
+
+def _print_pairing_next_steps(platform: dict) -> None:
+    key = platform.get("key", "telegram")
+    label = platform.get("label", key)
+    print_success(f"  {label} DM pairing mode saved.")
+    print_info("  Pairing happens after the gateway is running:")
+    print_info("    1. Start the gateway: elevate gateway start")
+    print_info(f"    2. Message the {label} bot")
+    print_info("    3. The bot replies with a pairing code")
+    print_info(f"    4. Approve it: elevate pairing approve {key} <code>")
+    if key == "telegram":
+        print_info("    5. After approval, send /set-home for cron/admin notifications")
+
+
 def _telegram_startup_preflight() -> None:
     """Collect missing Telegram user/home values before starting.
 
@@ -2946,6 +2977,28 @@ def _telegram_startup_preflight() -> None:
     allowed_users = str(get_env_value("TELEGRAM_ALLOWED_USERS") or "").strip()
     home_channel = str(get_env_value("TELEGRAM_HOME_CHANNEL") or "").strip()
     open_access = _truthy_env_value(get_env_value("GATEWAY_ALLOW_ALL_USERS"))
+    unauthorized_behavior = str(
+        get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or ""
+    ).strip().lower()
+    pairing_mode = unauthorized_behavior == "pair"
+    deny_unknown = unauthorized_behavior == "ignore"
+
+    if pairing_mode and not allowed_users and not open_access:
+        print()
+        print_info("Telegram DM pairing is enabled.")
+        print_info("The gateway can start now. Then open your Telegram bot and send /start.")
+        print_info("The bot will reply with a pairing code to approve:")
+        print_info("  elevate pairing approve telegram <code>")
+        if not home_channel:
+            print_info("After approval, send /set-home in Telegram for cron/admin notifications.")
+        return
+
+    if deny_unknown and not allowed_users and not open_access:
+        print_warning(
+            "Telegram is configured to ignore unknown users. Add TELEGRAM_ALLOWED_USERS "
+            "or run 'elevate gateway setup' if you want pairing."
+        )
+        return
 
     if (allowed_users or open_access) and home_channel:
         return
@@ -2964,18 +3017,37 @@ def _telegram_startup_preflight() -> None:
         return
 
     print()
-    print_warning("Telegram needs your numeric user ID before the gateway starts.")
-    print_info("  Message @userinfobot in Telegram, copy the numeric ID it replies with,")
-    print_info("  then paste it here. This is not the bot token.")
+    print_warning("Telegram needs an authorization method before the gateway starts.")
 
     if not allowed_users and not open_access:
+        access_idx = prompt_choice(
+            "How should Telegram authorize you?",
+            [
+                "Paste numeric user ID now (recommended)",
+                "Use DM pairing after the gateway starts",
+            ],
+            0,
+        )
+        if access_idx == 1:
+            save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "pair")
+            print_info("Gateway will start first. Then message the bot to receive a pairing code.")
+            print_info("Approve it with: elevate pairing approve telegram <code>")
+            return
+
+        print_info("  Message @userinfobot in Telegram, copy the numeric ID it replies with,")
+        print_info("  then paste it here. This is not the bot token.")
         value = prompt("Telegram numeric user ID (comma-separated if multiple)")
         if value:
             allowed_users = value.replace(" ", "")
             save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users)
+            save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "ignore")
             print_success("Saved TELEGRAM_ALLOWED_USERS")
         else:
-            print_warning("No allowed user saved - Telegram will deny unknown users.")
+            save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "pair")
+            print_info("No numeric user ID saved. Telegram DM pairing was enabled instead.")
+            print_info("After the gateway starts, message the bot to receive a pairing code.")
+            print_info("Approve it with: elevate pairing approve telegram <code>")
+            return
 
     if not home_channel:
         first_user = allowed_users.split(",")[0].strip() if allowed_users else ""
