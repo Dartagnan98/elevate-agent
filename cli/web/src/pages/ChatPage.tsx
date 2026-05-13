@@ -2555,16 +2555,16 @@ export default function ChatPage() {
     );
 
   return (
-    <div className="elevate-chat-shell relative -m-4 flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6">
-      <div className="relative flex min-h-0 flex-1">
+    <div
+      className="elevate-chat-shell relative -m-4 flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case sm:-m-6"
+      style={previewPanelLayoutStyle}
+    >
+      <div className="flex min-h-0 flex-1">
         <section
           className={cn(
             "flex min-h-0 flex-1 flex-col",
-            previewArtifact
-              ? "xl:pr-[calc(var(--preview-panel-width)+1.5rem)]"
-              : "xl:pr-[23rem]",
+            previewArtifact && "xl:basis-1/2",
           )}
-          style={previewPanelLayoutStyle}
         >
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-5 sm:px-6">
             {visibleMessages.length === 0 ? (
@@ -2708,14 +2708,16 @@ export default function ChatPage() {
 
         <aside
           className={cn(
-            "pointer-events-none absolute right-5 top-5 hidden xl:block",
-            previewArtifact
-              ? "h-[calc(100%-2.5rem)] min-h-[30rem] max-w-[calc(100vw-2.5rem)]"
-              : "h-[52vh] max-h-[34rem] min-h-[22rem] w-[21.5rem]",
+            "hidden min-h-0 shrink-0 flex-col py-5 pr-5 xl:flex",
+            previewArtifact ? "pl-0" : "w-[23rem] pl-0",
           )}
-          style={previewArtifact ? { width: previewPanelWidthPx } : undefined}
+          style={
+            previewArtifact
+              ? { width: "min(var(--preview-panel-width), 50%)" }
+              : undefined
+          }
         >
-          <div className="pointer-events-auto relative h-full">
+          <div className="relative min-h-0 flex-1">
             {previewArtifact && (
               <button
                 aria-label="Resize artifact preview"
@@ -3674,24 +3676,31 @@ function ArtifactPreviewPane({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <Button
-            className="h-8 rounded-full px-2.5 text-xs"
+            aria-label="Open preview externally"
+            className="h-8 w-8 rounded-full p-0"
             disabled={!blobUrl}
             onClick={openExternal}
             size="sm"
+            title="Open"
             type="button"
             variant="outline"
           >
-            <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-            Open
+            <ExternalLink className="h-3.5 w-3.5" />
           </Button>
           <Button
-            className="h-8 rounded-full px-2.5 text-xs"
+            aria-label="Copy artifact path"
+            className="h-8 w-8 rounded-full p-0"
             onClick={copy}
             size="sm"
+            title={copied ? "Copied" : "Copy"}
             type="button"
             variant="outline"
           >
-            {copied ? "Copied" : "Copy"}
+            {copied ? (
+              <CheckCircle2 className="h-3.5 w-3.5" />
+            ) : (
+              <Clipboard className="h-3.5 w-3.5" />
+            )}
           </Button>
           <Button
             aria-label="Close preview"
