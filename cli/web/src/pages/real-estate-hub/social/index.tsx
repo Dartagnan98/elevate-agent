@@ -205,22 +205,14 @@ export function RealEstateSocialMediaPage() {
       )}
 
       {socialError && (
-        <div className="rounded-sm border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-destructive">
-          {socialError}
-        </div>
+        <p className="px-1 py-1 text-xs text-destructive">{socialError}</p>
       )}
 
       {snapshot && snapshot.exists === false && (
-        <Card className="border-dashed">
-          <CardContent className="py-6 text-center text-sm text-muted-foreground">
-            <Sparkles className="mx-auto mb-2 h-5 w-5 text-muted-foreground/60" />
-            No snapshot yet. The weekly content engine runs Mondays at 7am Pacific —
-            once it pulls metrics from your connected platforms, this page comes alive.
-            <div className="mt-2 text-[0.7rem] text-muted-foreground/70">
-              {snapshot.message ?? "Connect at least one social platform in Channels to begin."}
-            </div>
-          </CardContent>
-        </Card>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
+          No snapshot yet. Weekly content engine runs Mondays 7am Pacific.{" "}
+          {snapshot.message ?? "Connect at least one social platform in Channels to begin."}
+        </p>
       )}
 
       <Card>
@@ -246,9 +238,7 @@ export function RealEstateSocialMediaPage() {
         </CardHeader>
         <CardContent className="space-y-5">
           {loadingSocial && !ideas.length ? (
-            <div className="flex items-center justify-center py-12 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-            </div>
+            <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading ideas…</p>
           ) : ideas.length === 0 ? (
             <p className="px-1 py-1 text-xs text-muted-foreground/80">
               No ideas waiting — the engine queues 5–10 every Monday morning.
@@ -314,7 +304,7 @@ export function RealEstateSocialMediaPage() {
                 <Activity className="h-4 w-4" />
                 Your posts
               </CardTitle>
-              <p className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 {recentPosts.length === 0
                   ? "Nothing pulled yet"
                   : `${recentPosts.length} pulled · last ${lookbackDays} days`}
@@ -396,12 +386,12 @@ export function RealEstateSocialMediaPage() {
                     <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                       <h3
                         id="all-posts-heading"
-                        className="font-mono-ui text-[0.75rem] uppercase tracking-wider text-foreground"
+                        className="text-sm font-medium text-foreground"
                       >
                         All posts
                       </h3>
                       <span
-                        className="font-mono-ui text-[0.7rem] uppercase tracking-wider tabular-nums text-muted-foreground"
+                        className="text-xs text-muted-foreground tabular-nums"
                         aria-live="polite"
                       >
                         {Math.min(postLimit, filteredPosts.length)} of {filteredPosts.length}
