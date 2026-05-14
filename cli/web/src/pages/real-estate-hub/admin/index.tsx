@@ -46,6 +46,7 @@ import type {
   DealAttachmentCreateRequest,
   DealContactCreateRequest,
   DealContext,
+  ProvinceStageDocumentItem,
   SourceInboxProfileVerifier,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -1750,6 +1751,7 @@ function AdminCardStageSection({
   expanded,
   onToggleExpand,
   onToggleItem,
+  documents,
 }: {
   card: AdminCard;
   stage: AdminStageNumber;
@@ -1758,6 +1760,7 @@ function AdminCardStageSection({
   expanded: boolean;
   onToggleExpand: () => void;
   onToggleItem: (itemId: string, completed: boolean) => void;
+  documents?: ProvinceStageDocumentItem[];
 }) {
   const column = adminStageDefinition(stage);
   const label = column.labels[card.side];
@@ -1870,6 +1873,32 @@ function AdminCardStageSection({
                 );
               })}
             </ul>
+          )}
+          {documents && documents.length > 0 && (
+            <div className="mt-3 border-t border-border pt-2.5">
+              <div className="font-mono-ui mb-1.5 text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+                Province documents · {documents.length}
+              </div>
+              <ul className="flex flex-col gap-1">
+                {documents.map((doc) => (
+                  <li
+                    key={`${doc.source}-${doc.code}`}
+                    className="flex items-start gap-2 text-[0.78rem] leading-snug"
+                  >
+                    <FileText className="mt-[1px] h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0">
+                      <span className="font-medium text-foreground">{doc.code}</span>
+                      <span className="text-muted-foreground"> · {doc.name}</span>
+                      {doc.condition && (
+                        <span className="font-mono-ui ml-1 text-[0.62rem] uppercase tracking-wider text-warning">
+                          if {doc.condition.field}={doc.condition.value}
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}
@@ -2796,6 +2825,7 @@ function AdminCardDetailPanel({
                   expanded={expanded.has(stage)}
                   onToggleExpand={() => toggleSection(stage)}
                   onToggleItem={(itemId, completed) => onToggleItem(stage, itemId, completed)}
+                  documents={dealContext?.stageDocuments?.stages[String(stage)] ?? []}
                 />
             ))}
           </div>
