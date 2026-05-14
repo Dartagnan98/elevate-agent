@@ -53,7 +53,6 @@ import {
   MoreHorizontal,
   Package,
   PanelLeftClose,
-  PanelLeftOpen,
   Pencil,
   Pin,
   Plus,
@@ -590,31 +589,11 @@ export default function App() {
             />
           </aside>
 
-          {sidebarCollapsed && !isConfigRoute && (
-            <>
-              <div
-                className="hidden lg:block fixed top-0 left-0 right-0 z-30 h-9 bg-transparent"
-                style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-                aria-hidden
-              />
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                aria-label="Show sidebar"
-                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-                className={cn(
-                  "hidden lg:inline-flex fixed left-[5.5rem] top-2 z-40",
-                  "h-7 w-7 items-center justify-center rounded-md",
-                  "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                )}
-              >
-                <PanelLeftOpen className="h-4 w-4" />
-              </button>
-            </>
-          )}
-
-          <PageHeaderProvider pluginTabs={pluginTabMeta}>
+          <PageHeaderProvider
+            pluginTabs={pluginTabMeta}
+            sidebarCollapsed={sidebarCollapsed && !isConfigRoute}
+            onShowSidebar={toggleSidebar}
+          >
             <div
               className={cn(
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",

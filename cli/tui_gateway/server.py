@@ -909,6 +909,15 @@ def _session_info(agent) -> dict:
     return info
 
 
+def _light_session_info(agent=None) -> dict:
+    return {
+        "model": getattr(agent, "model", None) or _resolve_model(),
+        "tools": {},
+        "skills": {},
+        "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+    }
+
+
 def _tool_ctx(name: str, args: dict) -> str:
     try:
         from agent.display import build_tool_preview
@@ -1651,6 +1660,11 @@ def _(rid, params: dict) -> dict:
     target = params.get("session_id", "")
     if not target:
         return _err(rid, 4006, "session_id required")
+    include_messages = params.get("include_messages", True)
+    include_messages = not (
+        include_messages is False
+        or (isinstance(include_messages, str) and include_messages.lower() == "false")
+    )
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
@@ -1669,26 +1683,103 @@ def _(rid, params: dict) -> dict:
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
-        messages = _history_to_messages(history)
-        tokens = _set_session_context(target)
-        try:
-            agent = _make_agent(sid, target, session_id=target)
-        finally:
-            _clear_session_context(tokens)
-        _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        messages = _history_to_messages(history) if include_messages else None
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
-    return _ok(
-        rid,
-        {
-            "session_id": sid,
-            "resumed": target,
-            "persisted_session_id": target,
-            "message_count": len(messages),
-            "messages": messages,
-            "info": _session_info(agent),
-        },
-    )
+
+    ready = threading.Event()
+    session = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "attached_images": [],
+        "cols": int(params.get("cols", 80)),
+        "edit_snapshots": {},
+        "history": history,
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "image_counter": 0,
+        "running": False,
+        "session_key": target,
+        "show_reasoning": _load_show_reasoning(),
+        "slash_worker": None,
+        "tool_progress_mode": _load_tool_progress_mode(),
+        "tool_started_at": {},
+        "transport": current_transport() or _stdio_transport,
+    }
+    _sessions[sid] = session
+
+    def _build() -> None:
+        worker = None
+        notify_registered = False
+        try:
+            tokens = _set_session_context(target)
+            try:
+                agent = _make_agent(sid, target, session_id=target)
+            finally:
+                _clear_session_context(tokens)
+
+            if _sessions.get(sid) is not session:
+                return
+
+            session["agent"] = agent
+            _emit("session.info", sid, _light_session_info(agent))
+            ready.set()
+
+            try:
+                worker = _SlashWorker(target, getattr(agent, "model", _resolve_model()))
+                session["slash_worker"] = worker
+            except Exception:
+                pass
+
+            try:
+                from tools.approval import (
+                    register_gateway_notify,
+                    load_permanent_allowlist,
+                )
+
+                register_gateway_notify(
+                    target, lambda data: _emit("approval.request", sid, data)
+                )
+                notify_registered = True
+                load_permanent_allowlist()
+            except Exception:
+                pass
+
+            _wire_callbacks(sid)
+            _emit("session.info", sid, _session_info(agent))
+        except Exception as e:
+            session["agent_error"] = str(e)
+            _emit("error", sid, {"message": f"agent init failed: {e}"})
+        finally:
+            if _sessions.get(sid) is not session:
+                if worker is not None:
+                    try:
+                        worker.close()
+                    except Exception:
+                        pass
+                if notify_registered:
+                    try:
+                        from tools.approval import unregister_gateway_notify
+
+                        unregister_gateway_notify(target)
+                    except Exception:
+                        pass
+            ready.set()
+
+    threading.Thread(target=_build, daemon=True).start()
+
+    result = {
+        "session_id": sid,
+        "resumed": target,
+        "persisted_session_id": target,
+        "message_count": len(messages) if messages is not None else len(history),
+        "agent_ready": False,
+        "info": _light_session_info(),
+    }
+    if messages is not None:
+        result["messages"] = messages
+    return _ok(rid, result)
 
 
 @method("session.title")

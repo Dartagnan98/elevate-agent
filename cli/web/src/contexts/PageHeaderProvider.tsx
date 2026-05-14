@@ -1,16 +1,24 @@
-import { useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { useLayoutEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
+import { PanelLeftOpen } from "lucide-react";
 import { PageHeaderContext } from "./page-header-context";
 import { resolvePageTitle } from "@/lib/resolve-page-title";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
 
+const DRAG_REGION = { WebkitAppRegion: "drag" } as CSSProperties;
+const NO_DRAG_REGION = { WebkitAppRegion: "no-drag" } as CSSProperties;
+
 export function PageHeaderProvider({
   children,
   pluginTabs,
+  sidebarCollapsed = false,
+  onShowSidebar,
 }: {
   children: ReactNode;
   pluginTabs: { path: string; label: string }[];
+  sidebarCollapsed?: boolean;
+  onShowSidebar?: () => void;
 }) {
   const { pathname } = useLocation();
   const { t } = useI18n();
@@ -53,18 +61,39 @@ export function PageHeaderProvider({
           <header
             className={cn(
               "z-1 w-full shrink-0",
-              "box-border h-14 min-h-14",
-              "border-b border-border",
+              "box-border h-11 min-h-11",
               "bg-background",
               "overflow-hidden",
-              "sm:min-h-0",
             )}
             role="banner"
+            style={DRAG_REGION}
           >
             <div
-              className="flex h-full w-full min-w-0 flex-1 flex-col justify-center gap-2 px-3 py-2 sm:flex-row sm:items-center sm:gap-3 sm:px-6 sm:py-0"
+              className={cn(
+                "flex h-full w-full min-w-0 items-center gap-3 pr-3 sm:pr-6",
+                sidebarCollapsed ? "pl-20" : "pl-3 sm:pl-6",
+              )}
             >
-              <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+              {sidebarCollapsed && onShowSidebar && (
+                <button
+                  type="button"
+                  onClick={onShowSidebar}
+                  aria-label="Show sidebar"
+                  style={NO_DRAG_REGION}
+                  className={cn(
+                    "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+                    "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  )}
+                >
+                  <PanelLeftOpen className="h-4 w-4" />
+                </button>
+              )}
+
+              <div
+                className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
+                style={NO_DRAG_REGION}
+              >
                 <h1
                   className="min-w-0 truncate text-sm font-semibold tracking-normal text-midground"
                 >
@@ -74,7 +103,10 @@ export function PageHeaderProvider({
               </div>
 
               {end ? (
-                <div className="flex w-full min-w-0 justify-end sm:max-w-md sm:flex-1">
+                <div
+                  className="flex min-w-0 shrink-0 justify-end"
+                  style={NO_DRAG_REGION}
+                >
                   {end}
                 </div>
               ) : null}

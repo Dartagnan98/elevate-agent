@@ -114,6 +114,7 @@ interface GatewayTranscriptMessage {
 }
 
 interface SessionCreateResponse {
+  agent_ready?: boolean;
   info?: SessionInfo;
   persisted_session_id?: string;
   resumed?: string;
@@ -311,7 +312,18 @@ const STATE_LABEL: Record<ConnectionState, string> = {
 };
 
 const SESSION_MESSAGE_CACHE = new Map<string, ChatMessage[]>();
+const SESSION_MESSAGE_STORAGE_KEY = "elevate.chat.messageCache.v1";
 const MAX_CACHED_TRANSCRIPTS = 24;
+const MAX_STORED_TRANSCRIPT_MESSAGES = 160;
+const MAX_STORED_TRANSCRIPT_CHARS = 220_000;
+const MAX_STORED_MESSAGE_CHARS = 16_000;
+
+interface StoredTranscriptCacheEntry {
+  messages: ChatMessage[];
+  updatedAt: number;
+}
+
+type StoredTranscriptCache = Record<string, StoredTranscriptCacheEntry>;
 
 function id(prefix: string): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -407,15 +419,120 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     }));
 }
 
+function readStoredTranscriptCache(): StoredTranscriptCache {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(SESSION_MESSAGE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as StoredTranscriptCache
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
+  if (!Array.isArray(messages)) return null;
+  const normalized: ChatMessage[] = [];
+  messages.forEach((message, index) => {
+    if (!message || typeof message !== "object") return;
+    const entry = message as Partial<ChatMessage>;
+    const role = entry.role;
+    const content = typeof entry.content === "string" ? entry.content : "";
+    if (
+      role !== "assistant" &&
+      role !== "system" &&
+      role !== "tool" &&
+      role !== "user"
+    ) {
+      return;
+    }
+    if (!shouldKeepTranscriptMessage(role, content)) return;
+    normalized.push({
+      content,
+      createdAt: timestampMillis(entry.createdAt, Date.now() - index),
+      id: typeof entry.id === "string" && entry.id ? entry.id : id(`cached-${index}`),
+      role,
+      status:
+        entry.status === "error" ||
+        entry.status === "interrupted" ||
+        entry.status === "streaming"
+          ? entry.status
+          : "complete" as const,
+      title: typeof entry.title === "string" ? entry.title : undefined,
+      warning: typeof entry.warning === "string" ? entry.warning : undefined,
+    });
+  });
+  return normalized.length ? normalized : null;
+}
+
+function trimTranscriptForStorage(messages: ChatMessage[]): ChatMessage[] {
+  let used = 0;
+  const trimmed: ChatMessage[] = [];
+  for (const message of messages.slice(-MAX_STORED_TRANSCRIPT_MESSAGES).reverse()) {
+    if (message.status === "streaming") continue;
+    const content =
+      message.content.length > MAX_STORED_MESSAGE_CHARS
+        ? `${message.content.slice(0, MAX_STORED_MESSAGE_CHARS)}\n\n[Cached preview trimmed. Full history reloads from disk.]`
+        : message.content;
+    const size = content.length + (message.title?.length ?? 0) + (message.warning?.length ?? 0);
+    if (trimmed.length && used + size > MAX_STORED_TRANSCRIPT_CHARS) break;
+    used += size;
+    trimmed.push({ ...message, content, status: message.status ?? "complete" });
+  }
+  return trimmed.reverse();
+}
+
+function writeStoredTranscript(sessionId: string, messages: ChatMessage[]): void {
+  if (typeof window === "undefined" || !sessionId || !messages.length) return;
+  const cache = readStoredTranscriptCache();
+  cache[sessionId] = {
+    messages: trimTranscriptForStorage(messages),
+    updatedAt: Date.now(),
+  };
+  const entries = Object.entries(cache)
+    .filter(([, entry]) => Array.isArray(entry?.messages) && entry.messages.length)
+    .sort(([, a], [, b]) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, MAX_CACHED_TRANSCRIPTS);
+  try {
+    window.localStorage.setItem(
+      SESSION_MESSAGE_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    try {
+      const smaller = Object.fromEntries(entries.slice(0, Math.max(4, Math.floor(entries.length / 2))));
+      window.localStorage.setItem(SESSION_MESSAGE_STORAGE_KEY, JSON.stringify(smaller));
+    } catch {}
+  }
+}
+
+function restoreTranscript(sessionId: string): ChatMessage[] | null {
+  if (!sessionId) return null;
+  const memory = SESSION_MESSAGE_CACHE.get(sessionId);
+  if (memory?.length) return memory;
+  const entry = readStoredTranscriptCache()[sessionId];
+  const restored = normalizeCachedTranscript(entry?.messages);
+  if (restored) {
+    SESSION_MESSAGE_CACHE.set(sessionId, restored);
+  }
+  return restored;
+}
+
 function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
   if (!sessionId) return;
+  const stableMessages = messages.filter((message) => message.status !== "streaming");
+  if (!stableMessages.length) return;
   SESSION_MESSAGE_CACHE.delete(sessionId);
-  SESSION_MESSAGE_CACHE.set(sessionId, messages);
+  SESSION_MESSAGE_CACHE.set(sessionId, stableMessages);
   while (SESSION_MESSAGE_CACHE.size > MAX_CACHED_TRANSCRIPTS) {
     const oldest = SESSION_MESSAGE_CACHE.keys().next().value;
     if (!oldest) break;
     SESSION_MESSAGE_CACHE.delete(oldest);
   }
+  writeStoredTranscript(sessionId, stableMessages);
 }
 
 function replaceUrlWithResume(sessionId: string): void {
@@ -1603,12 +1720,12 @@ export default function ChatPage() {
     setStatusText(resumeId ? "Loading chat..." : "Connecting...");
 
     if (resumeId) {
-      const cached = SESSION_MESSAGE_CACHE.get(resumeId);
+      const cached = restoreTranscript(resumeId);
       if (cached) {
         historyHydratedRef.current = true;
         setMessages(cached);
         hydrateArtifactsFromMessages(cached);
-        setStatusText("Connecting live session...");
+        setStatusText("Preparing agent...");
       }
 
       void api.getSessionMessages(resumeId)
@@ -1620,7 +1737,7 @@ export default function ChatPage() {
           rememberTranscript(resumeId, hydrated);
           setMessages(hydrated);
           hydrateArtifactsFromMessages(hydrated);
-          setStatusText("Connecting live session...");
+          setStatusText("Preparing agent...");
         })
         .catch((error: Error) => {
           if (cancelled || cached) return;
@@ -2094,6 +2211,7 @@ export default function ChatPage() {
           try {
             created = await gw.request<SessionResumeResponse>("session.resume", {
               cols: 100,
+              include_messages: false,
               session_id: resumeId,
             }, 30_000);
           } catch (error) {
@@ -2152,7 +2270,7 @@ export default function ChatPage() {
         } else {
           setMessages([]);
         }
-        setStatusText("Ready");
+        setStatusText(created.agent_ready === false ? "Preparing agent..." : "Ready");
       })
       .catch((error: Error) => {
         if (cancelled) return;

@@ -325,6 +325,10 @@ function createWindow() {
     mainWindow.show();
   });
 
+  mainWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(backendUrl)) {
       return { action: "allow" };

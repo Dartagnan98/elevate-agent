@@ -95,48 +95,102 @@ function MultiSelectGrid({
   selected,
   onToggle,
   empty,
+  searchable = false,
   getLabel,
   getDescription,
+  getCategory,
 }: {
   options: Array<{ name: string }>;
   selected: string[];
   onToggle: (name: string) => void;
   empty: string;
+  searchable?: boolean;
   getLabel?: (name: string) => string;
   getDescription?: (name: string) => string;
+  getCategory?: (name: string) => string;
 }) {
-  if (options.length === 0) {
-    return <div className="text-xs text-muted-foreground">{empty}</div>;
-  }
+  const [query, setQuery] = useState("");
   const selectedSet = new Set(selected);
+
+  const annotated = useMemo(
+    () =>
+      options.map((option) => ({
+        name: option.name,
+        label: getLabel?.(option.name) ?? option.name,
+        description: getDescription?.(option.name) ?? "",
+        category: getCategory?.(option.name) ?? "",
+      })),
+    [options, getLabel, getDescription, getCategory],
+  );
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return annotated;
+    return annotated.filter(
+      (entry) =>
+        entry.name.toLowerCase().includes(needle) ||
+        entry.label.toLowerCase().includes(needle) ||
+        entry.description.toLowerCase().includes(needle) ||
+        entry.category.toLowerCase().includes(needle),
+    );
+  }, [annotated, query]);
+
+  if (options.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-2.5 py-3 text-xs text-muted-foreground">
+        {empty}
+      </div>
+    );
+  }
+
   return (
-    <div className="grid max-h-44 gap-1 overflow-y-auto pr-1 sm:grid-cols-2">
-      {options.map((option) => {
-        const isOn = selectedSet.has(option.name);
-        const description = getDescription?.(option.name);
-        return (
-          <label
-            key={option.name}
-            className={cn(
-              "flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 text-xs transition-colors",
-              isOn
-                ? "border-primary/40 bg-primary/5 text-foreground"
-                : "border-border/60 bg-background/40 text-muted-foreground hover:text-foreground",
-            )}
-            title={description || option.name}
-          >
-            <input
-              type="checkbox"
-              checked={isOn}
-              onChange={() => onToggle(option.name)}
-              className="mt-0.5 h-3 w-3 cursor-pointer accent-[--color-primary]"
-            />
-            <span className="min-w-0 flex-1 truncate font-medium">
-              {getLabel?.(option.name) ?? option.name}
-            </span>
-          </label>
-        );
-      })}
+    <div className="space-y-1.5">
+      {searchable && options.length > 6 && (
+        <Input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Search ${options.length} options`}
+          className="h-7 text-xs"
+        />
+      )}
+      <div className="grid max-h-56 gap-1 overflow-y-auto pr-1 sm:grid-cols-2">
+        {filtered.length === 0 ? (
+          <div className="col-span-full px-1 py-2 text-xs text-muted-foreground">
+            No matches for "{query}"
+          </div>
+        ) : (
+          filtered.map((entry) => {
+            const isOn = selectedSet.has(entry.name);
+            return (
+              <label
+                key={entry.name}
+                className={cn(
+                  "flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 text-xs transition-colors",
+                  isOn
+                    ? "border-primary/40 bg-primary/5 text-foreground"
+                    : "border-border/60 bg-background/40 text-muted-foreground hover:text-foreground",
+                )}
+                title={entry.description || entry.label}
+              >
+                <input
+                  type="checkbox"
+                  checked={isOn}
+                  onChange={() => onToggle(entry.name)}
+                  className="mt-0.5 h-3 w-3 cursor-pointer accent-[--color-primary]"
+                />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate font-medium">{entry.label}</span>
+                  {entry.category && (
+                    <span className="truncate text-[0.65rem] uppercase tracking-wide text-muted-foreground/70">
+                      {entry.category}
+                    </span>
+                  )}
+                </span>
+              </label>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }
@@ -226,6 +280,8 @@ function AgentConfigEditor({
 
   const skillDescription = (name: string) =>
     availableSkills.find((s) => s.name === name)?.description ?? "";
+  const skillCategory = (name: string) =>
+    availableSkills.find((s) => s.name === name)?.category ?? "";
   const toolsetLabel = (name: string) =>
     availableToolsets.find((t) => t.name === name)?.label ?? name;
   const toolsetDescription = (name: string) =>
@@ -311,26 +367,37 @@ function AgentConfigEditor({
 
         <div className="grid gap-1">
           <span className="text-xs font-medium text-muted-foreground">
-            Skills ({skills.length})
+            Skills ({skills.length} of {availableSkills.length})
           </span>
           <MultiSelectGrid
             options={skillOptions}
             selected={skills}
             onToggle={toggleSkill}
-            empty="No skills installed"
+            empty={
+              availableSkills.length === 0
+                ? "Loading installed skills…"
+                : "No skills installed yet."
+            }
+            searchable
             getDescription={skillDescription}
+            getCategory={skillCategory}
           />
         </div>
 
         <div className="grid gap-1">
           <span className="text-xs font-medium text-muted-foreground">
-            Toolsets ({toolsets.length})
+            Toolsets ({toolsets.length} of {availableToolsets.length})
           </span>
           <MultiSelectGrid
             options={toolsetOptions}
             selected={toolsets}
             onToggle={toggleToolset}
-            empty="No toolsets registered"
+            empty={
+              availableToolsets.length === 0
+                ? "Loading toolsets…"
+                : "No toolsets registered."
+            }
+            searchable
             getLabel={toolsetLabel}
             getDescription={toolsetDescription}
           />
@@ -1032,7 +1099,11 @@ export default function AgentHubPage() {
       })
       .catch(() => null);
     try {
-      const nextSnapshot = await api.getAgentHub({ lite: true });
+      const nextSnapshot = await api.getAgentHub({
+        lite: true,
+        includeSkills: true,
+        includeToolsets: true,
+      });
       if (mountedRef.current) {
         setSnapshot(nextSnapshot);
         hydrationTimerRef.current = window.setTimeout(() => {
