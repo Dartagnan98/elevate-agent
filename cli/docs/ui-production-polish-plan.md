@@ -26,7 +26,7 @@ Working out of `cli/web/src/`. Build verified after every slice (`npx tsc -b && 
    The page name promises action; the content is a status dump. → Restructure around "what needs me right now": waiting-human handoffs and pending deal tasks become the headline, everything else moves below.
 2. **Agent Hub** handoff card shows counts + worker state but the "next action" is buried.
    When the worker is unhealthy the user shouldn't have to read six chips to find the fix. → Surface the single most-important call to action as a primary affordance.
-3. **Outreach lanes vs Automations vs Tasks** — same operational concept (timed jobs) rendered three different ways. → Make the relationship visible: the lanes block on `/leads` already lists the cron jobs, but the styling makes it look like a different system. Reuse the same row UI, label both as "Automations" sub-views.
+3. **Outreach lanes vs Automations vs Tasks** — same operational concept (timed jobs) rendered three different ways. → Make the relationship visible: the lanes block on `/leads` already lists the cron jobs, but the styling makes it look like a different system. Reuse the same row UI, label both as "Automations" sub-views. **DONE in S11** (5a932e8).
 4. **Cron page row width**: schedule, last, next all crammed on one line; with long names the row overflows on tablet. → Stack schedule on its own line under the title on `<lg`.
 
 ### P1 — visible polish
@@ -71,3 +71,4 @@ Working out of `cli/web/src/`. Build verified after every slice (`npx tsc -b && 
 - **S8** 97e8cb0 — Today + Admin: drop "Elevate Agent" prefix and marketing-style hero/title copy. Today = "Today", Admin = "Admin".
 - **S9** 09e0733 — Skills page: drop "Skills live here; dashboards show connectors." marketing tagline; collapse workflow section header to single muted eyebrow + counter badge. Three empty states (search, category, toolset grid) trade py-8 text-center for the muted single-line style used on /leads.
 - **S10** 1d50ba8 — Settings + OAuth: remaining heavy empty states (ConfigPage search results, OAuthProvidersCard zero-providers) drop py-8/py-12 text-center for the muted single-line style.
+- **S11** 5a932e8 — Outreach lanes: P0 #3 fix. AgentLaneStripRow rebuilt around the cron-page row layout (inline icon + title + shadcn Badge mapped from laneStatus, muted tagline, schedule/last/next as plain text, icon-only Pause/Run/Edit). Edit deep-links to /cron?edit=id so the lane and the underlying job are visibly the same record. Section labels reframed to "Outreach automations" and "Other automations".
