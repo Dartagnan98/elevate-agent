@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
   playOnboardingClick,
+  playOnboardingRiser,
   playOnboardingSwell,
 } from "@/lib/onboarding-sounds";
 
@@ -264,6 +265,7 @@ function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
 
   const handleStart = useCallback(() => {
     playOnboardingSwell();
+    playOnboardingRiser(1.6);
     setExiting(true);
   }, []);
 
@@ -1550,12 +1552,15 @@ export function LeadsSetupLaunch({
   const handleWizardFinish = useCallback(async () => {
     setError(null);
     setSavedMessage(null);
+    const riser = playOnboardingRiser(2.0);
     try {
       await api.updateLeadsSetup(buildItemUpdates(draft));
     } catch (err) {
+      riser.stop();
       setError(errorMessage(err, "Save failed"));
       return;
     }
+    riser.stop();
     playOnboardingChime();
     setPhase("form");
   }, [draft]);
