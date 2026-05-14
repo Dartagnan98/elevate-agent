@@ -368,7 +368,7 @@ function RetiredRow({ template }: { template: Template }) {
           <CardTitle className="text-foreground/85">{template.name}</CardTitle>
           <LaneChannelBadges lane={template.lane} channel={template.channel} />
         </div>
-        <Badge variant="destructive" className="font-mono uppercase tracking-wider">
+        <Badge variant="destructive">
           {template.status === "rejected" ? "Rejected" : "Retired"}
         </Badge>
       </CardHeader>
@@ -452,7 +452,7 @@ export default function RealEstateTemplatesPage() {
   useLayoutEffect(() => {
     setTitle("Templates");
     setAfterTitle(
-      <span className="font-mono text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+      <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground">
         Admin · Approval queue
       </span>,
     );
@@ -760,7 +760,7 @@ function RetiredTabContent({ items }: { items: Template[] | null }) {
 function SectionHead({ label, hint }: { label: string; hint: string }) {
   return (
     <header className="flex flex-col gap-0.5 border-b border-border/40 pb-2">
-      <span className="font-mono text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+      <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground">
         {label}
       </span>
       <span className="text-xs text-muted-foreground/85">{hint}</span>
