@@ -1838,18 +1838,23 @@ function AdminOnboardingCoach({
   initialQuestion,
   onClose,
   externalMention,
+  messages,
+  setMessages,
 }: {
   initialQuestion: string;
   onClose: () => void;
   externalMention: string | null;
+  messages: CoachMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<CoachMessage[]>>;
 }) {
-  const [messages, setMessages] = useState<CoachMessage[]>([
-    { role: "assistant", content: initialQuestion },
-  ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setMessages((prev) => (prev.length > 0 ? prev : [{ role: "assistant", content: initialQuestion }]));
+  }, [initialQuestion, setMessages]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -2057,6 +2062,7 @@ function AdminSetupLaunch({
   );
   const [coachOpen, setCoachOpen] = useState(true);
   const [coachMention, setCoachMention] = useState<string | null>(null);
+  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
 
   const savedProvinceCode = (setup.profile?.province || "").trim().toUpperCase();
 
@@ -2236,6 +2242,8 @@ function AdminSetupLaunch({
             initialQuestion={initialCoachQuestion}
             onClose={() => setCoachOpen(false)}
             externalMention={coachMention}
+            messages={coachMessages}
+            setMessages={setCoachMessages}
           />
         )}
       </>
@@ -2266,6 +2274,8 @@ function AdminSetupLaunch({
             initialQuestion={initialCoachQuestion}
             onClose={() => setCoachOpen(false)}
             externalMention={coachMention}
+            messages={coachMessages}
+            setMessages={setCoachMessages}
           />
         ) : (
           <button
