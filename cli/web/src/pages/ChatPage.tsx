@@ -1800,6 +1800,21 @@ export default function ChatPage() {
         if (last?.kind === kind && last.text === clean && last.messageId === messageId) {
           return prev;
         }
+        // Streaming thinking/reasoning arrives as many small deltas
+        // ("I", "Notice", "There's"...). Coalesce consecutive chunks
+        // of the same kind + message into one rolling entry so the
+        // Activity panel shows whole thoughts, not token fragments.
+        if (
+          (kind === "thinking" || kind === "reasoning") &&
+          last?.kind === kind &&
+          last.messageId === messageId
+        ) {
+          const sep = /[.!?…]$/.test(last.text) ? " " : last.text.endsWith(" ") || clean.startsWith(" ") ? "" : " ";
+          const merged = (last.text + sep + clean).trim().slice(-2000);
+          const next = prev.slice(0, -1);
+          next.push({ ...last, text: merged });
+          return next;
+        }
         return [
           ...prev,
           {
