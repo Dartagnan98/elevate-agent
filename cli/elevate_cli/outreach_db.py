@@ -21,6 +21,9 @@ from elevate_cli.source_connectors import _candidate_tools_root
 
 
 LANES = ("new-outreach", "hot-leads-watcher", "follow-ups")
+# Template bodies can carry a `[[gif:keyword]]` marker — the agent expands it
+# to a GIF attachment when rendering. The UI shows a "GIF" badge for any
+# template whose body contains the marker.
 SEED_TEMPLATES: dict[str, list[dict[str, str]]] = {
     "new-outreach": [
         {
@@ -41,6 +44,14 @@ SEED_TEMPLATES: dict[str, list[dict[str, str]]] = {
             "name": "Live nudge",
             "body": "{first_name}, just saw your {signal}. Want me to set up a viewing this week?",
         },
+        {
+            "name": "Open house live",
+            "body": "{first_name}, open house going on now at {address}. I can hold a slot for you in the next hour — want me to?",
+        },
+        {
+            "name": "Just-listed match",
+            "body": "Hot off MLS — {address} just hit and matches your {criteria}. Showings booking fast. Tonight or tomorrow morning easier?",
+        },
     ],
     "follow-ups": [
         {
@@ -48,8 +59,24 @@ SEED_TEMPLATES: dict[str, list[dict[str, str]]] = {
             "body": "Hey {first_name}, circling back on {topic}. Anything change on your end? Happy to send fresh options.",
         },
         {
+            "name": "GIF nudge",
+            "body": "Hey {first_name}, still on the hunt? [[gif:waving-hello]]\n\nIf timing shifted, no stress — just say the word and I'll pause the alerts.",
+        },
+        {
+            "name": "Market update",
+            "body": "{first_name}, quick one: median in {area} moved {delta} this month. Want a 30-second voice note breaking down what that means for your search?",
+        },
+        {
             "name": "Soft close",
             "body": "Hi {first_name}, no pressure, just want to make sure I'm not missing anything. What would make the next step easy for you?",
+        },
+        {
+            "name": "Breakup",
+            "body": "Hey {first_name}, I'll close out the file for now so you're not getting noise. Door's open whenever — just text and I'll pick right back up.",
+        },
+        {
+            "name": "Referral ask",
+            "body": "{first_name}, since timing's not right for you — anyone in your circle thinking about a move in the next 6 months? Happy to be a no-pressure resource for them too.",
         },
     ],
 }
@@ -233,13 +260,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS uniq_templates_lane_name ON templates(lane, name)"
     )
 
-    seeded_marker = _read_meta(conn, "seeded_v1")
+    # v2 adds: hot-leads-watcher × 2 (Open house live, Just-listed match),
+    # follow-ups × 4 (GIF nudge, Market update, Breakup, Referral ask).
+    # INSERT OR IGNORE keeps any user-edited templates intact — only new
+    # (lane, name) pairs get inserted.
+    seeded_marker = _read_meta(conn, "seeded_v2")
     if not seeded_marker:
         for lane, items in SEED_TEMPLATES.items():
             for item in items:
-                # INSERT OR IGNORE so the seed is idempotent: if a previous
-                # partial run inserted the row but didn't write the marker,
-                # we don't crash on UNIQUE(lane, name) the next start-up.
                 _insert_template(
                     conn,
                     lane=lane,
@@ -247,6 +275,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                     body=item["body"],
                     or_ignore=True,
                 )
+        _write_meta(conn, "seeded_v2", _now())
+        # Backfill the v1 marker so older code paths still see "seeded".
         _write_meta(conn, "seeded_v1", _now())
 
 

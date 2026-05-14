@@ -173,6 +173,12 @@ function StatusBadge({ status }: { status: AdminSetupItemStatus }) {
 
 const OUTREACH_CONNECTOR_IDS = ["crm", "apple-messages", "sms-provider", "android-device", "rcs"] as const;
 
+const LEADS_TEMPLATE_LANES: { id: string; label: string; hint: string }[] = [
+  { id: "new-outreach", label: "First touch", hint: "lead just landed — pick the opener" },
+  { id: "hot-leads-watcher", label: "Hot signals", hint: "live intent — open house, just-listed match, alert reply" },
+  { id: "follow-ups", label: "Follow-ups", hint: "re-engagement, GIF nudge, market update, breakup, referral" },
+];
+
 function connectorStateLabel(state: SourceConnectorStatus["state"]): string {
   return state.replace(/_/g, " ");
 }
@@ -458,7 +464,7 @@ function LeadsOnboardingWizard({
       className="onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto px-6 py-10"
     >
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
-      <div className="relative flex w-full max-w-2xl flex-col">
+      <div className="relative flex w-full max-w-3xl flex-col">
         <div className="mb-7 flex items-center gap-1.5">
           {LEADS_WIZARD_STEPS.map((s, idx) => (
             <span
@@ -780,44 +786,78 @@ function LeadsOnboardingWizard({
                   </div>
                 </label>
                 {firstTouchTemplates.length > 0 && (
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-4">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-[12px] font-medium text-muted-foreground">
-                        Pick from your saved first-touch templates
-                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[12.5px] font-medium text-foreground">
+                          Template library
+                        </span>
+                        <span className="text-[11px] leading-[1.4] text-muted-foreground">
+                          Elevate picks per situation — best-fit template is auto-attached by ID and tracked for reply rate. Click any card to pin it as the default first-touch.
+                        </span>
+                      </div>
                       <Link
                         to="/real-estate/templates"
-                        className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                        className="shrink-0 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                       >
                         Manage all
                       </Link>
                     </div>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {firstTouchTemplates.map((tpl) => {
-                        const isActive = draft.autoReplyTemplate.trim() === tpl.body.trim();
-                        return (
-                          <button
-                            key={tpl.id}
-                            type="button"
-                            onClick={() => updateField("autoReplyTemplate", tpl.body)}
-                            className={cn(
-                              "flex flex-col gap-1 rounded-md border px-3 py-2.5 text-left backdrop-blur-sm transition",
-                              isActive
-                                ? "border-primary/60 bg-primary/10"
-                                : "border-border bg-card/60 hover:border-border/80 hover:bg-card",
-                            )}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[12.5px] font-medium text-foreground">{tpl.name}</span>
-                              {isActive && <CheckCircle2 className="h-3.5 w-3.5 text-primary" />}
+                    {LEADS_TEMPLATE_LANES.map((lane) => {
+                      const laneTemplates = firstTouchTemplates.filter((t) => t.lane === lane.id);
+                      if (laneTemplates.length === 0) return null;
+                      return (
+                        <div key={lane.id} className="flex flex-col gap-2">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <div className="flex items-baseline gap-2">
+                              <span className="font-mono-ui text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                                {lane.label}
+                              </span>
+                              <span className="text-[10.5px] text-muted-foreground/70">
+                                {laneTemplates.length} · {lane.hint}
+                              </span>
                             </div>
-                            <span className="line-clamp-2 text-[11.5px] leading-[1.4] text-muted-foreground">
-                              {tpl.body}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {laneTemplates.map((tpl) => {
+                              const isActive = draft.autoReplyTemplate.trim() === tpl.body.trim();
+                              const hasGif = /\[\[gif:/i.test(tpl.body);
+                              return (
+                                <button
+                                  key={tpl.id}
+                                  type="button"
+                                  onClick={() => updateField("autoReplyTemplate", tpl.body)}
+                                  className={cn(
+                                    "flex flex-col gap-1 rounded-md border px-3 py-2.5 text-left backdrop-blur-sm transition",
+                                    isActive
+                                      ? "border-primary/60 bg-primary/10"
+                                      : "border-border bg-card/60 hover:border-border/80 hover:bg-card",
+                                  )}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[12.5px] font-medium text-foreground">{tpl.name}</span>
+                                    <div className="flex items-center gap-1.5">
+                                      {hasGif && (
+                                        <span className="inline-flex items-center rounded-sm border border-border/70 bg-muted/50 px-1.5 py-px font-mono-ui text-[9px] uppercase tracking-wide text-muted-foreground">
+                                          GIF
+                                        </span>
+                                      )}
+                                      {isActive && <CheckCircle2 className="h-3.5 w-3.5 text-primary" />}
+                                    </div>
+                                  </div>
+                                  <span className="line-clamp-2 text-[11.5px] leading-[1.4] text-muted-foreground">
+                                    {tpl.body}
+                                  </span>
+                                  <span className="mt-0.5 font-mono-ui text-[9.5px] tracking-wide text-muted-foreground/60">
+                                    id · {tpl.id.slice(0, 8)}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
                 <label className="block">
@@ -1199,15 +1239,16 @@ export function LeadsSetupLaunch({
     let cancelled = false;
     (async () => {
       try {
-        const resp = await api.getOutreachTemplates("new-outreach");
+        const resp = await api.getOutreachTemplates();
         if (cancelled) return;
         const actives = resp.templates.filter((t) => t.active);
         setFirstTouchTemplates(actives);
         const policyVal = (setup.items.find((i) => i.key === "auto_reply_policy")?.value ?? {}) as Record<string, unknown>;
         const stored = String(policyVal.initialMessageTemplate ?? "").trim();
         const currentMatchesDefault = draft.autoReplyTemplate.trim() === DEFAULT_AUTO_REPLY_TEMPLATE.trim();
-        if (actives.length > 0 && !stored && currentMatchesDefault) {
-          setDraft((prev) => ({ ...prev, autoReplyTemplate: actives[0].body }));
+        const firstTouchDefault = actives.find((t) => t.lane === "new-outreach");
+        if (firstTouchDefault && !stored && currentMatchesDefault) {
+          setDraft((prev) => ({ ...prev, autoReplyTemplate: firstTouchDefault.body }));
         }
       } catch {
         // best-effort — empty list falls back to default opener
