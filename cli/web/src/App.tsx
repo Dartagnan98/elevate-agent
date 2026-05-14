@@ -1745,7 +1745,7 @@ function SessionListItem({
           event.preventDefault();
           onOpenSession(session);
         }}
-        className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-1"
+        className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-1 lg:group-hover:pr-16 lg:group-focus-within:pr-16"
       >
         {session.is_active ? (
           <Loader2
