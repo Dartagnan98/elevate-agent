@@ -766,14 +766,10 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
         <span className="text-xs text-muted-foreground">· {harness.server.pattern}</span>
       </div>
       <div className="space-y-3 px-1">
-        <div className="grid grid-cols-2 gap-2">
-          <MiniMetric label="Clients" value={`${connectedClients.length}/${harness.server.clients.length}`} />
-          <MiniMetric label="Routed" value={harness.orchestration.route_labeled_runs} />
-          <MiniMetric label="Events" value={harness.orchestration.recent_events} />
-          <MiniMetric label="Ready Runs" value={harness.orchestration.plan_graph.ready_runs} />
+        <div className="grid grid-cols-3 gap-2">
+          <MiniMetric label="Ready" value={harness.orchestration.plan_graph.ready_runs} />
           <MiniMetric label="Blocked" value={harness.orchestration.plan_graph.blocked_runs} />
           <MiniMetric label="Safety" value={harness.safety.external_actions_policy} />
-          <MiniMetric label="Memory Flow" value={harness.memory.pipeline.state} />
         </div>
         {harness.performance.available ? (
           <div className="text-xs">
@@ -799,11 +795,37 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
             {harness.performance.error || "Performance profiles skipped"}
           </div>
         )}
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          {harness.orchestration.lifecycle_states.slice(0, 7).map((state) => (
-            <span key={state}>{state}</span>
-          ))}
-        </div>
+        <details className="group text-xs">
+          <summary className="cursor-pointer list-none text-muted-foreground hover:text-foreground">
+            <span className="group-open:hidden">Show technical detail</span>
+            <span className="hidden group-open:inline">Hide technical detail</span>
+          </summary>
+          <div className="mt-2 space-y-1.5">
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">Clients</span>
+              <span>{connectedClients.length}/{harness.server.clients.length}</span>
+            </div>
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">Routed runs</span>
+              <span>{harness.orchestration.route_labeled_runs}</span>
+            </div>
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">Recent events</span>
+              <span>{harness.orchestration.recent_events}</span>
+            </div>
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">Memory flow</span>
+              <span>{harness.memory.pipeline.state}</span>
+            </div>
+            {harness.orchestration.lifecycle_states.length > 0 && (
+              <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 text-muted-foreground">
+                {harness.orchestration.lifecycle_states.slice(0, 7).map((state) => (
+                  <span key={state}>{state}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
         {harness.memory.pipeline.recent_events?.length ? (
           <div className="text-xs">
             <div className="mb-1 text-muted-foreground">Memory activity</div>
