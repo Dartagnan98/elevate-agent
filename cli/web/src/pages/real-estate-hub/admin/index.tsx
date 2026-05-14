@@ -34,6 +34,7 @@ import {
   Square as SquareIcon,
   Plus,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
   Target,
@@ -1919,12 +1920,14 @@ type CoachMessage = { role: "user" | "assistant"; content: string };
 function AdminOnboardingCoach({
   initialQuestion,
   onClose,
+  onReset,
   externalMention,
   messages,
   setMessages,
 }: {
   initialQuestion: string;
   onClose: () => void;
+  onReset?: () => void;
   externalMention: string | null;
   messages: CoachMessage[];
   setMessages: React.Dispatch<React.SetStateAction<CoachMessage[]>>;
@@ -1979,14 +1982,27 @@ function AdminOnboardingCoach({
           <MessageCircle className="h-3.5 w-3.5 text-primary" />
           <div className="text-[12.5px] font-medium text-foreground">Onboarding coach</div>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close onboarding coach"
-          className="rounded-md p-1 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-        >
-          <CloseIcon className="h-3.5 w-3.5" />
-        </button>
+        <div className="flex items-center gap-1">
+          {onReset && (
+            <button
+              type="button"
+              onClick={onReset}
+              aria-label="Reset onboarding coach chat"
+              title="Reset chat"
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close onboarding coach"
+            className="rounded-md p-1 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+          >
+            <CloseIcon className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </header>
 
       <div ref={scrollRef} className="flex max-h-[360px] min-h-[180px] flex-col gap-2 overflow-y-auto px-3 py-3">
@@ -5042,10 +5058,41 @@ export function RealEstateAdminPage() {
   const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
   const openCoach = useCallback(() => setCoachOpen(true), []);
   const initialCoachQuestion = useMemo(() => {
-    const province = (adminSetup.setup?.profile?.province || "").toUpperCase();
-    const provincePrefix = province ? ` Got ${province} loaded.` : "";
-    return `Running your databases now —${provincePrefix} this takes a couple minutes. While that's going: where do your active deals live right now? Spreadsheet, Lofty, kvCORE, BoldTrail, or somewhere else?`;
-  }, [adminSetup.setup?.profile?.province]);
+    const snap = adminSetup.setup;
+    if (!snap) return "Loading your setup snapshot — one sec.";
+    const province = (snap.profile?.province || "").toUpperCase();
+    const pct = snap.completionPct ?? 0;
+    const connected = snap.items
+      .filter((item) => item.status === "connected" || item.status === "configured")
+      .map((item) => {
+        const provider = (item.provider || "").trim();
+        return provider ? `${item.label} (${provider})` : item.label;
+      });
+    const missingByKey = new Map(snap.items.map((item) => [item.key, item.label]));
+    const missing = (snap.missingRequiredKeys ?? []).map((key) => missingByKey.get(key) ?? key);
+    const lines: string[] = [];
+    const provinceBit = province ? `${province}, ` : "";
+    lines.push(`${provinceBit}${pct}% wired up. Here's where we're at:`);
+    if (connected.length > 0) {
+      lines.push(`Connected — ${connected.join(", ")}.`);
+    }
+    if (missing.length > 0) {
+      const first = missing[0];
+      const rest = missing.slice(1);
+      const remaining = rest.length > 0 ? ` Also still need: ${rest.join(", ")}.` : "";
+      lines.push(`Missing — ${missing.join(", ")}.${remaining ? "" : ""}`);
+      lines.push(`Want to knock out ${first} first?`);
+    } else {
+      lines.push(`Everything required is in. Anything else you want to tighten up?`);
+    }
+    return lines.join("\n\n");
+  }, [adminSetup.setup]);
+
+  const resetCoach = useCallback(() => {
+    setCoachMessages([{ role: "assistant", content: initialCoachQuestion }]);
+    setCoachMention(null);
+    setCoachOpen(true);
+  }, [initialCoachQuestion]);
   useHubHeader("Admin", data);
   useEffect(() => {
     if (!adminSetup.setup?.complete) return;
@@ -5178,6 +5225,7 @@ export function RealEstateAdminPage() {
         <AdminOnboardingCoach
           initialQuestion={initialCoachQuestion}
           onClose={() => setCoachOpen(false)}
+          onReset={resetCoach}
           externalMention={coachMention}
           messages={coachMessages}
           setMessages={setCoachMessages}

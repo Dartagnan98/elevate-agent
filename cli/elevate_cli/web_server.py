@@ -3694,30 +3694,31 @@ async def post_admin_setup_verify_endpoint():
 
 _ONBOARDING_CHAT_SYSTEM = (
     "You are Elevate's onboarding coach for a Canadian real estate agent. "
-    "The user just finished a 9-step setup wizard. You see a live snapshot of "
-    "their admin_setup_items: profile, connectors already attached, what's "
-    "still missing. "
-    "READ THE SNAPSHOT FIRST. Before asking the user anything, look at what is "
-    "already configured. Never ask for something the snapshot already shows as "
-    "set. Never claim you're 'making' or 'creating' a database/connector that "
-    "already exists. If a CRM, drive, or portal is already attached in the "
-    "snapshot, acknowledge it ('I see Lofty is already wired in') and move on "
-    "to the next gap. "
-    "Your job: ask ONE short, friendly question at a time to fill the actual "
-    "gaps shown in 'Still missing'. "
-    "Priority for missing items, in order: (1) where deals live (spreadsheet, "
-    "Lofty, kvCORE, BoldTrail, paper) ONLY if crm is missing; (2) cloud drive "
-    "(Google Drive vs Dropbox vs SharePoint) ONLY if drive is missing; (3) "
-    "MLS / compliance / showing portal logins ONLY for ones not yet attached; "
-    "(4) any spreadsheets to import. "
-    "Keep replies to 1-3 sentences. No bullet lists unless the user asks. "
-    "When a connector needs OAuth (Google Drive, Gmail, etc.) tell them to "
-    "click the matching button in the connectors panel — don't paste URLs. "
-    "When a portal needs browser-use analysis, tell them to enter login URL + "
-    "credentials into the portal card, then hit 'Connect & analyze'. "
-    "If everything in the snapshot is already configured, say that plainly "
-    "and ask if there's anything else to set up before going live — don't "
-    "invent new tasks."
+    "Tone: direct operator, no fluff, no 'do you have', no 'would you like to'. "
+    "Get-it-done energy. Treat the snapshot below as ground truth — the wizard "
+    "is done, the agent is up to date. "
+    "RULES: "
+    "(1) Always lead with current state: name the province and what's already "
+    "connected (with provider names). Don't ask questions about anything the "
+    "snapshot shows as connected/configured. "
+    "(2) After the state line, name the next concrete gap from 'Still missing' "
+    "and tell the user how to close it — not 'do you have a calendar', but "
+    "'Next: Calendar — click Connect on the Calendar card in the connectors "
+    "panel'. "
+    "(3) Never say you're 'making' or 'creating' something that already exists. "
+    "(4) Never offer to import 'any spreadsheets of contacts, deals, listings, "
+    "or past clients' unless the user brings them up first. The CRM already "
+    "covers that surface area. "
+    "(5) Keep replies to 1-3 short sentences. No bullet lists, no markdown, no "
+    "'great question' / 'happy to help'. "
+    "(6) OAuth connectors (Google Drive, Gmail, Calendar): say 'click Connect "
+    "on the X card'. Portal logins (MLS, compliance, showing): say 'enter URL "
+    "+ email + password on the X card, then hit Connect & analyze'. "
+    "(7) If the user asks 'where are we at' or similar status questions, "
+    "restate: province, completion %, connected items with providers, missing "
+    "items with the next action to close the first one. "
+    "(8) If everything required is in, say so in one sentence and ask if "
+    "anything else needs tightening up. Do not invent tasks."
 )
 
 
@@ -3746,50 +3747,76 @@ def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_CONNECTOR_NEXT_ACTION = {
+    "calendar": "click Connect on the Calendar card.",
+    "email": "click Connect on the Email card.",
+    "drive": "click Connect on the Drive card.",
+    "crm": "click Connect on the CRM card or paste your spreadsheet path.",
+    "mls": "enter URL + email + password on the MLS card, then hit Connect & analyze.",
+    "compliance_platform": "enter URL + email + password on the Compliance card, then hit Connect & analyze.",
+    "showing_platform": "enter URL + email + password on the Showing card, then hit Connect & analyze.",
+    "photo_processing": "pick a provider on the Photo processing card.",
+    "fintrac_workflow": "pick a FINTRAC workflow on the card.",
+    "forms_provider": "pick your forms provider on the card.",
+    "signing_provider": "pick your signing provider on the card.",
+    "approval_channel": "pick your approval channel (Telegram / email).",
+}
+
+
 def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, Any]) -> str:
     """Deterministic guidance when no LLM is configured.
 
-    Always leads with what's already present before pointing at the next gap,
-    so the coach never sounds like it's creating things from scratch.
+    Mirrors the system prompt: state-first, direct next-action ask.
     """
-    missing = list(setup.get("missingRequiredKeys") or [])
     profile = setup.get("profile") or {}
-    drive = (profile.get("driveProvider") or "").strip()
-    crm = (profile.get("crmProvider") or "").strip()
-    mls = (profile.get("mlsProvider") or "").strip()
-    province = (profile.get("province") or "").strip()
+    items = setup.get("items") or []
+    by_key: Dict[str, Dict[str, Any]] = {it["key"]: it for it in items if isinstance(it, dict) and it.get("key")}
+    missing = list(setup.get("missingRequiredKeys") or [])
+    province = (profile.get("province") or "").strip().upper()
+    pct = setup.get("completionPct") or 0
     last = (messages[-1].get("content") if messages else "") or ""
     last_lower = last.lower()
 
-    prefix_bits: List[str] = []
-    if province:
-        prefix_bits.append(f"{province.upper()} loaded")
-    if crm:
-        prefix_bits.append(f"{crm} CRM attached")
-    if drive:
-        prefix_bits.append(f"{drive} drive attached")
-    if mls:
-        prefix_bits.append(f"{mls} MLS attached")
-    prefix = ", ".join(prefix_bits)
-    lead = f"I see {prefix}." if prefix else ""
+    connected_bits: List[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if it.get("status") not in ("connected", "configured"):
+            continue
+        label = (it.get("label") or it.get("key") or "").strip()
+        provider = (it.get("provider") or "").strip()
+        if not label:
+            continue
+        connected_bits.append(f"{label} ({provider})" if provider else label)
 
-    # If user named a CRM in their last message and we already have one, acknowledge instead of asking again.
-    if crm and any(token in last_lower for token in ("lofty", "kvcore", "boldtrail", "follow up boss", "chime", "spreadsheet")):
-        return (
-            (lead + " " if lead else "")
-            + f"Sounds like leads already live in {crm} on our side — I won't touch that. "
-            + (f"Next gap: {missing[0]}." if missing else "Nothing else missing on my end.")
-        ).strip()
+    missing_labels = [by_key.get(k, {}).get("label") or k for k in missing]
+    next_action = _CONNECTOR_NEXT_ACTION.get(missing[0]) if missing else None
 
-    if not drive:
-        return (lead + " " if lead else "") + "Where do your active deal folders live today — Google Drive, Dropbox, or SharePoint? I'll wire up the right connector once you tell me."
-    if not crm:
-        return (lead + " " if lead else "") + "Where do your leads live right now? CRM name (Lofty, kvCORE, BoldTrail) or a spreadsheet path works."
-    if missing:
-        return (lead + " " if lead else "") + f"Still missing: {', '.join(missing[:3])}. Want to walk through the first one?"
+    status_re_ask = any(
+        token in last_lower
+        for token in ("where are we", "status", "where we at", "what's left", "where do we", "what do we need")
+    )
+
+    if status_re_ask or not messages:
+        head = f"{province + ', ' if province else ''}{pct}% wired up."
+        connected_line = f" Connected: {', '.join(connected_bits)}." if connected_bits else ""
+        if missing_labels:
+            tail = f" Still need: {', '.join(missing_labels)}. Next: {missing_labels[0]} — {next_action}" if next_action else f" Still need: {', '.join(missing_labels)}."
+        else:
+            tail = " Everything required is in. Anything else to tighten?"
+        return head + connected_line + tail
+
     if "spreadsheet" in last_lower or "sheet" in last_lower:
-        return (lead + " " if lead else "") + "Drop the Google Sheet URL into your drive folder and I'll pick it up on the next sync."
-    return (lead + " " if lead else "") + "Everything required is in place. Anything else you want me to set up before we go live?"
+        crm = (profile.get("crmProvider") or "").strip()
+        if crm:
+            return f"{crm} is already wired in as your CRM — leads, contacts, deals all flow through it. Drop a sheet only if there's data not in {crm} yet."
+        return "Paste the Google Sheet URL into your drive folder; the next sync will pick it up."
+
+    if missing_labels and next_action:
+        return f"{missing_labels[0]} is the next gap — {next_action}"
+    if missing_labels:
+        return f"Still need: {', '.join(missing_labels)}. Knock them out in the connectors panel."
+    return "Everything required is in. Anything else to tighten before we go live?"
 
 
 @app.post("/api/admin/onboarding/chat")
