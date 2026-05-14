@@ -193,6 +193,7 @@ export interface SourceInboxProfileVerifier {
 }
 
 export type SourceInboxProfileStatus =
+  | "new_lead"
   | "follow_up"
   | "ghosting"
   | "dead"
@@ -878,6 +879,40 @@ export interface PackOnboardingUpdateRequest {
     value?: unknown;
     notes?: string | null;
   }>;
+}
+
+export interface LeadsSetupItem {
+  key: string;
+  category: string;
+  label: string;
+  description: string | null;
+  required: boolean;
+  status: AdminSetupItemStatus;
+  provider: string | null;
+  value: unknown;
+  notes: string | null;
+  sortOrder: number;
+  updatedAt: string | null;
+}
+
+export interface LeadsSetupSnapshot {
+  items: LeadsSetupItem[];
+  requiredCount: number;
+  completedRequiredCount: number;
+  missingRequiredKeys: string[];
+  completionPct: number;
+  complete: boolean;
+  completedAt: string | null;
+  launchRequired: boolean;
+  leadSourcesReady: boolean;
+}
+
+export interface LeadsSetupItemUpdate {
+  key: string;
+  status: AdminSetupItemStatus;
+  provider?: string | null;
+  value?: unknown;
+  notes?: string | null;
 }
 
 export interface AdminDealsResponse {

@@ -35,6 +35,8 @@ import type {
   AdminSetupUpdateRequest,
   PackOnboardingSnapshot,
   PackOnboardingUpdateRequest,
+  LeadsSetupSnapshot,
+  LeadsSetupItemUpdate,
   AdminDealsResponse,
   AdminContactsResponse,
   ComposioStatus,
@@ -727,6 +729,19 @@ export const api = {
         body: JSON.stringify({ messages }),
       },
     ),
+
+  // Leads onboarding gate
+  getLeadsSetup: () => fetchJSON<LeadsSetupSnapshot>("/api/leads/setup"),
+  updateLeadsSetup: (items: LeadsSetupItemUpdate[]) =>
+    fetchJSON<LeadsSetupSnapshot>("/api/leads/setup", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    }),
+  completeLeadsSetup: () =>
+    fetchJSON<LeadsSetupSnapshot>("/api/leads/setup/complete", { method: "POST" }),
+  resetLeadsSetup: () =>
+    fetchJSON<LeadsSetupSnapshot>("/api/leads/setup/reset", { method: "POST" }),
   launchAdminOnboardingBrowserUse: (portalKey: "mls" | "compliance" | "showing", taskHint?: string) =>
     fetchJSON<{
       ok: boolean;

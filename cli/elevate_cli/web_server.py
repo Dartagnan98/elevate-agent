@@ -3078,6 +3078,18 @@ class _PackOnboardingUpdateBody(BaseModel):
     items: List[_PackOnboardingItemBody] = []
 
 
+class _LeadsSetupItemBody(BaseModel):
+    key: str
+    status: str = "missing"
+    provider: Optional[str] = None
+    value: Any = None
+    notes: Optional[str] = None
+
+
+class _LeadsSetupUpdateBody(BaseModel):
+    items: List[_LeadsSetupItemBody] = []
+
+
 class _OnboardingChatMessage(BaseModel):
     role: str
     content: str
@@ -3690,6 +3702,67 @@ async def post_admin_setup_verify_endpoint():
     except Exception as exc:
         _log.exception("POST /api/admin/setup/verify failed")
         raise HTTPException(status_code=500, detail=f"Verify admin setup failed: {exc}")
+
+
+@app.get("/api/leads/setup")
+async def get_leads_setup_endpoint():
+    """Return the Leads onboarding readiness snapshot."""
+    try:
+        from elevate_cli.data import connect, get_leads_setup
+
+        with connect() as conn:
+            return get_leads_setup(conn)
+    except Exception as exc:
+        _log.exception("GET /api/leads/setup failed")
+        raise HTTPException(status_code=500, detail=f"Leads setup failed: {exc}")
+
+
+@app.put("/api/leads/setup")
+async def put_leads_setup_endpoint(body: _LeadsSetupUpdateBody):
+    """Update Leads setup items while the gate is open."""
+    try:
+        from elevate_cli.data import connect, update_leads_setup
+
+        with connect() as conn:
+            return update_leads_setup(
+                conn,
+                items=[item.dict() for item in body.items],
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/leads/setup failed")
+        raise HTTPException(status_code=500, detail=f"Update leads setup failed: {exc}")
+
+
+@app.post("/api/leads/setup/complete")
+async def post_leads_setup_complete_endpoint():
+    """Mark Leads onboarding complete once CRM + at least one lead source + auto-reply are ready."""
+    try:
+        from elevate_cli.data import complete_leads_setup, connect
+
+        with connect() as conn:
+            return complete_leads_setup(conn)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/leads/setup/complete failed")
+        raise HTTPException(status_code=500, detail=f"Complete leads setup failed: {exc}")
+
+
+@app.post("/api/leads/setup/reset")
+async def post_leads_setup_reset_endpoint():
+    """Re-open the Leads onboarding gate without wiping item state."""
+    try:
+        from elevate_cli.data import connect, reset_leads_setup
+
+        with connect() as conn:
+            return reset_leads_setup(conn)
+    except Exception as exc:
+        _log.exception("POST /api/leads/setup/reset failed")
+        raise HTTPException(status_code=500, detail=f"Reset leads setup failed: {exc}")
 
 
 _ONBOARDING_CHAT_SYSTEM = (

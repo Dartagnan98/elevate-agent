@@ -31,6 +31,7 @@ from elevate_cli.data.contacts import (
     find_contacts,
     get_contact,
     park_contact,
+    set_pipeline_status,
     unpark_contact,
     update_contact_stage,
     update_flags,
@@ -90,12 +91,26 @@ from elevate_cli.data.reads import (
     db_source_inbox_response,
     db_thread_context_response,
 )
+from elevate_cli.data.review import (
+    SCORING_VERSION as REVIEW_SCORING_VERSION,
+    review_all_contacts,
+    score_contact,
+)
 from elevate_cli.data.shadow import (
     data_primary_is_db,
     shadow_read,
     shadow_read_enabled,
 )
 from elevate_cli.data.attribution import attribute_inbound_reply
+from elevate_cli.data.notes import (
+    list_notes_for_contact,
+    list_pending_lofty_notes,
+    mark_lofty_deleted,
+    mark_lofty_failed,
+    mark_lofty_synced,
+    recent_ai_note,
+    write_note,
+)
 from elevate_cli.data.gaps import analyze_template_gaps
 from elevate_cli.data.picker import eligible_templates, pick_template
 from elevate_cli.data.templates import (
@@ -200,6 +215,12 @@ from elevate_cli.data.pack_onboarding import (
     sync_pack_onboarding_memory,
     update_pack_onboarding,
 )
+from elevate_cli.data.leads_setup import (
+    complete_leads_setup,
+    get_leads_setup,
+    reset_leads_setup,
+    update_leads_setup,
+)
 
 
 __all__ = [
@@ -209,8 +230,8 @@ __all__ = [
     "backups_root", "parity_root",
     # contacts
     "add_contact_note", "classify_contact", "close_to_admin", "find_contacts",
-    "get_contact", "park_contact", "unpark_contact", "update_contact_stage",
-    "update_flags", "upsert_contact",
+    "get_contact", "park_contact", "set_pipeline_status", "unpark_contact",
+    "update_contact_stage", "update_flags", "upsert_contact",
     # identities
     "add_identity", "list_open_conflicts", "merge_contacts",
     "record_identity_conflict", "resolve_identity",
@@ -237,6 +258,8 @@ __all__ = [
     "recent_diffs",
     # reads
     "db_source_inbox_response", "db_thread_context_response",
+    # ai review / heat scoring
+    "REVIEW_SCORING_VERSION", "review_all_contacts", "score_contact",
     # shadow read
     "data_primary_is_db", "shadow_read", "shadow_read_enabled",
     # templates

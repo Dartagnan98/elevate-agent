@@ -115,6 +115,7 @@ import {
   type BoardAction,
   type HubData,
 } from "@/pages/real-estate-hub/_shared";
+import { LeadsSetupLaunch, useLeadsSetup } from "@/pages/real-estate-hub/leads/onboarding";
 
 export type { BoardAction, HubData };
 
@@ -3082,6 +3083,10 @@ export function RealEstateLeadsPage() {
   useHubHeader("Leads", data);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [tab, setTab] = useState<LeadTab>("action-board");
+  const leadsSetup = useLeadsSetup();
+  const [forceOnboarding, setForceOnboarding] = useState(false);
+  const showOnboarding = !leadsSetup.loading && !!leadsSetup.setup && (!leadsSetup.setup.complete || forceOnboarding);
+  const setupSnapshot = leadsSetup.setup;
 
   const allThreads = useMemo(() => data.sourceInbox?.threads ?? [], [data.sourceInbox?.threads]);
   const allDrafts = useMemo(() => data.sourceInbox?.drafts ?? [], [data.sourceInbox?.drafts]);
@@ -3180,8 +3185,38 @@ export function RealEstateLeadsPage() {
       title={shellTitle}
     >
       <div className="flex w-full flex-col gap-5">
+        {leadsSetup.loading ? (
+          <div className="rounded-md border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
+            Loading leads onboarding…
+          </div>
+        ) : leadsSetup.error ? (
+          <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+            Could not load leads setup: {leadsSetup.error}
+          </div>
+        ) : showOnboarding && setupSnapshot ? (
+          <LeadsSetupLaunch
+            setup={setupSnapshot}
+            onSetupUpdated={(next) => leadsSetup.setSetup(next)}
+            forceOnboarding={forceOnboarding}
+            onForceOnboardingDone={() => setForceOnboarding(false)}
+          />
+        ) : (
+        <>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <LeadsTabBar active={tab} onChange={setTab} />
+          <div className="flex items-center gap-3">
+            <LeadsTabBar active={tab} onChange={setTab} />
+            {setupSnapshot?.complete && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2 text-[11px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                onClick={() => setForceOnboarding(true)}
+              >
+                Re-run onboarding
+              </Button>
+            )}
+          </div>
           {tab === "profiles" && (
             <span className="text-xs text-foreground/70">
               A searchable source-filtered list of people, separate from the action board.
@@ -3319,6 +3354,8 @@ export function RealEstateLeadsPage() {
               </section>
             )}
           </>
+        )}
+        </>
         )}
       </div>
     </HubShell>
