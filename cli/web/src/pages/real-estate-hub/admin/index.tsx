@@ -2539,7 +2539,7 @@ function AdminCardDetailPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative flex h-full w-full flex-col bg-cardsm:h-auto sm:max-h-full sm:w-full sm:max-w-[36rem] sm:rounded-md sm:border sm:border-border"
+        className="relative flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-full sm:w-full sm:max-w-[36rem] sm:rounded-md sm:border sm:border-border"
       >
         <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
