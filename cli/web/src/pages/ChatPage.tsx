@@ -1914,6 +1914,13 @@ export default function ChatPage() {
           setMessages(merged);
           hydrateArtifactsFromMessages(merged);
           if (!hasPendingTurn(merged)) {
+            // Cache heuristic flagged this as pending (last msg = user
+            // with no assistant follow-up) so busy was set true at
+            // L1899. The server-side transcript confirms no pending
+            // turn — clear busy too, otherwise the composer stays
+            // locked behind a "Resuming work" mirage that the gateway
+            // has no knowledge of.
+            setBusy(false);
             setStatusText("Ready");
           }
         })
@@ -2462,6 +2469,9 @@ export default function ChatPage() {
           setMessages([]);
         }
         if (!pendingAfterResume) {
+          // Same fix as the api.getSessionMessages path: clear busy when
+          // the server-confirmed transcript shows no pending turn.
+          setBusy(false);
           setStatusText("Ready");
         }
       })

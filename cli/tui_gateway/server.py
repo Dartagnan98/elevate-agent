@@ -3377,6 +3377,67 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4004, "usage: /queue <prompt>")
         return _ok(rid, {"type": "send", "message": arg})
 
+    if name == "restart":
+        # Mirror the web "Restart Gateway" button (web_server.py:1119).
+        # Drains active runs then re-execs the gateway process.
+        try:
+            import subprocess
+            import sys as _sys
+            proc = subprocess.Popen(
+                [_sys.executable, "-m", "elevate_cli", "gateway", "restart"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return _ok(
+                rid,
+                {
+                    "type": "exec",
+                    "output": (
+                        f"⏳ Restarting gateway (pid {proc.pid})... "
+                        "active runs drain first."
+                    ),
+                },
+            )
+        except Exception as e:
+            return _err(rid, 4018, f"failed to spawn gateway restart: {e}")
+
+    if name == "stop":
+        # Interrupt the active turn + kill any in-flight tool processes.
+        # Same primitives as session.interrupt + the process_registry
+        # kill_all that already runs in _mirror_slash_side_effects.
+        agent = session.get("agent") if session else None
+        interrupted = False
+        if agent and hasattr(agent, "interrupt"):
+            try:
+                agent.interrupt()
+                interrupted = True
+            except Exception:
+                pass
+        killed = 0
+        try:
+            from tools.process_registry import process_registry
+            killed = process_registry.kill_all()
+        except Exception:
+            pass
+        _clear_pending(params.get("session_id", ""))
+        try:
+            from tools.approval import resolve_gateway_approval
+            if session:
+                resolve_gateway_approval(
+                    session["session_key"], "deny", resolve_all=True
+                )
+        except Exception:
+            pass
+        parts = []
+        if interrupted:
+            parts.append("interrupted current turn")
+        if killed:
+            parts.append(f"killed {killed} tool process(es)")
+        if not parts:
+            parts.append("no active agent or tool processes to stop")
+        return _ok(rid, {"type": "exec", "output": "🛑 " + ", ".join(parts) + "."})
+
     if name == "retry":
         if not session:
             return _err(rid, 4001, "no active session to retry")
