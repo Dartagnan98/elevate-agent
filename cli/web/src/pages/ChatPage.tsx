@@ -177,7 +177,7 @@ interface ChatAttachment {
   error?: string;
 }
 
-const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACHMENT_MAX_BYTES = 500 * 1024 * 1024;
 
 function formatAttachmentSize(size: number): string {
   if (size < 1024) return `${size} B`;

@@ -1290,6 +1290,8 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         _clear_session_context(tokens)
     session["agent"] = new_agent
     session["attached_images"] = []
+    session["attached_videos"] = []
+    session["attached_files"] = []
     session["edit_snapshots"] = {}
     session["image_counter"] = 0
     session["running"] = False
@@ -1345,6 +1347,8 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "history_version": 0,
         "running": False,
         "attached_images": [],
+        "attached_videos": [],
+        "attached_files": [],
         "image_counter": 0,
         "cols": cols,
         "slash_worker": None,
@@ -1428,6 +1432,65 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
     if prefix:
         return f"{prefix}\n\n{text}" if text else prefix
     return text or "What do you see in this image?"
+
+
+_VIDEO_SUFFIXES = frozenset({
+    ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".m4v",
+})
+
+# Above this raw-file size, skip inline base64 analysis (provider caps + base64
+# overhead make it impractical). Hint-only so the agent knows about the file.
+_VIDEO_AUTO_ANALYZE_MAX_BYTES = 30 * 1024 * 1024  # 30 MB
+
+
+def _enrich_with_attached_videos(user_text: str, video_paths: list[str]) -> str:
+    """Pre-analyze attached videos via video_analyze and prepend descriptions."""
+    if not video_paths:
+        return user_text or ""
+    import asyncio, json as _json
+    from tools.vision_tools import video_analyze_tool
+
+    prompt = (
+        "Describe everything happening in this video in thorough detail. "
+        "Include any text, speech, actions, scenes, people, and notable "
+        "visual or audio information."
+    )
+
+    parts: list[str] = []
+    for path in video_paths:
+        p = Path(path)
+        if not p.exists():
+            continue
+        hint = f"[You can re-examine it with video_analyze using video_url: {p}]"
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        if size > _VIDEO_AUTO_ANALYZE_MAX_BYTES:
+            mb = size // (1024 * 1024)
+            parts.append(
+                f"[The user attached a video ({mb} MB at {p}) — too large for "
+                f"automatic analysis. Use video_analyze on a clip if needed.]\n{hint}"
+            )
+            continue
+        try:
+            r = _json.loads(
+                asyncio.run(video_analyze_tool(video_url=str(p), user_prompt=prompt))
+            )
+            desc = r.get("analysis", "") if r.get("success") else None
+            parts.append(
+                f"[The user attached a video:\n{desc}]\n{hint}"
+                if desc
+                else f"[The user attached a video but analysis failed.]\n{hint}"
+            )
+        except Exception:
+            parts.append(f"[The user attached a video but analysis failed.]\n{hint}")
+
+    text = user_text or ""
+    prefix = "\n\n".join(parts)
+    if prefix:
+        return f"{prefix}\n\n{text}" if text else prefix
+    return text or "What do you see in this video?"
 
 
 # File types we treat as "small enough to inline" — readable as text.
@@ -1572,6 +1635,8 @@ def _(rid, params: dict) -> dict:
         "agent_error": None,
         "agent_ready": ready,
         "attached_images": [],
+        "attached_videos": [],
+        "attached_files": [],
         "cols": cols,
         "edit_snapshots": {},
         "history": [],
@@ -1781,6 +1846,8 @@ def _(rid, params: dict) -> dict:
         "agent_error": None,
         "agent_ready": ready,
         "attached_images": [],
+        "attached_videos": [],
+        "attached_files": [],
         "cols": int(params.get("cols", 80)),
         "edit_snapshots": {},
         "history": history,
@@ -2363,6 +2430,8 @@ def _(rid, params: dict) -> dict:
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
+        videos = list(session.get("attached_videos", []))
+        session["attached_videos"] = []
         files = list(session.get("attached_files", []))
         session["attached_files"] = []
     agent = session["agent"]
@@ -2411,6 +2480,7 @@ def _(rid, params: dict) -> dict:
                 prompt = ctx.message
 
             prompt = _enrich_with_attached_images(prompt, images) if images else prompt
+            prompt = _enrich_with_attached_videos(prompt, videos) if videos else prompt
             prompt = _enrich_with_attached_files(prompt, files) if files else prompt
 
             def _stream(delta):
@@ -2623,7 +2693,8 @@ def _(rid, params: dict) -> dict:
     the path lands here. We also accept already-on-disk paths from the user
     (e.g. a Finder drag where the renderer extracted file.path). Images
     route into attached_images so the existing vision-analyze enrichment
-    still fires; everything else lands in attached_files.
+    still fires, videos route into attached_videos for video_analyze, and
+    everything else lands in attached_files.
     """
     session, err = _sess(params, rid)
     if err:
@@ -2632,15 +2703,20 @@ def _(rid, params: dict) -> dict:
     if not raw:
         return _err(rid, 4015, "path required")
     try:
-        from cli import _IMAGE_EXTENSIONS, _resolve_attachment_path
+        from cli import _IMAGE_EXTENSIONS, _VIDEO_EXTENSIONS, _resolve_attachment_path
 
         path = _resolve_attachment_path(raw)
         if path is None:
             return _err(rid, 4016, f"file not found: {raw}")
-        is_image = path.suffix.lower() in _IMAGE_EXTENSIONS
+        suffix = path.suffix.lower()
+        is_image = suffix in _IMAGE_EXTENSIONS
+        is_video = (not is_image) and suffix in _VIDEO_EXTENSIONS
         if is_image:
             session.setdefault("attached_images", []).append(str(path))
             extra = _image_meta(path)
+        elif is_video:
+            session.setdefault("attached_videos", []).append(str(path))
+            extra = {}
         else:
             session.setdefault("attached_files", []).append(str(path))
             extra = {}
@@ -2662,7 +2738,9 @@ def _(rid, params: dict) -> dict:
                 "size": size,
                 "media_type": media_type,
                 "is_image": is_image,
+                "is_video": is_video,
                 "count": len(session.get("attached_images", []))
+                + len(session.get("attached_videos", []))
                 + len(session.get("attached_files", [])),
                 **extra,
             },
@@ -2684,16 +2762,18 @@ def _(rid, params: dict) -> dict:
         return err
     path = str(params.get("path", "") or "").strip()
     if path:
-        for key in ("attached_images", "attached_files"):
+        for key in ("attached_images", "attached_videos", "attached_files"):
             queue = session.get(key, [])
             session[key] = [p for p in queue if p != path]
     else:
         session["attached_images"] = []
+        session["attached_videos"] = []
         session["attached_files"] = []
     return _ok(
         rid,
         {
             "count": len(session.get("attached_images", []))
+            + len(session.get("attached_videos", []))
             + len(session.get("attached_files", [])),
         },
     )

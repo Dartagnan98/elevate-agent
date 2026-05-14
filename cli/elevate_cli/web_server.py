@@ -1396,7 +1396,7 @@ async def preview_file(path: str):
     )
 
 
-_UPLOAD_MAX_PER_FILE = 25 * 1024 * 1024  # 25 MB per file
+_UPLOAD_MAX_PER_FILE = 500 * 1024 * 1024  # 500 MB per file (covers most phone videos)
 _UPLOAD_DIRNAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]")
 
 

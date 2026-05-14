@@ -1263,6 +1263,10 @@ _IMAGE_EXTENSIONS = frozenset({
     '.bmp', '.tiff', '.tif', '.svg', '.ico',
 })
 
+_VIDEO_EXTENSIONS = frozenset({
+    '.mp4', '.webm', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.m4v',
+})
+
 
 from elevate_constants import is_termux as _is_termux_environment
 
