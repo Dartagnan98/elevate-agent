@@ -2361,8 +2361,12 @@ def _resolve_source_view(source_root: Path, source_id: str) -> JsonRecord | None
 
 
 def _message_for_thread(record: JsonRecord) -> JsonRecord | None:
+    # Thread drawer is the full-detail view — prefer `body` (untruncated)
+    # over `text` (200-char snippet written by composio_inbound for the
+    # inbox preview). Falls through to text/message/summary/title for
+    # sources that don't split full vs preview.
     text = ""
-    for key in ("text", "body", "message", "summary", "title"):
+    for key in ("body", "text", "message", "summary", "title"):
         value = record.get(key)
         if isinstance(value, str) and value.strip():
             text = value.strip()
