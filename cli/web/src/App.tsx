@@ -1503,7 +1503,7 @@ function SidebarSectionLabel({
   onToggle?: () => void;
 }) {
   const baseClass =
-    "mb-0.5 mt-3 first:mt-0 px-2 text-[0.62rem] font-semibold uppercase tracking-wider text-[var(--sidebar-text-muted)]/60";
+    "mb-0.5 mt-3 first:mt-0 px-2 text-[0.62rem] font-semibold uppercase tracking-wider text-[var(--sidebar-text)]";
   if (!onToggle) {
     return <div className={baseClass}>{children}</div>;
   }
@@ -1515,7 +1515,7 @@ function SidebarSectionLabel({
       className={cn(
         baseClass,
         "group flex w-full items-center justify-between gap-1.5 cursor-pointer",
-        "hover:text-[var(--sidebar-text-muted)] transition-colors",
+        "hover:text-[var(--sidebar-text-active)] transition-colors",
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm",
       )}
     >
@@ -1537,7 +1537,7 @@ function sidebarActionClass(active: boolean, primary = false) {
     primary && "font-medium text-[var(--sidebar-text-strong)]",
     active
       ? "text-[var(--sidebar-text-active)] font-medium"
-      : "text-[var(--sidebar-text-muted)] hover:text-[var(--sidebar-text-active)]",
+      : "text-[var(--sidebar-text)] hover:text-[var(--sidebar-text-active)]",
   );
 }
 
@@ -1566,7 +1566,7 @@ function SidebarAction({
         cn(sidebarActionClass(isActive, primary), "flex items-center gap-2")
       }
     >
-      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <Icon className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
       <span className="min-w-0 truncate">{label}</span>
     </NavLink>
   );
