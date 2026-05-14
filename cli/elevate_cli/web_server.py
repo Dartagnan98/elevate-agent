@@ -3701,10 +3701,19 @@ _ONBOARDING_CHAT_SYSTEM = (
     "(1) Always lead with current state: name the province and what's already "
     "connected (with provider names). Don't ask questions about anything the "
     "snapshot shows as connected/configured. "
-    "(2) After the state line, name the next concrete gap from 'Still missing' "
+    "IMPORTANT: 'Still missing' has two sub-buckets — items that the user "
+    "set up but Elevate hasn't yet captured a runtime verification ping for "
+    "(status=connected/configured AND key in missingRequiredKeys, listed under "
+    "'Pending verification'), and items the user hasn't picked a provider for "
+    "(status=missing, listed under 'Not picked yet'). NEVER tell the user a "
+    "Pending-verification item is 'missing' or that they need to reconnect "
+    "it — say 'health-check pending, will clear on next sync' instead. Only "
+    "items in 'Not picked yet' need user action. "
+    "(2) After the state line, name the next concrete 'Not picked yet' gap "
     "and tell the user how to close it — not 'do you have a calendar', but "
     "'Next: Calendar — click Connect on the Calendar card in the connectors "
-    "panel'. "
+    "panel'. If everything is either connected or pending verification, say "
+    "so; do not invent action items. "
     "(3) Never say you're 'making' or 'creating' something that already exists. "
     "(4) Never offer to import 'any spreadsheets of contacts, deals, listings, "
     "or past clients' unless the user brings them up first. The CRM already "
@@ -3770,8 +3779,22 @@ def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
         f"Completion: {setup.get('completionPct') or 0}% ({setup.get('completedRequiredCount') or 0}/{setup.get('requiredCount') or 0})",
     ]
     if missing:
-        labels = [by_key.get(k, {}).get("label") or k for k in missing]
-        lines.append(f"Still missing: {', '.join(labels)}")
+        pending_verify: List[str] = []
+        not_picked: List[str] = []
+        for k in missing:
+            it = by_key.get(k) or {}
+            label = it.get("label") or k
+            status = (it.get("status") or "").strip()
+            if status in ("connected", "configured"):
+                pending_verify.append(label)
+            else:
+                not_picked.append(label)
+        if pending_verify:
+            lines.append(f"Pending verification (provider set, health-check not yet captured): {', '.join(pending_verify)}")
+        if not_picked:
+            lines.append(f"Not picked yet (user action required): {', '.join(not_picked)}")
+        if not pending_verify and not not_picked:
+            lines.append("All required items present.")
     else:
         lines.append("All required items present.")
     for key in ("drive", "crm", "mls", "compliance", "showing"):
@@ -3880,8 +3903,20 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
             continue
         connected_bits.append(f"{label} ({provider})" if provider else label)
 
-    missing_labels = [by_key.get(k, {}).get("label") or k for k in missing]
-    next_action = _next_action_with_url(missing[0]) if missing else None
+    pending_verify_labels: List[str] = []
+    not_picked_labels: List[str] = []
+    not_picked_keys: List[str] = []
+    for k in missing:
+        it = by_key.get(k) or {}
+        label = it.get("label") or k
+        status = (it.get("status") or "").strip()
+        if status in ("connected", "configured"):
+            pending_verify_labels.append(label)
+        else:
+            not_picked_labels.append(label)
+            not_picked_keys.append(k)
+
+    next_action = _next_action_with_url(not_picked_keys[0]) if not_picked_keys else None
 
     status_re_ask = any(
         token in last_lower
@@ -3891,11 +3926,20 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
     if status_re_ask or not messages:
         head = f"{province + ', ' if province else ''}{pct}% wired up."
         connected_line = f" Connected: {', '.join(connected_bits)}." if connected_bits else ""
-        if missing_labels:
-            tail = f" Still need: {', '.join(missing_labels)}. Next: {missing_labels[0]} — {next_action}" if next_action else f" Still need: {', '.join(missing_labels)}."
+        pending_line = (
+            f" Health-check pending (will clear on next sync): {', '.join(pending_verify_labels)}."
+            if pending_verify_labels else ""
+        )
+        if not_picked_labels:
+            tail = (
+                f" Not picked yet: {', '.join(not_picked_labels)}. Next: {not_picked_labels[0]} — {next_action}"
+                if next_action else f" Not picked yet: {', '.join(not_picked_labels)}."
+            )
+        elif pending_verify_labels:
+            tail = " No user action needed — pending items will clear automatically."
         else:
             tail = " Everything required is in. Anything else to tighten?"
-        return head + connected_line + tail
+        return head + connected_line + pending_line + tail
 
     if "spreadsheet" in last_lower or "sheet" in last_lower:
         crm = (profile.get("crmProvider") or "").strip()
@@ -3903,10 +3947,15 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
             return f"{crm} is already wired in as your CRM — leads, contacts, deals all flow through it. Drop a sheet only if there's data not in {crm} yet."
         return "Paste the Google Sheet URL into your drive folder; the next sync will pick it up."
 
-    if missing_labels and next_action:
-        return f"{missing_labels[0]} is the next gap — {next_action}"
-    if missing_labels:
-        return f"Still need: {', '.join(missing_labels)}. Knock them out in the connectors panel."
+    if not_picked_labels and next_action:
+        return f"{not_picked_labels[0]} is the next gap — {next_action}"
+    if not_picked_labels:
+        return f"Still need to pick: {', '.join(not_picked_labels)}. Knock them out in the connectors panel."
+    if pending_verify_labels:
+        return (
+            f"Pending health-check on {', '.join(pending_verify_labels)} — these are wired up, "
+            f"verification ping just hasn't landed. Will clear on next sync."
+        )
     return "Everything required is in. Anything else to tighten before we go live?"
 
 

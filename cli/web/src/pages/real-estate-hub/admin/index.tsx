@@ -5089,26 +5089,50 @@ export function RealEstateAdminPage() {
     if (!snap) return "Loading your setup snapshot — one sec.";
     const province = (snap.profile?.province || "").toUpperCase();
     const pct = snap.completionPct ?? 0;
-    const connected = snap.items
-      .filter((item) => item.status === "connected" || item.status === "configured")
-      .map((item) => {
-        const provider = (item.provider || "").trim();
-        return provider ? `${item.label} (${provider})` : item.label;
-      });
-    const missingByKey = new Map(snap.items.map((item) => [item.key, item.label]));
-    const missing = (snap.missingRequiredKeys ?? []).map((key) => missingByKey.get(key) ?? key);
+    const itemByKey = new Map(snap.items.map((item) => [item.key, item]));
+    const missingKeys = new Set(snap.missingRequiredKeys ?? []);
+
+    const connectedBits: string[] = [];
+    const needsVerificationBits: string[] = [];
+    for (const item of snap.items) {
+      const isReadyStatus = item.status === "connected" || item.status === "configured";
+      if (!isReadyStatus) continue;
+      const provider = (item.provider || "").trim();
+      const label = provider ? `${item.label} (${provider})` : item.label;
+      if (missingKeys.has(item.key)) {
+        needsVerificationBits.push(label);
+      } else {
+        connectedBits.push(label);
+      }
+    }
+
+    const notPicked: string[] = [];
+    for (const key of missingKeys) {
+      const item = itemByKey.get(key);
+      if (!item) continue;
+      const isReadyStatus = item.status === "connected" || item.status === "configured";
+      if (isReadyStatus) continue;
+      notPicked.push(item.label);
+    }
+
     const lines: string[] = [];
     const provinceBit = province ? `${province}, ` : "";
     lines.push(`${provinceBit}${pct}% wired up. Here's where we're at:`);
-    if (connected.length > 0) {
-      lines.push(`Connected — ${connected.join(", ")}.`);
+    if (connectedBits.length > 0) {
+      lines.push(`Connected and verified — ${connectedBits.join(", ")}.`);
     }
-    if (missing.length > 0) {
-      const first = missing[0];
-      const rest = missing.slice(1);
-      const remaining = rest.length > 0 ? ` Also still need: ${rest.join(", ")}.` : "";
-      lines.push(`Missing — ${missing.join(", ")}.${remaining ? "" : ""}`);
+    if (needsVerificationBits.length > 0) {
+      lines.push(
+        `Provider set but health-check still pending — ${needsVerificationBits.join(", ")}. ` +
+          `These count as missing until Elevate runs a verification ping; usually clears on its own once a sync runs.`,
+      );
+    }
+    if (notPicked.length > 0) {
+      const first = notPicked[0];
+      lines.push(`Not picked yet — ${notPicked.join(", ")}.`);
       lines.push(`Want to knock out ${first} first?`);
+    } else if (needsVerificationBits.length > 0) {
+      lines.push(`Nothing left to pick — once the pending health-checks clear, you're 100%.`);
     } else {
       lines.push(`Everything required is in. Anything else you want to tighten up?`);
     }
