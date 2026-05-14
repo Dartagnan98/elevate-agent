@@ -3090,6 +3090,18 @@ class _LeadsSetupUpdateBody(BaseModel):
     items: List[_LeadsSetupItemBody] = []
 
 
+class _AgentSetupItemBody(BaseModel):
+    key: str
+    status: str = "missing"
+    provider: Optional[str] = None
+    value: Any = None
+    notes: Optional[str] = None
+
+
+class _AgentSetupUpdateBody(BaseModel):
+    items: List[_AgentSetupItemBody] = []
+
+
 class _OnboardingChatMessage(BaseModel):
     role: str
     content: str
@@ -3763,6 +3775,67 @@ async def post_leads_setup_reset_endpoint():
     except Exception as exc:
         _log.exception("POST /api/leads/setup/reset failed")
         raise HTTPException(status_code=500, detail=f"Reset leads setup failed: {exc}")
+
+
+@app.get("/api/agent/setup")
+async def get_agent_setup_endpoint():
+    """Return the top-level Agent onboarding readiness snapshot."""
+    try:
+        from elevate_cli.data import connect, get_agent_setup
+
+        with connect() as conn:
+            return get_agent_setup(conn)
+    except Exception as exc:
+        _log.exception("GET /api/agent/setup failed")
+        raise HTTPException(status_code=500, detail=f"Agent setup failed: {exc}")
+
+
+@app.put("/api/agent/setup")
+async def put_agent_setup_endpoint(body: _AgentSetupUpdateBody):
+    """Update Agent setup items while the gate is open."""
+    try:
+        from elevate_cli.data import connect, update_agent_setup
+
+        with connect() as conn:
+            return update_agent_setup(
+                conn,
+                items=[item.dict() for item in body.items],
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("PUT /api/agent/setup failed")
+        raise HTTPException(status_code=500, detail=f"Update agent setup failed: {exc}")
+
+
+@app.post("/api/agent/setup/complete")
+async def post_agent_setup_complete_endpoint():
+    """Mark Agent onboarding complete once primary LLM + embedding + memory store are ready."""
+    try:
+        from elevate_cli.data import complete_agent_setup, connect
+
+        with connect() as conn:
+            return complete_agent_setup(conn)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/agent/setup/complete failed")
+        raise HTTPException(status_code=500, detail=f"Complete agent setup failed: {exc}")
+
+
+@app.post("/api/agent/setup/reset")
+async def post_agent_setup_reset_endpoint():
+    """Re-open the Agent onboarding gate without wiping item state."""
+    try:
+        from elevate_cli.data import connect, reset_agent_setup
+
+        with connect() as conn:
+            return reset_agent_setup(conn)
+    except Exception as exc:
+        _log.exception("POST /api/agent/setup/reset failed")
+        raise HTTPException(status_code=500, detail=f"Reset agent setup failed: {exc}")
 
 
 _ONBOARDING_CHAT_SYSTEM = (

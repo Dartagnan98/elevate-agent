@@ -916,6 +916,39 @@ export interface LeadsSetupItemUpdate {
   notes?: string | null;
 }
 
+export interface AgentSetupItem {
+  key: string;
+  category: string;
+  label: string;
+  description: string | null;
+  required: boolean;
+  status: AdminSetupItemStatus;
+  provider: string | null;
+  value: unknown;
+  notes: string | null;
+  sortOrder: number;
+  updatedAt: string | null;
+}
+
+export interface AgentSetupSnapshot {
+  items: AgentSetupItem[];
+  requiredCount: number;
+  completedRequiredCount: number;
+  missingRequiredKeys: string[];
+  completionPct: number;
+  complete: boolean;
+  completedAt: string | null;
+  launchRequired: boolean;
+}
+
+export interface AgentSetupItemUpdate {
+  key: string;
+  status: AdminSetupItemStatus;
+  provider?: string | null;
+  value?: unknown;
+  notes?: string | null;
+}
+
 export interface AdminDealsResponse {
   items: AdminDeal[];
   count: number;

@@ -37,6 +37,8 @@ import type {
   PackOnboardingUpdateRequest,
   LeadsSetupSnapshot,
   LeadsSetupItemUpdate,
+  AgentSetupSnapshot,
+  AgentSetupItemUpdate,
   AdminDealsResponse,
   AdminContactsResponse,
   ComposioStatus,
@@ -742,6 +744,19 @@ export const api = {
     fetchJSON<LeadsSetupSnapshot>("/api/leads/setup/complete", { method: "POST" }),
   resetLeadsSetup: () =>
     fetchJSON<LeadsSetupSnapshot>("/api/leads/setup/reset", { method: "POST" }),
+
+  // Agent (top-level) onboarding gate
+  getAgentSetup: () => fetchJSON<AgentSetupSnapshot>("/api/agent/setup"),
+  updateAgentSetup: (items: AgentSetupItemUpdate[]) =>
+    fetchJSON<AgentSetupSnapshot>("/api/agent/setup", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    }),
+  completeAgentSetup: () =>
+    fetchJSON<AgentSetupSnapshot>("/api/agent/setup/complete", { method: "POST" }),
+  resetAgentSetup: () =>
+    fetchJSON<AgentSetupSnapshot>("/api/agent/setup/reset", { method: "POST" }),
   launchAdminOnboardingBrowserUse: (portalKey: "mls" | "compliance" | "showing", taskHint?: string) =>
     fetchJSON<{
       ok: boolean;

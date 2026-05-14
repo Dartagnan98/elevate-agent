@@ -221,6 +221,12 @@ from elevate_cli.data.leads_setup import (
     reset_leads_setup,
     update_leads_setup,
 )
+from elevate_cli.data.agent_setup import (
+    complete_agent_setup,
+    get_agent_setup,
+    reset_agent_setup,
+    update_agent_setup,
+)
 
 
 __all__ = [
@@ -309,4 +315,7 @@ __all__ = [
     # picker / attribution / gaps
     "attribute_inbound_reply", "analyze_template_gaps",
     "eligible_templates", "pick_template",
+    # Agent (top-level) setup readiness gate
+    "complete_agent_setup", "get_agent_setup",
+    "reset_agent_setup", "update_agent_setup",
 ]

@@ -117,6 +117,9 @@ const RealEstateTasksPage = lazy(() =>
 const RealEstateTodayPage = lazy(() =>
   import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage })),
 );
+const AgentOnboardingPage = lazy(() =>
+  import("@/pages/agent-onboarding").then((m) => ({ default: m.AgentOnboardingPage })),
+);
 import { useI18n } from "@/i18n";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
@@ -184,6 +187,7 @@ const CHAT_NAV_ITEM: NavItem = {
 const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/hub": AgentHubPage,
   "/desktop-setup": DesktopSetupPage,
+  "/agent-onboarding": AgentOnboardingPage,
   "/project": ProjectPage,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
@@ -205,6 +209,11 @@ const BUILTIN_NAV_REST: NavItem[] = [
     path: "/desktop-setup",
     label: "Desktop Setup",
     icon: ShieldCheck,
+  },
+  {
+    path: "/agent-onboarding",
+    label: "Agent Onboarding",
+    icon: Sparkles,
   },
   {
     path: "/sessions",
