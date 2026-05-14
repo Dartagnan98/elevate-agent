@@ -115,7 +115,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           </div>
         )}
         {providers && providers.length === 0 && (
-          <p className="text-sm text-muted-foreground text-center py-8">
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">
             {t.oauth.noProviders}
           </p>
         )}

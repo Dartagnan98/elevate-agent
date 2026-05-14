@@ -2167,7 +2167,7 @@ export default function ConfigPage() {
                   </p>
                   <div className="mt-4">
                     {searchMatchedFields.length === 0 ? (
-                      <p className="text-sm text-muted-foreground text-center py-12">
+                      <p className="px-1 py-1 text-xs text-muted-foreground/80">
                         {t.config.noFieldsMatch.replace("{query}", searchQuery)}
                       </p>
                     ) : (
