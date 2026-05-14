@@ -22,12 +22,14 @@ import {
   Flame,
   Home,
   Loader2,
+  Lock,
   Mail,
   Phone,
   Square as SquareIcon,
   Plus,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Target,
   Users,
   X as CloseIcon,
@@ -955,6 +957,503 @@ const PROVIDER_SUGGESTIONS = {
   fintrac: ["Fintracker", "Manual FIN# capture", "OneID", "Treefort"],
 } as const;
 
+type OnboardingFieldType = "text" | "textarea" | "province";
+
+type OnboardingField = {
+  key: keyof AdminSetupDraft;
+  label: string;
+  placeholder?: string;
+  type?: OnboardingFieldType;
+  suggestions?: readonly string[];
+  listId?: string;
+  helper?: string;
+};
+
+type OnboardingStep = {
+  id: string;
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  banner?: { tone: "credentials" | "info"; text: string };
+  fields: OnboardingField[];
+};
+
+const WIZARD_STEPS: OnboardingStep[] = [
+  {
+    id: "you",
+    eyebrow: "Step 1 of 9",
+    title: "Who's the realtor?",
+    subtitle: "Legal name on file, the brokerage you hang your license at, and the team if you run one.",
+    fields: [
+      { key: "realtorLegalName", label: "Realtor legal name" },
+      { key: "licenseName", label: "Licensed / public name", placeholder: "How it shows on listings" },
+      { key: "brokerageName", label: "Brokerage" },
+      { key: "teamName", label: "Team / PREC", placeholder: "Optional" },
+    ],
+  },
+  {
+    id: "where",
+    eyebrow: "Step 2 of 9",
+    title: "Where do you work?",
+    subtitle: "Province sets the legal forms and reference docs. Market and boards refine the playbook.",
+    fields: [
+      { key: "province", label: "Province / territory", type: "province" },
+      { key: "market", label: "Primary market", placeholder: "Kamloops, Calgary..." },
+      { key: "boardMemberships", label: "Board memberships", placeholder: "AOIR, FVREB..." },
+    ],
+  },
+  {
+    id: "approval",
+    eyebrow: "Step 3 of 9",
+    title: "How does approval work?",
+    subtitle: "Admin will pause for sign-off here. Tell it where to ping you and what it can / can't do without you.",
+    fields: [
+      { key: "managingBrokerEmail", label: "Managing broker / admin email" },
+      { key: "approvalChannel", label: "Approval channel", placeholder: "Telegram Admin bot / lane" },
+      {
+        key: "approvalPolicy",
+        label: "Approval policy",
+        type: "textarea",
+        placeholder: "What AI can draft / upload, what needs sign-off, whether docs / MLS / signing ever go out without a human.",
+      },
+    ],
+  },
+  {
+    id: "daily-tools",
+    eyebrow: "Step 4 of 9",
+    title: "Daily tools",
+    subtitle: "Email, calendar, and the cloud drive where deal folders live.",
+    fields: [
+      { key: "emailProvider", label: "Email", placeholder: "Gmail / Outlook account", suggestions: PROVIDER_SUGGESTIONS.email, listId: "onboard-email" },
+      { key: "calendarProvider", label: "Calendar", placeholder: "Google Calendar / Outlook", suggestions: PROVIDER_SUGGESTIONS.calendar, listId: "onboard-calendar" },
+      { key: "driveProvider", label: "Cloud drive", placeholder: "Google Drive / SharePoint", suggestions: PROVIDER_SUGGESTIONS.drive, listId: "onboard-drive" },
+    ],
+  },
+  {
+    id: "crm-mls",
+    eyebrow: "Step 5 of 9",
+    title: "CRM + MLS",
+    subtitle: "Where leads live and where listings get published.",
+    fields: [
+      { key: "crmProvider", label: "CRM", placeholder: "Lofty, kvCORE, BoldTrail...", suggestions: PROVIDER_SUGGESTIONS.crm, listId: "onboard-crm" },
+      { key: "mlsProvider", label: "MLS / board portal", placeholder: "Matrix, Xposure, Paragon...", suggestions: PROVIDER_SUGGESTIONS.mls, listId: "onboard-mls" },
+    ],
+  },
+  {
+    id: "documents",
+    eyebrow: "Step 6 of 9",
+    title: "Documents flow",
+    subtitle: "How paperwork moves: form filler, signing, and compliance review.",
+    fields: [
+      { key: "formsProvider", label: "Forms provider", placeholder: "WEBForms / TransactionDesk", suggestions: PROVIDER_SUGGESTIONS.forms, listId: "onboard-forms" },
+      { key: "signingProvider", label: "Signing provider", placeholder: "DigiSign / DocuSign", suggestions: PROVIDER_SUGGESTIONS.signing, listId: "onboard-signing" },
+      { key: "complianceProvider", label: "Compliance platform", placeholder: "SkySlope / Lone Wolf", suggestions: PROVIDER_SUGGESTIONS.compliance, listId: "onboard-compliance" },
+    ],
+  },
+  {
+    id: "specialty",
+    eyebrow: "Step 7 of 9",
+    title: "Listings + verification",
+    subtitle: "Showings, photo processing, and FINTRAC / ID workflow.",
+    fields: [
+      { key: "showingProvider", label: "Showing platform", placeholder: "ShowingTime / BrokerBay", suggestions: PROVIDER_SUGGESTIONS.showing, listId: "onboard-showing" },
+      { key: "photoProcessingProvider", label: "Photo processing", placeholder: "Drive + Nano Banana / Higgsfield", suggestions: PROVIDER_SUGGESTIONS.photo, listId: "onboard-photo" },
+      { key: "fintracProvider", label: "FINTRAC / ID workflow", placeholder: "Fintracker / manual FIN# capture", suggestions: PROVIDER_SUGGESTIONS.fintrac, listId: "onboard-fintrac" },
+    ],
+  },
+  {
+    id: "credentials",
+    eyebrow: "Step 8 of 9",
+    title: "Login URLs + credential refs",
+    subtitle: "Where Admin opens browser sessions. Reference how a credential is reached, not the password itself.",
+    banner: {
+      tone: "credentials",
+      text: "Stored locally on this computer in a .env-style config the agent pulls from. Nothing leaves your machine.",
+    },
+    fields: [
+      { key: "mlsLoginUrl", label: "MLS login URL", placeholder: "https://..." },
+      { key: "mlsCredentialRef", label: "MLS credential ref", placeholder: "Saved browser / keychain / 1Password" },
+      { key: "complianceLoginUrl", label: "Compliance login URL", placeholder: "https://..." },
+      { key: "complianceCredentialRef", label: "Compliance credential ref", placeholder: "Saved browser / keychain / 1Password" },
+      { key: "showingLoginUrl", label: "Showing login URL", placeholder: "https://..." },
+      { key: "showingCredentialRef", label: "Showing credential ref", placeholder: "Saved browser / keychain / 1Password" },
+    ],
+  },
+  {
+    id: "workflow",
+    eyebrow: "Step 9 of 9",
+    title: "Workflow notes",
+    subtitle: "Folder conventions, commission specifics, and the regional memory Admin will read every run.",
+    fields: [
+      { key: "defaultFolderPattern", label: "Folder pattern" },
+      { key: "commissionNotes", label: "Commission / service notes" },
+      {
+        key: "browserWorkflowNotes",
+        label: "Browser-use notes",
+        type: "textarea",
+        placeholder: "Board portal quirks, browser profile, MFA expectations, where to find MLS number, showing feedback, compliance status, confirmation screens.",
+      },
+      {
+        key: "regionalMemory",
+        label: "Regional memory",
+        type: "textarea",
+        placeholder: "Province docs, local MLS quirks, deposit rules, admin emails, property lookup sources, showing platform notes.",
+      },
+    ],
+  },
+];
+
+function isBrandNewAdminSetup(setup: AdminSetupSnapshot): boolean {
+  if (setup.completionPct > 0) return false;
+  const profile = setup.profile ?? {};
+  if ((profile.realtorLegalName ?? "").trim()) return false;
+  if ((profile.brokerageName ?? "").trim()) return false;
+  if ((profile.province ?? "").trim()) return false;
+  return true;
+}
+
+function AdminOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
+  return (
+    <section className="onboarding-overlay relative -mx-6 -my-6 flex min-h-[calc(100vh-9rem)] items-center justify-center overflow-hidden px-6 py-10">
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex max-w-md flex-col items-center text-center">
+        <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Admin · first run
+        </div>
+        <h1 className="onboarding-rise-delay-1 mt-3 text-[34px] font-medium leading-[1.05] tracking-tight text-foreground">
+          Set up Elevate Admin
+        </h1>
+        <p className="onboarding-rise-delay-2 mt-3 max-w-sm text-[13.5px] leading-6 text-muted-foreground">
+          A short guided run sets the realtor profile, province, tools, and approval lane. Two minutes, end-to-end.
+        </p>
+        <Button
+          size="lg"
+          onClick={onStart}
+          className="onboarding-rise-delay-3 mt-7 h-12 min-w-[220px] px-6 text-[14px]"
+        >
+          <Sparkles className="h-4 w-4" />
+          Run onboarding
+        </Button>
+        <button
+          type="button"
+          onClick={onSkip}
+          className="onboarding-rise-delay-3 mt-4 text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+        >
+          or skip to the full setup form
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function AdminOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
+  const [exiting, setExiting] = useState(false);
+
+  const handleStart = useCallback(() => setExiting(true), []);
+
+  const handleAnimationEnd = useCallback(
+    (event: React.AnimationEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) return;
+      if (exiting) onContinue();
+    },
+    [exiting, onContinue],
+  );
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Welcome to Elevate Admin"
+      className={cn(
+        "onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden",
+        exiting && "onboarding-exit",
+      )}
+      onAnimationEnd={handleAnimationEnd}
+    >
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex max-w-xl flex-col items-center px-6 text-center">
+        <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+          Elevate · Admin
+        </div>
+        <h1 className="onboarding-rise-delay-1 mt-4 text-[52px] font-medium leading-[1.02] tracking-tight text-foreground">
+          Welcome to Elevate Admin.
+        </h1>
+        <p className="onboarding-rise-delay-2 mt-4 max-w-lg text-[15px] leading-7 text-muted-foreground">
+          A few quick questions and Admin starts running listings, conditions, and closings alongside you.
+        </p>
+        <Button
+          size="lg"
+          onClick={handleStart}
+          disabled={exiting}
+          className="onboarding-rise-delay-3 mt-9 h-12 min-w-[240px] px-7 text-[14px]"
+        >
+          Let's get started
+        </Button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function AdminOnboardingWizard({
+  draft,
+  updateDraft,
+  onAdvanceSave,
+  onFinish,
+  saving,
+  verifying,
+  error,
+  savedMessage,
+  provinceCoverage,
+  savedProvinceCode,
+  onSkipToForm,
+}: {
+  draft: AdminSetupDraft;
+  updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
+  onAdvanceSave: () => Promise<void>;
+  onFinish: () => Promise<void>;
+  saving: boolean;
+  verifying: boolean;
+  error: string | null;
+  savedMessage: string | null;
+  provinceCoverage: AdminProvinceGuideCoverage[];
+  savedProvinceCode: string;
+  onSkipToForm: () => void;
+}) {
+  const [stepIdx, setStepIdx] = useState(0);
+  const step = WIZARD_STEPS[stepIdx];
+  const isLast = stepIdx === WIZARD_STEPS.length - 1;
+  const isFirst = stepIdx === 0;
+  const busy = saving || verifying;
+
+  const provinceCoverageByCode = useMemo(
+    () => new Map(provinceCoverage.map((item) => [item.province, item])),
+    [provinceCoverage],
+  );
+  const selectedProvinceCoverage = provinceCoverageByCode.get(draft.province.trim().toUpperCase());
+
+  const handleNext = useCallback(async () => {
+    if (busy) return;
+    await onAdvanceSave();
+    if (isLast) {
+      await onFinish();
+      return;
+    }
+    setStepIdx((idx) => Math.min(idx + 1, WIZARD_STEPS.length - 1));
+  }, [busy, isLast, onAdvanceSave, onFinish]);
+
+  const handleBack = useCallback(() => {
+    if (busy) return;
+    setStepIdx((idx) => Math.max(idx - 1, 0));
+  }, [busy]);
+
+  return (
+    <section className="border-t border-border pt-6">
+      <div className="mx-auto flex max-w-3xl flex-col">
+        <div className="mb-6 flex items-center gap-1.5">
+          {WIZARD_STEPS.map((s, idx) => (
+            <span
+              key={s.id}
+              aria-hidden
+              className={cn(
+                "h-1 flex-1 rounded-sm transition-colors",
+                idx < stepIdx
+                  ? "bg-primary"
+                  : idx === stepIdx
+                    ? "bg-primary"
+                    : "bg-border",
+              )}
+            />
+          ))}
+        </div>
+
+        <div className="font-mono-ui text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+          {step.eyebrow}
+        </div>
+        <h2 className="mt-2 text-[26px] font-medium leading-tight tracking-tight text-foreground">
+          {step.title}
+        </h2>
+        <p className="mt-2 max-w-2xl text-[13.5px] leading-6 text-muted-foreground">
+          {step.subtitle}
+        </p>
+
+        {step.banner && (
+          <div className="mt-5 flex items-start gap-3 rounded-md border border-border bg-muted/30 px-4 py-3">
+            <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <p className="text-[12.5px] leading-5 text-muted-foreground">
+              {step.banner.text}
+            </p>
+          </div>
+        )}
+
+        <div className="mt-7 grid gap-4 md:grid-cols-2">
+          {step.fields.map((field) => {
+            if (field.type === "province") {
+              return (
+                <OnboardingProvinceField
+                  key={field.key}
+                  draft={draft}
+                  updateDraft={updateDraft}
+                  provinceCoverageByCode={provinceCoverageByCode}
+                  selectedProvinceCoverage={selectedProvinceCoverage}
+                  savedProvinceCode={savedProvinceCode}
+                />
+              );
+            }
+            if (field.type === "textarea") {
+              return (
+                <label key={field.key} className="block min-w-0 md:col-span-2">
+                  <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
+                    {field.label}
+                  </span>
+                  <textarea
+                    value={draft[field.key]}
+                    onChange={(event) => updateDraft(field.key, event.target.value)}
+                    placeholder={field.placeholder}
+                    className="min-h-28 w-full rounded-md border border-border bg-background px-3 py-2 text-[13px] leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
+                  />
+                </label>
+              );
+            }
+            return (
+              <AdminSetupField
+                key={field.key}
+                label={field.label}
+                placeholder={field.placeholder}
+                value={draft[field.key]}
+                onChange={(value) => updateDraft(field.key, value)}
+                suggestions={field.suggestions}
+                listId={field.listId}
+              />
+            );
+          })}
+        </div>
+
+        {(error || savedMessage) && (
+          <div className={cn(
+            "mt-6 flex items-baseline gap-3 border-t py-3 text-[13px]",
+            error ? "border-destructive" : "border-success",
+          )}>
+            <span className={cn(
+              "shrink-0 font-mono-ui text-[10px] uppercase tracking-wider",
+              error ? "text-destructive" : "text-success",
+            )}>
+              {error ? "Error" : "Saved"}
+            </span>
+            <span className="text-foreground">{error || savedMessage}</span>
+          </div>
+        )}
+
+        <div className="mt-8 flex items-center justify-between border-t border-border pt-5">
+          <button
+            type="button"
+            onClick={onSkipToForm}
+            className="text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Skip wizard, jump to full form
+          </button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={handleBack} disabled={busy || isFirst}>
+              Back
+            </Button>
+            <Button onClick={() => void handleNext()} disabled={busy}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              {isLast ? "Finish + verify" : "Continue"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OnboardingProvinceField({
+  draft,
+  updateDraft,
+  provinceCoverageByCode,
+  selectedProvinceCoverage,
+  savedProvinceCode,
+}: {
+  draft: AdminSetupDraft;
+  updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
+  provinceCoverageByCode: Map<string, AdminProvinceGuideCoverage>;
+  selectedProvinceCoverage: AdminProvinceGuideCoverage | undefined;
+  savedProvinceCode: string;
+}) {
+  const [unlocked, setUnlocked] = useState(false);
+  const locked = Boolean(savedProvinceCode) && !unlocked;
+  return (
+    <label className="block min-w-0 md:col-span-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="block text-[12px] font-medium text-muted-foreground">Province / territory</span>
+        <div className="flex items-center gap-2">
+          {locked && (
+            <button
+              type="button"
+              onClick={() => setUnlocked(true)}
+              className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              Change
+            </button>
+          )}
+          <span className="font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground/80">CA · Canada</span>
+        </div>
+      </div>
+      {locked ? (
+        <div className="flex h-9 w-full items-center rounded-md border border-border bg-muted/40 px-3 text-[13px] text-foreground">
+          <span>{PROVINCE_LABEL_BY_CODE.get(savedProvinceCode) ?? savedProvinceCode}</span>
+          <span className="ml-2 font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+            saved
+          </span>
+        </div>
+      ) : (
+        <select
+          value={draft.province.trim().toUpperCase()}
+          onChange={(event) => updateDraft("province", event.target.value)}
+          className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
+        >
+          <option value="">Select province</option>
+          {CANADIAN_PROVINCES.map(({ code, label }) => {
+            const coverage = provinceCoverageByCode.get(code);
+            const suffix = coverage?.hasTransactionGuide ? " — full guide" : coverage ? " — reference" : "";
+            return (
+              <option key={code} value={code}>
+                {label}
+                {suffix}
+              </option>
+            );
+          })}
+        </select>
+      )}
+      {selectedProvinceCoverage && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+            {selectedProvinceCoverage.hasTransactionGuide ? "full guide" : "reference"}
+          </span>
+          <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+            {selectedProvinceCoverage.referencePages} pages
+          </span>
+          {selectedProvinceCoverage.forms > 0 && (
+            <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+              {selectedProvinceCoverage.forms} forms
+            </span>
+          )}
+          {selectedProvinceCoverage.checklists > 0 && (
+            <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+              {selectedProvinceCoverage.checklists} checklists
+            </span>
+          )}
+        </div>
+      )}
+      {draft.province.trim() && !selectedProvinceCoverage && (
+        <div className="mt-1.5 text-[11px] text-muted-foreground">
+          No local guide for this province yet — fall back to manual references.
+        </div>
+      )}
+    </label>
+  );
+}
+
 function AdminSetupLaunch({
   setup,
   onSetupUpdated,
@@ -969,6 +1468,9 @@ function AdminSetupLaunch({
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
   const [provinceUnlocked, setProvinceUnlocked] = useState(false);
+  const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "form">(() =>
+    isBrandNewAdminSetup(setup) ? "gate" : "form",
+  );
 
   const savedProvinceCode = (setup.profile?.province || "").trim().toUpperCase();
 
@@ -1060,6 +1562,37 @@ function AdminSetupLaunch({
     [setup.readiness],
   );
   const verificationWarnings = setup.verificationWarnings ?? [];
+
+  if (phase === "gate") {
+    return (
+      <AdminOnboardingGate
+        onStart={() => setPhase("welcome")}
+        onSkip={() => setPhase("form")}
+      />
+    );
+  }
+
+  if (phase === "welcome") {
+    return <AdminOnboardingWelcome onContinue={() => setPhase("wizard")} />;
+  }
+
+  if (phase === "wizard") {
+    return (
+      <AdminOnboardingWizard
+        draft={draft}
+        updateDraft={updateDraft}
+        onAdvanceSave={submit}
+        onFinish={verify}
+        saving={saving}
+        verifying={verifying}
+        error={error}
+        savedMessage={savedMessage}
+        provinceCoverage={provinceCoverage}
+        savedProvinceCode={savedProvinceCode}
+        onSkipToForm={() => setPhase("form")}
+      />
+    );
+  }
 
   return (
     <section className="border-t border-border pt-6">
