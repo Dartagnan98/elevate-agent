@@ -25,6 +25,9 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+const DEFAULT_AUTO_REPLY_TEMPLATE =
+  "Hey {{firstName}} — thanks for reaching out. What's the property address or area you're looking at?";
+
 type LeadsSetupDraft = {
   metaProvider: string;
   metaAuthMethod: string;
@@ -63,7 +66,7 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
     webhookUrl: String(webhookVal.url ?? ""),
     webhookSecret: String(webhookVal.secret ?? ""),
     autoReplyEnabled: Boolean(policyVal.enabled ?? false),
-    autoReplyTemplate: String(policyVal.initialMessageTemplate ?? ""),
+    autoReplyTemplate: String(policyVal.initialMessageTemplate ?? DEFAULT_AUTO_REPLY_TEMPLATE),
     followUpCadenceDays: String(policyVal.followUpCadenceDays ?? "2"),
   };
 }
