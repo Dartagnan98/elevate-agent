@@ -11,7 +11,7 @@ export function Segmented<T extends string>({
     <div
       role="radiogroup"
       className={cn(
-        "inline-flex gap-0.5 rounded-full bg-card/70 p-0.5 shadow-[inset_0_0_0_1px_var(--chat-border)]",
+        "inline-flex gap-0.5 rounded-sm bg-card border border-border p-0.5",
         className,
       )}
     >
@@ -26,13 +26,13 @@ export function Segmented<T extends string>({
             aria-checked={active}
             onClick={() => onChange(opt.value)}
             className={cn(
-              "rounded-full font-sans font-medium tracking-normal normal-case",
+              "rounded-sm font-sans font-medium tracking-normal normal-case",
               "transition-colors cursor-pointer whitespace-nowrap",
               "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70",
               size === "sm" && "h-7 px-2.5 text-xs",
               size === "md" && "h-8 px-3 text-xs",
               active
-                ? "bg-secondary text-foreground shadow-sm"
+                ? "bg-secondary text-foreground"
                 : "text-muted-foreground hover:bg-foreground/10 hover:text-foreground",
             )}
           >

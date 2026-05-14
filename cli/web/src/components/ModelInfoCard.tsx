@@ -52,7 +52,7 @@ export function ModelInfoCard({ currentModel, refreshKey = 0 }: ModelInfoCardPro
   const hasCaps = caps && Object.keys(caps).length > 0;
 
   return (
-    <div className="space-y-2 rounded-2xl border border-border/60 bg-muted/30 px-3 py-2.5">
+    <div className="space-y-2 rounded-md border border-border bg-card px-3 py-2.5">
       {/* Context window */}
       <div className="flex items-center gap-4 text-xs">
         <div className="flex items-center gap-1.5 text-muted-foreground">
@@ -64,7 +64,7 @@ export function ModelInfoCard({ currentModel, refreshKey = 0 }: ModelInfoCardPro
             {formatTokenCount(info.effective_context_length)}
           </span>
           {info.config_context_length > 0 ? (
-            <span className="text-amber-500/80 text-[10px]">
+            <span className="text-[10px] text-[var(--color-warning)]/80">
               (override — auto: {formatTokenCount(info.auto_context_length)})
             </span>
           ) : (
@@ -90,7 +90,7 @@ export function ModelInfoCard({ currentModel, refreshKey = 0 }: ModelInfoCardPro
       {hasCaps && (
         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
           {caps.supports_tools && (
-            <span className="inline-flex items-center gap-1 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            <span className="inline-flex items-center gap-1 bg-[var(--color-success)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-success)]">
               <Wrench className="h-2.5 w-2.5" /> Tools
             </span>
           )}

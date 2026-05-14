@@ -146,7 +146,7 @@ function AgentCard({
           )}>
             <span className={cn(
               "inline-block h-1.5 w-1.5 rounded-full",
-              agent.status === "active" ? "bg-emerald-500" : "bg-amber-500"
+              agent.status === "active" ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]"
             )} />
             {STATUS_COPY[agent.status] ?? agent.status}
           </span>
@@ -574,15 +574,15 @@ function HandoffBusCard({
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
-            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", workerHealthy ? "bg-emerald-500" : "bg-amber-500")} />
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", workerHealthy ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
             {worker.enabled ? "auto-drain on" : "auto-drain off"}
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", loopRunning ? "bg-emerald-500" : "bg-amber-500")} />
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", loopRunning ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
             wake loop {loopRunning ? "on" : "off"}
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", heartbeat?.enabled ? "bg-emerald-500" : "bg-amber-500")} />
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", heartbeat?.enabled ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
             heartbeat {heartbeat?.intervalSeconds ?? "off"}s
           </span>
           {wake?.pending && <span className="text-warning">wake pending</span>}
@@ -712,9 +712,9 @@ function SetupRunway({
                   <span className={cn(
                     "inline-block h-1.5 w-1.5 rounded-full",
                     item.state === "ready" || item.state === "online"
-                      ? "bg-emerald-500"
+                      ? "bg-[var(--color-success)]"
                       : item.state === "review" || item.state === "needs setup"
-                        ? "bg-amber-500"
+                        ? "bg-[var(--color-warning)]"
                         : "bg-border"
                   )} />
                   {item.state}
@@ -983,7 +983,7 @@ export default function AgentHubPage() {
           <div className="min-w-0 space-y-3">
             <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
               <span className="inline-flex items-center gap-1.5">
-                <span className={cn("inline-block h-1.5 w-1.5 rounded-full", snapshot.gateway.running ? "bg-emerald-500" : "bg-amber-500")} />
+                <span className={cn("inline-block h-1.5 w-1.5 rounded-full", snapshot.gateway.running ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
                 {snapshot.gateway.running ? "Gateway online" : "Gateway offline"}
               </span>
               <span>{snapshot.model.provider || "model"} / {snapshot.model.model || "not set"}</span>
@@ -1202,7 +1202,7 @@ export default function AgentHubPage() {
                     <span className="truncate text-sm">{session.title || "Untitled session"}</span>
                     {session.is_active && (
                       <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-success)]" />
                         live
                       </span>
                     )}
@@ -1247,7 +1247,7 @@ export default function AgentHubPage() {
                   >
                     <span className={cn(
                       "inline-block h-1.5 w-1.5 rounded-full",
-                      entitlement.status === "active" ? "bg-emerald-500" : "bg-border"
+                      entitlement.status === "active" ? "bg-[var(--color-success)]" : "bg-border"
                     )} />
                     <span className="text-muted-foreground">{name}</span>
                   </span>

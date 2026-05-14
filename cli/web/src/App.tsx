@@ -96,20 +96,20 @@ import AgentHubPage from "@/pages/AgentHubPage";
 import DesktopSetupPage from "@/pages/DesktopSetupPage";
 import ProjectPage from "@/pages/ProjectPage";
 const RealEstateAdminPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateAdminPage })),
+  import("@/pages/real-estate-hub/admin").then((m) => ({ default: m.RealEstateAdminPage })),
 );
 const RealEstateTemplatesPage = lazy(() => import("@/pages/RealEstateTemplatesPage"));
 const RealEstateLeadsPage = lazy(() =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage })),
 );
 const RealEstateMemoryPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateMemoryPage })),
+  import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage })),
 );
 const RealEstateSocialMediaPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateSocialMediaPage })),
+  import("@/pages/real-estate-hub/social").then((m) => ({ default: m.RealEstateSocialMediaPage })),
 );
 const RealEstateTasksPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateTasksPage })),
+  import("@/pages/real-estate-hub/tasks").then((m) => ({ default: m.RealEstateTasksPage })),
 );
 const RealEstateTodayPage = lazy(() =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateTodayPage })),
@@ -389,6 +389,7 @@ export default function App() {
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
+  const isConfigRoute = normalizedPath === "/config";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
   const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
   const [accessVersion, setAccessVersion] = useState(0);
@@ -535,6 +536,7 @@ export default function App() {
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
+              isConfigRoute && "lg:hidden",
             )}
           >
             <DesktopSidebar
@@ -549,10 +551,10 @@ export default function App() {
             <div
               className={cn(
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
-                "px-3 sm:px-6",
+                isConfigRoute ? "p-0" : "px-3 sm:px-6",
                 isChatRoute
                   ? "pb-3 pt-1 sm:pb-4 sm:pt-2 lg:pt-4"
-                  : "pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
+                  : !isConfigRoute && "pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
                 isDocsRoute && "min-h-0 flex-1",
               )}
             >
@@ -560,7 +562,7 @@ export default function App() {
               <div
                 className={cn(
                   "w-full min-w-0",
-                  !isChatRoute && "elevate-page-shell",
+                  !isChatRoute && !isConfigRoute && "elevate-page-shell",
                   isDocsRoute && "elevate-docs-shell",
                   (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
                 )}
@@ -1148,12 +1150,16 @@ function DesktopSidebar({
           onOpenMiniWindow={openMiniWindow}
         />
       )}
-      <div className="relative flex h-[50px] shrink-0 items-center px-3">
-        <div className="mx-auto flex h-9 w-[9.75rem] min-w-0 items-center">
+      <div
+        className="relative flex h-[52px] shrink-0 items-center pl-[5.25rem] pr-3 lg:pl-[5.25rem]"
+        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+      >
+        <div className="flex h-9 w-[9.75rem] min-w-0 items-center">
           <img
             src={sidebarLogoSrc}
             alt="Elevation"
             className="h-8 w-full object-contain"
+            draggable={false}
           />
         </div>
 
@@ -1161,6 +1167,7 @@ function DesktopSidebar({
           type="button"
           onClick={onNavigate}
           aria-label={t.app.closeNavigation}
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           className={cn(
             "absolute right-3 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 shrink-0 items-center justify-center lg:hidden",
             "rounded-lg text-muted-foreground hover:bg-accent hover:text-midground",
@@ -1747,8 +1754,8 @@ function SessionContextMenu({
         onContextMenu={(event) => event.preventDefault()}
         style={{ left, top }}
         className={cn(
-          "fixed z-[100] w-[16.5rem] rounded-2xl p-1.5 outline-none",
-          "bg-card/98 text-midground shadow-[0_18px_54px_color-mix(in_srgb,var(--midground-base)_22%,transparent),0_0_0_1px_color-mix(in_srgb,var(--midground-base)_14%,transparent)] backdrop-blur-xl",
+          "fixed z-[100] w-[16.5rem] rounded-lg p-1.5 outline-none",
+          "border border-border bg-card text-midground shadow-[0_8px_24px_rgba(0,0,0,0.18)]",
         )}
       >
       <SessionMenuButton

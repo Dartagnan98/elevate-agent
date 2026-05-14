@@ -40,7 +40,7 @@ function MiniStat({
   value: string | number;
 }) {
   return (
-    <div className="rounded-2xl border border-border bg-muted/20 px-3 py-2">
+    <div className="rounded-md border border-border bg-card px-3 py-2">
       <div className="flex items-center gap-2 text-muted-foreground">
         <Icon className="h-3.5 w-3.5" />
         <span className="text-[0.68rem] font-medium">
@@ -130,7 +130,7 @@ export default function ProjectPage() {
     <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
       <Toast toast={toast} />
 
-      <section className="overflow-hidden rounded-[1.6rem] border border-border bg-card/70 shadow-[0_24px_90px_rgba(0,0,0,0.16)]">
+      <section className="overflow-hidden rounded-md border border-border bg-card">
         <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="min-w-0 space-y-4">
             <div className="flex flex-wrap items-center gap-2">

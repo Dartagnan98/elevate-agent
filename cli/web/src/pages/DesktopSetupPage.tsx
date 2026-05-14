@@ -162,7 +162,7 @@ function DetailRow({
   tone?: ReadinessTone;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-background/35 px-3 py-2">
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2">
       <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <Icon className="h-3.5 w-3.5 shrink-0" />
         <span className="truncate">{label}</span>
@@ -206,11 +206,11 @@ function ReadinessCard({
   tone: ReadinessTone;
 }) {
   return (
-    <Card className="min-h-[17rem] bg-card/75">
+    <Card className="min-h-[17rem] bg-card">
       <CardHeader className="gap-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">
-            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-background/45 text-muted-foreground">
+            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground">
               <Icon className="h-4 w-4" />
             </span>
             <div className="min-w-0">
@@ -240,8 +240,8 @@ function RunwayStep({
 }) {
   const StatusIcon = tone === "success" ? CheckCircle2 : tone === "warning" ? AlertTriangle : CircleAlert;
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-border/60 bg-background/35 px-3 py-3">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-card/60">
+    <div className="flex items-start gap-3 rounded-md border border-border bg-card px-3 py-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border border-border bg-card">
         <Icon className="h-3.5 w-3.5 text-muted-foreground" />
       </div>
       <div className="min-w-0 flex-1">
@@ -267,7 +267,7 @@ function AgentLaneRow({ agent }: { agent: AgentHubAgent }) {
   const ready = Boolean(lane?.tokenConfigured && lane?.targetConfigured && !lane?.duplicateSharedBot);
   const warn = Boolean(lane?.duplicateSharedBot || lane?.usesSharedBot);
   return (
-    <div className="rounded-xl border border-border/60 bg-background/35 px-3 py-2">
+    <div className="rounded-md border border-border bg-card px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-foreground">{agent.name}</div>
@@ -410,7 +410,7 @@ function PackUnlockOnboarding({
   }
 
   return (
-    <section className="pack-unlock-shell overflow-hidden rounded-[1.5rem] border border-border bg-card/70">
+    <section className="pack-unlock-shell overflow-hidden rounded-md border border-border bg-card">
       <div className="grid gap-0 xl:grid-cols-[21rem_minmax(0,1fr)]">
         <div className="border-b border-border/60 p-4 xl:border-b-0 xl:border-r">
           <div className="mb-3 flex items-center justify-between gap-2">
@@ -430,10 +430,10 @@ function PackUnlockOnboarding({
                   key={pack.packId}
                   type="button"
                   className={cn(
-                    "pack-unlock-card group w-full rounded-2xl border px-3 py-3 text-left transition-colors",
+                    "pack-unlock-card group w-full rounded-md border px-3 py-3 text-left transition-colors",
                     selected
-                      ? "border-primary/50 bg-primary/10 text-foreground"
-                      : "border-border/60 bg-background/35 text-muted-foreground hover:bg-background/55 hover:text-foreground",
+                      ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+                      : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
                     !pack.unlocked && "opacity-60",
                   )}
                   style={{ animationDelay: `${index * 70}ms` }}
@@ -461,7 +461,7 @@ function PackUnlockOnboarding({
         </div>
 
         <div className="min-w-0 p-4">
-          <div className="pack-unlock-panel relative overflow-hidden rounded-[1.25rem] border border-border/60 bg-background/40 p-4">
+          <div className="relative overflow-hidden rounded-sm border border-border bg-card p-4">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
                 <Badge variant={selectedPack.unlocked ? "success" : "outline"}>{activeLabel}</Badge>
@@ -474,7 +474,7 @@ function PackUnlockOnboarding({
                       : "This pack stays hidden from production users until their license unlocks it."}
                 </p>
               </div>
-              <div className={cn("pack-unlock-check flex h-12 w-12 items-center justify-center rounded-full border", savedPulse && "is-saved")}>
+              <div className={cn("pack-unlock-check flex h-12 w-12 items-center justify-center rounded-sm border", savedPulse && "is-saved")}>
                 <Sparkles className="h-5 w-5 text-primary" />
               </div>
             </div>
@@ -485,10 +485,10 @@ function PackUnlockOnboarding({
                   key={name}
                   type="button"
                   className={cn(
-                    "inline-flex min-h-9 items-center gap-2 rounded-full border px-3 text-xs font-medium transition-colors",
+                    "inline-flex min-h-9 items-center gap-2 rounded-sm border px-3 text-xs font-medium transition-colors",
                     step === name
-                      ? "border-primary/50 bg-primary/10 text-foreground"
-                      : "border-border/60 bg-card/40 text-muted-foreground hover:text-foreground",
+                      ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+                      : "border-border bg-card text-muted-foreground hover:text-foreground",
                   )}
                   onClick={() => setStep(name)}
                   disabled={!selectedPack.unlocked}
@@ -501,18 +501,18 @@ function PackUnlockOnboarding({
 
             {step === "celebrate" ? (
               <div className="pack-step-enter mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-                <div className="rounded-2xl border border-border/60 bg-card/45 p-4">
+                <div className="rounded-md border border-border bg-card p-4">
                   <div className="text-sm font-semibold text-foreground">Before this pack can run</div>
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">
                     {selectedPack.items.slice(0, 6).map((item) => (
-                      <div key={item.key} className="rounded-xl border border-border/55 bg-background/35 px-3 py-2">
+                      <div key={item.key} className="rounded-md border border-border bg-card px-3 py-2">
                         <div className="truncate text-xs font-medium text-foreground">{item.label}</div>
                         <div className="mt-1 truncate text-xs text-muted-foreground">{item.status}</div>
                       </div>
                     ))}
                   </div>
                 </div>
-                <div className="flex flex-col justify-between rounded-2xl border border-border/60 bg-card/45 p-4">
+                <div className="flex flex-col justify-between rounded-md border border-border bg-card p-4">
                   <div>
                     <div className="text-sm font-semibold text-foreground">Next form</div>
                     <p className="mt-2 text-xs leading-5 text-muted-foreground">
@@ -535,7 +535,7 @@ function PackUnlockOnboarding({
               <div className="pack-step-enter mt-5 space-y-3">
                 <div className="grid gap-3 md:grid-cols-2">
                   {visibleItems.map((item) => (
-                    <label key={item.key} className="rounded-2xl border border-border/60 bg-card/45 p-3">
+                    <label key={item.key} className="rounded-md border border-border bg-card p-3">
                       <span className="text-xs font-medium text-muted-foreground">{item.label}</span>
                       <Input
                         className="mt-2"
@@ -568,13 +568,13 @@ function PackUnlockOnboarding({
 
             {step === "credentials" ? (
               <div className="pack-step-enter mt-5 space-y-3">
-                <div className="rounded-2xl border border-border/60 bg-card/45 p-3 text-xs leading-5 text-muted-foreground">
+                <div className="rounded-md border border-border bg-card p-3 text-xs leading-5 text-muted-foreground">
                   Values entered here are saved through the dashboard env endpoint into the local Elevate `.env`. Use API keys,
                   tokens, account IDs, or credential refs. Avoid raw passwords unless the local operator explicitly wants that.
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {credentialFields.map((field) => (
-                    <label key={field.key} className="rounded-2xl border border-border/60 bg-card/45 p-3">
+                    <label key={field.key} className="rounded-md border border-border bg-card p-3">
                       <span className="text-xs font-medium text-muted-foreground">{field.label}</span>
                       <Input
                         className="mt-2 font-mono-ui text-xs"
@@ -766,7 +766,7 @@ export default function DesktopSetupPage() {
         <LoginCard onAuthChange={handleAuthChange} />
       </section>
 
-      <section className="overflow-hidden rounded-[1.5rem] border border-border bg-card/70">
+      <section className="overflow-hidden rounded-md border border-border bg-card">
         <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_24rem]">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -918,7 +918,7 @@ export default function DesktopSetupPage() {
             value={`${setup?.completedRequiredCount ?? 0}/${setup?.requiredCount ?? 0}`}
             tone={setupReady ? "success" : setupWarning ? "warning" : "outline"}
           />
-          <div className="rounded-xl border border-border/60 bg-background/35 px-3 py-2">
+          <div className="rounded-md border border-border bg-card px-3 py-2">
             <div className="text-xs font-medium text-muted-foreground">Missing launch items</div>
             <div className="mt-2 flex flex-wrap gap-1.5">
               {setup?.missingRequiredKeys.length ? (
@@ -984,7 +984,7 @@ export default function DesktopSetupPage() {
           {requiredAgents.length ? (
             requiredAgents.map((agent) => <AgentLaneRow key={agent.id} agent={agent} />)
           ) : (
-            <div className="rounded-xl border border-border/60 bg-background/35 px-3 py-3 text-sm text-muted-foreground">
+            <div className="rounded-md border border-border bg-card px-3 py-3 text-sm text-muted-foreground">
               Agent Hub did not return the Executive Assistant/Admin agent definitions.
             </div>
           )}

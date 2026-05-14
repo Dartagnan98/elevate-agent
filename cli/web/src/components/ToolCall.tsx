@@ -36,9 +36,9 @@ export interface ToolEntry {
 }
 
 const STATUS_TONE: Record<ToolEntry["status"], string> = {
-  running: "border-primary/40 bg-primary/[0.04]",
-  done: "border-border bg-muted/20",
-  error: "border-destructive/50 bg-destructive/[0.04]",
+  running: "border-l-2 border-l-primary border-border bg-card",
+  done: "border-border bg-card",
+  error: "border-l-2 border-l-destructive border-border bg-card",
 };
 
 const BULLET_TONE: Record<ToolEntry["status"], string> = {
@@ -220,7 +220,7 @@ function colorizeDiff(diff: string): React.ReactNode {
 
 function diffLineClass(line: string): string {
   if (line.startsWith("+") && !line.startsWith("+++"))
-    return "text-emerald-500 dark:text-emerald-400";
+    return "text-[var(--color-success)]";
   if (line.startsWith("-") && !line.startsWith("---"))
     return "text-destructive";
   if (line.startsWith("@@")) return "text-primary";

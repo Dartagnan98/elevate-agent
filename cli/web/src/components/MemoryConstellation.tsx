@@ -571,7 +571,7 @@ export function MemoryConstellation({
     return (
       <div
         className={cn(
-          "flex min-h-[30rem] items-center justify-center rounded-[1.25rem] border border-dashed border-border bg-background/30 px-6 text-center text-sm text-muted-foreground",
+          "flex min-h-[30rem] items-center justify-center rounded-lg border border-dashed border-border bg-background/30 px-6 text-center text-sm text-muted-foreground",
           className,
         )}
       >
@@ -585,8 +585,7 @@ export function MemoryConstellation({
       style={graphStyle}
       onClick={() => setSelectedNodeId(null)}
       className={cn(
-        "memory-constellation relative isolate min-h-[34rem] overflow-hidden rounded-[1.25rem] bg-[var(--memory-bg)] text-foreground",
-        "shadow-[inset_0_0_0_1px_var(--page-border),0_30px_90px_rgba(0,0,0,0.22)]",
+        "memory-constellation relative isolate min-h-[34rem] overflow-hidden rounded-md border border-[var(--page-border)] bg-[var(--memory-bg)] text-foreground",
         compact && "min-h-[18rem]",
         className,
       )}
@@ -776,7 +775,7 @@ export function MemoryConstellation({
       </svg>
 
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-4 p-4">
-        <div className="rounded-2xl border border-border/60 bg-background/72 px-3 py-2 shadow-lg shadow-background/20 backdrop-blur">
+        <div className="rounded-lg border border-border/60 bg-background/95 px-3 py-2 shadow-sm">
           <div className="text-xs font-semibold text-foreground">Knowledge graph</div>
           <div className="mt-1 text-[0.72rem] text-muted-foreground">
             {nodes.length} nodes / {displayedLinks} {activeNode ? "related" : "links"}
@@ -787,7 +786,7 @@ export function MemoryConstellation({
             <Badge
               key={group.kind}
               variant="outline"
-              className="border-border/60 bg-background/58 text-[0.68rem] text-muted-foreground shadow-sm backdrop-blur"
+              className="border-border/60 bg-background/95 text-[0.68rem] text-muted-foreground shadow-sm"
             >
               <span
                 aria-hidden="true"
@@ -802,10 +801,10 @@ export function MemoryConstellation({
 
       {focusNode && (
         <div className="pointer-events-none absolute inset-x-4 bottom-4 flex flex-col gap-2 sm:max-w-[28rem]">
-          <div className="w-fit rounded-full border border-border/60 bg-background/72 px-3 py-1 text-[0.68rem] font-medium text-muted-foreground shadow-lg shadow-background/20 backdrop-blur">
+          <div className="w-fit rounded border border-border/60 bg-background/95 px-2 py-0.5 font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground shadow-sm">
             {activeNode && selectedNodeId === activeNode.node.id ? "Pinned" : activeNode ? "Inspecting" : "Strongest signal"}
           </div>
-          <div className="rounded-2xl border border-border/70 bg-background/78 p-3 shadow-lg shadow-background/25 backdrop-blur">
+          <div className="rounded-lg border border-border/70 bg-background/95 p-3 shadow-sm">
             <div className="flex items-center gap-2">
               <span
                 aria-hidden="true"

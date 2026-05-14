@@ -246,7 +246,7 @@ export function IdeaCard({
             <span
               key={chip.label}
               className={cn(
-                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.65rem] font-medium",
+                "inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 text-[0.65rem] font-medium",
                 chip.tone,
               )}
               title={chip.text}
@@ -461,7 +461,7 @@ export function YouTubeTabView({
       )}
 
       {videos.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-10 text-sm text-muted-foreground text-center">
+        <div className="rounded-md border border-dashed border-border bg-card px-4 py-10 text-sm text-muted-foreground text-center">
           No YouTube videos pulled yet. Click "refresh from platforms" above to pull the channel.
         </div>
       ) : (
@@ -492,7 +492,7 @@ function YouTubeStatTile({
   hint?: string;
 }) {
   return (
-    <div className="rounded-xl border border-border/60 bg-background/40 px-3 py-3">
+    <div className="rounded-md border border-border bg-card px-3 py-3">
       <div className="font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
@@ -520,7 +520,7 @@ function RankPanel({
   tone?: "muted";
 }) {
   return (
-    <div className="rounded-xl bg-background/30 p-3 space-y-2">
+    <div className="rounded-md bg-card p-3 space-y-2">
       <div
         className={cn(
           "font-mono-ui text-[0.7rem] uppercase tracking-wider",
@@ -530,7 +530,7 @@ function RankPanel({
         {title}
       </div>
       {rows.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/40 bg-background/20 px-2 py-3 text-center text-[0.75rem] text-muted-foreground">
+        <div className="rounded-sm border border-dashed border-border bg-card px-2 py-3 text-center text-[0.75rem] text-muted-foreground">
           No data yet
         </div>
       ) : (
@@ -541,7 +541,7 @@ function RankPanel({
                 type="button"
                 onClick={() => onSelect(row)}
                 aria-label={`Rank ${idx + 1}: ${row.caption || "untitled"}, ${formatValue(row)}`}
-                className="group flex min-h-[44px] w-full items-center gap-2 rounded-lg border border-border/40 bg-background/30 px-2.5 py-2 text-left transition hover:border-primary/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                className="group flex min-h-[44px] w-full items-center gap-2 rounded-sm border border-border bg-card px-2.5 py-2 text-left transition hover:border-ring focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
               >
                 <span className="font-mono-ui w-4 text-center text-[0.7rem] text-muted-foreground">
                   {idx + 1}
@@ -808,9 +808,9 @@ function YouTubeVideoCard({
     <button
       type="button"
       onClick={onClick}
-      className="group flex flex-col text-left rounded-2xl border border-border/40 bg-background/30 overflow-hidden transition hover:border-border"
+      className="group flex flex-col text-left rounded-md border border-border bg-card overflow-hidden transition hover:border-ring"
     >
-      <div className="relative aspect-video w-full bg-background/40">
+      <div className="relative aspect-video w-full bg-card">
         {thumb ? (
           <img
             src={thumb}
@@ -826,7 +826,7 @@ function YouTubeVideoCard({
             <Video className="h-8 w-8" />
           </div>
         )}
-        <div className="absolute top-1.5 left-1.5 flex items-center gap-1 rounded-full bg-card border border-border/60 px-2 py-0.5">
+        <div className="absolute top-1.5 left-1.5 flex items-center gap-1 rounded-sm bg-card border border-border px-2 py-0.5">
           <span className={cn("h-1.5 w-1.5 rounded-full", platformDot("youtube"))} />
           <span className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-foreground">
             {isShort ? "short" : "video"}
@@ -875,7 +875,7 @@ function YouTubeVideoCard({
 
 function YouTubeMetricCell({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-border/40 bg-background/40 px-2 py-1">
+    <div className="rounded-md border border-border/40 bg-card px-2 py-1">
       <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
@@ -952,10 +952,10 @@ const PlatformTab = forwardRef<HTMLButtonElement, {
       onClick={onClick}
       onKeyDown={onKeyDown}
       className={cn(
-        "inline-flex min-h-[44px] items-center gap-1.5 rounded-full border px-3 py-2 font-mono-ui text-[0.75rem] uppercase tracking-wider transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary",
+        "inline-flex min-h-[44px] items-center gap-1.5 rounded-sm border px-3 py-2 font-mono-ui text-[0.75rem] uppercase tracking-wider transition focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring",
         active
-          ? "border-primary bg-primary/10 text-primary"
-          : "border-border bg-background text-muted-foreground hover:border-foreground hover:text-foreground",
+          ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+          : "border-border bg-card text-muted-foreground hover:border-ring hover:text-foreground",
       )}
     >
       {label !== "all" && (
@@ -1084,21 +1084,21 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-border bg-card shadow-2xl outline-none"
+        className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-md border border-border bg-card outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <button
           type="button"
           onClick={onClose}
           aria-label="Close post detail"
-          className="absolute right-3 top-3 z-10 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full bg-background px-3 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+          className="absolute right-3 top-3 z-10 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-sm bg-background px-3 font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
         >
           close
         </button>
         <div className="grid gap-0 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
           <div
             className={cn(
-              "relative bg-background/40 md:aspect-auto md:min-h-[480px]",
+              "relative bg-card md:aspect-auto md:min-h-[480px]",
               isFbLandscape ? "aspect-[4/5]" : "aspect-[9/16]",
             )}
           >
@@ -1119,7 +1119,7 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
                 <Activity className="h-8 w-8" />
               </div>
             )}
-            <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-card border border-border/60 px-2.5 py-1">
+            <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-sm bg-card border border-border px-2.5 py-1">
               <span
                 aria-hidden="true"
                 className={cn("h-2 w-2 rounded-full", platformDot(row.platform))}
@@ -1150,7 +1150,7 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label="Open original post in new tab"
-                    className="font-mono-ui inline-flex min-h-[44px] items-center px-3 text-[0.7rem] uppercase tracking-wider text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                    className="font-mono-ui inline-flex min-h-[44px] items-center px-3 text-[0.7rem] uppercase tracking-wider text-primary hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
                   >
                     open ↗
                   </a>
@@ -1159,7 +1159,7 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
                     onClick={handleCopyLink}
                     aria-label="Copy post link to clipboard"
                     aria-live="polite"
-                    className="font-mono-ui inline-flex min-h-[44px] items-center rounded-md border border-border bg-background px-3 text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                    className="font-mono-ui inline-flex min-h-[44px] items-center rounded-md border border-border bg-background px-3 text-[0.7rem] uppercase tracking-wider text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring"
                   >
                     {linkCopied ? "copied" : "copy link"}
                   </button>
@@ -1206,7 +1206,7 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   {metricEntries.map(([k, v]) => (
-                    <div key={k} className="rounded-lg border border-border/40 bg-background/30 px-3 py-2">
+                    <div key={k} className="rounded-sm border border-border bg-card px-3 py-2">
                       <div className="font-mono-ui text-[0.7rem] uppercase tracking-wider text-muted-foreground">
                         {prettifyMetricKey(k)}
                       </div>
@@ -1218,7 +1218,7 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
                 </div>
               </div>
             ) : (
-              <div className="rounded-lg border border-dashed border-border/40 bg-background/20 px-3 py-4 text-center text-xs text-muted-foreground">
+              <div className="rounded-sm border border-dashed border-border bg-card px-3 py-4 text-center text-xs text-muted-foreground">
                 No metrics returned for this post yet.
               </div>
             )}
@@ -1310,9 +1310,9 @@ export function RealVideoCard({
     <div className="space-y-2">
       <div
         className={cn(
-          "relative overflow-hidden rounded-xl bg-background/40 border transition",
+          "relative overflow-hidden rounded-md bg-card border transition",
           aspectClass,
-          highlight ? "border-primary" : "border-border/40 group-hover:border-border",
+          highlight ? "border-l-2 border-l-primary border-border" : "border-border group-hover:border-ring",
         )}
       >
         {thumb ? (
@@ -1373,7 +1373,7 @@ export function RealVideoCard({
       <button
         type="button"
         onClick={handleClick}
-        className="group block w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary rounded-xl"
+        className="group block w-full text-left focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-ring rounded-md"
       >
         {Inner}
       </button>
@@ -1384,7 +1384,7 @@ export function RealVideoCard({
       href={row.permalink}
       target="_blank"
       rel="noopener noreferrer"
-      className="group block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary rounded-xl"
+      className="group block focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-ring rounded-md"
     >
       {Inner}
     </a>

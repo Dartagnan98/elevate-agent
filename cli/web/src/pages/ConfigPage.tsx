@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import {
+  ChevronLeft,
   Code,
   Download,
   FormInput,
+  Menu,
   RotateCcw,
   RefreshCw,
   Save,
@@ -37,6 +39,7 @@ import {
   CheckCircle2,
   CircleSlash,
   Loader2,
+  Puzzle,
 } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import {
@@ -55,10 +58,10 @@ import { CRM_PRESETS, applyPreset, findPresetForForm, type CrmPreset } from "@/l
 import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { AutoField } from "@/components/AutoField";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 
@@ -254,6 +257,17 @@ function ComposioPanel() {
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh, status?.valid]);
 
+  useEffect(() => {
+    if (!customAuthState) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !customAuthState.submitting) {
+        setCustomAuthState(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [customAuthState]);
+
   const saveKey = async () => {
     if (!keyInput.trim()) return;
     setSavingKey(true);
@@ -448,231 +462,223 @@ function ComposioPanel() {
   const visibleToolkits = filteredToolkits.slice(0, visibleCount);
 
   return (
-    <Card id="composio" className="scroll-mt-24">
-      <CardHeader>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Plug className="h-4 w-4 text-primary" />
-              Composio
-            </CardTitle>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              One auth hub for both messaging (Gmail, Twilio, WhatsApp) and social (Instagram, X, LinkedIn). Add your Composio API key, then connect each app. Apps shown below are pulled live from your Composio account.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {statusBadge}
-            <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
-              <RefreshCw className="h-3.5 w-3.5" />
-              Refresh
-            </Button>
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="rounded-2xl border border-border/65 bg-background/35 p-3">
-          <label className="mb-2 flex items-center gap-2 text-xs font-medium text-foreground">
-            <KeyRound className="h-3.5 w-3.5" />
-            API key
-          </label>
-          {status?.hasKey ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <code className="flex-1 truncate rounded-md bg-background/60 px-2 py-1.5 text-xs">
-                {status.valid ? "key configured" : "key configured (invalid)"}
-              </code>
-              <Button variant="outline" size="sm" onClick={() => void clearKey()} disabled={savingKey}>
-                <Trash2 className="h-3.5 w-3.5" />
-                Remove
-              </Button>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <Input
-                type="password"
-                placeholder="ck_..."
-                value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                className="min-w-[16rem] flex-1"
-              />
-              <Button size="sm" onClick={() => void saveKey()} disabled={savingKey || !keyInput.trim()}>
-                {savingKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                Save
-              </Button>
-            </div>
-          )}
-          {keyError && (
-            <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-500">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>{keyError}</span>
-            </div>
-          )}
-          {status && status.hasKey && !status.valid && !keyError && (
-            <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-500">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>{status.error ?? "Composio rejected the key. Rotate it at composio.dev and re-save."}</span>
-            </div>
-          )}
-          <p className="mt-2 text-xs leading-5 text-muted-foreground">
-            Get a key at{" "}
-            <a
-              href="https://app.composio.dev/developers"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline-offset-4 hover:underline"
-            >
-              composio.dev/developers
-              <ExternalLink className="ml-1 inline h-3 w-3" />
-            </a>
-            . Stored in your local .env, never sent anywhere except Composio.
+    <section id="composio" className="scroll-mt-24 space-y-6">
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-foreground">Composio</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            One auth hub for messaging (Gmail, Twilio, WhatsApp) and social (Instagram, X, LinkedIn). Add your API key, then connect each app.
           </p>
         </div>
+        <div className="flex items-center gap-2">
+          {statusBadge}
+          <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh
+          </Button>
+        </div>
+      </header>
 
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Connected accounts ({connections.length})
-            </h4>
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <KeyRound className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+          API key
+        </label>
+        {status?.hasKey ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="flex-1 truncate rounded-md border border-border bg-transparent px-2 py-1.5 text-xs">
+              {status.valid ? "key configured" : "key configured (invalid)"}
+            </code>
+            <Button variant="outline" size="sm" onClick={() => void clearKey()} disabled={savingKey}>
+              <Trash2 className="h-3.5 w-3.5" />
+              Remove
+            </Button>
           </div>
-          {!status?.valid ? (
-            <div className="rounded-2xl border border-dashed border-border/65 bg-background/25 px-4 py-6 text-center text-xs text-muted-foreground">
-              <CircleSlash className="mx-auto mb-2 h-4 w-4" />
-              Add a working API key to see your connected accounts.
-            </div>
-          ) : connections.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border/65 bg-background/25 px-4 py-6 text-center text-xs text-muted-foreground">
-              No accounts connected yet. Pick one below to start.
-            </div>
-          ) : (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {connections.map((conn, idx) => (
-                <div
-                  key={String(conn.id ?? idx)}
-                  className="flex items-center gap-3 rounded-2xl border border-border/65 bg-background/35 p-3"
-                >
-                  {(conn.toolkit?.meta?.logo ?? conn.toolkit?.logo) ? (
-                    <img
-                      src={conn.toolkit?.meta?.logo ?? conn.toolkit?.logo}
-                      alt=""
-                      className="h-8 w-8 rounded-md bg-background/60 object-contain p-1"
-                    />
-                  ) : (
-                    <div className="flex h-8 w-8 items-center justify-center rounded-md bg-background/60">
-                      <Plug className="h-4 w-4 text-muted-foreground" />
-                    </div>
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium text-foreground">
-                        {conn.toolkit?.name ?? conn.toolkit?.slug ?? "Unknown app"}
-                      </span>
-                      {conn.status === "ACTIVE" && (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                      )}
-                    </div>
-                    {conn.user_id && (
-                      <div className="truncate text-xs text-muted-foreground">{conn.user_id}</div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="password"
+              placeholder="ck_..."
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              className="min-w-[16rem] flex-1"
+            />
+            <Button size="sm" onClick={() => void saveKey()} disabled={savingKey || !keyInput.trim()}>
+              {savingKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Save
+            </Button>
+          </div>
+        )}
+        {keyError && (
+          <div className="flex items-start gap-1.5 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{keyError}</span>
+          </div>
+        )}
+        {status && status.hasKey && !status.valid && !keyError && (
+          <div className="flex items-start gap-1.5 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{status.error ?? "Composio rejected the key. Rotate it at composio.dev and re-save."}</span>
+          </div>
+        )}
+        <p className="text-xs leading-5 text-muted-foreground">
+          Get a key at{" "}
+          <a
+            href="https://app.composio.dev/developers"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            composio.dev/developers
+            <ExternalLink className="ml-1 inline h-3 w-3" aria-hidden="true" />
+          </a>
+          . Stored in your local .env, never sent anywhere except Composio.
+        </p>
+      </div>
+
+      <div>
+        <h3 className="mb-3 text-sm font-medium text-foreground">
+          Connected accounts <span className="text-muted-foreground">({connections.length})</span>
+        </h3>
+        {!status?.valid ? (
+          <div className="flex items-start gap-2 text-sm text-muted-foreground">
+            <CircleSlash className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            Add a working API key to see your connected accounts.
+          </div>
+        ) : connections.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No accounts connected yet. Pick one below to start.</p>
+        ) : (
+          <ul className="divide-y divide-border/50 border-y border-border/50">
+            {connections.map((conn, idx) => (
+              <li
+                key={String(conn.id ?? idx)}
+                className="flex items-center gap-3 py-2.5"
+              >
+                {(conn.toolkit?.meta?.logo ?? conn.toolkit?.logo) ? (
+                  <img
+                    src={conn.toolkit?.meta?.logo ?? conn.toolkit?.logo}
+                    alt=""
+                    className="h-7 w-7 rounded-md object-contain"
+                  />
+                ) : (
+                  <div className="flex h-7 w-7 items-center justify-center">
+                    <Plug className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-medium text-foreground">
+                      {conn.toolkit?.name ?? conn.toolkit?.slug ?? "Unknown app"}
+                    </span>
+                    {conn.status === "ACTIVE" && (
+                      <CheckCircle2 className="h-3.5 w-3.5 text-success" aria-label="Active" />
                     )}
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void disconnect(String(conn.id ?? ""))}
-                    disabled={connectingSlug === String(conn.id ?? "")}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+                  {conn.user_id && (
+                    <div className="truncate text-xs text-muted-foreground">{conn.user_id}</div>
+                  )}
                 </div>
-              ))}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Disconnect ${conn.toolkit?.name ?? "account"}`}
+                  onClick={() => void disconnect(String(conn.id ?? ""))}
+                  disabled={connectingSlug === String(conn.id ?? "")}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {status?.valid && (
+        <div>
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <h3 className="text-sm font-medium text-foreground">
+              Available apps <span className="text-muted-foreground">({filteredToolkits.length}
+              {filteredToolkits.length !== toolkits.length ? ` of ${toolkits.length}` : ""})</span>
+            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                <Input
+                  type="search"
+                  placeholder="Search apps..."
+                  aria-label="Search Composio apps"
+                  value={toolkitQuery}
+                  onChange={(e) => setToolkitQuery(e.target.value)}
+                  className="h-8 w-44 pl-7 text-xs"
+                />
+              </div>
+              {allCategories.length > 0 && (
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  aria-label="Filter by category"
+                  className="h-8 rounded-md border border-border bg-transparent px-2 text-xs text-foreground"
+                >
+                  <option value="all">All categories</option>
+                  {allCategories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
+          {filteredToolkits.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {toolkits.length === 0 ? "No toolkits returned by Composio." : "No apps match that filter."}
+            </p>
+          ) : (
+            <div className="grid gap-1.5 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+              {visibleToolkits.map((tk) => {
+                const slug = String(tk.slug ?? "");
+                const isConnected = connectedSlugs.has(slug);
+                const logo = toolkitLogo(tk);
+                const desc = toolkitDescription(tk);
+                return (
+                  <button
+                    key={slug}
+                    type="button"
+                    onClick={() => void connect(slug)}
+                    disabled={connectingSlug === slug}
+                    aria-label={isConnected ? `Add another ${tk.name ?? slug} connection` : `Connect ${tk.name ?? slug}`}
+                    title={desc ? `${tk.name ?? slug} — ${desc}` : tk.name ?? slug}
+                    className="group flex min-h-[44px] flex-col items-center gap-1.5 rounded-md border border-border bg-transparent p-3 text-center transition-colors hover:border-ring hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                  >
+                    {logo ? (
+                      <img
+                        src={logo}
+                        alt=""
+                        className="h-9 w-9 rounded-md object-contain"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="flex h-9 w-9 items-center justify-center rounded-md">
+                        <Plug className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                      </div>
+                    )}
+                    <span className="w-full truncate text-xs font-medium text-foreground">
+                      {tk.name ?? slug}
+                    </span>
+                    <span className="text-[0.68rem] text-muted-foreground group-hover:text-foreground">
+                      {connectingSlug === slug ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : isConnected ? (
+                        "Add another"
+                      ) : (
+                        "Connect"
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
-        </div>
-
-        {status?.valid && (
-          <div>
-            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Available apps ({filteredToolkits.length}
-                {filteredToolkits.length !== toolkits.length ? ` of ${toolkits.length}` : ""})
-              </h4>
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    type="search"
-                    placeholder="Search apps..."
-                    value={toolkitQuery}
-                    onChange={(e) => setToolkitQuery(e.target.value)}
-                    className="h-8 w-44 pl-7 text-xs"
-                  />
-                </div>
-                {allCategories.length > 0 && (
-                  <select
-                    value={categoryFilter}
-                    onChange={(e) => setCategoryFilter(e.target.value)}
-                    className="h-8 rounded-md border border-border/65 bg-background/60 px-2 text-xs text-foreground"
-                  >
-                    <option value="all">All categories</option>
-                    {allCategories.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
-            {filteredToolkits.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-border/65 bg-background/25 px-4 py-6 text-center text-xs text-muted-foreground">
-                {toolkits.length === 0 ? "No toolkits returned by Composio." : "No apps match that filter."}
-              </div>
-            ) : (
-              <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
-                {visibleToolkits.map((tk) => {
-                  const slug = String(tk.slug ?? "");
-                  const isConnected = connectedSlugs.has(slug);
-                  const logo = toolkitLogo(tk);
-                  const desc = toolkitDescription(tk);
-                  return (
-                    <div
-                      key={slug}
-                      className="group flex flex-col items-center gap-2 rounded-2xl border border-border/65 bg-background/35 p-3 text-center transition-colors hover:border-primary/60 hover:bg-background/55"
-                      title={desc ? `${tk.name ?? slug} — ${desc}` : tk.name ?? slug}
-                    >
-                      {logo ? (
-                        <img
-                          src={logo}
-                          alt=""
-                          className="h-10 w-10 rounded-md bg-background/60 object-contain p-1"
-                          loading="lazy"
-                        />
-                      ) : (
-                        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-background/60">
-                          <Plug className="h-4 w-4 text-muted-foreground" />
-                        </div>
-                      )}
-                      <div className="w-full truncate text-xs font-medium text-foreground">
-                        {tk.name ?? slug}
-                      </div>
-                      <Button
-                        variant={isConnected ? "outline" : "default"}
-                        size="sm"
-                        className="h-7 w-full px-2 text-xs"
-                        onClick={() => void connect(slug)}
-                        disabled={connectingSlug === slug}
-                      >
-                        {connectingSlug === slug ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : isConnected ? (
-                          "Add another"
-                        ) : (
-                          "Connect"
-                        )}
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
             {visibleCount < filteredToolkits.length && (
               <div className="mt-3 flex items-center justify-center">
                 <Button
@@ -691,30 +697,33 @@ function ComposioPanel() {
             )}
           </div>
         )}
-      </CardContent>
       {customAuthState && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 p-4"
           onClick={() => !customAuthState.submitting && setCustomAuthState(null)}
         >
           <div
-            className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="composio-auth-title"
+            className="relative w-full max-w-lg overflow-hidden rounded-lg border border-border bg-card"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="border-b border-border px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-base font-semibold">{customAuthState.name}</div>
+                  <div id="composio-auth-title" className="text-base font-semibold">{customAuthState.name}</div>
                   <div className="text-xs text-muted-foreground">
                     This connection requires custom OAuth credentials.
                   </div>
                 </div>
                 <button
                   type="button"
+                  aria-label="Close dialog"
                   onClick={() => !customAuthState.submitting && setCustomAuthState(null)}
-                  className="rounded-full bg-background/60 px-2 py-1 font-mono-ui text-[0.65rem] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                  className="-mr-2 flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
                 >
-                  close
+                  <X className="h-4 w-4" />
                 </button>
               </div>
               {customAuthState.authGuideUrl && (
@@ -738,7 +747,7 @@ function ComposioPanel() {
                       {field.displayName || field.name}
                       {!isOptional && <span className="text-destructive">*</span>}
                       {isOptional && (
-                        <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">optional</span>
+                        <span className="text-xs font-normal text-muted-foreground">(optional)</span>
                       )}
                     </label>
                     {field.description && (
@@ -755,7 +764,7 @@ function ComposioPanel() {
                         })
                       }
                       placeholder={field.displayName || field.name}
-                      className="w-full rounded-lg border border-border bg-background/40 px-3 py-2 text-sm outline-none focus:border-primary/60"
+                      className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:border-ring"
                       autoComplete="off"
                       spellCheck={false}
                     />
@@ -763,7 +772,7 @@ function ComposioPanel() {
                 );
               })}
               {customAuthState.error && (
-                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <div className="rounded-md border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-destructive">
                   {customAuthState.error}
                 </div>
               )}
@@ -780,7 +789,7 @@ function ComposioPanel() {
           </div>
         </div>
       )}
-    </Card>
+    </section>
   );
 }
 
@@ -902,175 +911,180 @@ function SourceConnectorSettingsPanel() {
   const ready = connectors.filter((connector) => connector.state === "connected" || connector.state === "import_only").length;
 
   return (
-    <Card id="connectors" className="scroll-mt-24">
-      <CardHeader>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Network className="h-4 w-4 text-primary" />
-              Source connectors
-            </CardTitle>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Setup lives here. Apple Messages can build a real local message index. Social apps use Composio as the account hub. Other sources create an agent setup task until a webhook, poller, import command, or bridge exists.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{ready}/{connectors.length || 12} ready</Badge>
-            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-              <RefreshCw className="h-3.5 w-3.5" />
-              Refresh
-            </Button>
-          </div>
+    <section id="connectors" className="scroll-mt-24 space-y-5">
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <Network className="h-4 w-4 text-primary" aria-hidden="true" />
+            Source connectors
+          </h2>
+          <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
+            Setup lives here. Apple Messages can build a real local message index. Social apps use Composio as the account hub. Other sources create an agent setup task until a webhook, poller, import command, or bridge exists.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="rounded-2xl border border-border/65 bg-background/35 p-3 text-xs leading-5 text-muted-foreground">
-          <div className="font-medium text-foreground">Source root</div>
-          <code className="mt-1 block break-all bg-transparent p-0">{data?.sourceRoot ?? "Loading source root..."}</code>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">{ready}/{connectors.length || 12} ready</Badge>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void load()}
+            disabled={loading}
+            aria-label="Refresh source connectors"
+          >
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+            Refresh
+          </Button>
         </div>
-        <div className="grid gap-2 md:grid-cols-2">
-          {connectors.map((connector) => (
-            <div key={connector.id} className="rounded-2xl border border-border/65 bg-background/35 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="truncate text-sm font-semibold text-foreground">{connector.label}</span>
-                    <Badge variant={connectorVariant(connector.state)}>{connector.state.replace(/_/g, " ")}</Badge>
+      </header>
+
+      <div className="text-sm leading-6 text-muted-foreground">
+        <div className="font-medium text-foreground">Source root</div>
+        <code className="mt-1 block break-all bg-transparent p-0 font-mono text-xs">
+          {data?.sourceRoot ?? "Loading source root..."}
+        </code>
+      </div>
+
+      <ul className="divide-y divide-border/50 border-y border-border/50">
+        {connectors.map((connector) => (
+          <li key={connector.id} className="py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="truncate text-sm font-semibold text-foreground">{connector.label}</span>
+                  <Badge variant={connectorVariant(connector.state)}>{connector.state.replace(/_/g, " ")}</Badge>
+                </div>
+                <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                  {connectorSetupCopy(connector)}
+                </p>
+              </div>
+              <Badge variant="outline">{connectorRecordTotal(connector)} records</Badge>
+            </div>
+            {connector.nextOperatorStep && (
+              <div className="mt-3 text-sm leading-6 text-muted-foreground">
+                {connector.nextOperatorStep}
+              </div>
+            )}
+            {connector.initializeBehavior === "composio_social_setup" && (
+              <div className="mt-3 text-sm">
+                {!composioReady ? (
+                  <div className="text-muted-foreground">
+                    Add your Composio API key in the Composio panel to connect social accounts.
                   </div>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                    {connectorSetupCopy(connector)}
-                  </p>
-                </div>
-                <Badge variant="outline">{connectorRecordTotal(connector)} records</Badge>
-              </div>
-              {connector.nextOperatorStep && (
-                <div className="mt-3 rounded-xl bg-background/45 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
-                  {connector.nextOperatorStep}
-                </div>
-              )}
-              {connector.initializeBehavior === "composio_social_setup" && (
-                <div className="mt-3 rounded-xl border border-border/45 bg-background/45 p-2.5 text-xs">
-                  {!composioReady ? (
-                    <div className="text-muted-foreground">
-                      Add your Composio API key in the Composio panel to connect social accounts.
+                ) : composioAccounts.length === 0 ? (
+                  <div className="text-muted-foreground">
+                    No social accounts connected yet. Add one from the Composio panel below.
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-1.5 text-xs text-muted-foreground">
+                      Social accounts ({composioAccounts.length})
                     </div>
-                  ) : composioAccounts.length === 0 ? (
-                    <div className="text-muted-foreground">
-                      No social accounts connected yet. Add one from the Composio panel below.
-                    </div>
-                  ) : (
-                    <>
-                      <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        Social accounts ({composioAccounts.length})
+                    <ul className="flex flex-wrap gap-1.5">
+                      {composioAccounts.map((acc, idx) => {
+                        const logo = acc.toolkit?.meta?.logo ?? acc.toolkit?.logo;
+                        const name = acc.toolkit?.name ?? acc.toolkit?.slug ?? "Unknown";
+                        return (
+                          <li
+                            key={String(acc.id ?? idx)}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-2 py-0.5"
+                            title={acc.user_id ? `${name} • ${acc.user_id}` : name}
+                          >
+                            {logo ? (
+                              <img src={logo} alt="" className="h-3.5 w-3.5 rounded-sm object-contain" />
+                            ) : (
+                              <Plug className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                            )}
+                            <span className="text-xs text-foreground">{name}</span>
+                            {acc.status === "ACTIVE" && (
+                              <CheckCircle2 className="h-3 w-3 text-success" aria-hidden="true" />
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {hasFacebookAccount && (
+                      <div className="mt-3 border-t border-border/40 pt-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-medium text-foreground">
+                            Facebook pages on /leads
+                          </div>
+                          <button
+                            type="button"
+                            className="text-xs text-primary hover:underline"
+                            onClick={() => {
+                              setFbPickerOpen((v) => !v);
+                              if (!fbPickerOpen) void loadFbPages();
+                            }}
+                            aria-expanded={fbPickerOpen}
+                          >
+                            {fbPickerOpen ? "Done" : "Edit"}
+                          </button>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {fbPickerLoading
+                            ? "Loading pages..."
+                            : fbPages.length === 0
+                              ? "No pages found on this Facebook account."
+                              : `${fbSelectedCount} of ${fbPages.length} pages will sync to the leads board. The Composio MCP stays connected to all of them.`}
+                          {fbPickerSaving && <span className="ml-1 italic">Saving...</span>}
+                        </div>
+                        {fbPickerOpen && fbPages.length > 0 && (
+                          <ul className="mt-2 grid gap-1 sm:grid-cols-2">
+                            {fbPages.map((p) => (
+                              <li key={p.id}>
+                                <label className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-xs text-foreground hover:bg-foreground/[0.04]">
+                                  <input
+                                    type="checkbox"
+                                    checked={p.selected}
+                                    onChange={() => void toggleFbPage(p.id)}
+                                    className="h-3.5 w-3.5"
+                                  />
+                                  <span className="truncate">{p.name}</span>
+                                </label>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
-                      <ul className="flex flex-wrap gap-1.5">
-                        {composioAccounts.map((acc, idx) => {
-                          const logo = acc.toolkit?.meta?.logo ?? acc.toolkit?.logo;
-                          const name = acc.toolkit?.name ?? acc.toolkit?.slug ?? "Unknown";
-                          return (
-                            <li
-                              key={String(acc.id ?? idx)}
-                              className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background/50 px-2 py-0.5"
-                              title={acc.user_id ? `${name} • ${acc.user_id}` : name}
-                            >
-                              {logo ? (
-                                <img src={logo} alt="" className="h-3.5 w-3.5 rounded-sm object-contain" />
-                              ) : (
-                                <Plug className="h-3 w-3 text-muted-foreground" />
-                              )}
-                              <span className="text-[11px] text-foreground">{name}</span>
-                              {acc.status === "ACTIVE" && (
-                                <CheckCircle2 className="h-3 w-3 text-emerald-500" />
-                              )}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                      {hasFacebookAccount && (
-                        <div className="mt-3 rounded-xl border border-border/40 bg-background/60 p-2.5">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                              Facebook pages on /leads
-                            </div>
-                            <button
-                              type="button"
-                              className="text-[11px] text-primary hover:underline"
-                              onClick={() => {
-                                setFbPickerOpen((v) => !v);
-                                if (!fbPickerOpen) void loadFbPages();
-                              }}
-                            >
-                              {fbPickerOpen ? "Done" : "Edit"}
-                            </button>
-                          </div>
-                          <div className="mt-1 text-[11px] text-muted-foreground">
-                            {fbPickerLoading
-                              ? "Loading pages..."
-                              : fbPages.length === 0
-                                ? "No pages found on this Facebook account."
-                                : `${fbSelectedCount} of ${fbPages.length} pages will sync to the leads board. The Composio MCP stays connected to all of them.`}
-                            {fbPickerSaving && <span className="ml-1 italic">Saving...</span>}
-                          </div>
-                          {fbPickerOpen && fbPages.length > 0 && (
-                            <ul className="mt-2 grid gap-1 sm:grid-cols-2">
-                              {fbPages.map((p) => (
-                                <li key={p.id}>
-                                  <label className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12px] text-foreground hover:bg-background/80">
-                                    <input
-                                      type="checkbox"
-                                      checked={p.selected}
-                                      onChange={() => void toggleFbPage(p.id)}
-                                      className="h-3.5 w-3.5"
-                                    />
-                                    <span className="truncate">{p.name}</span>
-                                  </label>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </div>
-                      )}
-                      {lastSyncSummary && (
-                        <div className="mt-2 text-[11px] text-muted-foreground">
-                          Last sync: {lastSyncSummary.total_new ?? 0} new / {lastSyncSummary.total_fetched ?? 0} fetched
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-              <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                <Badge variant="outline">{connector.ownerAgent}</Badge>
-                {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
-                <Button
-                  variant={connector.sourceExists ? "outline" : "default"}
-                  size="sm"
-                  className="ml-auto h-7 px-2.5"
-                  onClick={() => void initialize(connector)}
-                  disabled={busyId === connector.id}
-                >
-                  {connectorActionLabel(connector, busyId === connector.id)}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2.5"
-                  onClick={() => void copyPrompt(connector)}
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  {copiedId === connector.id ? "Copied" : "Prompt"}
-                </Button>
+                    )}
+                    {lastSyncSummary && (
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        Last sync: {lastSyncSummary.total_new ?? 0} new / {lastSyncSummary.total_fetched ?? 0} fetched
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
+            )}
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">
+              <Badge variant="outline">{connector.ownerAgent}</Badge>
+              {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
+              <Button
+                variant={connector.sourceExists ? "outline" : "default"}
+                size="sm"
+                className="ml-auto"
+                onClick={() => void initialize(connector)}
+                disabled={busyId === connector.id}
+              >
+                {connectorActionLabel(connector, busyId === connector.id)}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void copyPrompt(connector)}
+                aria-label={`Copy setup prompt for ${connector.label}`}
+              >
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                {copiedId === connector.id ? "Copied" : "Prompt"}
+              </Button>
             </div>
-          ))}
-          {loading && !connectors.length && (
-            <div className="rounded-2xl border border-dashed border-border bg-background/25 px-4 py-6 text-sm text-muted-foreground">
-              Loading connector blueprints...
-            </div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+          </li>
+        ))}
+        {loading && !connectors.length && (
+          <li className="py-6 text-sm text-muted-foreground">Loading connector blueprints...</li>
+        )}
+      </ul>
+    </section>
   );
 }
 
@@ -1184,21 +1198,19 @@ function CrmIntegrationSettingsPanel() {
   const canSave = form && (form.apiKey || form.hasApiKey) && (form.baseUrl || mode === "custom");
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <KeyRound className="h-4 w-4 text-primary" />
+    <section className="space-y-5">
+      <header>
+        <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+          <KeyRound className="h-4 w-4 text-primary" aria-hidden="true" />
           Connect your CRM
-        </CardTitle>
-        <p className="text-xs leading-5 text-foreground/70">
+        </h2>
+        <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
           Pick your CRM, paste your API key, and we handle the rest. Lofty, Follow Up Boss, Sierra, BoldTrail and Brivity are pre-wired.
         </p>
-      </CardHeader>
-      <CardContent className="space-y-3">
+      </header>
+      <div className="space-y-4">
         {loading || !form ? (
-          <div className="rounded-2xl border border-border bg-card px-4 py-6 text-sm text-foreground/70">
-            Loading CRM settings...
-          </div>
+          <div className="py-6 text-sm text-muted-foreground">Loading CRM settings...</div>
         ) : (
           <>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
@@ -1210,8 +1222,9 @@ function CrmIntegrationSettingsPanel() {
                     key={preset.slug}
                     type="button"
                     onClick={() => choosePreset(preset)}
+                    aria-pressed={isSelected}
                     title={`${preset.label} — ${preset.description}`}
-                    className={`group flex flex-col items-center gap-2 rounded-2xl border bg-card p-3 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${isSelected ? "border-primary" : "border-border"}`}
+                    className={`group flex min-h-[44px] flex-col items-center gap-2 rounded-md border bg-transparent p-3 text-center transition-colors hover:border-ring hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${isSelected ? "border-primary" : "border-border/60"}`}
                   >
                     <div className="relative">
                       <img
@@ -1221,180 +1234,366 @@ function CrmIntegrationSettingsPanel() {
                         height={40}
                         loading="lazy"
                         decoding="async"
-                        className="h-10 w-10 rounded-md bg-card object-contain p-1"
+                        className="h-10 w-10 rounded-md object-contain p-1"
                         onError={(e) => {
                           (e.currentTarget as HTMLImageElement).style.display = "none";
                           const fallback = e.currentTarget.nextElementSibling as HTMLElement | null;
                           if (fallback) fallback.style.display = "flex";
                         }}
                       />
-                      <div className="hidden h-10 w-10 items-center justify-center rounded-md bg-card">
+                      <div className="hidden h-10 w-10 items-center justify-center rounded-md">
                         <Plug className="h-4 w-4 text-foreground/70" />
                       </div>
                       {isConnected && (
-                        <CheckCircle2 className="absolute -right-1 -top-1 h-3.5 w-3.5 rounded-full bg-card text-emerald-500" />
+                        <CheckCircle2 className="absolute -right-1 -top-1 h-3.5 w-3.5 rounded-full bg-card text-success" />
                       )}
                     </div>
-                    <div className="w-full truncate text-xs font-medium text-foreground">{preset.label}</div>
-                    <Button
-                      variant={isConnected ? "outline" : "default"}
-                      size="sm"
-                      className="h-7 w-full px-2 text-xs"
+                    <span className="w-full truncate text-xs font-medium text-foreground">{preset.label}</span>
+                    <span
+                      className={`mt-0.5 text-[0.7rem] ${isConnected ? "text-success" : "text-muted-foreground group-hover:text-foreground"}`}
                     >
                       {isConnected ? "Connected" : "Connect"}
-                    </Button>
+                    </span>
                   </button>
                 );
               })}
               <button
                 type="button"
                 onClick={chooseCustom}
+                aria-pressed={mode === "custom"}
                 title="Other — wire up any REST CRM"
-                className={`group flex flex-col items-center gap-2 rounded-2xl border bg-card p-3 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${mode === "custom" ? "border-primary" : "border-border"}`}
+                className={`group flex min-h-[44px] flex-col items-center gap-2 rounded-md border bg-transparent p-3 text-center transition-colors hover:border-ring hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${mode === "custom" ? "border-primary" : "border-border/60"}`}
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-card">
+                <div className="flex h-10 w-10 items-center justify-center rounded-md">
                   <Settings2 className="h-4 w-4 text-foreground/70" />
                 </div>
-                <div className="w-full truncate text-xs font-medium text-foreground">Other / Custom</div>
-                <Button variant="outline" size="sm" className="h-7 w-full px-2 text-xs">Wire up</Button>
+                <span className="w-full truncate text-xs font-medium text-foreground">Other / Custom</span>
+                <span className="mt-0.5 text-[0.7rem] text-muted-foreground group-hover:text-foreground">Wire up</span>
               </button>
             </div>
 
             {mode === "preset" && selectedPreset && (
-              <div className="space-y-3 rounded-2xl border border-border bg-card p-4">
+              <div className="space-y-4 border-t border-border/50 pt-4">
                 <div className="flex items-center gap-3">
                   <img
                     src={selectedPreset.logo}
                     alt=""
                     width={32}
                     height={32}
-                    className="h-8 w-8 rounded-md bg-card object-contain p-1"
+                    className="h-8 w-8 rounded-md object-contain p-1"
                     onError={(e) => {
                       (e.currentTarget as HTMLImageElement).style.display = "none";
                     }}
                   />
-                  <span className="text-sm font-semibold text-foreground">{selectedPreset.label}</span>
+                  <span className="text-base font-semibold text-foreground">{selectedPreset.label}</span>
                 </div>
                 {selectedPreset.notice && (
-              <div className="rounded-2xl border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning">
-                <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
-                {selectedPreset.notice}
-              </div>
-            )}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-foreground/80" htmlFor="crm-preset-api-key">
-                {selectedPreset.keyLabel}
-              </label>
-              <Input
-                id="crm-preset-api-key"
-                type="password"
-                value={form.apiKey ?? ""}
-                placeholder={form.hasApiKey ? `Saved · ${form.apiKeyPreview ?? "•••"}` : "Paste your API key"}
-                onChange={(e) => patch({ apiKey: e.target.value })}
-              />
-              <a
-                href={selectedPreset.helpUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-foreground/65 transition-colors hover:text-foreground"
-              >
-                <ExternalLink className="h-3 w-3" />
-                Where do I find this? — {selectedPreset.helpText}
-              </a>
-            </div>
-            {testResult && (
-              <div className={`rounded-2xl border px-3 py-2 text-xs ${testResult.success ? "border-success/25 bg-success/10 text-success" : "border-warning/25 bg-warning/10 text-warning"}`}>
-                {testResult.message ?? testResult.error ?? "Test finished"}
-              </div>
-            )}
-            <div className="flex flex-wrap justify-between gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-9 px-3 text-foreground/70"
-                onClick={() => setShowAdvanced((v) => !v)}
-              >
-                {showAdvanced ? "Hide advanced" : "Show advanced"}
-              </Button>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" className="h-9 px-3" onClick={() => void test()} disabled={testing || !canSave}>
-                  {testing ? "Testing" : "Test connection"}
-                </Button>
-                <Button size="sm" className="h-9 px-3" onClick={() => void save()} disabled={saving || !canSave}>
-                  {saving ? "Saving" : "Connect"}
-                </Button>
-              </div>
-            </div>
-            {showAdvanced && (
-              <div className="space-y-3 rounded-2xl border border-border bg-card p-3">
-                <div className="text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-foreground/55">
-                  Advanced — pre-wired by preset
+                  <div className="rounded-md border border-border border-l-2 border-l-warning bg-card px-3 py-2 text-sm leading-6 text-warning">
+                    <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" aria-hidden="true" />
+                    {selectedPreset.notice}
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-foreground" htmlFor="crm-preset-api-key">
+                    {selectedPreset.keyLabel}
+                  </label>
+                  <Input
+                    id="crm-preset-api-key"
+                    type="password"
+                    value={form.apiKey ?? ""}
+                    placeholder={form.hasApiKey ? `Saved · ${form.apiKeyPreview ?? "•••"}` : "Paste your API key"}
+                    onChange={(e) => patch({ apiKey: e.target.value })}
+                  />
+                  <a
+                    href={selectedPreset.helpUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                    Where do I find this? — {selectedPreset.helpText}
+                  </a>
                 </div>
-                <div className="grid gap-2 md:grid-cols-3">
-                  <Input value={form.baseUrl} placeholder="base URL" onChange={(e) => patch({ baseUrl: e.target.value })} />
-                  <Input value={form.authHeader} placeholder="header" onChange={(e) => patch({ authHeader: e.target.value })} />
-                  <Input value={form.authPrefix} placeholder="prefix" onChange={(e) => patch({ authPrefix: e.target.value })} />
-                  <Input value={form.endpoints.leads} placeholder="leads endpoint" onChange={(e) => patchNested("endpoints", "leads", e.target.value)} />
-                  <Input value={form.endpoints.lead} placeholder="lead endpoint" onChange={(e) => patchNested("endpoints", "lead", e.target.value)} />
-                  <Input value={form.endpoints.notes} placeholder="notes endpoint" onChange={(e) => patchNested("endpoints", "notes", e.target.value)} />
+                {testResult && (
+                  <div className={`rounded-md border px-3 py-2 text-sm ${testResult.success ? "border-border border-l-2 border-l-success bg-card text-success" : "border-border border-l-2 border-l-warning bg-card text-warning"}`} role="status">
+                    {testResult.message ?? testResult.error ?? "Test finished"}
+                  </div>
+                )}
+                <div className="flex flex-wrap justify-between gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    aria-expanded={showAdvanced}
+                  >
+                    {showAdvanced ? "Hide advanced" : "Show advanced"}
+                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={() => void test()} disabled={testing || !canSave}>
+                      {testing ? "Testing" : "Test connection"}
+                    </Button>
+                    <Button size="sm" onClick={() => void save()} disabled={saving || !canSave}>
+                      {saving ? "Saving" : "Connect"}
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            )}
+                {showAdvanced && (
+                  <div className="space-y-3 border-t border-border/40 pt-3">
+                    <div className="text-xs text-muted-foreground">Advanced — pre-wired by preset</div>
+                    <div className="grid gap-2 md:grid-cols-3">
+                      <Input value={form.baseUrl} placeholder="base URL" onChange={(e) => patch({ baseUrl: e.target.value })} aria-label="Base URL" />
+                      <Input value={form.authHeader} placeholder="header" onChange={(e) => patch({ authHeader: e.target.value })} aria-label="Auth header" />
+                      <Input value={form.authPrefix} placeholder="prefix" onChange={(e) => patch({ authPrefix: e.target.value })} aria-label="Auth prefix" />
+                      <Input value={form.endpoints.leads} placeholder="leads endpoint" onChange={(e) => patchNested("endpoints", "leads", e.target.value)} aria-label="Leads endpoint" />
+                      <Input value={form.endpoints.lead} placeholder="lead endpoint" onChange={(e) => patchNested("endpoints", "lead", e.target.value)} aria-label="Lead endpoint" />
+                      <Input value={form.endpoints.notes} placeholder="notes endpoint" onChange={(e) => patchNested("endpoints", "notes", e.target.value)} aria-label="Notes endpoint" />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {mode === "custom" && (
-              <div className="space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Settings2 className="h-4 w-4 text-foreground/70" />
-                <span className="text-sm font-semibold text-foreground">Custom CRM</span>
-              </div>
-              <Button variant="ghost" size="sm" className="h-9 px-3" onClick={backToPicker}>
-                Change CRM
-              </Button>
-            </div>
-            <div className="grid gap-2 md:grid-cols-3">
-              <Input value={form.provider} placeholder="provider" onChange={(e) => patch({ provider: e.target.value })} />
-              <Input value={form.label} placeholder="label" onChange={(e) => patch({ label: e.target.value })} />
-              <Input value={form.baseUrl} placeholder="https://api.example.com" onChange={(e) => patch({ baseUrl: e.target.value })} />
-              <Input value={form.apiKeyEnv} placeholder="CRM_API_KEY" onChange={(e) => patch({ apiKeyEnv: e.target.value })} />
-              <Input value={form.apiKey ?? ""} type="password" placeholder={form.hasApiKey ? `API key ${form.apiKeyPreview ?? "saved"}` : "API key"} onChange={(e) => patch({ apiKey: e.target.value })} />
-              <Input value={form.authType} placeholder="header or query" onChange={(e) => patch({ authType: e.target.value })} />
-              <Input value={form.authHeader} placeholder="Authorization" onChange={(e) => patch({ authHeader: e.target.value })} />
-              <Input value={form.authPrefix} placeholder="Bearer " onChange={(e) => patch({ authPrefix: e.target.value })} />
-              <Input value={form.authQueryParam} placeholder="api_key" onChange={(e) => patch({ authQueryParam: e.target.value })} />
-            </div>
-            <div className="grid gap-2 md:grid-cols-3">
-              <Input value={form.endpoints.leads} placeholder="/v1/leads" onChange={(e) => patchNested("endpoints", "leads", e.target.value)} />
-              <Input value={form.endpoints.lead} placeholder="/v1/leads/:id" onChange={(e) => patchNested("endpoints", "lead", e.target.value)} />
-              <Input value={form.endpoints.notes} placeholder="/v1/leads/:id/notes" onChange={(e) => patchNested("endpoints", "notes", e.target.value)} />
-              <Input value={form.dbColumns.leadId} placeholder="crm_lead_id" onChange={(e) => patchNested("dbColumns", "leadId", e.target.value)} />
-              <Input value={form.dbColumns.stage} placeholder="crm_stage" onChange={(e) => patchNested("dbColumns", "stage", e.target.value)} />
-              <Input value={form.dbColumns.tags} placeholder="crm_tags" onChange={(e) => patchNested("dbColumns", "tags", e.target.value)} />
-            </div>
-            <div className="rounded-2xl border border-border bg-card p-3 text-xs leading-5 text-foreground/65">
-              <div>Config: <code className="bg-transparent p-0">{data?.configPath}</code></div>
-              <div>Secrets: <code className="bg-transparent p-0">{data?.secretsPath}</code></div>
-            </div>
-            {testResult && (
-              <div className={`rounded-2xl border px-3 py-2 text-xs ${testResult.success ? "border-success/25 bg-success/10 text-success" : "border-warning/25 bg-warning/10 text-warning"}`}>
-                {testResult.message ?? testResult.error ?? "Test finished"}
-              </div>
-            )}
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button variant="outline" size="sm" className="h-9 px-3" onClick={() => void test()} disabled={testing}>
-                {testing ? "Testing" : "Test"}
-              </Button>
-              <Button size="sm" className="h-9 px-3" onClick={() => void save()} disabled={saving}>
-                {saving ? "Saving" : "Save CRM"}
-              </Button>
-            </div>
+              <div className="space-y-4 border-t border-border/50 pt-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Settings2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                    <span className="text-base font-semibold text-foreground">Custom CRM</span>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={backToPicker}>
+                    Change CRM
+                  </Button>
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
+                  <Input value={form.provider} placeholder="provider" onChange={(e) => patch({ provider: e.target.value })} aria-label="Provider" />
+                  <Input value={form.label} placeholder="label" onChange={(e) => patch({ label: e.target.value })} aria-label="Label" />
+                  <Input value={form.baseUrl} placeholder="https://api.example.com" onChange={(e) => patch({ baseUrl: e.target.value })} aria-label="Base URL" />
+                  <Input value={form.apiKeyEnv} placeholder="CRM_API_KEY" onChange={(e) => patch({ apiKeyEnv: e.target.value })} aria-label="API key env var name" />
+                  <Input value={form.apiKey ?? ""} type="password" placeholder={form.hasApiKey ? `API key ${form.apiKeyPreview ?? "saved"}` : "API key"} onChange={(e) => patch({ apiKey: e.target.value })} aria-label="API key" />
+                  <Input value={form.authType} placeholder="header or query" onChange={(e) => patch({ authType: e.target.value })} aria-label="Auth type" />
+                  <Input value={form.authHeader} placeholder="Authorization" onChange={(e) => patch({ authHeader: e.target.value })} aria-label="Auth header" />
+                  <Input value={form.authPrefix} placeholder="Bearer " onChange={(e) => patch({ authPrefix: e.target.value })} aria-label="Auth prefix" />
+                  <Input value={form.authQueryParam} placeholder="api_key" onChange={(e) => patch({ authQueryParam: e.target.value })} aria-label="Auth query param" />
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
+                  <Input value={form.endpoints.leads} placeholder="/v1/leads" onChange={(e) => patchNested("endpoints", "leads", e.target.value)} aria-label="Leads endpoint" />
+                  <Input value={form.endpoints.lead} placeholder="/v1/leads/:id" onChange={(e) => patchNested("endpoints", "lead", e.target.value)} aria-label="Lead endpoint" />
+                  <Input value={form.endpoints.notes} placeholder="/v1/leads/:id/notes" onChange={(e) => patchNested("endpoints", "notes", e.target.value)} aria-label="Notes endpoint" />
+                  <Input value={form.dbColumns.leadId} placeholder="crm_lead_id" onChange={(e) => patchNested("dbColumns", "leadId", e.target.value)} aria-label="Lead ID column" />
+                  <Input value={form.dbColumns.stage} placeholder="crm_stage" onChange={(e) => patchNested("dbColumns", "stage", e.target.value)} aria-label="Stage column" />
+                  <Input value={form.dbColumns.tags} placeholder="crm_tags" onChange={(e) => patchNested("dbColumns", "tags", e.target.value)} aria-label="Tags column" />
+                </div>
+                <div className="text-xs leading-6 text-muted-foreground">
+                  <div>Config: <code className="bg-transparent p-0 font-mono">{data?.configPath}</code></div>
+                  <div>Secrets: <code className="bg-transparent p-0 font-mono">{data?.secretsPath}</code></div>
+                </div>
+                {testResult && (
+                  <div className={`rounded-md border px-3 py-2 text-sm ${testResult.success ? "border-border border-l-2 border-l-success bg-card text-success" : "border-border border-l-2 border-l-warning bg-card text-warning"}`} role="status">
+                    {testResult.message ?? testResult.error ?? "Test finished"}
+                  </div>
+                )}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={() => void test()} disabled={testing}>
+                    {testing ? "Testing" : "Test"}
+                  </Button>
+                  <Button size="sm" onClick={() => void save()} disabled={saving}>
+                    {saving ? "Saving" : "Save CRM"}
+                  </Button>
+                </div>
               </div>
             )}
           </>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </section>
+  );
+}
+
+interface PluginsPanelProps {
+  config: Record<string, unknown>;
+  setConfig: (next: Record<string, unknown>) => void;
+}
+
+function PluginsPanel({ config, setConfig }: PluginsPanelProps) {
+  const [discovered, setDiscovered] = useState<Array<{
+    name: string;
+    label: string;
+    description: string;
+    version: string;
+    source: string;
+  }> | null>(null);
+  const [rescanning, setRescanning] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const plugins = await api.getPlugins();
+      setDiscovered(
+        plugins.map((p) => ({
+          name: p.name,
+          label: p.label || p.name,
+          description: p.description || "",
+          version: p.version || "0.0.0",
+          source: p.source || "user",
+        })),
+      );
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load plugins");
+      setDiscovered([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleRescan = useCallback(async () => {
+    setRescanning(true);
+    try {
+      await api.rescanPlugins();
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rescan failed");
+    } finally {
+      setRescanning(false);
+    }
+  }, [load]);
+
+  const enabled = useMemo(() => {
+    const raw = getNestedValue(config, "plugins.enabled");
+    return Array.isArray(raw) ? (raw as string[]) : [];
+  }, [config]);
+  const disabled = useMemo(() => {
+    const raw = getNestedValue(config, "plugins.disabled");
+    return Array.isArray(raw) ? (raw as string[]) : [];
+  }, [config]);
+
+  const togglePlugin = (name: string, on: boolean) => {
+    const nextEnabled = on
+      ? [...new Set([...enabled, name])]
+      : enabled.filter((n) => n !== name);
+    const nextDisabled = on
+      ? disabled.filter((n) => n !== name)
+      : disabled;
+    let next = setNestedValue(config, "plugins.enabled", nextEnabled);
+    next = setNestedValue(next, "plugins.disabled", nextDisabled);
+    setConfig(next);
+  };
+
+  const discoveredNames = new Set((discovered ?? []).map((p) => p.name));
+  const orphanEnabled = enabled.filter((n) => !discoveredNames.has(n));
+
+  return (
+    <section className="space-y-5">
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <Puzzle className="h-4 w-4 text-primary" aria-hidden="true" />
+            Installed plugins
+          </h2>
+          <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
+            Plugins live in <code className="bg-transparent p-0 font-mono text-xs">~/.elevate/plugins/</code> and bundled directories. Toggle one on to load it next time the agent starts.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">
+            {discovered ? `${discovered.length} discovered` : "Loading..."}
+          </Badge>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleRescan()}
+            disabled={rescanning}
+            aria-label="Rescan plugins"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${rescanning ? "animate-spin" : ""}`} aria-hidden="true" />
+            Rescan
+          </Button>
+        </div>
+      </header>
+
+      {error && (
+        <div className="rounded-md border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      {discovered === null ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
+        </div>
+      ) : discovered.length === 0 ? (
+        <div className="rounded-md border border-border/50 px-4 py-6 text-center text-sm text-muted-foreground">
+          No plugins discovered. Drop a plugin directory under <code className="bg-transparent p-0 font-mono text-xs">~/.elevate/plugins/</code> and click Rescan.
+        </div>
+      ) : (
+        <ul className="divide-y divide-border/50 border-y border-border/50">
+          {discovered.map((plugin) => {
+            const isOn = enabled.includes(plugin.name);
+            return (
+              <li key={plugin.name} className="py-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="truncate text-sm font-semibold text-foreground">{plugin.label}</span>
+                      <Badge variant="outline" className="font-mono text-[0.65rem] uppercase tracking-wide">
+                        {plugin.source}
+                      </Badge>
+                      <span className="font-mono text-[0.7rem] text-foreground/60">v{plugin.version}</span>
+                    </div>
+                    {plugin.description && (
+                      <p className="mt-1 text-sm leading-6 text-foreground/80">
+                        {plugin.description}
+                      </p>
+                    )}
+                    <code className="mt-1 block bg-transparent p-0 font-mono text-[0.7rem] text-foreground/55">
+                      {plugin.name}
+                    </code>
+                  </div>
+                  <div className="shrink-0 pt-0.5">
+                    <Switch
+                      checked={isOn}
+                      onCheckedChange={(v) => togglePlugin(plugin.name, v)}
+                      aria-label={`${isOn ? "Disable" : "Enable"} ${plugin.label}`}
+                    />
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {orphanEnabled.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <AlertTriangle className="h-4 w-4 text-warning" aria-hidden="true" />
+            Enabled but not found
+          </div>
+          <p className="text-xs leading-6 text-foreground/70">
+            These plugin names are in your config but no matching directory was discovered. Remove them or install the plugin.
+          </p>
+          <ul className="flex flex-wrap gap-1.5">
+            {orphanEnabled.map((name) => (
+              <li
+                key={name}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-2 py-1 text-xs"
+              >
+                <code className="bg-transparent p-0 font-mono">{name}</code>
+                <button
+                  type="button"
+                  onClick={() => togglePlugin(name, false)}
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label={`Remove ${name} from enabled list`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1417,6 +1616,7 @@ export default function ConfigPage() {
   const [activePane, setActivePane] = useState<"config" | "composio" | "connectors" | "crm" | "setup">("config");
   const [showAdvanced, setShowAdvanced] = useState(true);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useI18n();
@@ -1518,9 +1718,14 @@ export default function ConfigPage() {
   /* ---- Active tab fields ---- */
   const activeFields = useMemo(() => {
     if (!schema || isSearching) return [];
-    return Object.entries(schema).filter(
-      ([, s]) => String(s.category ?? "general") === activeCategory
-    );
+    return Object.entries(schema).filter(([key, s]) => {
+      if (String(s.category ?? "general") !== activeCategory) return false;
+      // The PluginsPanel replaces the raw enabled/disabled list inputs.
+      if (activeCategory === "plugins" && (key === "plugins.enabled" || key === "plugins.disabled")) {
+        return false;
+      }
+      return true;
+    });
   }, [schema, activeCategory, isSearching]);
 
   /* ---- Handlers ---- */
@@ -1616,7 +1821,7 @@ export default function ConfigPage() {
   const renderFields = (fields: [string, Record<string, unknown>][], showCategory = false) => {
     let lastSection = "";
     let lastCat = "";
-    return fields.map(([key, s], idx) => {
+    return fields.map(([key, s]) => {
       const parts = key.split(".");
       const section = parts.length > 1 ? parts[0] : "";
       const cat = String(s.category ?? "general");
@@ -1628,23 +1833,23 @@ export default function ConfigPage() {
       return (
         <div key={key}>
           {showCatBadge && (
-            <div className="mt-8 mb-3 first:mt-0">
+            <div className="mt-10 mb-2 first:mt-2">
               <div className="flex items-center gap-2">
                 <CategoryIcon category={cat} className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-semibold text-foreground">
+                <span className="text-base font-semibold text-foreground">
                   {prettyCategoryName(cat)}
                 </span>
               </div>
             </div>
           )}
           {showSection && (
-            <div className="mt-8 mb-3 first:mt-0">
+            <div className="mt-10 mb-2 first:mt-2">
               <span className="text-sm font-semibold text-foreground">
                 {section.charAt(0).toUpperCase() + section.slice(1).replace(/_/g, " ")}
               </span>
             </div>
           )}
-          <div className={idx > 0 ? "border-t border-border/40 py-4" : "py-4"}>
+          <div className="py-6 first:pt-2">
             <AutoField
               schemaKey={key}
               schema={s}
@@ -1673,59 +1878,126 @@ export default function ConfigPage() {
     { id: "setup", pane: "setup" as const, label: "Setup commands", icon: <Wrench className="h-4 w-4" /> },
   ];
 
+  const activeNavLabel =
+    activePane === "config"
+      ? prettyCategoryName(activeCategory) || "Settings"
+      : integrationItems.find((i) => i.pane === activePane)?.label ?? "Settings";
+
   return (
-    <div className="flex -mx-6 -mt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+    <div className="flex h-dvh flex-col justify-center md:flex-row">
       <Toast toast={toast} />
       <input ref={fileInputRef} type="file" accept=".json,.yaml,.yml" className="hidden" onChange={handleImport} />
 
+      {/* Mobile top bar */}
+      <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2 md:hidden">
+        <Link
+          to="/"
+          aria-label="Back to app"
+          className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Link>
+        <button
+          type="button"
+          aria-label="Open settings navigation"
+          aria-expanded={mobileNavOpen}
+          onClick={() => setMobileNavOpen(true)}
+          className="flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium text-foreground transition-colors hover:bg-foreground/[0.06]"
+        >
+          <Menu className="h-4 w-4" aria-hidden="true" />
+          <span>{activeNavLabel}</span>
+        </button>
+      </div>
+
+      {/* Mobile drawer scrim */}
+      {mobileNavOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-background/80 md:hidden"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      <div className="flex h-full min-h-0 w-full flex-1 max-w-[1280px] mx-auto">
       {/* ---- Sidebar ---- */}
-      <aside className="w-52 shrink-0 border-r border-border/50 overflow-y-auto">
-        <div className="py-3">
+      <aside
+        className={`
+          ${mobileNavOpen ? "fixed inset-y-0 left-0 z-50 w-72 bg-background shadow-xl" : "hidden"}
+          md:static md:z-auto md:block md:w-64 md:shadow-none md:bg-transparent
+          shrink-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden
+        `}
+        aria-label="Settings navigation"
+      >
+        <div className="py-4">
+          {/* Back + title (desktop) / Close (mobile drawer) */}
+          <div className="flex items-center gap-2 px-4 pb-3">
+            <Link
+              to="/"
+              aria-label="Back to app"
+              className="hidden md:flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground hover:bg-foreground/[0.06]"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Link>
+            <span className="text-sm font-semibold text-foreground">Settings</span>
+            <button
+              type="button"
+              aria-label="Close navigation"
+              onClick={() => setMobileNavOpen(false)}
+              className="ml-auto flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground md:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
           {/* Search */}
-          <div className="px-3 pb-3">
+          <div className="px-3 pb-2">
             <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
               <Input
-                className="h-8 pl-8 pr-7 text-xs"
+                className="h-9 pl-8 pr-9 text-sm"
                 placeholder={t.common.search}
+                aria-label="Search settings"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
               {searchQuery && (
                 <button
                   type="button"
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  aria-label="Clear search"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
                   onClick={() => setSearchQuery("")}
                 >
-                  <X className="h-3 w-3" />
+                  <X className="h-3.5 w-3.5" />
                 </button>
               )}
             </div>
           </div>
 
           {/* Config categories */}
-          <nav className="flex flex-col gap-px px-2">
+          <nav className="flex flex-col gap-0.5 px-2" aria-label="Settings categories">
             {sidebarItems.map((item) => {
               const isActive = !isSearching && activePane === "config" && activeCategory === item.id;
               return (
                 <button
                   key={item.id}
                   type="button"
+                  aria-current={isActive ? "page" : undefined}
                   onClick={() => {
                     setSearchQuery("");
                     setActivePane("config");
                     setActiveCategory(item.id);
+                    setMobileNavOpen(false);
                   }}
                   className={`
-                    flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.82rem]
+                    flex min-h-[36px] items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-sm
                     transition-colors
                     ${isActive
-                      ? "bg-foreground/8 text-foreground font-medium"
-                      : "text-muted-foreground hover:text-foreground hover:bg-foreground/[0.04]"
+                      ? "bg-foreground/[0.08] text-foreground font-medium"
+                      : "text-foreground/85 hover:text-foreground hover:bg-foreground/[0.04]"
                     }
                   `}
                 >
-                  <span className={isActive ? "text-foreground" : "text-muted-foreground/70"}>{item.icon}</span>
+                  <span className={isActive ? "text-foreground" : "text-foreground/70"} aria-hidden="true">{item.icon}</span>
                   <span className="flex-1 truncate">{item.label}</span>
                 </button>
               );
@@ -1736,41 +2008,44 @@ export default function ConfigPage() {
           <div className="px-3 pt-2">
             <button
               type="button"
+              aria-pressed={showAdvanced}
               onClick={() => setShowAdvanced((v) => !v)}
-              className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-[0.78rem] text-muted-foreground/70 transition-colors hover:text-foreground hover:bg-foreground/[0.04]"
+              className="flex w-full min-h-[36px] items-center justify-between rounded-md px-3 py-1.5 text-sm text-muted-foreground/70 transition-colors hover:text-foreground hover:bg-foreground/[0.04]"
             >
               <span>{showAdvanced ? "Hide advanced" : "Show advanced"}</span>
-              <ShieldCheck className="h-3.5 w-3.5" />
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </div>
 
           {/* Divider */}
           <div className="mx-3 my-3 border-t border-border/50" />
-          <div className="px-4 pb-1.5 text-[0.68rem] font-medium uppercase tracking-wider text-muted-foreground/50">
+          <div className="px-5 pb-2 text-xs font-medium text-foreground/70">
             Integrations
           </div>
 
-          <nav className="flex flex-col gap-px px-2">
+          <nav className="flex flex-col gap-0.5 px-2" aria-label="Integrations">
             {integrationItems.map((item) => {
               const isActive = activePane === item.pane;
               return (
                 <button
                   key={item.id}
                   type="button"
+                  aria-current={isActive ? "page" : undefined}
                   onClick={() => {
                     setSearchQuery("");
                     setActivePane(item.pane);
+                    setMobileNavOpen(false);
                   }}
                   className={`
-                    flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[0.82rem]
+                    flex min-h-[36px] items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-sm
                     transition-colors
                     ${isActive
-                      ? "bg-foreground/8 text-foreground font-medium"
-                      : "text-muted-foreground hover:text-foreground hover:bg-foreground/[0.04]"
+                      ? "bg-foreground/[0.08] text-foreground font-medium"
+                      : "text-foreground/85 hover:text-foreground hover:bg-foreground/[0.04]"
                     }
                   `}
                 >
-                  <span className={isActive ? "text-foreground" : "text-muted-foreground/70"}>{item.icon}</span>
+                  <span className={isActive ? "text-foreground" : "text-foreground/70"} aria-hidden="true">{item.icon}</span>
                   <span className="flex-1 truncate">{item.label}</span>
                 </button>
               );
@@ -1780,8 +2055,8 @@ export default function ConfigPage() {
       </aside>
 
       {/* ---- Content ---- */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-8 py-6">
+      <div className="flex-1 overflow-y-auto min-w-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="mx-auto max-w-4xl px-4 py-6 md:px-12 md:py-8">
 
           {/* ---- Composio pane ---- */}
           {activePane === "composio" && <ComposioPanel />}
@@ -1839,7 +2114,7 @@ export default function ConfigPage() {
                   </Button>
                   <Link
                     to="/env"
-                    className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-card/60 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+                    className="inline-flex h-8 items-center gap-2 rounded-sm border border-border bg-card px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   >
                     <KeyRound className="h-3.5 w-3.5" />
                     Keys and OAuth
@@ -1868,7 +2143,7 @@ export default function ConfigPage() {
                       </Button>
                     </div>
                   </div>
-                  <div className="mt-4 rounded-xl border border-border overflow-hidden">
+                  <div className="mt-4 rounded-md border border-border overflow-hidden">
                     {yamlLoading ? (
                       <div className="flex items-center justify-center py-12">
                         <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -1905,8 +2180,8 @@ export default function ConfigPage() {
                 <div>
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-lg font-semibold text-foreground">{prettyCategoryName(activeCategory)}</h2>
-                      <p className="mt-1 text-sm text-muted-foreground">
+                      <h2 className="text-base font-semibold text-foreground">{prettyCategoryName(activeCategory)}</h2>
+                      <p className="mt-0.5 text-xs text-foreground/70">
                         {activeFields.length} settings
                       </p>
                     </div>
@@ -1920,7 +2195,12 @@ export default function ConfigPage() {
                       </Button>
                     </div>
                   </div>
-                  <div className="mt-6">
+                  {activeCategory === "plugins" && (
+                    <div className="mt-6">
+                      <PluginsPanel config={config} setConfig={setConfig} />
+                    </div>
+                  )}
+                  <div className="mt-4">
                     {renderFields(activeFields)}
                   </div>
                 </div>
@@ -1928,6 +2208,7 @@ export default function ConfigPage() {
             </>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

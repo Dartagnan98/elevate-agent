@@ -146,7 +146,7 @@ function WorkflowSkillCard({
   const enabled = present.filter((skill) => skill.enabled).length;
 
   return (
-    <div className="rounded-2xl border border-border/70 bg-background/35 p-3">
+    <div className="rounded-md border border-border bg-card p-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Icon className="h-4 w-4 shrink-0 text-primary" />
@@ -162,7 +162,7 @@ function WorkflowSkillCard({
         {present.map((skill) => (
           <div
             key={skill.name}
-            className="flex items-center justify-between gap-2 rounded-xl bg-card/45 px-2.5 py-1.5"
+            className="flex items-center justify-between gap-2 rounded-md bg-card px-2.5 py-1.5"
           >
             <div className="min-w-0">
               <div className="truncate text-xs font-medium text-foreground">
@@ -183,7 +183,7 @@ function WorkflowSkillCard({
         {missing.map((name) => (
           <div
             key={name}
-            className="rounded-xl border border-dashed border-border bg-background/25 px-2.5 py-1.5 text-xs text-muted-foreground"
+            className="rounded-md border border-dashed border-border bg-card px-2.5 py-1.5 text-xs text-muted-foreground"
           >
             {name} missing
           </div>
@@ -369,7 +369,7 @@ export default function SkillsPage() {
     <div className="flex flex-col gap-4">
       <Toast toast={toast} />
 
-      <section className="rounded-[1.45rem] border border-border bg-card/70 p-4 shadow-[0_20px_70px_color-mix(in_srgb,var(--background-base)_48%,transparent)]">
+      <section className="rounded-md border border-border bg-card p-4">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
@@ -408,7 +408,7 @@ export default function SkillsPage() {
             <div
               className={`
                 flex flex-col
-                rounded-2xl border border-border bg-muted/20
+                rounded-md border border-border bg-card
               `}
             >
               {/* Filter heading */}
@@ -461,7 +461,7 @@ export default function SkillsPage() {
                           }
                           className={`
                             group flex items-center gap-2 px-2 py-1
-                            rounded-xl text-left text-[11px] cursor-pointer
+                            rounded-md text-left text-[11px] cursor-pointer
                             transition-colors
                             ${
                               isActive
@@ -614,7 +614,7 @@ export default function SkillsPage() {
                                 {ts.description}
                               </p>
                               {ts.enabled && !ts.configured && (
-                                <p className="text-[10px] text-amber-300/80 mb-2">
+                                <p className="text-[10px] text-[var(--color-warning)]/80 mb-2">
                                   {t.skills.setupNeeded}
                                 </p>
                               )}
@@ -698,7 +698,7 @@ function PanelItem({ active, icon: Icon, label, onClick }: PanelItemProps) {
       className={`
         group flex items-center gap-2 px-2.5 py-1.5
         text-[0.7rem] font-medium tracking-normal normal-case
-        rounded-xl text-left cursor-pointer whitespace-nowrap
+        rounded-md text-left cursor-pointer whitespace-nowrap
         transition-colors
         ${
           active

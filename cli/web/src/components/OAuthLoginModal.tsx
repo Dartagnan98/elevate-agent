@@ -177,13 +177,13 @@ export function OAuthLoginModal({
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/85 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4"
       onClick={handleBackdrop}
       role="dialog"
       aria-modal="true"
       aria-labelledby="oauth-modal-title"
     >
-      <div className="relative w-full max-w-md overflow-hidden rounded-[1.35rem] border border-border bg-card shadow-2xl">
+      <div className="relative w-full max-w-md overflow-hidden rounded-md border border-border bg-card">
         <button
           type="button"
           onClick={handleClose}
@@ -344,7 +344,7 @@ export function OAuthLoginModal({
           {/* ── error ──────────────────────────────────────── */}
           {phase === "error" && (
             <>
-              <div className="border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="border-l-2 border-destructive bg-muted p-3 text-sm text-destructive">
                 {errorMsg || t.oauth.loginFailed}
               </div>
               <div className="flex justify-end gap-2">

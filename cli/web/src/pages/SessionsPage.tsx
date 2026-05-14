@@ -69,7 +69,7 @@ function SnippetHighlight({ snippet }: { snippet: string }) {
       parts.push(snippet.slice(last, match.index));
     }
     parts.push(
-      <mark key={i++} className="bg-warning/30 text-warning px-0.5">
+      <mark key={i++} className="bg-card text-warning px-0.5">
         {match[1]}
       </mark>,
     );
@@ -101,10 +101,10 @@ function ToolCallBlock({
   }
 
   return (
-    <div className="mt-2 border border-warning/20 bg-warning/5">
+    <div className="mt-2 border border-border border-l-2 border-l-warning bg-card">
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-warning cursor-pointer hover:bg-warning/10 transition-colors"
+        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-warning cursor-pointer hover:bg-muted transition-colors"
         onClick={() => setOpen(!open)}
         aria-label={`${open ? t.common.collapse : t.common.expand} tool call ${toolCall.function.name}`}
       >
@@ -119,7 +119,7 @@ function ToolCallBlock({
         <span className="text-warning/50 ml-auto">{toolCall.id}</span>
       </button>
       {open && (
-        <pre className="border-t border-warning/20 px-3 py-2 text-xs text-warning/80 overflow-x-auto whitespace-pre-wrap font-mono">
+        <pre className="border-t border-border px-3 py-2 text-xs text-warning/80 overflow-x-auto whitespace-pre-wrap font-mono">
           {args}
         </pre>
       )}
@@ -141,12 +141,12 @@ function MessageBubble({
     { bg: string; text: string; label: string }
   > = {
     user: {
-      bg: "bg-primary/10",
+      bg: "bg-card",
       text: "text-primary",
       label: t.sessions.roles.user,
     },
     assistant: {
-      bg: "bg-success/10",
+      bg: "bg-card",
       text: "text-success",
       label: t.sessions.roles.assistant,
     },
@@ -156,7 +156,7 @@ function MessageBubble({
       label: t.sessions.roles.system,
     },
     tool: {
-      bg: "bg-warning/10",
+      bg: "bg-card",
       text: "text-warning",
       label: t.sessions.roles.tool,
     },
@@ -294,9 +294,9 @@ function SessionRow({
   return (
     <div
       id={`session-row-${session.id}`}
-      className={`overflow-hidden rounded-2xl border bg-card/70 transition-colors ${
+      className={`overflow-hidden rounded-md border bg-card transition-colors ${
         session.is_active
-          ? "border-success/30 bg-success/[0.03]"
+          ? "border-border border-l-2 border-l-success"
           : "border-border"
       }`}
     >
@@ -405,7 +405,7 @@ function SessionRow({
       </button>
 
       {isExpanded && (
-        <div className="border-t border-border bg-background/50 p-4">
+        <div className="border-t border-border bg-background p-4">
           {loading && (
             <div className="flex items-center justify-center py-8">
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -468,7 +468,7 @@ function LinkedSessionPanel({
   }, [sessionId]);
 
   return (
-    <Card className="border-primary/25 bg-primary/[0.03]">
+    <Card className="border-border border-l-2 border-l-primary">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -775,7 +775,7 @@ export default function SessionsPage() {
       />
 
       {alerts.length > 0 && (
-        <div className="border border-destructive/30 bg-destructive/[0.06] p-4">
+        <div className="border border-border border-l-2 border-l-destructive bg-card p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             <div className="flex flex-col gap-2 min-w-0">
@@ -797,7 +797,7 @@ export default function SessionsPage() {
       )}
 
       {activeAction && (
-        <div className="overflow-hidden rounded-2xl border border-border bg-background-base/50">
+        <div className="overflow-hidden rounded-md border border-border bg-card">
           <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
             <div className="flex items-center gap-2 min-w-0">
               {actionStatus?.running ? (
@@ -887,7 +887,7 @@ export default function SessionsPage() {
             {recentSessions.map((s) => (
               <div
                 key={s.id}
-                className="flex w-full cursor-pointer flex-col gap-2 rounded-2xl border border-border p-3 transition-colors hover:bg-secondary/30 sm:flex-row sm:items-center sm:justify-between"
+                className="flex w-full cursor-pointer flex-col gap-2 rounded-md border border-border p-3 transition-colors hover:bg-muted sm:flex-row sm:items-center sm:justify-between"
                 onClick={() => openSessionInChat(s.id)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {

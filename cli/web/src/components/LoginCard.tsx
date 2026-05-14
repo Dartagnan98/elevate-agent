@@ -139,7 +139,7 @@ export function LoginCard({ onAuthChange }: Props) {
               <CardDescription>Signed in as {licenseStatus.email}</CardDescription>
             </div>
             <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[0.72rem] font-semibold text-emerald-600">
+              <span className="inline-flex items-center gap-1 rounded bg-[var(--color-success)]/10 px-2.5 py-1 font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.06em] text-[var(--color-success)]">
                 <Check className="h-3 w-3" />
                 Active
               </span>
@@ -158,7 +158,7 @@ export function LoginCard({ onAuthChange }: Props) {
                 {enabledPacks.map((pack) => (
                   <span
                     key={pack}
-                    className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-0.5 text-[0.72rem] font-medium text-primary"
+                    className="inline-flex items-center gap-1 rounded-sm border border-border bg-card px-2 py-0.5 text-[0.72rem] font-medium text-primary"
                   >
                     <Package className="h-3 w-3" />
                     {pack}
@@ -206,9 +206,9 @@ export function LoginCard({ onAuthChange }: Props) {
                 {enabledPacks.map((pack) => (
                   <div
                     key={pack}
-                    className="flex items-center gap-2.5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2"
+                    className="flex items-center gap-2.5 rounded-md border border-[var(--color-success)]/20 bg-[var(--color-success)]/5 px-3 py-2"
                   >
-                    <Check className="h-4 w-4 text-emerald-500" />
+                    <Check className="h-4 w-4 text-[var(--color-success)]" />
                     <span className="text-sm font-medium">{pack}</span>
                   </div>
                 ))}
@@ -296,7 +296,7 @@ export function LoginCard({ onAuthChange }: Props) {
           )}
 
           {error && (
-            <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+            <p className="rounded-sm border-l-2 border-destructive bg-card px-3 py-2 text-xs font-medium text-destructive">
               {error}
             </p>
           )}

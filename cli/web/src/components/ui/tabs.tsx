@@ -18,7 +18,7 @@ export function TabsList({ className, ...props }: React.HTMLAttributes<HTMLDivEl
   return (
     <div
       className={cn(
-        "inline-flex h-9 items-center justify-start gap-0.5 rounded-full bg-card/70 p-0.5 text-muted-foreground shadow-[inset_0_0_0_1px_var(--chat-border)]",
+        "inline-flex h-9 items-center justify-start gap-0.5 rounded-sm bg-card border border-border p-0.5 text-muted-foreground",
         className,
       )}
       {...props}
@@ -37,10 +37,10 @@ export function TabsTrigger({
     <button
       type="button"
       className={cn(
-        "relative inline-flex h-8 items-center justify-center whitespace-nowrap rounded-full px-3 py-1.5 font-sans text-xs font-medium tracking-normal normal-case transition-all cursor-pointer",
+        "relative inline-flex h-8 items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 font-sans text-xs font-medium tracking-normal normal-case transition-all cursor-pointer",
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         active
-          ? "bg-secondary text-foreground shadow-sm"
+          ? "bg-secondary text-foreground"
           : "hover:text-foreground",
         className,
       )}

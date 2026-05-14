@@ -1,17 +1,19 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
+// Ops-tool badge: transparent surface, opaque border, left-edge color strip
+// for state. No palette-glow tints. Mono uppercase label is the signal.
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full border px-2 py-0.5 font-sans text-[0.68rem] font-medium tracking-normal normal-case transition-colors",
+  "relative inline-flex items-center rounded-sm font-mono-ui border bg-transparent pl-2.5 pr-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.06em] transition-colors before:absolute before:left-0 before:top-0 before:bottom-0 before:w-[2px] before:rounded-l-sm",
   {
     variants: {
       variant: {
-        default: "border-foreground/15 bg-foreground/8 text-foreground",
-        secondary: "border-border/70 bg-secondary/80 text-secondary-foreground",
-        destructive: "border-destructive/25 bg-destructive/12 text-destructive",
-        outline: "border-border/70 bg-card/35 text-muted-foreground",
-        success: "border-success/25 bg-success/12 text-success",
-        warning: "border-warning/30 bg-warning/15 text-warning",
+        default: "border-border text-foreground before:bg-border",
+        secondary: "border-border text-muted-foreground before:bg-border",
+        destructive: "border-border text-destructive before:bg-destructive",
+        outline: "border-border text-muted-foreground before:bg-transparent",
+        success: "border-border text-success before:bg-success",
+        warning: "border-border text-warning before:bg-warning",
       },
     },
     defaultVariants: {

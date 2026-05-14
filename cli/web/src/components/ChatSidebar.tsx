@@ -59,10 +59,10 @@ const STATE_LABEL: Record<ConnectionState, string> = {
 
 const STATE_TONE: Record<ConnectionState, string> = {
   idle: "bg-muted text-muted-foreground",
-  connecting: "bg-primary/10 text-primary",
-  open: "bg-emerald-500/10 text-emerald-500 dark:text-emerald-400",
+  connecting: "bg-muted text-primary",
+  open: "bg-muted text-[var(--color-success)]",
   closed: "bg-muted text-muted-foreground",
-  error: "bg-destructive/10 text-destructive",
+  error: "bg-muted text-destructive",
 };
 
 interface ChatSidebarProps {
@@ -329,7 +329,7 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
       </Card>
 
       {banner && (
-        <Card className="flex items-start gap-2 border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
+        <Card className="flex items-start gap-2 border-l-2 border-l-destructive bg-card px-3 py-2 text-xs">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
 
           <div className="min-w-0 flex-1">

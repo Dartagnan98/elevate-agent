@@ -145,7 +145,7 @@ function TabPill({
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70",
         active
           ? "bg-primary text-primary-foreground"
-          : "bg-card/70 text-muted-foreground hover:text-foreground",
+          : "bg-card text-muted-foreground hover:text-foreground",
       )}
     >
       <span>{label}</span>
@@ -320,9 +320,9 @@ function ProposedCard({
           value={draftBody}
           onChange={(e) => setDraftBody(e.target.value)}
           className={cn(
-            "min-h-[7.5rem] w-full resize-y rounded-lg border border-border/70 bg-background/40 px-3 py-2",
+            "min-h-[7.5rem] w-full resize-y rounded-sm border border-border bg-card px-3 py-2",
             "text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/70",
-            "focus-visible:border-primary/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40",
+            "focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           )}
           spellCheck
           rows={6}
@@ -402,7 +402,7 @@ function RetiredRow({ template }: { template: Template }) {
 
 function EmptyState({ title, hint }: { title: string; hint: string }) {
   return (
-    <div className="flex min-h-[16rem] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-border/60 bg-card/40 px-6 py-10 text-center">
+    <div className="flex min-h-[16rem] flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-card px-6 py-10 text-center">
       <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
         {title}
       </span>
@@ -617,7 +617,7 @@ export default function RealEstateTemplatesPage() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <div className="flex items-start gap-2 rounded-md border border-border border-l-2 border-l-destructive bg-card px-4 py-3 text-sm text-destructive">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{error}</span>
         </div>

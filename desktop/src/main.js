@@ -8,6 +8,10 @@ const path = require("path");
 const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
 const HOST = "127.0.0.1";
 const HOME = os.homedir();
+const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/hub";
+const EMBEDDED_CHAT =
+  process.env.ELEVATE_DESKTOP_EMBEDDED_CHAT === "1" ||
+  process.env.ELEVATE_DASHBOARD_TUI === "1";
 const DEFAULT_PATH = [
   path.join(HOME, ".elevate", "bin"),
   path.join(HOME, ".local", "bin"),
@@ -68,8 +72,10 @@ function resolveElevateLauncher() {
     "--host",
     HOST,
     "--no-open",
-    "--tui",
   ];
+  if (EMBEDDED_CHAT) {
+    dashboardArgs.push("--tui");
+  }
 
   if (process.env.ELEVATE_DESKTOP_CLI) {
     return {
@@ -164,10 +170,16 @@ async function dashboardChatEnabled(port = backendPort) {
   return html.includes("window.__ELEVATE_DASHBOARD_EMBEDDED_CHAT__=true");
 }
 
+async function backendMatchesDesktopMode(port = backendPort) {
+  if (!(await backendIsReady(port))) return false;
+  if (!EMBEDDED_CHAT) return true;
+  return dashboardChatEnabled(port);
+}
+
 async function waitForBackend(timeoutMs = 45000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if ((await backendIsReady()) && (await dashboardChatEnabled())) {
+    if (await backendMatchesDesktopMode()) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -176,20 +188,19 @@ async function waitForBackend(timeoutMs = 45000) {
 }
 
 async function chooseBackendPort() {
-  const preferredReady = await backendIsReady(PREFERRED_PORT);
-  if (!preferredReady || (await dashboardChatEnabled(PREFERRED_PORT))) {
+  if (await backendMatchesDesktopMode(PREFERRED_PORT)) {
     backendPort = PREFERRED_PORT;
     backendUrl = `http://${HOST}:${backendPort}`;
     return;
   }
 
   for (let port = PREFERRED_PORT + 1; port <= PREFERRED_PORT + 10; port += 1) {
-    if (!(await backendIsReady(port))) {
+    if (await backendMatchesDesktopMode(port)) {
       backendPort = port;
       backendUrl = `http://${HOST}:${backendPort}`;
       return;
     }
-    if (await dashboardChatEnabled(port)) {
+    if (!(await backendIsReady(port))) {
       backendPort = port;
       backendUrl = `http://${HOST}:${backendPort}`;
       return;
@@ -210,7 +221,7 @@ function appendBackendLog(data) {
 async function ensureBackend() {
   await chooseBackendPort();
 
-  if ((await backendIsReady()) && (await dashboardChatEnabled())) {
+  if (await backendMatchesDesktopMode()) {
     return true;
   }
 
@@ -221,7 +232,7 @@ async function ensureBackend() {
 
   backendProcess = spawn(launcher.command, launcher.args, {
     cwd: launcher.cwd,
-    env: envWithPath({ ELEVATE_DASHBOARD_TUI: "1" }),
+    env: envWithPath(EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
     stdio: ["ignore", "pipe", "pipe"],
   });
   ownsBackend = true;
@@ -297,8 +308,11 @@ function createWindow() {
     minWidth: 980,
     minHeight: 680,
     title: "Elevate",
-    backgroundColor: "#07111f",
+    backgroundColor: "#1a1b1a",
     show: false,
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+    trafficLightPosition:
+      process.platform === "darwin" ? { x: 14, y: 18 } : undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -325,7 +339,7 @@ function loadLocalPage(fileName) {
   mainWindow.loadFile(path.join(__dirname, fileName));
 }
 
-function loadAppPath(pathname = "/chat") {
+function loadAppPath(pathname = START_PATH) {
   if (!mainWindow) return;
   mainWindow.loadURL(`${backendUrl}${pathname}`);
 }
@@ -337,7 +351,7 @@ async function startDesktop() {
 
   const ready = await ensureBackend();
   if (ready) {
-    loadAppPath("/chat");
+    loadAppPath(START_PATH);
   } else {
     loadLocalPage("install.html");
   }
@@ -369,7 +383,7 @@ function runInstaller() {
     installProcess = null;
     if (code === 0 && mainWindow) {
       const ready = await ensureBackend();
-      if (ready) loadAppPath("/chat");
+      if (ready) loadAppPath(START_PATH);
     } else if (mainWindow) {
       dialog.showErrorBox("Elevate install failed", "The installer exited before Elevate was ready. Check the terminal logs and try again.");
     }
@@ -382,7 +396,7 @@ ipcMain.handle("desktop:retry", async () => {
   loadLocalPage("loading.html");
   const ready = await ensureBackend();
   if (ready) {
-    loadAppPath("/chat");
+    loadAppPath(START_PATH);
     return { ok: true };
   }
   loadLocalPage("install.html");

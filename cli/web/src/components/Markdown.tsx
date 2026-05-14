@@ -357,7 +357,7 @@ function HighlightedText({ text, terms }: { text: string; terms?: string[] }) {
     <>
       {parts.map((part, i) =>
         regex.test(part) ? (
-          <mark key={i} className="bg-warning/30 text-warning px-0.5">
+          <mark key={i} className="bg-transparent text-warning underline decoration-warning decoration-2 underline-offset-2 px-0.5">
             {part}
           </mark>
         ) : (

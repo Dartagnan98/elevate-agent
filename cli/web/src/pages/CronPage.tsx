@@ -222,7 +222,7 @@ function ScheduleFields({
     [customSchedule, dayOfMonth, dayOfWeek, scheduleMode, time],
   );
   return (
-    <div className="grid gap-3 rounded-2xl border border-border/70 bg-card/35 p-3">
+    <div className="grid gap-3 rounded-md border border-border bg-card p-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <Label htmlFor={`${idPrefix}-schedule-mode`}>{t.cron.schedule}</Label>
@@ -232,7 +232,7 @@ function ScheduleFields({
           </div>
         </div>
         <Segmented
-          className="flex flex-wrap justify-start rounded-2xl bg-background/40 p-1"
+          className="flex flex-wrap justify-start rounded-md bg-card p-1"
           onChange={(value) => setScheduleMode(value)}
           options={SCHEDULE_OPTIONS}
           size="sm"
@@ -298,7 +298,7 @@ function ScheduleFields({
         </div>
       )}
 
-      <div className="flex flex-col gap-2 rounded-xl bg-background/45 px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-2 rounded-md bg-card px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
         <span>{schedule.helper}</span>
         <code className="w-fit rounded-lg bg-foreground/10 px-2 py-1 font-mono text-[0.72rem] text-foreground">
           {schedule.expression || "schedule required"}
@@ -374,7 +374,7 @@ function EditJobForm({
         <Label htmlFor={`edit-${job.id}-prompt`}>{t.cron.prompt}</Label>
         <textarea
           id={`edit-${job.id}-prompt`}
-          className="flex min-h-[100px] w-full rounded-xl border border-input bg-card/55 px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-h-[100px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
         />
@@ -634,7 +634,7 @@ export default function CronPage() {
               <Label htmlFor="cron-prompt">{t.cron.prompt}</Label>
               <textarea
                 id="cron-prompt"
-                className="flex min-h-[80px] w-full rounded-xl border border-input bg-card/55 px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex min-h-[80px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 placeholder={t.cron.promptPlaceholder}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
@@ -805,7 +805,7 @@ export default function CronPage() {
                 </div>
               </CardContent>
               {isEditing && (
-                <div className="border-t border-border/55 bg-background/30">
+                <div className="border-t border-border bg-card">
                   <EditJobForm
                     job={job}
                     onCancel={closeEditor}

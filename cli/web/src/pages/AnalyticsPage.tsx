@@ -71,11 +71,11 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
   const maxTokens = Math.max(...daily.map((d) => d.input_tokens + d.output_tokens), 1);
 
   return (
-    <Card>
+    <Card role="region" aria-labelledby="analytics-daily-tokens">
       <CardHeader>
         <div className="flex items-center gap-2">
           <BarChart3 className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">{t.analytics.dailyTokenUsage}</CardTitle>
+          <CardTitle id="analytics-daily-tokens" className="text-base">{t.analytics.dailyTokenUsage}</CardTitle>
         </div>
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
@@ -83,7 +83,7 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
             {t.analytics.input}
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 bg-emerald-500" />
+            <div className="h-2.5 w-2.5 bg-[var(--color-success)]" />
             {t.analytics.output}
           </div>
         </div>
@@ -102,7 +102,7 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
               >
                 {/* Tooltip */}
                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 pointer-events-none">
-                  <div className="whitespace-nowrap rounded-xl border border-border bg-card px-2.5 py-1.5 text-[10px] text-foreground shadow-lg">
+                  <div className="whitespace-nowrap rounded-md border border-border bg-card px-2.5 py-1.5 text-[10px] text-foreground">
                     <div className="font-medium">{formatDate(d.day)}</div>
                     <div>{t.analytics.input}: {formatTokens(d.input_tokens)}</div>
                     <div>{t.analytics.output}: {formatTokens(d.output_tokens)}</div>
@@ -119,7 +119,7 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
                 />
                 {/* Output bar */}
                 <div
-                  className="w-full bg-emerald-500/70"
+                  className="w-full bg-[var(--color-success)]/70"
                   style={{ height: Math.max(outputH, d.output_tokens > 0 ? 1 : 0) }}
                 />
               </div>
@@ -146,11 +146,11 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
   const sorted = [...daily].reverse();
 
   return (
-    <Card>
+    <Card role="region" aria-labelledby="analytics-daily-breakdown">
       <CardHeader>
         <div className="flex items-center gap-2">
           <TrendingUp className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">{t.analytics.dailyBreakdown}</CardTitle>
+          <CardTitle id="analytics-daily-breakdown" className="text-base">{t.analytics.dailyBreakdown}</CardTitle>
         </div>
       </CardHeader>
       <CardContent>
@@ -174,7 +174,7 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
                       <span style={{ color: "var(--midground)" }}>{formatTokens(d.input_tokens)}</span>
                     </td>
                     <td className="text-right py-2 pl-4">
-                      <span className="text-emerald-400">{formatTokens(d.output_tokens)}</span>
+                      <span className="text-[var(--color-success)]">{formatTokens(d.output_tokens)}</span>
                     </td>
                   </tr>
                 );
@@ -196,11 +196,11 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
   );
 
   return (
-    <Card>
+    <Card role="region" aria-labelledby="analytics-per-model">
       <CardHeader>
         <div className="flex items-center gap-2">
           <Cpu className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">{t.analytics.perModelBreakdown}</CardTitle>
+          <CardTitle id="analytics-per-model" className="text-base">{t.analytics.perModelBreakdown}</CardTitle>
         </div>
       </CardHeader>
       <CardContent>
@@ -223,7 +223,7 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
                   <td className="text-right py-2 pl-4">
                     <span style={{ color: "var(--midground)" }}>{formatTokens(m.input_tokens)}</span>
                     {" / "}
-                    <span className="text-emerald-400">{formatTokens(m.output_tokens)}</span>
+                    <span className="text-[var(--color-success)]">{formatTokens(m.output_tokens)}</span>
                   </td>
                 </tr>
               ))}
@@ -240,11 +240,11 @@ function SkillTable({ skills }: { skills: AnalyticsSkillEntry[] }) {
   if (skills.length === 0) return null;
 
   return (
-    <Card>
+    <Card role="region" aria-labelledby="analytics-top-skills">
       <CardHeader>
         <div className="flex items-center gap-2">
           <Brain className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">{t.analytics.topSkills}</CardTitle>
+          <CardTitle id="analytics-top-skills" className="text-base">{t.analytics.topSkills}</CardTitle>
         </div>
       </CardHeader>
       <CardContent>

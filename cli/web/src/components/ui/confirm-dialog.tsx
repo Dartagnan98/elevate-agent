@@ -57,7 +57,7 @@ export function ConfirmDialog({
       }}
       className={cn(
         "fixed inset-0 z-50 flex items-center justify-center",
-        "bg-black/60 backdrop-blur-sm",
+        "bg-black/60",
         "animate-[fade-in_150ms_ease-out]",
       )}
     >
@@ -65,11 +65,11 @@ export function ConfirmDialog({
         ref={dialogRef}
         className={cn(
           "relative w-full max-w-md mx-4",
-          "overflow-hidden rounded-[1.35rem] border border-border/80 bg-card shadow-[0_24px_90px_rgba(0,0,0,0.28)]",
+          "overflow-hidden rounded-md border border-border bg-card",
           "animate-[dialog-in_180ms_ease-out]",
         )}
       >
-        <div className="flex items-start gap-3 border-b border-border/60 p-4">
+        <div className="flex items-start gap-3 border-b border-border p-4">
           {destructive && (
             <div
               aria-hidden

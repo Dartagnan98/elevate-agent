@@ -35,6 +35,7 @@ export function PageHeaderProvider({
   const displayTitle = titleOverride ?? defaultTitle;
 
   const isChatRoute = pathname === "/chat" || pathname === "/chat/";
+  const isConfigRoute = pathname === "/config" || pathname === "/config/";
 
   const value = useMemo(
     () => ({
@@ -48,13 +49,13 @@ export function PageHeaderProvider({
   return (
     <PageHeaderContext.Provider value={value}>
       <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        {!isChatRoute && (
+        {!isChatRoute && !isConfigRoute && (
           <header
             className={cn(
               "z-1 w-full shrink-0",
               "box-border h-14 min-h-14",
               "border-b border-border",
-              "bg-background-base/72 backdrop-blur-sm",
+              "bg-background",
               "overflow-hidden",
               "sm:min-h-0",
             )}

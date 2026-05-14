@@ -76,8 +76,7 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
           className={cn(
             "absolute z-50 min-w-[240px]",
             dropUp ? "left-0 bottom-full mb-1" : "right-0 top-full mt-1",
-            "overflow-hidden rounded-xl border border-border bg-card/98 backdrop-blur-sm",
-            "shadow-[0_18px_44px_-22px_rgba(0,0,0,0.65)]",
+            "overflow-hidden rounded-md border border-border bg-card",
           )}
         >
           <div className="border-b border-border px-3 py-2">

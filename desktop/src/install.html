@@ -7,89 +7,124 @@
     <style>
       :root {
         color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #07111f;
-        color: #e8eef8;
+        font-family: -apple-system, BlinkMacSystemFont, "Geist", "Inter", system-ui, sans-serif;
+        --bg: #1a1b1a;
+        --surface: #212321;
+        --border: #2a2c2a;
+        --border-strong: #353735;
+        --text: #ececec;
+        --muted: #8a8c8a;
+        --accent: #D97757;
+        --accent-hover: #c46948;
+        --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        background: var(--bg);
+        color: var(--text);
       }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background:
-          radial-gradient(circle at 50% 30%, rgba(96, 165, 250, 0.14), transparent 32%),
-          linear-gradient(145deg, #08111f, #101827);
+        background: var(--bg);
       }
       main {
-        width: min(560px, calc(100vw - 48px));
-        padding: 34px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        border-radius: 24px;
-        background: rgba(8, 17, 31, 0.78);
-        box-shadow: 0 30px 100px rgba(0, 0, 0, 0.28);
+        width: min(520px, calc(100vw - 48px));
+        padding: 36px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
       }
       .mark {
-        width: 54px;
-        height: 54px;
-        margin-bottom: 22px;
-        border: 1px solid rgba(120, 245, 191, 0.45);
-        border-radius: 17px;
+        width: 44px;
+        height: 44px;
+        margin-bottom: 24px;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
         display: grid;
         place-items: center;
-        color: #78f5bf;
-        font-size: 27px;
-        font-weight: 700;
+        background: var(--bg);
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 10px;
       }
       h1 {
-        margin: 0 0 10px;
-        font-size: 30px;
-        font-weight: 720;
-        letter-spacing: 0;
+        margin: 0 0 12px;
+        font-size: 22px;
+        font-weight: 500;
+        letter-spacing: -0.01em;
+        color: var(--text);
       }
       p {
-        margin: 0 0 22px;
-        color: #9aa8bb;
-        font-size: 15px;
+        margin: 0 0 24px;
+        color: var(--muted);
+        font-size: 14px;
         line-height: 1.6;
       }
       .actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 12px;
+        gap: 10px;
       }
       button {
-        height: 42px;
-        border: 0;
-        border-radius: 11px;
+        height: 38px;
+        border: 1px solid transparent;
+        border-radius: 6px;
         padding: 0 16px;
         font: inherit;
-        font-weight: 650;
+        font-size: 14px;
+        font-weight: 500;
         cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+      }
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
       }
       .primary {
-        background: #78f5bf;
-        color: #062013;
+        background: var(--accent);
+        color: #ffffff;
+      }
+      .primary:hover {
+        background: var(--accent-hover);
       }
       .secondary {
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: rgba(15, 23, 42, 0.8);
-        color: #e8eef8;
+        border-color: var(--border-strong);
+        background: transparent;
+        color: var(--text);
+      }
+      .secondary:hover {
+        background: var(--bg);
+        border-color: var(--muted);
       }
       #status {
-        min-height: 22px;
-        margin-top: 18px;
-        color: #9aa8bb;
-        font-size: 13px;
+        min-height: 18px;
+        margin-top: 20px;
+        font-family: var(--mono);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
       }
     </style>
   </head>
   <body>
     <main>
       <div class="mark">E</div>
+      <div class="eyebrow">SETUP REQUIRED</div>
       <h1>Elevate runtime not found</h1>
       <p>
-        The desktop shell is installed, but the local Elevate runtime is not reachable yet.
-        Install it once, then this app will start the dashboard automatically.
+        The desktop shell is installed, but the local Elevate runtime is not reachable.
+        Install it once and this app will start the dashboard automatically next launch.
       </p>
       <div class="actions">
         <button class="primary" id="install">Install Elevate</button>
@@ -100,14 +135,14 @@
     <script>
       const statusEl = document.getElementById("status");
       document.getElementById("retry").addEventListener("click", async () => {
-        statusEl.textContent = "Checking Elevate...";
+        statusEl.textContent = "CHECKING RUNTIME";
         const result = await window.elevateDesktop.retry();
-        if (!result.ok) statusEl.textContent = "Elevate is still not reachable.";
+        if (!result.ok) statusEl.textContent = "RUNTIME NOT REACHABLE";
       });
       document.getElementById("install").addEventListener("click", async () => {
-        statusEl.textContent = "Starting installer...";
+        statusEl.textContent = "STARTING INSTALLER";
         const result = await window.elevateDesktop.install();
-        statusEl.textContent = result.message || "Installer started.";
+        statusEl.textContent = (result.message || "INSTALLER STARTED").toUpperCase();
       });
     </script>
   </body>

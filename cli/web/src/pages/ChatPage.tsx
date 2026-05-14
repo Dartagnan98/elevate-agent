@@ -2549,7 +2549,7 @@ export default function ChatPage() {
         >
           <Button
             aria-label="Close activity"
-            className="absolute right-3 top-3 z-10 h-8 w-8 rounded-full bg-[var(--chat-surface-strong)] p-0 text-[var(--chat-muted-strong)] shadow-sm hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+            className="absolute right-3 top-3 z-10 h-8 w-8 rounded-sm bg-[var(--chat-surface-strong)] p-0 text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
             onClick={() => setMobilePanelOpen(false)}
             size="sm"
             variant="ghost"
@@ -2656,7 +2656,7 @@ export default function ChatPage() {
               />
               <QueuedInputStrip queuedInputs={queuedInputs} />
 
-              <div className="relative rounded-[1.45rem] bg-[var(--chat-surface)] p-2.5 shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[0_24px_80px_rgba(0,0,0,0.20),inset_0_0_0_1px_var(--chat-accent)]">
+              <div className="relative rounded-lg bg-[var(--chat-surface)] p-2.5 shadow-[inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-accent)]">
                 <SlashPopover
                   ref={commandPopoverRef}
                   agents={activeComposerAgents}
@@ -2780,7 +2780,7 @@ export default function ChatPage() {
       {mobilePreviewPortal}
       {narrow && !mobilePanelOpen && !previewArtifact && (
         <button
-          className="fixed right-4 top-4 z-40 rounded-full bg-[var(--chat-surface)] px-3 py-1.5 text-xs font-medium text-[var(--chat-muted-strong)] shadow-[0_12px_38px_rgba(0,0,0,0.18),inset_0_0_0_1px_var(--chat-border)]"
+          className="fixed right-4 top-4 z-40 rounded-sm border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-1.5 text-xs font-medium text-[var(--chat-muted-strong)]"
           onClick={() => setMobilePanelOpen(true)}
           type="button"
         >
@@ -2827,7 +2827,7 @@ function ChatTitleLine({
 function EmptyState({ state }: { state: ConnectionState }) {
   return (
     <div className="mx-auto flex min-h-[34rem] max-w-xl flex-col items-center justify-center text-center">
-      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-full bg-[var(--chat-surface)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border-strong)]">
+      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-sm border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-accent)]">
         {state === "connecting" ? (
           <Loader2 className="h-5 w-5 animate-spin" />
         ) : (
@@ -2848,7 +2848,7 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
   if (!queuedInputs.length) return null;
 
   return (
-    <div className="mb-2 rounded-2xl bg-[var(--chat-surface-soft)] px-3 py-2">
+    <div className="mb-2 rounded-md bg-[var(--chat-surface-soft)] px-3 py-2">
       <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
         <span className="font-medium text-[var(--chat-muted-strong)]">
           Queued follow-ups
@@ -2860,7 +2860,7 @@ function QueuedInputStrip({ queuedInputs }: { queuedInputs: QueuedInput[] }) {
           <div
             key={item.id}
             className={cn(
-              "flex items-start gap-2 rounded-xl px-2.5 py-1.5 text-xs",
+              "flex items-start gap-2 rounded-md px-2.5 py-1.5 text-xs",
               item.status === "error"
                 ? "bg-[color-mix(in_srgb,var(--chat-danger)_14%,var(--chat-bg))] text-[var(--chat-danger)]"
                 : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
@@ -2930,7 +2930,7 @@ function RunningWorkStrip({
   ].slice(0, 6);
 
   return (
-    <div className="mb-2 overflow-hidden rounded-[1.35rem] bg-[var(--chat-surface)] shadow-[0_18px_58px_rgba(0,0,0,0.18),inset_0_0_0_1px_var(--chat-border-strong)]">
+    <div className="mb-2 overflow-hidden rounded-lg bg-[var(--chat-surface)] shadow-[inset_0_0_0_1px_var(--chat-border-strong)]">
       <div className="flex min-h-11 items-center gap-2 px-3 py-2">
         <button
           type="button"
@@ -2940,7 +2940,7 @@ function RunningWorkStrip({
           <SquareTerminal className="h-4 w-4 shrink-0 opacity-75" />
           <span className="min-w-0 truncate font-medium">{title}</span>
           {runningSubagents.length > 0 && (
-            <span className="hidden shrink-0 rounded-full bg-[var(--chat-surface-soft)] px-2 py-0.5 text-[0.66rem] text-[var(--chat-muted)] sm:inline-flex">
+            <span className="hidden shrink-0 rounded-sm bg-[var(--chat-surface-soft)] px-2 py-0.5 text-[0.66rem] text-[var(--chat-muted)] sm:inline-flex">
               {plural(runningSubagents.length, "subagent")}
             </span>
           )}
@@ -2950,7 +2950,7 @@ function RunningWorkStrip({
           aria-label="Stop running work"
           type="button"
           onClick={onInterrupt}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
           title="Stop the current response"
         >
           <span className="h-2.5 w-2.5 rounded-[0.18rem] bg-current" />
@@ -2960,7 +2960,7 @@ function RunningWorkStrip({
           aria-label={open ? "Hide running work details" : "Show running work details"}
           type="button"
           onClick={() => setOpen((value) => !value)}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
         >
           <ChevronDown
             className={cn("h-4 w-4 transition-transform", open && "rotate-180")}
@@ -2976,7 +2976,7 @@ function RunningWorkStrip({
               return (
                 <div
                   key={row.id}
-                  className="flex min-h-7 items-center gap-2 rounded-xl px-2 py-1 text-[0.76rem] text-[var(--chat-muted-strong)]"
+                  className="flex min-h-7 items-center gap-2 rounded-md px-2 py-1 text-[0.76rem] text-[var(--chat-muted-strong)]"
                 >
                   <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />
                   <span className="shrink-0 font-medium">{row.label}</span>
@@ -3079,7 +3079,7 @@ function ComposerRichInputLayer({
               key={`${index}-${segment.text}`}
             >
               {segment.text}
-              <span className="absolute left-0 top-[0.12rem] inline-flex max-w-[min(24rem,calc(100vw-4rem))] items-center gap-1.5 rounded-full bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.82rem] font-medium leading-5 text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+              <span className="absolute left-0 top-[0.12rem] inline-flex max-w-[min(24rem,calc(100vw-4rem))] items-center gap-1.5 rounded-sm border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-1.5 py-0.5 text-[0.82rem] font-medium leading-5 text-[var(--chat-text)]">
                 <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-accent)]" />
                 <span className="min-w-0 truncate">{segment.label}</span>
               </span>
@@ -3104,7 +3104,7 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
 
   return (
     <span
-      className="inline-flex h-7 items-center gap-1.5 rounded-full bg-[var(--chat-surface-soft)] px-2.5 text-[var(--chat-muted-strong)]"
+      className="inline-flex h-7 items-center gap-1.5 rounded-sm bg-[var(--chat-surface-soft)] px-2.5 text-[var(--chat-muted-strong)]"
       title={`Context left: ${label}. ${detail}`}
     >
       <svg
@@ -3194,7 +3194,7 @@ function ComposerActionBar({
             <>
               <div className="fixed inset-0 z-20" onClick={onToggleAgentMenu} />
               <div
-                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[18rem] overflow-hidden rounded-2xl bg-[var(--chat-surface)] p-1.5 text-left shadow-[0_18px_54px_rgba(0,0,0,0.22),inset_0_0_0_1px_var(--chat-border-strong)]"
+                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[18rem] overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1.5 text-left"
                 onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onToggleAgentMenu(); } }}
                 role="menu"
               >
@@ -3205,7 +3205,7 @@ function ComposerActionBar({
                     role="menuitem"
                     onClick={() => onSelectAgent(agent)}
                     className={cn(
-                      "flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
+                      "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
                       selectedAgent.id === agent.id
                         ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
                         : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
@@ -3276,9 +3276,9 @@ function ComposerActionBar({
         <button
           aria-label={busy ? "Interrupt response" : "Send message"}
           className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all",
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-sm transition-all",
             busy
-              ? "bg-[var(--chat-text)] text-[var(--chat-bg)] shadow-[0_8px_22px_rgba(0,0,0,0.22)] hover:scale-[1.02]"
+              ? "bg-[var(--chat-text)] text-[var(--chat-bg)]"
               : canSend
                 ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
                 : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
@@ -3341,7 +3341,7 @@ function MessageRow({
           className={cn(
             "max-w-full text-sm leading-7",
             isUser
-              ? "inline-block rounded-2xl bg-[var(--chat-user)] px-3.5 py-2 text-[var(--chat-text)] shadow-sm"
+              ? "inline-block rounded-md bg-[var(--chat-user)] px-3.5 py-2 text-[var(--chat-text)] shadow-sm"
               : message.role === "system"
                 ? "rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_32%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] px-3 py-2 text-[var(--chat-text)]"
                 : "text-[var(--chat-text)]",
@@ -3470,9 +3470,9 @@ function InlineArtifactCard({
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
 
   return (
-    <div className="max-w-[38rem] rounded-2xl bg-[var(--chat-surface)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)]">
+    <div className="max-w-[38rem] rounded-md bg-[var(--chat-surface)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)]">
       <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
           <FileText className="h-4 w-4" />
         </div>
         <button
@@ -3488,14 +3488,14 @@ function InlineArtifactCard({
           </div>
         </button>
         <button
-          className="rounded-full border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          className="rounded-sm border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           onClick={() => onOpenArtifact(artifact)}
           type="button"
         >
           Open
         </button>
         <button
-          className="rounded-full border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          className="rounded-sm border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           onClick={() => copy(copyText)}
           type="button"
         >
@@ -3671,9 +3671,9 @@ function ArtifactPreviewPane({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.65rem] bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[0_32px_90px_rgba(0,0,0,0.26),inset_0_0_0_1px_var(--chat-border)] ring-1 ring-white/[0.025]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
       <header className="flex shrink-0 items-start gap-3 px-4 pb-3 pt-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[var(--chat-surface-soft)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[var(--chat-surface-soft)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
           <FileText className="h-4.5 w-4.5" />
         </div>
         <div className="min-w-0 flex-1">
@@ -3681,7 +3681,7 @@ function ArtifactPreviewPane({
             <h2 className="truncate text-[0.95rem] font-semibold leading-5">
               {artifact.title}
             </h2>
-            <span className="shrink-0 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[0.65rem] text-[var(--chat-muted)]">
+            <span className="shrink-0 rounded-sm bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[0.65rem] text-[var(--chat-muted)]">
               {fileExtension(pathForKind).replace(".", "").toUpperCase() || artifact.kind}
             </span>
           </div>
@@ -3692,7 +3692,7 @@ function ArtifactPreviewPane({
         <div className="flex shrink-0 items-center gap-1.5">
           <Button
             aria-label="Open preview externally"
-            className="h-8 w-8 rounded-full p-0"
+            className="h-8 w-8 rounded-sm p-0"
             disabled={!blobUrl}
             onClick={openExternal}
             size="sm"
@@ -3704,7 +3704,7 @@ function ArtifactPreviewPane({
           </Button>
           <Button
             aria-label="Copy artifact path"
-            className="h-8 w-8 rounded-full p-0"
+            className="h-8 w-8 rounded-sm p-0"
             onClick={() => copy(copyText)}
             size="sm"
             title={copied ? "Copied" : "Copy"}
@@ -3719,7 +3719,7 @@ function ArtifactPreviewPane({
           </Button>
           <Button
             aria-label="Close preview"
-            className="h-8 w-8 rounded-full p-0"
+            className="h-8 w-8 rounded-sm p-0"
             onClick={onClose}
             size="sm"
             type="button"
@@ -3735,11 +3735,11 @@ function ArtifactPreviewPane({
           <div className="flex h-full flex-col gap-3 p-6">
             <div className="h-4 w-2/3 animate-pulse rounded-lg bg-[var(--chat-border)]" />
             <div className="h-4 w-1/2 animate-pulse rounded-lg bg-[var(--chat-border)]" />
-            <div className="mt-2 flex-1 animate-pulse rounded-2xl bg-[var(--chat-border)]" />
+            <div className="mt-2 flex-1 animate-pulse rounded-md bg-[var(--chat-border)]" />
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center p-6">
-            <div className="max-w-sm rounded-2xl bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_34%,transparent)]">
+            <div className="max-w-sm rounded-md bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_34%,transparent)]">
               <div className="font-semibold">Could not preview this file</div>
               <div className="mt-1 break-words text-xs opacity-90">{error}</div>
             </div>
@@ -3779,7 +3779,7 @@ function ArtifactPreviewPane({
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <div className="max-w-sm text-center">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--chat-surface)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md bg-[var(--chat-surface)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
                 <FileText className="h-5 w-5" />
               </div>
               <div className="mt-3 text-sm font-semibold">
@@ -3827,7 +3827,7 @@ function ArtifactCard({
   return (
     <div
       className={cn(
-        "group rounded-xl px-1 py-1.5 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
+        "group rounded-md px-1 py-1.5 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
         artifact.status === "error" &&
           "bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]",
       )}
@@ -3916,7 +3916,7 @@ function ActivityTimelineRow({ item }: { item: ActivityTimelineItem }) {
       <button
         aria-expanded={open}
         className={cn(
-          "group flex w-full items-start gap-2.5 rounded-xl py-1.5 text-left transition-colors",
+          "group flex w-full items-start gap-2.5 rounded-md py-1.5 text-left transition-colors",
           hasDetails && "hover:text-[var(--chat-text)]",
         )}
         disabled={!hasDetails}
@@ -3984,7 +3984,7 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
       <button
         aria-expanded={open}
         className={cn(
-          "group flex w-full items-start gap-3 rounded-xl px-1 py-1.5 text-left transition-colors",
+          "group flex w-full items-start gap-3 rounded-md px-1 py-1.5 text-left transition-colors",
           hasDetails && "hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
         )}
         disabled={!hasDetails}
@@ -4079,7 +4079,7 @@ function ActivityPanel({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.75rem] border border-[color-mix(in_srgb,var(--chat-border)_72%,transparent)] bg-[color-mix(in_srgb,var(--chat-surface)_92%,var(--chat-bg))] p-5 normal-case shadow-[0_28px_84px_rgba(0,0,0,0.22)] backdrop-blur-xl">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-[color-mix(in_srgb,var(--chat-border)_72%,transparent)] bg-[color-mix(in_srgb,var(--chat-surface)_98%,var(--chat-bg))] p-5 normal-case">
       <div className="mb-4 flex shrink-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <span
@@ -4096,13 +4096,13 @@ function ActivityPanel({
       </div>
 
       {banner && (
-        <section className="mb-4 rounded-2xl bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]">
+        <section className="mb-4 rounded-md bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]">
           <div className="flex items-start gap-2 text-sm text-[var(--chat-danger)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <div className="break-words">{banner}</div>
               <button
-                className="mt-2 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_12%,var(--chat-bg))] px-2.5 py-1 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
+                className="mt-2 rounded-sm bg-[color-mix(in_srgb,var(--chat-danger)_12%,var(--chat-bg))] px-2.5 py-1 text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
                 onClick={onReconnect}
                 type="button"
               >
@@ -4164,7 +4164,7 @@ function PortalSectionHeader({
           {label}
         </span>
         {typeof count === "number" && (
-          <span className="rounded-full bg-[color-mix(in_srgb,var(--chat-surface-strong)_48%,transparent)] px-1.5 py-0.5 text-[0.64rem] leading-none text-[var(--chat-muted)]">
+          <span className="rounded-sm bg-[color-mix(in_srgb,var(--chat-surface-strong)_48%,transparent)] px-1.5 py-0.5 text-[0.64rem] leading-none text-[var(--chat-muted)]">
             {count}
           </span>
         )}

@@ -12,11 +12,13 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
 // Shared typography / layout presets
 // ---------------------------------------------------------------------------
 
-/** Sans stack for the local app shell: polished on macOS/Windows, no webfont dependency. */
+/** Sans stack for the local app shell. Geist Sans is the primary UI font
+ *  (Claude Code dashboard aesthetic); imported via Google Fonts in index.css.
+ *  Falls back to Inter, then platform sans, then system-ui. */
 const SYSTEM_SANS =
-  'Aptos, "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif';
+  '"Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif';
 const SYSTEM_MONO =
-  'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
+  '"Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
 
 const DEFAULT_TYPOGRAPHY: ThemeTypography = {
   fontSans: SYSTEM_SANS,
@@ -38,48 +40,48 @@ const DEFAULT_LAYOUT: ThemeLayout = {
 export const darkTheme: DashboardTheme = {
   name: "dark",
   label: "Dark",
-  description: "Navy workspace with copper real-estate controls",
+  description: "Warm-tinted dark workspace with terracotta accent",
   palette: {
-    background: { hex: "#101827", alpha: 1 },
-    midground: { hex: "#f4f7f5", alpha: 1 },
+    background: { hex: "#1a1b1a", alpha: 1 },
+    midground: { hex: "#ececec", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(206, 130, 62, 0.14)",
+    warmGlow: "rgba(217, 119, 87, 0.14)",
     noiseOpacity: 0,
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,
   colorOverrides: {
-    card: "color-mix(in srgb, #f4f7f5 5%, #101827)",
-    cardForeground: "#f4f7f5",
-    popover: "color-mix(in srgb, #f4f7f5 6%, #101827)",
-    popoverForeground: "#f4f7f5",
-    primary: "#CE823E",
-    primaryForeground: "#101827",
-    secondary: "color-mix(in srgb, #f4f7f5 9%, #101827)",
-    secondaryForeground: "#f4f7f5",
-    muted: "color-mix(in srgb, #f4f7f5 8%, #101827)",
-    mutedForeground: "color-mix(in srgb, #f4f7f5 58%, transparent)",
-    accent: "color-mix(in srgb, #CE823E 14%, #101827)",
-    accentForeground: "#f4f7f5",
+    card: "#212321",
+    cardForeground: "#ececec",
+    popover: "#212321",
+    popoverForeground: "#ececec",
+    primary: "#D97757",
+    primaryForeground: "#1a1b1a",
+    secondary: "#2a2c2a",
+    secondaryForeground: "#ececec",
+    muted: "#2a2c2a",
+    mutedForeground: "color-mix(in srgb, #ececec 58%, transparent)",
+    accent: "color-mix(in srgb, #D97757 14%, #1a1b1a)",
+    accentForeground: "#ececec",
     destructive: "#ff827d",
-    destructiveForeground: "#101827",
+    destructiveForeground: "#1a1b1a",
     success: "#44c487",
     warning: "#f3bf67",
-    border: "color-mix(in srgb, #f4f7f5 14%, transparent)",
-    input: "color-mix(in srgb, #f4f7f5 16%, transparent)",
-    ring: "#CE823E",
+    border: "#2a2c2a",
+    input: "#2a2c2a",
+    ring: "#D97757",
   },
 };
 
 export const lightTheme: DashboardTheme = {
   name: "light",
   label: "Light",
-  description: "Clean real-estate workspace with navy and copper accents",
+  description: "Clean real-estate workspace with navy and terracotta accents",
   palette: {
     background: { hex: "#f7f7f4", alpha: 1 },
     midground: { hex: "#1b2a4a", alpha: 1 },
     foreground: { hex: "#ffffff", alpha: 0 },
-    warmGlow: "rgba(206, 130, 62, 0.10)",
+    warmGlow: "rgba(217, 119, 87, 0.10)",
     noiseOpacity: 0,
   },
   typography: DEFAULT_TYPOGRAPHY,
@@ -103,7 +105,7 @@ export const lightTheme: DashboardTheme = {
     warning: "#a96324",
     border: "#dde2db",
     input: "#cdd6cc",
-    ring: "#CE823E",
+    ring: "#D97757",
   },
 };
 

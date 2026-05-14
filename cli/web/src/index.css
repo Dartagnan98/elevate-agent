@@ -1,3 +1,9 @@
+/* Geist Sans — primary UI font, matches Claude Code dashboard aesthetic.
+   Geist Mono — used by .font-mono-ui for structural labels (column headers,
+   timestamps, key shortcuts, status codes). MUST stay first so CSS @import
+   rules precede @layer declarations from Tailwind. */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
+
 @import 'tailwindcss';
 @import '@nous-research/ui/styles/globals.css';
 
@@ -46,23 +52,25 @@
   --foreground: color-mix(in srgb, #ffffff 0%, transparent);
   --foreground-base: #ffffff;
   --foreground-alpha: 0;
-  --midground: color-mix(in srgb, #f4f7f5 100%, transparent);
-  --midground-base: #f4f7f5;
+  --midground: color-mix(in srgb, #ececec 100%, transparent);
+  --midground-base: #ececec;
   --midground-alpha: 1;
-  --background: color-mix(in srgb, #101827 100%, transparent);
-  --background-base: #101827;
+  --background: color-mix(in srgb, #1a1b1a 100%, transparent);
+  --background-base: #1a1b1a;
   --background-alpha: 1;
 
   /* Consumed by <Backdrop />; also theme-switchable. */
-  --warm-glow: rgba(206, 130, 62, 0.14);
+  --warm-glow: rgba(217, 119, 87, 0.14);
   --noise-opacity-mul: 0;
 
-  /* Typography tokens — rewritten by ThemeProvider. Defaults match the
-     system stack so themes that don't override look native. */
-  --theme-font-sans: Aptos, "Avenir Next", "Segoe UI Variable", "Segoe UI",
-    system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --theme-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo,
-    Consolas, monospace;
+  /* Typography tokens — rewritten by ThemeProvider. Geist Sans is the primary
+     UI font (Claude Code dashboard aesthetic); Geist Mono is used for all
+     structural labels via the .font-mono-ui utility class. */
+  --theme-font-sans: "Geist", "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI Variable", "Segoe UI", system-ui, "Helvetica Neue", Arial,
+    sans-serif;
+  --theme-font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono",
+    "Cascadia Mono", Menlo, Consolas, monospace;
   --theme-font-display: var(--theme-font-sans);
   --theme-base-size: 15px;
   --theme-line-height: 1.55;
@@ -78,8 +86,8 @@
   --font-courier: var(--theme-font-sans);
 
   /* Layout tokens. */
-  --radius: 0.5rem;
-  --theme-radius: 0.5rem;
+  --radius: 0.375rem;
+  --theme-radius: 0.375rem;
   --theme-spacing-mul: 1;
   --theme-density: comfortable;
 
@@ -95,7 +103,7 @@
   --chat-muted: color-mix(in srgb, var(--midground-base) 58%, transparent);
   --chat-muted-strong: color-mix(in srgb, var(--midground-base) 72%, transparent);
   --chat-user: color-mix(in srgb, var(--midground-base) 8%, var(--background-base));
-  --chat-accent: var(--color-primary, #CE823E);
+  --chat-accent: var(--color-primary, #D97757);
   --chat-accent-soft: color-mix(in srgb, var(--chat-accent) 18%, var(--background-base));
   --chat-success: var(--color-success, #44c487);
   --chat-warning: var(--color-warning, #f3bf67);
@@ -103,7 +111,7 @@
   --sidebar-bg: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
   --sidebar-row: color-mix(in srgb, var(--midground-base) 4%, transparent);
   --sidebar-row-hover: color-mix(in srgb, var(--midground-base) 8%, transparent);
-  --sidebar-row-active: color-mix(in srgb, var(--color-primary, #7fb2ff) 15%, var(--midground-base) 7%);
+  --sidebar-row-active: color-mix(in srgb, var(--color-primary, #D97757) 15%, var(--midground-base) 7%);
   --sidebar-border: color-mix(in srgb, var(--midground-base) 10%, transparent);
   --sidebar-text: color-mix(in srgb, var(--midground-base) 82%, transparent);
   --sidebar-text-strong: color-mix(in srgb, var(--midground-base) 94%, transparent);
@@ -147,6 +155,14 @@ html .font-courier {
   font-family: var(--theme-font-sans);
 }
 
+/* Structural labels — column headers, timestamps, key shortcuts, status
+   codes. Claude Code dashboard aesthetic: micro-text in mono, full-width sans
+   above. Numbers stay tabular for column alignment. */
+.font-mono-ui {
+  font-family: var(--theme-font-mono);
+  font-feature-settings: "tnum" on, "lnum" on;
+}
+
 /* Shared dashboard page skin. The chat view defines the strongest visual
    language, so non-chat pages borrow the same soft panels, muted separators,
    and native-feeling controls. */
@@ -157,15 +173,6 @@ html .font-courier {
   --page-border: var(--chat-border);
   --page-border-strong: var(--chat-border-strong);
   color: var(--chat-text);
-}
-
-.elevate-page-shell .uppercase {
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.elevate-page-shell [class*="tracking-["] {
-  letter-spacing: 0;
 }
 
 .elevate-page-shell [class*="border-border"] {
@@ -183,28 +190,27 @@ html .font-courier {
 }
 
 .elevate-page-shell textarea {
-  border-radius: 1rem;
+  border-radius: 0.375rem;
   border-color: var(--page-border-strong);
   background: color-mix(in srgb, var(--midground-base) 3%, var(--background-base));
 }
 
 .elevate-page-shell pre {
-  border-radius: 1rem;
+  border-radius: 0.375rem;
   border-color: var(--page-border);
   background: color-mix(in srgb, var(--midground-base) 3%, var(--background-base));
 }
 
 .elevate-page-shell code {
-  border-radius: 0.55rem;
+  border-radius: 0.25rem;
   background: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
   padding-inline: 0.35em;
   padding-block: 0.12em;
 }
 
 .elevate-docs-shell iframe {
-  border-radius: 1.35rem;
+  border-radius: 0.5rem;
   border-color: var(--page-border-strong);
-  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.22);
 }
 
 /* Density: scale the shadcn spacing utilities via a multiplier. The DS
@@ -238,7 +244,7 @@ code { font-size: 0.875rem; }
 
   --color-card: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
   --color-card-foreground: var(--midground);
-  --color-primary: #CE823E;
+  --color-primary: #D97757;
   --color-primary-foreground: var(--background-base);
   --color-secondary: color-mix(in srgb, var(--midground-base) 9%, var(--background-base));
   --color-secondary-foreground: var(--midground);
@@ -250,9 +256,9 @@ code { font-size: 0.875rem; }
   --color-destructive-foreground: var(--background-base);
   --color-success: #44c487;
   --color-warning: #f3bf67;
-  --color-border: color-mix(in srgb, var(--midground-base) 15%, transparent);
-  --color-input: color-mix(in srgb, var(--midground-base) 15%, transparent);
-  --color-ring: #CE823E;
+  --color-border: #2a2c2a;
+  --color-input: #2a2c2a;
+  --color-ring: #D97757;
   --color-popover: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
   --color-popover-foreground: var(--midground);
 
@@ -284,20 +290,14 @@ code { font-size: 0.875rem; }
 }
 
 @keyframes pack-unlock-rise {
-  from { opacity: 0; transform: translateY(10px) scale(0.985); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes pack-unlock-sheen {
-  from { transform: translateX(-130%) rotate(8deg); opacity: 0; }
-  18%  { opacity: 0.45; }
-  to   { transform: translateX(260%) rotate(8deg); opacity: 0; }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 @keyframes pack-unlock-save {
-  0%   { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 35%, transparent); }
-  45%  { transform: scale(1.08); box-shadow: 0 0 0 10px color-mix(in srgb, var(--color-success) 0%, transparent); }
-  100% { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 0%, transparent); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 28%, transparent); }
+  60%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--color-success) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 0%, transparent); }
 }
 
 @keyframes elevate-shimmer-sweep {
@@ -331,23 +331,7 @@ code { font-size: 0.875rem; }
 }
 
 .pack-unlock-card {
-  animation: pack-unlock-rise 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.pack-unlock-panel::before {
-  content: '';
-  position: absolute;
-  inset-block: -20%;
-  left: 0;
-  width: 26%;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--midground-base) 16%, transparent),
-    transparent
-  );
-  animation: pack-unlock-sheen 900ms cubic-bezier(0.22, 1, 0.36, 1) 180ms both;
+  animation: pack-unlock-rise 150ms ease-out both;
 }
 
 .pack-unlock-check {
@@ -356,7 +340,7 @@ code { font-size: 0.875rem; }
 }
 
 .pack-unlock-check.is-saved {
-  animation: pack-unlock-save 720ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: pack-unlock-save 480ms ease-out;
 }
 
 .pack-step-enter {
@@ -365,7 +349,6 @@ code { font-size: 0.875rem; }
 
 @media (prefers-reduced-motion: reduce) {
   .pack-unlock-card,
-  .pack-unlock-panel::before,
   .pack-unlock-check.is-saved,
   .pack-step-enter {
     animation: none !important;

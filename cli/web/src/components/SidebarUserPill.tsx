@@ -62,9 +62,8 @@ export function SidebarUserPill() {
       {open && (
         <div
           className={cn(
-            "absolute bottom-full left-0 right-0 mb-1 rounded-xl",
+            "absolute bottom-full left-0 right-0 mb-1 rounded-md",
             "border border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]",
-            "shadow-lg shadow-black/30",
             "animate-in fade-in slide-in-from-bottom-2 duration-150",
             "z-50 overflow-hidden",
           )}

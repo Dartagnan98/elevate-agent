@@ -43,7 +43,7 @@ export function PlatformsCard({ platforms }: PlatformsCardProps) {
           return (
             <div
               key={name}
-              className="flex w-full flex-col gap-2 rounded-2xl border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
+              className="flex w-full flex-col gap-2 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
             >
               <div className="flex items-center gap-3 min-w-0 w-full">
                 <IconComponent

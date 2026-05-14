@@ -43,7 +43,7 @@ export default function DocsPage() {
         src={ELEVATE_DOCS_URL}
         className={cn(
           "min-h-0 w-full min-w-0 flex-1",
-          "rounded-[1.35rem] border border-current/20",
+          "rounded-lg border border-current/20",
           "bg-background",
         )}
         sandbox="allow-scripts allow-same-origin allow-popups allow-forms"

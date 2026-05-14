@@ -572,9 +572,8 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
       <div
         aria-activedescendant={activeItemId}
         className={cn(
-          "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[20rem] overflow-y-auto rounded-2xl p-1.5",
-          "bg-[var(--chat-surface-soft)] text-[var(--chat-text)]",
-          "shadow-[0_18px_54px_rgba(0,0,0,0.32),inset_0_0_0_1px_var(--chat-border)] backdrop-blur-xl",
+          "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[20rem] overflow-y-auto rounded-md p-1.5",
+          "border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] text-[var(--chat-text)]",
         )}
         id={listboxId}
         role="listbox"
@@ -595,7 +594,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
               <button
                 aria-selected={active}
                 className={cn(
-                  "grid min-h-8 w-full grid-cols-[1.35rem_minmax(0,auto)_minmax(0,1fr)_auto] items-center gap-1.5 rounded-xl px-2.5 py-1 text-left transition-colors",
+                  "grid min-h-8 w-full grid-cols-[1.35rem_minmax(0,auto)_minmax(0,1fr)_auto] items-center gap-1.5 rounded-sm px-2.5 py-1 text-left transition-colors",
                   active
                     ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)]"
                     : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
@@ -616,7 +615,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
                   </span>
                 )}
                 {item.kind === "skill" && (
-                  <span className="rounded-full px-1.5 py-0.5 text-[0.62rem] leading-none text-[var(--chat-muted)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+                  <span className="rounded-sm border border-[var(--chat-border)] px-1.5 py-0.5 text-[0.62rem] leading-none text-[var(--chat-muted)]">
                     Personal
                   </span>
                 )}

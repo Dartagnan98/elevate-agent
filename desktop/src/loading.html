@@ -7,68 +7,85 @@
     <style>
       :root {
         color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #07111f;
-        color: #e8eef8;
+        font-family: -apple-system, BlinkMacSystemFont, "Geist", "Inter", system-ui, sans-serif;
+        --bg: #1a1b1a;
+        --surface: #212321;
+        --border: #2a2c2a;
+        --text: #ececec;
+        --muted: #8a8c8a;
+        --accent: #D97757;
+        --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        background: var(--bg);
+        color: var(--text);
       }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background:
-          radial-gradient(circle at 50% 35%, rgba(54, 211, 153, 0.16), transparent 30%),
-          linear-gradient(145deg, #08111f, #101827);
+        background: var(--bg);
       }
       main {
-        width: min(460px, calc(100vw - 48px));
+        width: min(420px, calc(100vw - 48px));
         text-align: center;
       }
       .mark {
-        width: 58px;
-        height: 58px;
-        margin: 0 auto 22px;
-        border: 1px solid rgba(120, 245, 191, 0.45);
-        border-radius: 18px;
+        width: 48px;
+        height: 48px;
+        margin: 0 auto 28px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
         display: grid;
         place-items: center;
-        color: #78f5bf;
-        font-size: 28px;
-        font-weight: 700;
-        box-shadow: 0 24px 70px rgba(20, 184, 166, 0.18);
+        background: var(--surface);
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
       }
       h1 {
-        margin: 0 0 8px;
-        font-size: 30px;
-        font-weight: 720;
-        letter-spacing: 0;
+        margin: 0 0 10px;
+        font-size: 22px;
+        font-weight: 500;
+        letter-spacing: -0.01em;
+        color: var(--text);
       }
       p {
         margin: 0;
-        color: #9aa8bb;
-        font-size: 15px;
-        line-height: 1.6;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+      .status {
+        margin-top: 28px;
+        font-family: var(--mono);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
       }
       .bar {
         position: relative;
-        height: 4px;
-        margin: 26px auto 0;
+        height: 2px;
+        margin: 14px auto 0;
+        max-width: 220px;
         overflow: hidden;
-        border-radius: 999px;
-        background: rgba(154, 168, 187, 0.18);
+        border-radius: 2px;
+        background: var(--border);
       }
       .bar::after {
         content: "";
         position: absolute;
         inset: 0;
-        width: 42%;
+        width: 38%;
         border-radius: inherit;
-        background: linear-gradient(90deg, #78f5bf, #60a5fa);
-        animation: sweep 1.15s ease-in-out infinite;
+        background: var(--accent);
+        animation: sweep 1.4s ease-in-out infinite;
       }
       @keyframes sweep {
         0% { transform: translateX(-110%); }
-        100% { transform: translateX(250%); }
+        100% { transform: translateX(260%); }
       }
     </style>
   </head>
@@ -76,7 +93,8 @@
     <main>
       <div class="mark">E</div>
       <h1>Starting Elevate</h1>
-      <p>The desktop app is bringing the local agent runtime online.</p>
+      <p>Bringing the local agent runtime online.</p>
+      <div class="status">BOOTING RUNTIME</div>
       <div class="bar" aria-hidden="true"></div>
     </main>
   </body>
