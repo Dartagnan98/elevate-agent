@@ -29,7 +29,6 @@ import {
   BriefcaseBusiness,
   Building2,
   ChevronDown,
-  ChevronRight,
   Clock,
   Code,
   Copy,
@@ -1792,28 +1791,20 @@ function AutomationsSection({
   const liveCount = sessions.filter((session) => session.is_active).length;
   return (
     <div className="mt-3 lg:mt-2.5">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="flex min-h-11 w-full items-center gap-1.5 rounded px-2 py-2 text-left text-[0.75rem] font-semibold text-[var(--sidebar-text-muted)] hover:text-[var(--sidebar-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40 lg:min-h-8 lg:py-1"
-      >
-        {open ? (
-          <ChevronDown className="h-3 w-3 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 shrink-0" />
-        )}
-        <span>Automations</span>
-        <span className="ml-1 text-[0.72rem] font-normal text-[var(--sidebar-text-muted)] tabular-nums">
-          {sessions.length}
-        </span>
-        {liveCount > 0 && (
-          <span className="ml-auto flex items-center gap-1 text-[0.72rem] font-medium text-primary">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            {liveCount} live
+      <SidebarSectionLabel collapsed={!open} onToggle={onToggle}>
+        <span className="flex w-full items-center gap-1.5">
+          <span>Automations</span>
+          <span className="font-normal normal-case tracking-normal text-[var(--sidebar-text-muted)]/80 tabular-nums">
+            {sessions.length}
           </span>
-        )}
-      </button>
+          {liveCount > 0 && (
+            <span className="ml-auto flex items-center gap-1 normal-case tracking-normal text-primary">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {liveCount} live
+            </span>
+          )}
+        </span>
+      </SidebarSectionLabel>
       {open && (
         <div className="mt-1 space-y-0.5 lg:mt-0.5">
           {sessions.map((session) => (
