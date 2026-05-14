@@ -603,10 +603,9 @@ export default function App() {
             <div
               className={cn(
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
-                isConfigRoute ? "p-0" : "px-3 sm:px-6",
-                isChatRoute
-                  ? "pb-3 pt-1 sm:pb-4 sm:pt-2 lg:pt-4"
-                  : !isConfigRoute && "pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
+                isConfigRoute && "p-0",
+                isChatRoute && "p-0 bg-[var(--chat-bg)]",
+                !isConfigRoute && !isChatRoute && "px-3 sm:px-6 pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
                 isDocsRoute && "min-h-0 flex-1",
               )}
             >
@@ -837,6 +836,15 @@ function DesktopSidebar({
     });
   }, []);
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const openSearch = useCallback(() => {
+    setSearchOpen(true);
+    requestAnimationFrame(() => searchRef.current?.focus());
+  }, []);
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setQuery("");
+  }, []);
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => readPinnedSessionIds());
   const [unreadIds, setUnreadIds] = useState<string[]>(() => readUnreadSessionIds());
   const [archivedIds, setArchivedIds] = useState<string[]>(() =>
@@ -953,6 +961,19 @@ function DesktopSidebar({
   }, [sessionMenu]);
 
   useEffect(() => {
+    const onOpenMenu = (event: Event) => {
+      const ce = event as CustomEvent<{ sessionId: string; x: number; y: number }>;
+      const detail = ce.detail;
+      if (!detail?.sessionId) return;
+      const match = sessions.find((s) => s.id === detail.sessionId);
+      if (!match) return;
+      setSessionMenu({ session: match, x: detail.x, y: detail.y });
+    };
+    window.addEventListener("elevate:open-session-menu", onOpenMenu);
+    return () => window.removeEventListener("elevate:open-session-menu", onOpenMenu);
+  }, [sessions]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
@@ -964,11 +985,11 @@ function DesktopSidebar({
         tagName === "SELECT";
       if (isTyping) return;
       event.preventDefault();
-      searchRef.current?.focus();
+      openSearch();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [openSearch]);
 
   const filteredSessions = useMemo(() => {
     const visibleSessions = sessions.filter(
@@ -989,14 +1010,10 @@ function DesktopSidebar({
     });
   }, [archivedIds, query, sessions]);
 
-  const pinnedSessions = filteredSessions.filter((session) =>
-    pinnedIds.includes(session.id),
-  );
-  const liveSessions = filteredSessions.filter((session) => session.is_active);
-  const spotlightSessions = (pinnedSessions.length ? pinnedSessions : liveSessions)
-    .filter((session) => !isCronSession(session))
-    .slice(0, 4);
-  const spotlightIds = new Set(spotlightSessions.map((session) => session.id));
+  const pinnedSessions = filteredSessions
+    .filter((session) => pinnedIds.includes(session.id) && !isCronSession(session))
+    .slice(0, 8);
+  const spotlightIds = new Set(pinnedSessions.map((session) => session.id));
   const chatSessions = filteredSessions
     .filter((session) => !spotlightIds.has(session.id) && !isCronSession(session))
     .slice(0, 18);
@@ -1239,14 +1256,14 @@ function DesktopSidebar({
         />
       )}
       <div
-        className="relative flex h-[52px] shrink-0 items-center pl-[5.25rem] pr-3 lg:pl-[5.25rem]"
+        className="relative flex h-11 shrink-0 items-center pl-[5.25rem] pr-3 lg:pl-[5.25rem]"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        <div className="flex h-9 w-[9.75rem] min-w-0 items-center">
+        <div className="flex h-7 w-[9.75rem] min-w-0 items-center">
           <img
             src={sidebarLogoSrc}
             alt="Elevation"
-            className="h-8 w-full object-contain"
+            className="h-6 w-full object-contain"
             draggable={false}
           />
         </div>
@@ -1265,19 +1282,38 @@ function DesktopSidebar({
           <X className="h-4 w-4" />
         </button>
 
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          aria-label="Collapse sidebar"
+        <div
+          className="absolute right-2 top-1/2 hidden lg:flex -translate-y-1/2 items-center gap-1"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-          className={cn(
-            "absolute right-2 top-1/2 hidden lg:inline-flex h-7 w-7 -translate-y-1/2 shrink-0 items-center justify-center",
-            "rounded-md text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-text-active)] hover:bg-[var(--sidebar-row-hover)]",
-            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-          )}
         >
-          <PanelLeftClose className="h-4 w-4" />
-        </button>
+          <button
+            type="button"
+            onClick={() => (searchOpen ? closeSearch() : openSearch())}
+            aria-label={searchOpen ? "Close search" : "Search"}
+            aria-pressed={searchOpen}
+            className={cn(
+              "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
+              "text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-text-active)] hover:bg-[var(--sidebar-row-hover)]",
+              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              searchOpen && "bg-[var(--sidebar-row-hover)] text-[var(--sidebar-text-active)]",
+            )}
+          >
+            <Search className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            aria-label="Collapse sidebar"
+            className={cn(
+              "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
+              "text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-text-active)] hover:bg-[var(--sidebar-row-hover)]",
+              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            )}
+          >
+            <PanelLeftClose className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
 
       <PluginSlot name="header-left" />
@@ -1292,35 +1328,37 @@ function DesktopSidebar({
             <Plus className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
             <span className="truncate">New chat</span>
           </button>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              aria-label="Search chats and navigation"
-              placeholder="Search"
-              className={cn(
-                "h-11 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)] lg:h-8 lg:rounded-md",
-                "pl-9 pr-9 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)] lg:text-[0.86rem]",
-                "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
-              )}
-            />
-            {query ? (
+          {searchOpen && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeSearch();
+                  }
+                }}
+                aria-label="Search chats and navigation"
+                placeholder="Search"
+                className={cn(
+                  "h-11 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)] lg:h-8 lg:rounded-md",
+                  "pl-9 pr-9 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)] lg:text-[0.86rem]",
+                  "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
+                )}
+              />
               <button
                 type="button"
-                onClick={() => setQuery("")}
-                aria-label={t.common.clear}
+                onClick={closeSearch}
+                aria-label={query ? t.common.clear : "Close search"}
                 className="absolute right-0.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-md text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)] lg:h-7 lg:w-7 lg:right-0.5"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
-            ) : (
-              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-[var(--sidebar-row)] px-1.5 py-0.5 text-[0.72rem] leading-none text-[var(--sidebar-text-muted)]">
-                /
-              </span>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {realEstateNavItems.length > 0 && (
@@ -1361,12 +1399,11 @@ function DesktopSidebar({
               <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
               <SidebarAction icon={Puzzle} label="Skills" path="/skills" onNavigate={go} />
               <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
-              <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
             </div>
           )}
         </div>
 
-        {spotlightSessions.length > 0 && (
+        {pinnedSessions.length > 0 && (
           <SessionSection
             embeddedChat={embeddedChat}
             label="Pinned"
@@ -1377,7 +1414,7 @@ function DesktopSidebar({
             renamingSessionId={renamingSessionId}
             onCommitRename={commitRename}
             onCancelRename={() => setRenamingSessionId(null)}
-            sessions={spotlightSessions}
+            sessions={pinnedSessions}
             unreadIds={unreadIds}
           />
         )}
@@ -1591,6 +1628,48 @@ function SessionSection({
   );
 }
 
+const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
+
+function SessionStatusDot({
+  lastActive,
+  unread,
+}: {
+  lastActive: number;
+  unread: boolean;
+}) {
+  let tone: "warning" | "idle" | "ok";
+  let label: string;
+  if (unread) {
+    tone = "warning";
+    label = "Needs attention";
+  } else if (
+    !lastActive ||
+    Date.now() - lastActive * 1000 > SESSION_IDLE_MS
+  ) {
+    tone = "idle";
+    label = "Inactive";
+  } else {
+    tone = "ok";
+    label = "Done";
+  }
+  const dotClass =
+    tone === "warning"
+      ? "bg-[var(--color-warning,#d9a040)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-warning,#d9a040)_14%,transparent)]"
+      : tone === "idle"
+        ? "bg-[var(--sidebar-icon-muted)]"
+        : "bg-[var(--color-success,#7a9e87)]";
+  return (
+    <span
+      aria-label={label}
+      title={label}
+      className={cn(
+        "h-2 w-2 shrink-0 rounded-full lg:h-1.5 lg:w-1.5",
+        dotClass,
+      )}
+    />
+  );
+}
+
 function SessionListItem({
   embeddedChat,
   isRenaming = false,
@@ -1673,18 +1752,11 @@ function SessionListItem({
             aria-label="Running"
             className="h-3.5 w-3.5 shrink-0 animate-spin text-primary lg:h-3 lg:w-3"
           />
-        ) : unread ? (
-          <span
-            aria-label="Unread"
-            className="h-2 w-2 shrink-0 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-primary)_14%,transparent)] lg:h-1.5 lg:w-1.5"
-          />
-        ) : pinned ? (
-          <Pin
-            aria-label="Pinned"
-            className="h-3.5 w-3.5 shrink-0 text-[var(--sidebar-icon-muted)] lg:h-3 lg:w-3"
-          />
         ) : (
-          null
+          <SessionStatusDot
+            lastActive={session.last_active}
+            unread={unread}
+          />
         )}
         <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
           {title}
