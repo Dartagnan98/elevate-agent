@@ -30,6 +30,7 @@ import {
   BriefcaseBusiness,
   Building2,
   ChevronDown,
+  ChevronRight,
   Clock,
   Code,
   Copy,
@@ -992,18 +993,27 @@ function DesktopSidebar({
   const chatSessions = filteredSessions
     .filter((session) => !spotlightIds.has(session.id) && !isCronSession(session))
     .slice(0, 18);
-  const latestCronSessionByJobId = useMemo(() => {
-    const map = new Map<string, SessionInfo>();
+  const cronSessionsByJobId = useMemo(() => {
+    const map = new Map<string, SessionInfo[]>();
     for (const session of sessions) {
       const jobId = cronJobIdFromSession(session);
       if (!jobId) continue;
-      const current = map.get(jobId);
-      if (!current || (session.last_active ?? 0) > (current.last_active ?? 0)) {
-        map.set(jobId, session);
-      }
+      const list = map.get(jobId) ?? [];
+      list.push(session);
+      map.set(jobId, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => (b.last_active ?? 0) - (a.last_active ?? 0));
     }
     return map;
   }, [sessions]);
+  const latestCronSessionByJobId = useMemo(() => {
+    const map = new Map<string, SessionInfo>();
+    for (const [jobId, list] of cronSessionsByJobId) {
+      if (list[0]) map.set(jobId, list[0]);
+    }
+    return map;
+  }, [cronSessionsByJobId]);
   const runningCronJobIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [jobId, session] of latestCronSessionByJobId) {
@@ -1436,6 +1446,7 @@ function DesktopSidebar({
           open={automationsOpen}
           onToggle={() => setAutomationsOpen((prev) => !prev)}
           liveJobIds={runningCronJobIds}
+          sessionsByJobId={cronSessionsByJobId}
           onOpenCron={(jobId) => {
             const latest = latestCronSessionByJobId.get(jobId);
             if (latest) {
@@ -1445,6 +1456,7 @@ function DesktopSidebar({
             navigate(`/cron#cron-job-${jobId}`);
             onNavigate();
           }}
+          onOpenSession={openSession}
         />
 
         {toolNavItems.length > 0 && (
@@ -1848,20 +1860,33 @@ function AutomationsSection({
   open,
   onToggle,
   onOpenCron,
+  onOpenSession,
   liveJobIds,
+  sessionsByJobId,
 }: {
   jobs: CronJob[];
   open: boolean;
   onToggle: () => void;
   onOpenCron: (jobId: string) => void;
+  onOpenSession: (session: SessionInfo) => void;
   liveJobIds: Set<string>;
+  sessionsByJobId: Map<string, SessionInfo[]>;
 }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   if (jobs.length === 0) return null;
   const visible = jobs.slice(0, 24);
   const liveCount = jobs.filter(
     (job) => job.state === "enabled" || job.state === "scheduled",
   ).length;
   const runningCount = liveJobIds.size;
+  const toggleExpand = (jobId: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
+      return next;
+    });
+  };
   return (
     <div className="mt-3 lg:mt-2.5">
       <SidebarSectionLabel collapsed={!open} onToggle={onToggle}>
@@ -1895,13 +1920,17 @@ function AutomationsSection({
             const paused = job.state === "paused";
             const errored = job.state === "error" || !!job.last_error;
             const running = liveJobIds.has(job.id);
+            const runs = sessionsByJobId.get(job.id) ?? [];
+            const isExpanded = expanded.has(job.id);
+            const recentRuns = runs.slice(0, 8);
             return (
+              <div key={job.id}>
+              <div className="group/row flex w-full items-center">
               <button
-                key={job.id}
                 type="button"
                 onClick={() => onOpenCron(job.id)}
                 className={cn(
-                  "group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                  "group flex flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
                   "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                 )}
                 title={`${title} · ${job.schedule_display}${running ? " · running now" : ""}${job.last_error ? ` · ${job.last_error}` : ""}`}
@@ -1930,6 +1959,54 @@ function AutomationsSection({
                   {running ? "live" : paused ? "paused" : formatNextRun(job.next_run_at)}
                 </span>
               </button>
+              {runs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleExpand(job.id);
+                  }}
+                  className={cn(
+                    "ml-0.5 flex h-7 w-6 shrink-0 items-center justify-center rounded-md text-[var(--sidebar-text-muted)] transition-colors",
+                    "hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
+                  )}
+                  title={`${runs.length} run${runs.length === 1 ? "" : "s"}`}
+                  aria-label={isExpanded ? "Collapse run history" : "Expand run history"}
+                  aria-expanded={isExpanded}
+                >
+                  <ChevronRight
+                    className={cn(
+                      "h-3.5 w-3.5 transition-transform",
+                      isExpanded && "rotate-90",
+                    )}
+                  />
+                </button>
+              )}
+              </div>
+              {isExpanded && recentRuns.length > 0 && (
+                <div className="ml-3.5 mt-0.5 mb-1 space-y-0 border-l border-[var(--sidebar-border)]/60 pl-2">
+                  {recentRuns.map((session) => (
+                    <button
+                      key={session.id}
+                      type="button"
+                      onClick={() => onOpenSession(session)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[0.78rem] leading-5 transition-colors lg:text-[0.8rem]",
+                        "text-[var(--sidebar-text-muted)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
+                      )}
+                      title={`Run ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        {sessionTitle(session)}
+                      </span>
+                      <span className="shrink-0 text-[var(--sidebar-text-muted)]/70 tabular-nums">
+                        {compactSessionAge(session.last_active ?? 0)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              </div>
             );
           })}
         </div>
