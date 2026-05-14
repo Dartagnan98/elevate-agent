@@ -1597,15 +1597,46 @@ function AdminOnboardingConnectors({
   setup,
   onContinue,
   onChatMention,
+  onRefreshSetup,
 }: {
   setup: AdminSetupSnapshot;
   onContinue: () => void;
   onChatMention: (key: string) => void;
+  onRefreshSetup: () => Promise<void>;
 }) {
   const cards = useMemo(() => buildOnboardingConnectorCards(setup), [setup]);
   const [pendingBrowserKey, setPendingBrowserKey] = useState<string | null>(null);
   const [pendingComposioKey, setPendingComposioKey] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, { ok: boolean; message: string; runUrl?: string | null }>>({});
+  const [refreshing, setRefreshing] = useState(false);
+  const lastRefreshAtRef = useRef<number>(0);
+
+  const refresh = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastRefreshAtRef.current < 4000) return;
+    lastRefreshAtRef.current = now;
+    setRefreshing(true);
+    try {
+      await onRefreshSetup();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [onRefreshSetup]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void refresh();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refresh]);
 
   const runComposio = useCallback(async (cardKey: string, toolkitSlug: string) => {
     setPendingComposioKey(cardKey);
@@ -1687,7 +1718,20 @@ function AdminOnboardingConnectors({
           The coach on the right will walk you through each one. For browser-based portals, save the URL + credential ref first, then hit Connect & analyze — Admin launches browser-use and scans the dashboard.
         </p>
 
-        <div className="mt-7 flex flex-col gap-3">
+        <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground">
+          <span>Connections refresh automatically when you come back from a connect tab.</span>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+          >
+            {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+            Refresh now
+          </button>
+        </div>
+
+        <div className="mt-5 flex flex-col gap-3">
           {cards.map((card) => {
             const Icon = card.icon;
             const result = results[card.key];
@@ -2207,6 +2251,14 @@ function AdminSetupLaunch({
           onChatMention={(key) => {
             setCoachOpen(true);
             setCoachMention(key);
+          }}
+          onRefreshSetup={async () => {
+            try {
+              const fresh = await api.getAdminSetup();
+              onSetupUpdated(fresh);
+            } catch {
+              /* swallow — keep showing existing state */
+            }
           }}
         />
         {coachOpen ? (
