@@ -7,7 +7,7 @@ import type { HubData } from "./types";
 
 function ContactProfileRow({ profile }: { profile: SourceInboxProfile }) {
   return (
-    <div className="rounded-2xl border border-border/55 bg-background/35 px-3 py-3">
+    <div className="rounded-md border border-border/55 bg-background/35 px-3 py-3">
       <div className="flex min-w-0 items-start gap-3">
         <span
           className={cn(
@@ -66,9 +66,7 @@ function ContactColumn({
         {profiles.length ? (
           profiles.map((profile) => <ContactProfileRow key={profile.id} profile={profile} />)
         ) : (
-          <div className="rounded-2xl border border-dashed border-border bg-background/25 px-3 py-6 text-xs leading-5 text-muted-foreground">
-            {empty}
-          </div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">{empty}</p>
         )}
       </div>
     </div>

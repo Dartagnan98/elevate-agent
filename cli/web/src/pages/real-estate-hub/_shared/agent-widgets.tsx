@@ -527,7 +527,7 @@ export function AgentWorkerCard({
           <HubMetric icon={Brain} label="Memory queue" value={memory?.journal.pending ?? 0} />
           <HubMetric icon={Zap} label="Wake count" value={wake?.count ?? 0} />
         </div>
-        <div className="rounded-2xl border border-border/55 bg-background/35 p-3 text-xs leading-5 text-muted-foreground">
+        <div className="rounded-md border border-border/55 bg-background/35 p-3 text-xs leading-5 text-muted-foreground">
           <div className="font-semibold text-foreground">
             {worker?.loop?.running ? "Loop running" : "Loop idle"}
           </div>
