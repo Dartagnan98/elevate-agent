@@ -585,9 +585,7 @@ export default function CronPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">{t.common.loading}</p>
     );
   }
 
@@ -731,11 +729,9 @@ export default function CronPage() {
       {/* Jobs list */}
       <div className="flex flex-col gap-3">
         {jobs.length === 0 && (
-          <Card>
-            <CardContent className="py-8 text-center text-sm text-muted-foreground">
-              {t.cron.noJobs}
-            </CardContent>
-          </Card>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">
+            {t.cron.noJobs}
+          </p>
         )}
 
         {jobs.map((job) => {
