@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Lock } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Lock, Play, Copy, RefreshCw } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
   AdminSetupItemStatus,
@@ -9,6 +9,7 @@ import type {
   LeadsSetupItemUpdate,
   LeadsSetupSnapshot,
   OutreachConnectorRef,
+  SourceConnectorStatus,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -166,6 +167,42 @@ function StatusBadge({ status }: { status: AdminSetupItemStatus }) {
   );
 }
 
+const OUTREACH_CONNECTOR_IDS = ["apple-messages", "sms-provider", "android-device", "rcs"] as const;
+
+function connectorStateLabel(state: SourceConnectorStatus["state"]): string {
+  return state.replace(/_/g, " ");
+}
+
+function connectorStateClasses(state: SourceConnectorStatus["state"]): string {
+  if (state === "connected" || state === "import_only") {
+    return "bg-success/15 text-success";
+  }
+  if (state === "blocked" || state === "error" || state === "needs_operator") {
+    return "border border-warning/40 bg-warning/10 text-warning";
+  }
+  return "border border-border/60 bg-muted/40 text-muted-foreground";
+}
+
+function connectorRecordTotal(connector: SourceConnectorStatus): number {
+  return Object.values(connector.recordCounts).reduce((total, value) => total + value, 0);
+}
+
+function connectorSetupCopy(connector: SourceConnectorStatus): string {
+  if (connector.initializeBehavior === "local_messages_import") {
+    return connector.sourceExists
+      ? "Live sync runs every 10 min via launchd. Click Re-import to force a full rebuild."
+      : "Reads the synced Mac Messages database and builds a local Elevate message index for lead context.";
+  }
+  if (connector.initializeBehavior === "composio_social_setup") {
+    return connector.sourceExists
+      ? "Refreshes the local Composio social setup record and next operator step."
+      : "Sets up Composio as the social account hub.";
+  }
+  return connector.sourceExists
+    ? "Refreshes the local agent setup task and prompt for building the real connector."
+    : "Creates a local setup task for the agent/operator to build the webhook, poller, import command, or bridge.";
+}
+
 function isBrandNewLeadsSetup(setup: LeadsSetupSnapshot): boolean {
   if (setup.completionPct && setup.completionPct > 0) return false;
   if (setup.complete) return false;
@@ -320,7 +357,9 @@ function LeadsOnboardingWizard({
   completing,
   error,
   savedMessage,
-  outreachConnectors,
+  outreachSourceConnectors,
+  refreshSourceConnectors,
+  sourceConnectorsLoading,
 }: {
   draft: LeadsSetupDraft;
   updateField: <K extends keyof LeadsSetupDraft>(key: K, value: LeadsSetupDraft[K]) => void;
@@ -330,8 +369,40 @@ function LeadsOnboardingWizard({
   completing: boolean;
   error: string | null;
   savedMessage: string | null;
-  outreachConnectors: OutreachConnectorRef[];
+  outreachSourceConnectors: SourceConnectorStatus[];
+  refreshSourceConnectors: () => Promise<void>;
+  sourceConnectorsLoading: boolean;
 }) {
+  const navigate = useNavigate();
+  const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
+
+  const runPrompt = useCallback(
+    (connector: SourceConnectorStatus) => {
+      setRunningPromptId(connector.id);
+      const prompt = (connector.prompt || "").trim();
+      if (!prompt) {
+        setRunningPromptId(null);
+        return;
+      }
+      const ts = String(Date.now());
+      const seedText = `Source connector: ${connector.label} (${connector.id})\n\n${prompt}`;
+      try {
+        window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, seedText);
+      } catch {
+        // sessionStorage disabled — navigate anyway, user can paste manually.
+      }
+      navigate(`/chat?new=${ts}&seed=${ts}`);
+    },
+    [navigate],
+  );
+
+  const copyPrompt = useCallback(async (connector: SourceConnectorStatus) => {
+    try {
+      await navigator.clipboard.writeText(connector.prompt || "");
+    } catch {
+      // clipboard unavailable — silent fail
+    }
+  }, []);
   const [stepIdx, setStepIdx] = useState(0);
   const [showMissing, setShowMissing] = useState(false);
   const step = LEADS_WIZARD_STEPS[stepIdx];
@@ -565,43 +636,121 @@ function LeadsOnboardingWizard({
 
             {step.id === "outreach" && (
               <div className="flex flex-col gap-3">
-                <Link
-                  to="/config#connectors"
-                  className="inline-flex w-fit items-center gap-1 rounded-md border border-border bg-card/60 px-3 py-1.5 text-[12.5px] font-medium text-foreground backdrop-blur-sm hover:bg-muted"
-                >
-                  <LinkIcon className="h-3.5 w-3.5" />
-                  Open Source Connectors
-                </Link>
-                <div className="space-y-1.5">
-                  {outreachConnectors.length === 0 ? (
-                    <p className="text-[12px] text-muted-foreground">Loading connector state…</p>
-                  ) : (
-                    outreachConnectors.map((connector) => {
-                      const hint = OUTREACH_HINTS[connector.id];
-                      return (
-                        <div
-                          key={connector.id}
-                          className="flex items-start justify-between gap-3 rounded-md border border-border/60 bg-card/40 px-3 py-2 backdrop-blur-sm"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[12.5px] font-medium text-foreground">{connector.label}</span>
-                              <ConnectorStatusBadge connector={connector} />
-                              {connector.totalRecords > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    to="/config#connectors"
+                    className="inline-flex items-center gap-1 rounded-md border border-border bg-card/60 px-3 py-1.5 text-[12.5px] font-medium text-foreground backdrop-blur-sm hover:bg-muted"
+                  >
+                    <LinkIcon className="h-3.5 w-3.5" />
+                    Open Source Connectors
+                  </Link>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void refreshSourceConnectors()}
+                    disabled={sourceConnectorsLoading}
+                    className="h-8 gap-1 px-2 text-[11.5px]"
+                  >
+                    <RefreshCw className={cn("h-3.5 w-3.5", sourceConnectorsLoading && "animate-spin")} />
+                    Refresh
+                  </Button>
+                </div>
+
+                <ul className="divide-y divide-border/40 overflow-hidden rounded-md border border-border/60 bg-card/40 backdrop-blur-sm">
+                  {outreachSourceConnectors.length === 0 && !sourceConnectorsLoading && (
+                    <li className="px-3 py-4 text-[12px] text-muted-foreground">
+                      No outreach connectors found. Check that your install seeded `data/sources/`.
+                    </li>
+                  )}
+                  {outreachSourceConnectors.length === 0 && sourceConnectorsLoading && (
+                    <li className="px-3 py-4 text-[12px] text-muted-foreground">Loading connector blueprints…</li>
+                  )}
+                  {outreachSourceConnectors.map((connector) => {
+                    const total = connectorRecordTotal(connector);
+                    const hint = OUTREACH_HINTS[connector.id as OutreachConnectorRef["id"]];
+                    const setupCopy = connectorSetupCopy(connector);
+                    return (
+                      <li key={connector.id} className="px-3 py-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-[13px] font-semibold text-foreground">{connector.label}</span>
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-medium",
+                                  connectorStateClasses(connector.state),
+                                )}
+                              >
+                                {connector.state === "connected" || connector.state === "import_only" ? (
+                                  <CheckCircle2 className="h-3 w-3" />
+                                ) : connector.state === "blocked" || connector.state === "error" ? (
+                                  <AlertTriangle className="h-3 w-3" />
+                                ) : (
+                                  <Circle className="h-3 w-3" />
+                                )}
+                                {connectorStateLabel(connector.state)}
+                              </span>
+                              {total > 0 && (
                                 <span className="text-[10.5px] text-muted-foreground">
-                                  {connector.totalRecords.toLocaleString()} records
+                                  {total.toLocaleString()} records
                                 </span>
                               )}
                             </div>
-                            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{hint?.tagline}</p>
+                            <p className="mt-1 text-[11.5px] leading-5 text-muted-foreground">
+                              {hint?.tagline || setupCopy}
+                            </p>
+                            {connector.nextOperatorStep && (
+                              <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground/80">
+                                Next: {connector.nextOperatorStep}
+                              </p>
+                            )}
+                            {connector.lastError && (
+                              <p className="mt-1.5 text-[11px] leading-5 text-destructive/80">
+                                {connector.lastError}
+                              </p>
+                            )}
                           </div>
                         </div>
-                      );
-                    })
-                  )}
-                </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                            {connector.ownerAgent}
+                          </span>
+                          {connector.connectionType && (
+                            <span className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                              {connector.connectionType}
+                            </span>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="default"
+                            className="ml-auto h-7 gap-1 px-2 text-[11.5px]"
+                            disabled={runningPromptId === connector.id || !connector.prompt}
+                            onClick={() => runPrompt(connector)}
+                            aria-label={`Run setup prompt for ${connector.label}`}
+                          >
+                            <Play className="h-3 w-3" />
+                            {runningPromptId === connector.id ? "Opening chat…" : "Run prompt"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2"
+                            onClick={() => void copyPrompt(connector)}
+                            disabled={!connector.prompt}
+                            aria-label={`Copy setup prompt for ${connector.label}`}
+                            title="Copy prompt text"
+                          >
+                            <Copy className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+
                 <p className="text-[11.5px] text-muted-foreground/80">
-                  Nothing to fill here — outreach channels are managed in <code className="rounded bg-muted/40 px-1 py-0.5 text-[10.5px]">/config#connectors</code>. Elevate auto-routes by lead device.
+                  Run prompt opens a chat seeded with the connector's setup prompt — same flow as Config → Source connectors.
+                  Elevate auto-routes by lead device: iPhone → iMessage, Android → SMS / RCS.
                 </p>
               </div>
             )}
@@ -976,6 +1125,25 @@ export function LeadsSetupLaunch({
   const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "form">(() =>
     forceOnboarding ? "welcome" : isBrandNewLeadsSetup(setup) ? "gate" : "form",
   );
+  const [outreachSourceConnectors, setOutreachSourceConnectors] = useState<SourceConnectorStatus[]>([]);
+  const [sourceConnectorsLoading, setSourceConnectorsLoading] = useState(true);
+
+  const refreshSourceConnectors = useCallback(async () => {
+    setSourceConnectorsLoading(true);
+    try {
+      const resp = await api.getSourceConnectors();
+      const ids = new Set<string>(OUTREACH_CONNECTOR_IDS);
+      setOutreachSourceConnectors(resp.connectors.filter((c) => ids.has(c.id)));
+    } catch {
+      // best-effort — leave previous list in place
+    } finally {
+      setSourceConnectorsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSourceConnectors();
+  }, [refreshSourceConnectors]);
 
   useEffect(() => {
     if (forceOnboarding && phase === "form") {
@@ -1077,7 +1245,9 @@ export function LeadsSetupLaunch({
         completing={completing}
         error={error}
         savedMessage={savedMessage}
-        outreachConnectors={outreachConnectors}
+        outreachSourceConnectors={outreachSourceConnectors}
+        refreshSourceConnectors={refreshSourceConnectors}
+        sourceConnectorsLoading={sourceConnectorsLoading}
       />
     );
   }
