@@ -317,6 +317,8 @@ const MAX_CACHED_TRANSCRIPTS = 24;
 const MAX_STORED_TRANSCRIPT_MESSAGES = 160;
 const MAX_STORED_TRANSCRIPT_CHARS = 220_000;
 const MAX_STORED_MESSAGE_CHARS = 16_000;
+let SHARED_CHAT_GATEWAY: GatewayClient | null = null;
+let SHARED_CHAT_GATEWAY_VERSION = 0;
 
 interface StoredTranscriptCacheEntry {
   messages: ChatMessage[];
@@ -324,6 +326,15 @@ interface StoredTranscriptCacheEntry {
 }
 
 type StoredTranscriptCache = Record<string, StoredTranscriptCacheEntry>;
+
+function getSharedChatGateway(version: number): GatewayClient {
+  if (!SHARED_CHAT_GATEWAY || SHARED_CHAT_GATEWAY_VERSION !== version) {
+    SHARED_CHAT_GATEWAY?.close();
+    SHARED_CHAT_GATEWAY = new GatewayClient();
+    SHARED_CHAT_GATEWAY_VERSION = version;
+  }
+  return SHARED_CHAT_GATEWAY;
+}
 
 function id(prefix: string): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -1397,8 +1408,8 @@ export default function ChatPage() {
   const newChatId = searchParams.get("new");
   const [version, setVersion] = useState(0);
   const gw = useMemo(
-    () => new GatewayClient(),
-    [newChatId, resumeId, version],
+    () => getSharedChatGateway(version),
+    [version],
   );
 
   const [state, setState] = useState<ConnectionState>("idle");
@@ -1725,7 +1736,7 @@ export default function ChatPage() {
         historyHydratedRef.current = true;
         setMessages(cached);
         hydrateArtifactsFromMessages(cached);
-        setStatusText("Preparing agent...");
+        setStatusText("Ready");
       }
 
       void api.getSessionMessages(resumeId)
@@ -1737,7 +1748,7 @@ export default function ChatPage() {
           rememberTranscript(resumeId, hydrated);
           setMessages(hydrated);
           hydrateArtifactsFromMessages(hydrated);
-          setStatusText("Preparing agent...");
+          setStatusText("Ready");
         })
         .catch((error: Error) => {
           if (cancelled || cached) return;
@@ -2270,7 +2281,7 @@ export default function ChatPage() {
         } else {
           setMessages([]);
         }
-        setStatusText(created.agent_ready === false ? "Preparing agent..." : "Ready");
+        setStatusText("Ready");
       })
       .catch((error: Error) => {
         if (cancelled) return;
@@ -2280,8 +2291,11 @@ export default function ChatPage() {
 
     return () => {
       cancelled = true;
+      const active = activeSessionRef.current;
       unsubs.forEach((unsub) => unsub());
-      gw.close();
+      if (active && gw.state === "open") {
+        void gw.request("session.close", { session_id: active }, 3_000).catch(() => {});
+      }
     };
   }, [
     addActivityTrace,
@@ -2418,7 +2432,7 @@ export default function ChatPage() {
   const submitPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || !sessionId) return;
+      if (!trimmed) return;
 
       setInput("");
       composerScrollTopRef.current = 0;
@@ -2445,6 +2459,11 @@ export default function ChatPage() {
       }
 
       if (trimmed.startsWith("/")) {
+        if (!sessionId || state !== "open") {
+          setInput(trimmed);
+          setStatusText("Connecting...");
+          return;
+        }
         appendMessage("user", trimmed);
         await executeSlash({
           callbacks: {
@@ -2459,6 +2478,19 @@ export default function ChatPage() {
       }
 
       const routedText = routePromptForAgent(trimmed, selectedAgent);
+
+      if (!sessionId || state !== "open") {
+        const queued: QueuedInput = {
+          createdAt: Date.now(),
+          id: id("queued"),
+          routedText,
+          status: "queued",
+          text: trimmed,
+        };
+        setQueuedInputs((prev) => [...prev, queued].slice(-5));
+        setStatusText("Queued until connected");
+        return;
+      }
 
       if (busy) {
         const queued: QueuedInput = {
@@ -2475,7 +2507,7 @@ export default function ChatPage() {
 
       await submitGatewayPrompt(trimmed, routedText);
     },
-    [addArtifacts, appendMessage, artifacts, busy, gw, messages, selectedAgent, sessionId, submitGatewayPrompt],
+    [addArtifacts, appendMessage, artifacts, busy, gw, messages, selectedAgent, sessionId, state, submitGatewayPrompt],
   );
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -2604,7 +2636,9 @@ export default function ChatPage() {
     recognition.start();
   }, [input, voiceListening]);
 
-  const canSend = !!input.trim() && state === "open" && !!sessionId;
+  const canSend =
+    !!input.trim() &&
+    (state === "open" ? !!sessionId : state !== "error" && state !== "closed");
   const canPickModel = state === "open" && !!sessionId;
   const visibleMessages = useMemo(
     () =>
@@ -2808,7 +2842,7 @@ export default function ChatPage() {
                         ? "text-transparent"
                         : "text-[var(--chat-text)]",
                     )}
-                    disabled={state !== "open" || !sessionId}
+                    disabled={state === "error"}
                     onChange={(event) => {
                       setInput(event.target.value);
                       setCaretIndex(event.currentTarget.selectionStart ?? event.target.value.length);
@@ -2833,9 +2867,9 @@ export default function ChatPage() {
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
                     }
                     placeholder={
-                      state === "open" && sessionId
-                        ? "Message Elevate Agent..."
-                        : "Connecting..."
+                      state === "error"
+                        ? "Reconnect to continue..."
+                        : "Message Elevate Agent..."
                     }
                     rows={1}
                     spellCheck

@@ -570,12 +570,19 @@ export default function App() {
             aria-label={t.app.navigation}
             className={cn(
               "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[312px] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
-              "bg-[var(--sidebar-bg)] shadow-[inset_-1px_0_0_var(--sidebar-border)]",
+              "bg-[var(--sidebar-bg)]",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               sidebarCollapsed
                 ? "lg:hidden"
-                : "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
+                : cn(
+                    "lg:sticky lg:translate-x-0 lg:shrink-0",
+                    // Floating / pilled treatment on desktop: inset from the
+                    // window edges so the page background frames the sidebar.
+                    "lg:top-2 lg:my-2 lg:ml-2 lg:h-[calc(100dvh-1rem)]",
+                    "lg:overflow-hidden lg:rounded-xl lg:border lg:border-[var(--sidebar-border)]",
+                    "lg:shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.45)]",
+                  ),
               isConfigRoute && "lg:hidden",
             )}
           >
