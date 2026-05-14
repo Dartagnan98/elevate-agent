@@ -170,7 +170,7 @@ function StatusBadge({ status }: { status: AdminSetupItemStatus }) {
   );
 }
 
-const OUTREACH_CONNECTOR_IDS = ["apple-messages", "sms-provider", "android-device", "rcs"] as const;
+const OUTREACH_CONNECTOR_IDS = ["crm", "apple-messages", "sms-provider", "android-device", "rcs"] as const;
 
 function connectorStateLabel(state: SourceConnectorStatus["state"]): string {
   return state.replace(/_/g, " ");
@@ -336,18 +336,18 @@ const LEADS_WIZARD_STEPS: LeadsWizardStep[] = [
       "Optional catch-all POST endpoint for landing-page and contact-us forms. Wire any form provider that can POST JSON.",
   },
   {
-    id: "outreach",
-    eyebrow: "Step 4 of 5",
-    title: "Outreach channels",
-    subtitle:
-      "iMessage, SMS, RCS, and CRM live as Source Connectors so the same wiring powers ingestion and outbound. Configure in Config → Source connectors.",
-  },
-  {
     id: "policy",
-    eyebrow: "Step 5 of 5",
+    eyebrow: "Step 4 of 5",
     title: "Auto-reply policy",
     subtitle:
       "Tell Elevate how aggressive to be on the first touch. You can change the cadence per lane after onboarding.",
+  },
+  {
+    id: "outreach",
+    eyebrow: "Step 5 of 5",
+    title: "CRM + outreach channels",
+    subtitle:
+      "CRM (Lofty / FUB), iMessage, SMS, and RCS live as Source Connectors. \"Run prompt\" opens a chat seeded with that connector's setup — finish onboarding first, then run these one by one.",
   },
 ];
 
