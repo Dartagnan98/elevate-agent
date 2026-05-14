@@ -771,7 +771,7 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
           <MiniMetric label="Blocked" value={harness.orchestration.plan_graph.blocked_runs} />
           <MiniMetric label="Safety" value={harness.safety.external_actions_policy} />
         </div>
-        {harness.performance.available ? (
+        {harness.performance.available && (
           <div className="text-xs">
             <div className="flex justify-between gap-2">
               <span className="text-muted-foreground">Baseline</span>
@@ -789,10 +789,6 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
                 {worst?.name ?? "-"} / {formatSavings(worst?.savings_pct)}
               </span>
             </div>
-          </div>
-        ) : (
-          <div className="text-xs text-muted-foreground">
-            {harness.performance.error || "Performance profiles skipped"}
           </div>
         )}
         <details className="group text-xs">
@@ -1544,7 +1540,20 @@ export default function AgentHubPage() {
           worker={snapshot.agentWorker}
         />
 
-        <HarnessCard harness={snapshot.harness} />
+        <details className="group px-1">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
+            <span className="font-medium">System status</span>
+            <span className="text-xs text-muted-foreground/80 group-open:hidden">
+              · show
+            </span>
+            <span className="hidden text-xs text-muted-foreground/80 group-open:inline">
+              · hide
+            </span>
+          </summary>
+          <div className="mt-3">
+            <HarnessCard harness={snapshot.harness} />
+          </div>
+        </details>
 
         <div className="px-1">
           <div className="mb-2 flex items-center gap-2">
@@ -1552,9 +1561,9 @@ export default function AgentHubPage() {
             <span aria-hidden="true" className="text-xs text-muted-foreground">·</span>
             <span className="text-xs text-muted-foreground">{snapshot.access.label}</span>
           </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <div className="flex items-center gap-x-3 overflow-x-auto whitespace-nowrap text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {Object.entries(snapshot.access.entitlements).map(([name, entitlement]) => (
-              <span key={name} className="inline-flex items-center gap-1.5">
+              <span key={name} className="inline-flex shrink-0 items-center gap-1.5">
                 <span
                   aria-hidden="true"
                   className={cn(
