@@ -992,6 +992,7 @@ type OnboardingField = {
   helper?: string;
   fullWidth?: boolean;
   autoComplete?: string;
+  optional?: boolean;
 };
 
 type OnboardingStep = {
@@ -1013,7 +1014,7 @@ const WIZARD_STEPS: OnboardingStep[] = [
       { key: "realtorLegalName", label: "Realtor legal name" },
       { key: "licenseName", label: "Licensed / public name", placeholder: "How it shows on listings" },
       { key: "brokerageName", label: "Brokerage" },
-      { key: "teamName", label: "Team / PREC", placeholder: "Optional" },
+      { key: "teamName", label: "Team / PREC", placeholder: "Leave blank if you don't run a team", optional: true },
     ],
   },
   {
@@ -1024,7 +1025,7 @@ const WIZARD_STEPS: OnboardingStep[] = [
     fields: [
       { key: "province", label: "Province / territory", type: "province" },
       { key: "market", label: "Primary market", placeholder: "Kamloops, Calgary..." },
-      { key: "boardMemberships", label: "Board memberships", placeholder: "AOIR, FVREB..." },
+      { key: "boardMemberships", label: "Board memberships", placeholder: "AOIR, FVREB...", helper: "Comma-separated. Leave blank if not a board member.", optional: true },
     ],
   },
   {
@@ -1082,7 +1083,7 @@ const WIZARD_STEPS: OnboardingStep[] = [
     subtitle: "Showings, photo processing, and FINTRAC / ID workflow.",
     fields: [
       { key: "showingProvider", label: "Showing platform", placeholder: "ShowingTime / BrokerBay", suggestions: PROVIDER_SUGGESTIONS.showing, listId: "onboard-showing" },
-      { key: "photoProcessingProvider", label: "Photo processing", placeholder: "Drive + Nano Banana / Higgsfield", suggestions: PROVIDER_SUGGESTIONS.photo, listId: "onboard-photo" },
+      { key: "photoProcessingProvider", label: "Photo processing", placeholder: "Drive + Nano Banana / Higgsfield", suggestions: PROVIDER_SUGGESTIONS.photo, listId: "onboard-photo", optional: true, helper: "Leave blank if you don't run listing photos through a processor." },
       { key: "fintracProvider", label: "FINTRAC / ID workflow", placeholder: "Fintracker / manual FIN# capture", suggestions: PROVIDER_SUGGESTIONS.fintrac, listId: "onboard-fintrac" },
     ],
   },
@@ -1133,6 +1134,7 @@ const WIZARD_STEPS: OnboardingStep[] = [
         type: "textarea",
         helper: "Anything Admin should know when logging into your portals (extra MFA steps, where a button lives, etc). Optional.",
         placeholder: "Board portal quirks, browser profile, MFA expectations, where to find MLS number, showing feedback, compliance status, confirmation screens.",
+        optional: true,
       },
       {
         key: "regionalMemory",
@@ -1251,7 +1253,6 @@ function AdminOnboardingWizard({
   savedMessage,
   provinceCoverage,
   savedProvinceCode,
-  onSkipToForm,
 }: {
   draft: AdminSetupDraft;
   updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
@@ -1263,13 +1264,26 @@ function AdminOnboardingWizard({
   savedMessage: string | null;
   provinceCoverage: AdminProvinceGuideCoverage[];
   savedProvinceCode: string;
-  onSkipToForm: () => void;
 }) {
   const [stepIdx, setStepIdx] = useState(0);
+  const [showMissing, setShowMissing] = useState(false);
   const step = WIZARD_STEPS[stepIdx];
   const isLast = stepIdx === WIZARD_STEPS.length - 1;
   const isFirst = stepIdx === 0;
   const busy = saving || verifying;
+
+  const missingFields = useMemo(() => {
+    return step.fields.filter((field) => {
+      if (field.optional) return false;
+      const raw = draft[field.key];
+      const value = typeof raw === "string" ? raw.trim() : "";
+      return value.length === 0;
+    });
+  }, [step, draft]);
+  const canAdvance = missingFields.length === 0;
+  useEffect(() => {
+    setShowMissing(false);
+  }, [stepIdx]);
 
   const provinceCoverageByCode = useMemo(
     () => new Map(provinceCoverage.map((item) => [item.province, item])),
@@ -1279,6 +1293,10 @@ function AdminOnboardingWizard({
 
   const handleNext = useCallback(async () => {
     if (busy) return;
+    if (!canAdvance) {
+      setShowMissing(true);
+      return;
+    }
     playOnboardingClick();
     await onAdvanceSave();
     if (isLast) {
@@ -1287,7 +1305,7 @@ function AdminOnboardingWizard({
       return;
     }
     setStepIdx((idx) => Math.min(idx + 1, WIZARD_STEPS.length - 1));
-  }, [busy, isLast, onAdvanceSave, onFinish]);
+  }, [busy, canAdvance, isLast, onAdvanceSave, onFinish]);
 
   const handleBack = useCallback(() => {
     if (busy) return;
@@ -1409,19 +1427,23 @@ function AdminOnboardingWizard({
           </div>
         )}
 
-        <div className="mt-9 flex items-center justify-between border-t border-border/60 pt-5">
-          <button
-            type="button"
-            onClick={onSkipToForm}
-            className="text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-          >
-            Skip wizard, jump to full form
-          </button>
-          <div className="flex items-center gap-2">
+        <div className="mt-9 flex items-center justify-between gap-3 border-t border-border/60 pt-5">
+          <div className="min-h-[18px] flex-1 text-[12px] leading-5 text-muted-foreground/80">
+            {showMissing && !canAdvance && (
+              <span className="text-destructive">
+                Fill in {missingFields.map((f) => `"${f.label}"`).join(", ")} before continuing.
+              </span>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
             <Button variant="outline" onClick={handleBack} disabled={busy || isFirst}>
               Back
             </Button>
-            <Button onClick={() => void handleNext()} disabled={busy} className="min-w-[140px]">
+            <Button
+              onClick={() => void handleNext()}
+              disabled={busy || !canAdvance}
+              className="min-w-[140px]"
+            >
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
               {isLast ? "Run the setup" : "Continue"}
             </Button>
@@ -2294,7 +2316,6 @@ function AdminSetupLaunch({
         savedMessage={savedMessage}
         provinceCoverage={provinceCoverage}
         savedProvinceCode={savedProvinceCode}
-        onSkipToForm={() => setPhase("form")}
       />
     );
   }

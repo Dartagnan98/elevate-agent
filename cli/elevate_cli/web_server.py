@@ -3695,18 +3695,29 @@ async def post_admin_setup_verify_endpoint():
 _ONBOARDING_CHAT_SYSTEM = (
     "You are Elevate's onboarding coach for a Canadian real estate agent. "
     "The user just finished a 9-step setup wizard. You see a live snapshot of "
-    "their admin_setup_items: which keys are still missing, which province "
-    "they picked, and which connectors are already attached. "
-    "Your job: ask one short, friendly question at a time to fill in the gaps. "
-    "Priorities, in order: (1) where deals currently live (spreadsheet, Lofty, "
-    "kvCORE, BoldTrail, paper); (2) cloud drive (Google Drive vs Dropbox vs "
-    "SharePoint); (3) MLS / compliance / showing portal login URLs; "
+    "their admin_setup_items: profile, connectors already attached, what's "
+    "still missing. "
+    "READ THE SNAPSHOT FIRST. Before asking the user anything, look at what is "
+    "already configured. Never ask for something the snapshot already shows as "
+    "set. Never claim you're 'making' or 'creating' a database/connector that "
+    "already exists. If a CRM, drive, or portal is already attached in the "
+    "snapshot, acknowledge it ('I see Lofty is already wired in') and move on "
+    "to the next gap. "
+    "Your job: ask ONE short, friendly question at a time to fill the actual "
+    "gaps shown in 'Still missing'. "
+    "Priority for missing items, in order: (1) where deals live (spreadsheet, "
+    "Lofty, kvCORE, BoldTrail, paper) ONLY if crm is missing; (2) cloud drive "
+    "(Google Drive vs Dropbox vs SharePoint) ONLY if drive is missing; (3) "
+    "MLS / compliance / showing portal logins ONLY for ones not yet attached; "
     "(4) any spreadsheets to import. "
     "Keep replies to 1-3 sentences. No bullet lists unless the user asks. "
     "When a connector needs OAuth (Google Drive, Gmail, etc.) tell them to "
     "click the matching button in the connectors panel — don't paste URLs. "
     "When a portal needs browser-use analysis, tell them to enter login URL + "
-    "credential ref into the portal card, then hit 'Connect & analyze'."
+    "credentials into the portal card, then hit 'Connect & analyze'. "
+    "If everything in the snapshot is already configured, say that plainly "
+    "and ask if there's anything else to set up before going live — don't "
+    "invent new tasks."
 )
 
 
@@ -3736,22 +3747,49 @@ def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
 
 
 def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, Any]) -> str:
-    """Deterministic guidance when no LLM is configured."""
-    missing = setup.get("missingRequiredKeys") or []
+    """Deterministic guidance when no LLM is configured.
+
+    Always leads with what's already present before pointing at the next gap,
+    so the coach never sounds like it's creating things from scratch.
+    """
+    missing = list(setup.get("missingRequiredKeys") or [])
     profile = setup.get("profile") or {}
-    has_drive = bool(profile.get("driveProvider"))
-    has_crm = bool(profile.get("crmProvider"))
+    drive = (profile.get("driveProvider") or "").strip()
+    crm = (profile.get("crmProvider") or "").strip()
+    mls = (profile.get("mlsProvider") or "").strip()
+    province = (profile.get("province") or "").strip()
     last = (messages[-1].get("content") if messages else "") or ""
     last_lower = last.lower()
-    if not has_drive:
-        return "Where do your active deal folders live today — Google Drive, Dropbox, or SharePoint? I'll get the right connector ready."
-    if not has_crm:
-        return "Where do your leads live right now? CRM name (Lofty, kvCORE, BoldTrail) or a spreadsheet path works."
+
+    prefix_bits: List[str] = []
+    if province:
+        prefix_bits.append(f"{province.upper()} loaded")
+    if crm:
+        prefix_bits.append(f"{crm} CRM attached")
+    if drive:
+        prefix_bits.append(f"{drive} drive attached")
+    if mls:
+        prefix_bits.append(f"{mls} MLS attached")
+    prefix = ", ".join(prefix_bits)
+    lead = f"I see {prefix}." if prefix else ""
+
+    # If user named a CRM in their last message and we already have one, acknowledge instead of asking again.
+    if crm and any(token in last_lower for token in ("lofty", "kvcore", "boldtrail", "follow up boss", "chime", "spreadsheet")):
+        return (
+            (lead + " " if lead else "")
+            + f"Sounds like leads already live in {crm} on our side — I won't touch that. "
+            + (f"Next gap: {missing[0]}." if missing else "Nothing else missing on my end.")
+        ).strip()
+
+    if not drive:
+        return (lead + " " if lead else "") + "Where do your active deal folders live today — Google Drive, Dropbox, or SharePoint? I'll wire up the right connector once you tell me."
+    if not crm:
+        return (lead + " " if lead else "") + "Where do your leads live right now? CRM name (Lofty, kvCORE, BoldTrail) or a spreadsheet path works."
     if missing:
-        return f"Still missing: {', '.join(missing[:3])}. Want to walk through the first one?"
+        return (lead + " " if lead else "") + f"Still missing: {', '.join(missing[:3])}. Want to walk through the first one?"
     if "spreadsheet" in last_lower or "sheet" in last_lower:
-        return "Got it. Drop the Google Sheet URL into your drive folder and I'll pick it up on the next sync."
-    return "Looks good. Anything else you want me to set up before we go live?"
+        return (lead + " " if lead else "") + "Drop the Google Sheet URL into your drive folder and I'll pick it up on the next sync."
+    return (lead + " " if lead else "") + "Everything required is in place. Anything else you want me to set up before we go live?"
 
 
 @app.post("/api/admin/onboarding/chat")
