@@ -1,6 +1,7 @@
 import { ArrowUpRight, Clock, FileCheck, Flame, ServerCog } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import { useAdminTaskDrawer } from "../admin-task-drawer";
 import { useThreadDrawer } from "../thread-drawer";
 import type { UrgentItem } from "./data";
 
@@ -58,12 +59,25 @@ export function PriorityQueue({ items }: { items: UrgentItem[] }) {
 
 function PriorityRow({ item }: { item: UrgentItem }) {
   const Icon = ICON_MAP[item.kind];
-  const drawer = useThreadDrawer();
-  const canOpenInline =
-    (item.kind === "draft" || item.kind === "hot-lead") &&
-    !!item.sourceId &&
-    !!item.threadId &&
-    !!drawer;
+  const threadDrawer = useThreadDrawer();
+  const adminDrawer = useAdminTaskDrawer();
+
+  const inlineHandler = (() => {
+    if ((item.kind === "draft" || item.kind === "hot-lead") && threadDrawer && item.sourceId && item.threadId) {
+      const sourceId = item.sourceId;
+      const threadId = item.threadId;
+      return () => threadDrawer.openThread(sourceId, threadId);
+    }
+    if (item.kind === "deal-task" && adminDrawer && item.taskId) {
+      const taskId = item.taskId;
+      return () => adminDrawer.openDealTask(taskId);
+    }
+    if (item.kind === "action-run" && adminDrawer && item.runId) {
+      const runId = item.runId;
+      return () => adminDrawer.openActionRun(runId);
+    }
+    return null;
+  })();
 
   const rowClasses = cn(
     "group flex w-full items-start gap-3 px-3.5 py-2.5 text-left",
@@ -114,14 +128,10 @@ function PriorityRow({ item }: { item: UrgentItem }) {
     </>
   );
 
-  if (canOpenInline) {
+  if (inlineHandler) {
     return (
       <li>
-        <button
-          type="button"
-          className={rowClasses}
-          onClick={() => drawer!.openThread(item.sourceId!, item.threadId!)}
-        >
+        <button type="button" className={rowClasses} onClick={inlineHandler}>
           {inner}
         </button>
       </li>

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Home } from "lucide-react";
 import { HubShell, useHubHeader, useRealEstateHubData } from "../_shared";
+import { AdminTaskDrawerProvider } from "../admin-task-drawer";
 import { ThreadDrawerProvider } from "../thread-drawer";
 import { buildTodayData } from "./data";
 import { DayShape } from "./day-shape";
@@ -26,19 +27,21 @@ export function RealEstateTodayPage() {
 
   return (
     <ThreadDrawerProvider data={data}>
-      <HubShell
-        data={data}
-        eyebrow="Operations"
-        icon={Home}
-        title="Today"
-      >
-        <div className="space-y-4">
-          <PulseStrip stats={view.pulse} />
-          <PriorityQueue items={view.priority} />
-          <DayShape hourBuckets={view.hourBuckets} dayBuckets={view.dayBuckets} />
-          <RunningStrip scheduled={view.scheduled} live={view.live} running={view.running} />
-        </div>
-      </HubShell>
+      <AdminTaskDrawerProvider data={data}>
+        <HubShell
+          data={data}
+          eyebrow="Operations"
+          icon={Home}
+          title="Today"
+        >
+          <div className="space-y-4">
+            <PulseStrip stats={view.pulse} />
+            <PriorityQueue items={view.priority} />
+            <DayShape hourBuckets={view.hourBuckets} dayBuckets={view.dayBuckets} />
+            <RunningStrip scheduled={view.scheduled} live={view.live} running={view.running} />
+          </div>
+        </HubShell>
+      </AdminTaskDrawerProvider>
     </ThreadDrawerProvider>
   );
 }

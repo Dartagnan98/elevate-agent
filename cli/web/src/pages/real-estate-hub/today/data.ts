@@ -46,6 +46,8 @@ export type UrgentItem = {
   to: string;
   sourceId?: string;
   threadId?: string;
+  taskId?: string;
+  runId?: string;
 };
 
 function parseTs(value: string | null | undefined): number | null {
@@ -282,6 +284,7 @@ export function urgentAdminTasks(
       waitedMinutes: waited,
       tone,
       to: "/admin",
+      taskId: task.id,
     });
   }
 
@@ -299,6 +302,7 @@ export function urgentAdminTasks(
       waitedMinutes: waited,
       tone,
       to: "/admin",
+      runId: run.id,
     });
   }
 
