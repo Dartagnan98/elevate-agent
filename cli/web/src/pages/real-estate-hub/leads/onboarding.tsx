@@ -26,6 +26,14 @@ type LeadsSetupDraft = {
   googleCampaignIds: string;
   webhookUrl: string;
   webhookSecret: string;
+  imessageEnabled: boolean;
+  imessageHandle: string;
+  smsProvider: string;
+  smsFromNumber: string;
+  smsTwilioAccountSid: string;
+  smsTwilioAuthToken: string;
+  rcsProvider: string;
+  rcsFromNumber: string;
   autoReplyEnabled: boolean;
   autoReplyTemplate: string;
   followUpCadenceDays: string;
@@ -36,6 +44,12 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
   const metaVal = (byKey.get("meta_lead_ads")?.value ?? {}) as Record<string, unknown>;
   const googleVal = (byKey.get("google_lead_forms")?.value ?? {}) as Record<string, unknown>;
   const webhookVal = (byKey.get("website_form_webhook")?.value ?? {}) as Record<string, unknown>;
+  const imessageItem = byKey.get("outreach_imessage");
+  const imessageVal = (imessageItem?.value ?? {}) as Record<string, unknown>;
+  const smsItem = byKey.get("outreach_sms");
+  const smsVal = (smsItem?.value ?? {}) as Record<string, unknown>;
+  const rcsItem = byKey.get("outreach_rcs");
+  const rcsVal = (rcsItem?.value ?? {}) as Record<string, unknown>;
   const policyVal = (byKey.get("auto_reply_policy")?.value ?? {}) as Record<string, unknown>;
   return {
     metaProvider: String(byKey.get("meta_lead_ads")?.provider ?? "") || "",
@@ -47,6 +61,14 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
     googleCampaignIds: Array.isArray(googleVal.campaignIds) ? (googleVal.campaignIds as string[]).join(", ") : String(googleVal.campaignIds ?? ""),
     webhookUrl: String(webhookVal.url ?? ""),
     webhookSecret: String(webhookVal.secret ?? ""),
+    imessageEnabled: imessageItem ? imessageItem.status !== "missing" : Boolean(imessageVal.enabled),
+    imessageHandle: String(imessageVal.handle ?? ""),
+    smsProvider: String(smsItem?.provider ?? "") || "",
+    smsFromNumber: String(smsVal.fromNumber ?? ""),
+    smsTwilioAccountSid: String(smsVal.accountSid ?? ""),
+    smsTwilioAuthToken: String(smsVal.authToken ?? ""),
+    rcsProvider: String(rcsItem?.provider ?? "") || "",
+    rcsFromNumber: String(rcsVal.fromNumber ?? ""),
     autoReplyEnabled: Boolean(policyVal.enabled ?? false),
     autoReplyTemplate: String(policyVal.initialMessageTemplate ?? ""),
     followUpCadenceDays: String(policyVal.followUpCadenceDays ?? "2"),
@@ -96,6 +118,46 @@ function buildItemUpdates(draft: LeadsSetupDraft): LeadsSetupItemUpdate[] {
       value: {
         url: draft.webhookUrl.trim(),
         secret: draft.webhookSecret,
+      },
+    },
+    {
+      key: "outreach_imessage",
+      status: (draft.imessageEnabled ? "configured" : "missing") as AdminSetupItemStatus,
+      provider: draft.imessageEnabled ? "apple_messages" : null,
+      value: {
+        enabled: draft.imessageEnabled,
+        handle: draft.imessageHandle.trim(),
+      },
+    },
+    {
+      key: "outreach_sms",
+      status: ((): AdminSetupItemStatus => {
+        const provider = draft.smsProvider.trim();
+        if (!provider) return "missing";
+        if (provider === "twilio") {
+          return draft.smsTwilioAccountSid.trim() && draft.smsTwilioAuthToken.trim() && draft.smsFromNumber.trim()
+            ? "configured"
+            : "missing";
+        }
+        return draft.smsFromNumber.trim() ? "configured" : "missing";
+      })(),
+      provider: draft.smsProvider.trim() || null,
+      value: {
+        fromNumber: draft.smsFromNumber.trim(),
+        accountSid: draft.smsTwilioAccountSid.trim(),
+        authToken: draft.smsTwilioAuthToken,
+      },
+    },
+    {
+      key: "outreach_rcs",
+      status: ((): AdminSetupItemStatus => {
+        const provider = draft.rcsProvider.trim();
+        if (!provider) return "missing";
+        return draft.rcsFromNumber.trim() ? "configured" : "missing";
+      })(),
+      provider: draft.rcsProvider.trim() || null,
+      value: {
+        fromNumber: draft.rcsFromNumber.trim(),
       },
     },
     {
@@ -263,6 +325,10 @@ export function LeadsSetupLaunch({
   const crmStatus = crmItem?.status ?? "missing";
   const crmProvider = (crmItem?.provider || "").trim();
   const leadSourcesReady = setup.leadSourcesReady;
+  const outreachReady = setup.outreachReady;
+  const imessageItem = byKey.get("outreach_imessage");
+  const smsItem = byKey.get("outreach_sms");
+  const rcsItem = byKey.get("outreach_rcs");
 
   return (
     <div className="flex flex-col gap-4">
@@ -271,8 +337,9 @@ export function LeadsSetupLaunch({
           <div>
             <h2 className="text-[14px] font-semibold text-foreground">Leads onboarding</h2>
             <p className="mt-1 text-[12px] text-muted-foreground">
-              CRM is inherited from Admin setup. Wire at least one lead source (Meta / Google / Website webhook) and
-              set your auto-reply policy. Once those are in, hit Mark complete to unlock the Leads workspace.
+              CRM is inherited from Admin setup. Wire at least one lead source (Meta / Google / Website webhook),
+              pick at least one outreach channel (iMessage / SMS / Twilio / RCS), and set your auto-reply policy.
+              Once those are in, hit Mark complete to unlock the Leads workspace.
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
@@ -407,6 +474,117 @@ export function LeadsSetupLaunch({
           onChange={(v) => updateField("webhookSecret", v)}
           placeholder="optional"
           type="password"
+        />
+      </ItemCard>
+
+      <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11.5px] text-muted-foreground">
+        <span className="font-medium text-foreground">Outreach channels.</span> Pick how you actually message leads.
+        At least one needs to be enabled.{" "}
+        {outreachReady ? (
+          <span className="text-success">Ready.</span>
+        ) : (
+          <span className="text-warning">No channel picked yet.</span>
+        )}
+      </div>
+
+      <ItemCard
+        title="Apple Messages (iMessage)"
+        description="Send and receive via iMessage from your Mac. Best when leads are iPhone users — keeps blue-bubble UX."
+        status={imessageItem?.status ?? "missing"}
+      >
+        <label className="flex items-center gap-2 text-[12px] text-foreground">
+          <input
+            type="checkbox"
+            checked={draft.imessageEnabled}
+            onChange={(e) => updateField("imessageEnabled", e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-border accent-primary"
+          />
+          Use iMessage for outbound replies
+        </label>
+        <FieldRow
+          label="iMessage handle (your Apple ID email or phone number)"
+          value={draft.imessageHandle}
+          onChange={(v) => updateField("imessageHandle", v)}
+          placeholder="you@icloud.com  or  +12505551234"
+        />
+        <p className="text-[10.5px] text-muted-foreground">
+          Requires Messages.app signed in on this Mac. Elevate sends via AppleScript from the local runtime.
+        </p>
+      </ItemCard>
+
+      <ItemCard
+        title="SMS / Twilio"
+        description="Plain text messaging. Use Twilio for a dedicated business line, otherwise your phone's native SMS."
+        status={smsItem?.status ?? "missing"}
+      >
+        <label className="block text-[11.5px] text-muted-foreground">
+          <span className="mb-0.5 block">Provider</span>
+          <select
+            value={draft.smsProvider}
+            onChange={(e) => updateField("smsProvider", e.target.value)}
+            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+          >
+            <option value="">— pick one —</option>
+            <option value="twilio">Twilio</option>
+            <option value="native_sms">Native SMS (Mac Messages / phone modem)</option>
+            <option value="google_voice">Google Voice</option>
+          </select>
+        </label>
+        <FieldRow
+          label="From number (E.164 format)"
+          value={draft.smsFromNumber}
+          onChange={(v) => updateField("smsFromNumber", v)}
+          placeholder="+12505551234"
+        />
+        {draft.smsProvider === "twilio" && (
+          <>
+            <FieldRow
+              label="Twilio Account SID"
+              value={draft.smsTwilioAccountSid}
+              onChange={(v) => updateField("smsTwilioAccountSid", v)}
+              placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            />
+            <FieldRow
+              label="Twilio Auth Token"
+              value={draft.smsTwilioAuthToken}
+              onChange={(v) => updateField("smsTwilioAuthToken", v)}
+              placeholder="••••••••"
+              type="password"
+            />
+            <a
+              href="https://console.twilio.com/"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
+            >
+              Open Twilio Console <ExternalLink className="h-3 w-3" />
+            </a>
+          </>
+        )}
+      </ItemCard>
+
+      <ItemCard
+        title="RCS"
+        description="Rich messaging for Android leads (read receipts, typing indicators, media). Falls back to SMS automatically."
+        status={rcsItem?.status ?? "missing"}
+      >
+        <label className="block text-[11.5px] text-muted-foreground">
+          <span className="mb-0.5 block">Provider</span>
+          <select
+            value={draft.rcsProvider}
+            onChange={(e) => updateField("rcsProvider", e.target.value)}
+            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+          >
+            <option value="">— pick one —</option>
+            <option value="google_rcs">Google Business Messages / RCS</option>
+            <option value="twilio_rcs">Twilio RCS</option>
+          </select>
+        </label>
+        <FieldRow
+          label="Sender phone number (E.164 format)"
+          value={draft.rcsFromNumber}
+          onChange={(v) => updateField("rcsFromNumber", v)}
+          placeholder="+12505551234"
         />
       </ItemCard>
 

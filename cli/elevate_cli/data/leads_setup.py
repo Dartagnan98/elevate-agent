@@ -10,6 +10,10 @@ required-keys completion check) but scoped to inbound lead capture:
   inbound lead sources. At least one must be ``connected``/``configured``
   for the gate to lift (enforced by the ``lead_sources_quorum`` synthetic
   check).
+- ``outreach_imessage``, ``outreach_sms``, ``outreach_rcs`` — outbound
+  channels the agent uses to message leads. At least one must be ready
+  (``outreach_quorum`` synthetic check). The agent picks whichever
+  combination they actually use day-to-day.
 - ``auto_reply_policy`` — initial-touch behaviour (enabled flag + template +
   follow-up cadence days).
 
@@ -65,12 +69,36 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "sort_order": 40,
     },
     {
+        "key": "outreach_imessage",
+        "category": "outreach",
+        "label": "Apple Messages (iMessage)",
+        "description": "Send replies and follow-ups via iMessage from your Mac. Best for iPhone leads.",
+        "required": False,
+        "sort_order": 60,
+    },
+    {
+        "key": "outreach_sms",
+        "category": "outreach",
+        "label": "SMS / Twilio",
+        "description": "Plain SMS for any phone. Use Twilio for a dedicated business line, otherwise your phone's number.",
+        "required": False,
+        "sort_order": 70,
+    },
+    {
+        "key": "outreach_rcs",
+        "category": "outreach",
+        "label": "RCS",
+        "description": "Rich messaging on Android. Richer than SMS, less common than iMessage.",
+        "required": False,
+        "sort_order": 80,
+    },
+    {
         "key": "auto_reply_policy",
         "category": "policy",
         "label": "Auto-reply policy",
         "description": "Whether Elevate sends an initial touch, and the follow-up cadence default.",
         "required": True,
-        "sort_order": 50,
+        "sort_order": 90,
     },
 ]
 
@@ -180,8 +208,12 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
 
     by_key = {it["key"]: it for it in items}
     lead_source_keys = ("meta_lead_ads", "google_lead_forms", "website_form_webhook")
+    outreach_keys = ("outreach_imessage", "outreach_sms", "outreach_rcs")
     any_lead_source_ready = any(
         by_key.get(k) and _item_counts_ready(by_key[k]) for k in lead_source_keys
+    )
+    any_outreach_ready = any(
+        by_key.get(k) and _item_counts_ready(by_key[k]) for k in outreach_keys
     )
 
     required = [item for item in items if item["required"]]
@@ -190,14 +222,20 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
     missing_keys = [item["key"] for item in missing]
     if not any_lead_source_ready:
         missing_keys.append("lead_sources_quorum")
+    if not any_outreach_ready:
+        missing_keys.append("outreach_quorum")
 
     state_row = conn.execute(
         "SELECT * FROM leads_setup_state WHERE id=?", (STATE_ID,)
     ).fetchone()
     completed_at = state_row["completed_at"] if state_row else None
 
-    required_count = len(required) + 1
-    completed_count = len(complete_required) + (1 if any_lead_source_ready else 0)
+    required_count = len(required) + 2
+    completed_count = (
+        len(complete_required)
+        + (1 if any_lead_source_ready else 0)
+        + (1 if any_outreach_ready else 0)
+    )
     complete = completed_count == required_count
 
     return {
@@ -210,6 +248,7 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
         "completedAt": completed_at,
         "launchRequired": not complete,
         "leadSourcesReady": any_lead_source_ready,
+        "outreachReady": any_outreach_ready,
     }
 
 

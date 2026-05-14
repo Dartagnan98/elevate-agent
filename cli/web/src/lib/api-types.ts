@@ -905,6 +905,7 @@ export interface LeadsSetupSnapshot {
   completedAt: string | null;
   launchRequired: boolean;
   leadSourcesReady: boolean;
+  outreachReady: boolean;
 }
 
 export interface LeadsSetupItemUpdate {
