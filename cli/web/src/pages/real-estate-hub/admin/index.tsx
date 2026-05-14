@@ -62,7 +62,6 @@ import { cn, isoTimeAgo } from "@/lib/utils";
 import {
   playOnboardingChime,
   playOnboardingClick,
-  playOnboardingRiser,
   playOnboardingSwell,
 } from "@/lib/onboarding-sounds";
 import {
@@ -1483,15 +1482,6 @@ function AdminOnboardingSeeding({
   const [activeIdx, setActiveIdx] = useState(0);
   const [seedDone, setSeedDone] = useState(false);
   const [seedResult, setSeedResult] = useState<{ missing: boolean; error: string | null } | null>(null);
-  const riserRef = useRef<{ stop: () => void } | null>(null);
-
-  useEffect(() => {
-    riserRef.current = playOnboardingRiser(ONBOARDING_SEEDING_STEPS.length * 1.6 + 1.2);
-    return () => {
-      riserRef.current?.stop();
-      riserRef.current = null;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1520,8 +1510,6 @@ function AdminOnboardingSeeding({
 
   useEffect(() => {
     if (!seedDone || !seedResult) return;
-    riserRef.current?.stop();
-    riserRef.current = null;
     const finishId = window.setTimeout(() => {
       if (seedResult.missing) onMissing();
       else onComplete();
