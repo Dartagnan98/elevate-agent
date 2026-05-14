@@ -72,7 +72,7 @@ import {
 } from "lucide-react";
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
-import { api, type CronJob, type SessionInfo } from "@/lib/api";
+import { api, type SessionInfo } from "@/lib/api";
 import type { AccessStatusResponse } from "@/lib/api-types";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
@@ -729,28 +729,6 @@ function isCronSession(session: SessionInfo): boolean {
   return cronJobIdFromSession(session) !== null;
 }
 
-function cronSessionLabel(
-  session: SessionInfo,
-  jobsById: Map<string, CronJob>,
-): string {
-  const jobId = cronJobIdFromSession(session);
-  if (jobId) {
-    const job = jobsById.get(jobId);
-    const fromJob = job?.name?.trim() || job?.prompt?.trim();
-    if (fromJob) {
-      return fromJob.length > 48 ? `${fromJob.slice(0, 47)}…` : fromJob;
-    }
-    if (job) return jobId;
-  }
-  const raw = sessionTitle(session);
-  const stripped = raw
-    .replace(/^\[SYSTEM:\s*/i, "")
-    .replace(/\]$/, "")
-    .replace(/^You are\s+/i, "")
-    .trim();
-  return stripped || raw;
-}
-
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
   if (!embeddedChat) return "/hub";
   return `/chat?resume=${encodeURIComponent(session.id)}`;
@@ -808,14 +786,6 @@ function DesktopSidebar({
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionError, setSessionError] = useState(false);
-  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
-  const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem("elevate.sidebar.automations.v2") === "1";
-    } catch {
-      return false;
-    }
-  });
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem("elevate.sidebar.sections.v1");
@@ -891,44 +861,6 @@ function DesktopSidebar({
     };
   }, [loadSessions, readyToLoad]);
 
-  useEffect(() => {
-    if (!readyToLoad) return;
-    let cancelled = false;
-    const loadJobs = () => {
-      api
-        .getCronJobs({ compact: true })
-        .then((jobs) => {
-          if (!cancelled) setCronJobs(jobs ?? []);
-        })
-        .catch(() => {
-          /* sidebar can render without job names */
-        });
-    };
-    const initialLoad = window.setTimeout(loadJobs, 500);
-    const id = window.setInterval(loadJobs, 30000);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(initialLoad);
-      window.clearInterval(id);
-    };
-  }, [readyToLoad]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        "elevate.sidebar.automations.v2",
-        automationsOpen ? "1" : "0",
-      );
-    } catch {
-      /* ignore */
-    }
-  }, [automationsOpen]);
-
-  const cronJobsById = useMemo(() => {
-    const map = new Map<string, CronJob>();
-    for (const job of cronJobs) map.set(job.id, job);
-    return map;
-  }, [cronJobs]);
 
   useEffect(() => {
     writePinnedSessionIds(pinnedIds);
@@ -1017,10 +949,6 @@ function DesktopSidebar({
   const chatSessions = filteredSessions
     .filter((session) => !spotlightIds.has(session.id) && !isCronSession(session))
     .slice(0, 18);
-  const automationSessions = filteredSessions
-    .filter((session) => isCronSession(session))
-    .slice(0, 24);
-
   const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
   const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
@@ -1441,20 +1369,7 @@ function DesktopSidebar({
           }
         />
 
-        {automationSessions.length > 0 && (
-          <AutomationsSection
-            embeddedChat={embeddedChat}
-            open={automationsOpen}
-            onToggle={() => setAutomationsOpen((prev) => !prev)}
-            onOpenContextMenu={openSessionMenu}
-            onOpenSession={openSession}
-            onTogglePinned={togglePinned}
-            pinnedIds={pinnedIds}
-            sessions={automationSessions}
-            unreadIds={unreadIds}
-            cronJobsById={cronJobsById}
-          />
-        )}
+        {/* Cron job runs live on the /cron dashboard, not in the sidebar. */}
 
         {toolNavItems.length > 0 && (
           <div className="mt-3">
@@ -1833,67 +1748,6 @@ function SessionListItem({
       >
         <MoreHorizontal className="h-3.5 w-3.5" />
       </button>
-    </div>
-  );
-}
-
-function AutomationsSection({
-  embeddedChat,
-  open,
-  onToggle,
-  onOpenContextMenu,
-  onOpenSession,
-  onTogglePinned,
-  pinnedIds,
-  sessions,
-  unreadIds,
-  cronJobsById,
-}: {
-  embeddedChat: boolean;
-  open: boolean;
-  onToggle: () => void;
-  onOpenContextMenu: (session: SessionInfo, event: MouseEvent<HTMLElement>) => void;
-  onOpenSession: (session: SessionInfo) => void;
-  onTogglePinned: (sessionId: string) => void;
-  pinnedIds: string[];
-  sessions: SessionInfo[];
-  unreadIds: string[];
-  cronJobsById: Map<string, CronJob>;
-}) {
-  const liveCount = sessions.filter((session) => session.is_active).length;
-  return (
-    <div className="mt-3 lg:mt-2.5">
-      <SidebarSectionLabel collapsed={!open} onToggle={onToggle}>
-        <span className="flex w-full items-center gap-1.5">
-          <span>Automations</span>
-          <span className="font-normal normal-case tracking-normal text-[var(--sidebar-text-muted)]/80 tabular-nums">
-            {sessions.length}
-          </span>
-          {liveCount > 0 && (
-            <span className="ml-auto flex items-center gap-1 normal-case tracking-normal text-primary">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {liveCount} live
-            </span>
-          )}
-        </span>
-      </SidebarSectionLabel>
-      {open && (
-        <div className="mt-1 space-y-0.5 lg:mt-0.5">
-          {sessions.map((session) => (
-            <SessionListItem
-              key={session.id}
-              embeddedChat={embeddedChat}
-              onOpenContextMenu={onOpenContextMenu}
-              onOpenSession={onOpenSession}
-              onTogglePinned={onTogglePinned}
-              pinned={pinnedIds.includes(session.id)}
-              session={session}
-              unread={unreadIds.includes(session.id)}
-              displayTitle={cronSessionLabel(session, cronJobsById)}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

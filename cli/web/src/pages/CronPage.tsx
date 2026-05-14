@@ -495,6 +495,10 @@ export default function CronPage() {
 
   useEffect(() => {
     loadJobs();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadJobs();
+    }, 15_000);
+    return () => window.clearInterval(interval);
   }, [loadJobs]);
 
   const handleCreate = async () => {
