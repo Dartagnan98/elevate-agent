@@ -270,7 +270,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "MLS",
     labels: {
       listing: { title: "MLS Entry", subtitle: "Listing build + launch prep" },
-      buyer: { title: "Offer Prep", subtitle: "Comps + CPS" },
+      buyer: { title: "Offer Prep", subtitle: "Comps + offer paperwork" },
     },
   },
   {
@@ -288,16 +288,16 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "Contract",
     labels: {
       listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
-      buyer: { title: "Conditions", subtitle: "Inspection + strata" },
+      buyer: { title: "Conditions", subtitle: "Inspection + property review" },
     },
   },
   {
     stage: 7,
     stageNumber: "S7",
-    stageLabel: "Subjects",
+    stageLabel: "Conditions",
     labels: {
-      listing: { title: "Subject Removal", subtitle: "Subjects + lawyer package" },
-      buyer: { title: "Subjects Off", subtitle: "Deposit + dates" },
+      listing: { title: "Condition Removal", subtitle: "Conditions + lawyer package" },
+      buyer: { title: "Conditions Removed", subtitle: "Deposit + dates" },
     },
   },
   {
@@ -305,7 +305,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S8",
     stageLabel: "Closing",
     labels: {
-      listing: { title: "Closing", subtitle: "Conveyance + possession" },
+      listing: { title: "Closing", subtitle: "Lawyer / conveyance + possession" },
       buyer: { title: "Closing", subtitle: "Lawyer + walkthrough" },
     },
   },
@@ -2112,7 +2112,7 @@ function AdminDealContextSection({
     ? ([
         ["Listing", deal.listingDate],
         ["Offer", deal.offerDate],
-        ["Subjects", deal.subjectRemovalDate],
+        ["Conditions", deal.subjectRemovalDate],
         ["Deposit", deal.depositDueDate],
         ["Completion", deal.completionDate],
         ["Possession", deal.possessionDate],
