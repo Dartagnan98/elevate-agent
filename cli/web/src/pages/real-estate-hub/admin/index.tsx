@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -7,7 +6,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -1537,44 +1535,23 @@ function AdminPhaseSummary({
     .filter(Boolean)
     .join("\n");
 
-  const segments: ReactNode[] = [];
-  if (phase.agents.length > 0) {
-    segments.push(
-      <span key="agents" className="truncate text-foreground/75">
-        {agentNames}
-      </span>,
-    );
-  } else {
-    segments.push(
-      <span key="agents-empty" className="truncate text-muted-foreground/70">
-        task list
-      </span>,
-    );
-  }
-  if (phase.background.length > 0) {
-    segments.push(
-      <span key="background" className="truncate text-muted-foreground">
-        bg · {backgroundNames}
-      </span>,
-    );
-  }
-  if (phase.approvalGate) {
-    segments.push(
-      <span key="approval" className="shrink-0 text-warning">
-        approval
-      </span>,
-    );
-  }
+  const automationLabel =
+    phase.agents.length > 0
+      ? phase.background.length > 0
+        ? "automated + background"
+        : "automated"
+      : "manual";
 
   return (
     <div className={cn("flex flex-col gap-0.5", dense ? "mt-1" : "mt-1.5")} title={summaryTitle}>
       <div className="flex min-w-0 items-center gap-1.5 text-[0.7rem] leading-tight">
-        {segments.map((segment, idx) => (
-          <Fragment key={idx}>
-            {idx > 0 && <span className="shrink-0 text-muted-foreground/45">·</span>}
-            {segment}
-          </Fragment>
-        ))}
+        <span className="truncate text-muted-foreground/85">{automationLabel}</span>
+        {phase.approvalGate && (
+          <>
+            <span className="shrink-0 text-muted-foreground/45">·</span>
+            <span className="shrink-0 text-warning">approval</span>
+          </>
+        )}
       </div>
       <div className="truncate text-[0.66rem] leading-tight text-muted-foreground/85">
         Moves on {phase.moveSignal}
