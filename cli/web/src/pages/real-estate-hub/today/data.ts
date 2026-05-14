@@ -44,6 +44,8 @@ export type UrgentItem = {
   waitedMinutes: number | null;
   tone: "neutral" | "warn" | "danger";
   to: string;
+  sourceId?: string;
+  threadId?: string;
 };
 
 function parseTs(value: string | null | undefined): number | null {
@@ -331,6 +333,8 @@ export function priorityQueue({
       waitedMinutes: waited,
       tone,
       to: "/leads",
+      sourceId: draft.sourceId,
+      threadId: draft.threadId,
     });
   }
 
@@ -346,6 +350,8 @@ export function priorityQueue({
       waitedMinutes: waited,
       tone,
       to: "/leads",
+      sourceId: thread.sourceId,
+      threadId: thread.threadId,
     });
   }
 
