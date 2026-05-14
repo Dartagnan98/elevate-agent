@@ -3060,49 +3060,6 @@ export default function ChatPage() {
       className="elevate-chat-shell relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case"
       style={previewPanelLayoutStyle}
     >
-      <div
-        className="relative h-11 shrink-0 px-4 sm:px-6"
-        style={{ WebkitAppRegion: "drag" } as CSSProperties}
-      >
-        {sidebarCollapsed && onShowSidebar ? (
-          <button
-            type="button"
-            onClick={onShowSidebar}
-            aria-label="Show sidebar"
-            style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
-            className="absolute left-4 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)] sm:left-6"
-          >
-            <PanelLeftOpen className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
-        <div
-          className="mx-auto flex h-full w-full min-w-0 max-w-[52rem] items-center gap-2 sm:gap-3"
-          style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
-        >
-          {folderLabel ? (
-            <span className="flex shrink-0 items-center gap-1.5 text-[0.92rem] leading-6 text-[var(--chat-muted)]">
-              <span>{folderLabel}</span>
-              <span className="opacity-60">/</span>
-            </span>
-          ) : null}
-          <h1 className="min-w-0 truncate text-[0.95rem] font-semibold leading-6 tracking-[-0.005em] text-[var(--chat-text)]">
-            {chatTitle}
-          </h1>
-          {sessionId ? (
-            <button
-              type="button"
-              aria-label="Chat options"
-              onClick={(event) => {
-                const rect = event.currentTarget.getBoundingClientRect();
-                handleOpenChatMenu({ x: rect.left, y: rect.bottom + 4 });
-              }}
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
-            >
-              <ChevronDown className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-        </div>
-      </div>
       <div className="flex min-h-0 flex-1">
         <section
           className={cn(
@@ -3110,7 +3067,50 @@ export default function ChatPage() {
             previewArtifact && "lg:basis-1/2",
           )}
         >
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-6 scrollbar-none sm:px-6 sm:pt-8">
+          <div
+            className="relative h-11 shrink-0 px-4 sm:px-6"
+            style={{ WebkitAppRegion: "drag" } as CSSProperties}
+          >
+            {sidebarCollapsed && onShowSidebar ? (
+              <button
+                type="button"
+                onClick={onShowSidebar}
+                aria-label="Show sidebar"
+                style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+                className="absolute left-4 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)] sm:left-6"
+              >
+                <PanelLeftOpen className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+            <div
+              className="mx-auto flex h-full w-full min-w-0 max-w-[52rem] items-center gap-2 sm:gap-3"
+              style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+            >
+              {folderLabel ? (
+                <span className="flex shrink-0 items-center gap-1.5 text-[0.92rem] leading-6 text-[var(--chat-muted)]">
+                  <span>{folderLabel}</span>
+                  <span className="opacity-60">/</span>
+                </span>
+              ) : null}
+              <h1 className="min-w-0 truncate text-[0.95rem] font-semibold leading-6 tracking-[-0.005em] text-[var(--chat-text)]">
+                {chatTitle}
+              </h1>
+              {sessionId ? (
+                <button
+                  type="button"
+                  aria-label="Chat options"
+                  onClick={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    handleOpenChatMenu({ x: rect.left, y: rect.bottom + 4 });
+                  }}
+                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2 scrollbar-none sm:px-6 sm:pt-3">
             {visibleMessages.length === 0 ? (
               <EmptyState state={state} />
             ) : (
@@ -3270,8 +3270,8 @@ export default function ChatPage() {
           className={cn(
             "hidden min-h-0 shrink-0 lg:flex",
             previewArtifact
-              ? "flex-col py-5 pr-5 pl-0"
-              : "w-[18rem] flex-col self-start pt-5 pr-5",
+              ? "flex-col pb-5 pl-0 pr-5 pt-2"
+              : "w-[18rem] flex-col self-start pr-5 pt-2",
           )}
           style={
             previewArtifact
