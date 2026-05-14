@@ -176,6 +176,7 @@ from elevate_cli.data.province_guides import (
     province_agent_memory,
     province_coverage,
     province_guide_summary,
+    province_stage_documents,
 )
 from elevate_cli.data.admin_setup import (
     admin_setup_memory_summary,
@@ -266,7 +267,7 @@ __all__ = [
     "condition_docs_for_conditions", "import_exp_agent_centre",
     "list_province_checklists", "list_province_forms",
     "list_province_reference_pages", "province_agent_memory", "province_coverage",
-    "province_guide_summary",
+    "province_guide_summary", "province_stage_documents",
     # Admin setup readiness gate
     "admin_setup_memory_summary", "admin_setup_ready", "complete_admin_setup",
     "get_admin_setup", "require_admin_setup_ready", "sync_admin_setup_memory",

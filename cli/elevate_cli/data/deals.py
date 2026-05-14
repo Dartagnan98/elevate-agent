@@ -1461,18 +1461,49 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
     prior_runs = list_deal_action_runs(conn, deal_id)
     from elevate_cli.data.province_guides import (
         condition_docs_for_conditions,
+        normalize_province_code,
         province_agent_memory,
         province_guide_summary,
+        province_stage_documents,
     )
+    # Province on the deal row may be stored as either a clean code ("BC") or
+    # a legacy country-prefixed tuple ("ca.bc"). Normalize once so every
+    # downstream call uses the canonical short code.
+    raw_province = str(deal.get("province") or "").strip()
+    try:
+        deal_province = normalize_province_code(raw_province.split(".", 1)[-1]) or ""
+    except ValueError:
+        deal_province = ""
     condition_docs = condition_docs_for_conditions(
         conn,
-        province=str(deal.get("province") or ""),
+        province=deal_province,
         conditions=conditions,
         side=str(deal.get("side") or ""),
         stage=int(deal.get("currentStage") or 0),
     )
-    province_guide = province_guide_summary(conn, str(deal.get("province") or ""))
-    agent_guide_memory = province_agent_memory(conn, str(deal.get("province") or ""))
+    province_guide = province_guide_summary(conn, deal_province)
+    agent_guide_memory = province_agent_memory(conn, deal_province)
+    # Conditions for stage-document mapping combine the named-field conditions
+    # (signing_authority, fintrac_form_type, etc.) with any boolean toggles
+    # carried on the checklist (tenanted, multiple_offers, strata, lockbox...).
+    # The conditional_docs overlay matches on field_key + field_value pairs.
+    stage_doc_conditions: dict[str, Any] = dict(conditions)
+    if isinstance(checklist, Mapping):
+        for key, value in checklist.items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                stage_doc_conditions[str(key)] = "true" if value else "false"
+            else:
+                stage_doc_conditions[str(key)] = value
+    if deal.get("propertySubtype"):
+        stage_doc_conditions["property_subtype"] = deal.get("propertySubtype")
+    stage_documents = province_stage_documents(
+        conn,
+        province=deal_province,
+        side=str(deal.get("side") or "listing"),
+        conditions=stage_doc_conditions,
+    )
     from elevate_cli.admin_deal_flow import resolve_deal_phase
 
     deal_flow = resolve_deal_phase(
@@ -1495,6 +1526,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
         "dealFlow": deal_flow,
         "provinceGuide": province_guide,
         "agentGuideMemory": agent_guide_memory,
+        "stageDocuments": stage_documents,
         "events": list_deal_events(conn, deal_id, limit=50),
     }
 

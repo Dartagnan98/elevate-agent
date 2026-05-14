@@ -601,7 +601,33 @@ export interface DealContext {
   dealFlow?: DealFlowResolution;
   provinceGuide?: AdminProvinceGuide;
   agentGuideMemory?: Record<string, unknown>;
+  stageDocuments?: ProvinceStageDocuments;
   events: Array<Record<string, unknown>>;
+}
+
+export interface ProvinceStageDocumentItem {
+  code: string;
+  name: string;
+  source: "form" | "conditional";
+  side?: string | null;
+  category?: string | null;
+  sourcePath?: string | null;
+  condition?: { field: string; value: string } | null;
+}
+
+export interface ProvinceStageDocuments {
+  province: string;
+  side: string;
+  stages: Record<string, ProvinceStageDocumentItem[]>;
+  unmapped: Array<{ code: string; name: string; category?: string | null }>;
+  otherSide: Array<{ code: string; name: string; category?: string | null; side?: string | null }>;
+  coverage: {
+    forms: number;
+    mapped: number;
+    conditional: number;
+    otherSide: number;
+    unmapped: number;
+  };
 }
 
 export interface ProvinceConditionalDoc {
