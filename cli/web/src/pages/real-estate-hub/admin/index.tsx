@@ -908,12 +908,17 @@ function AdminSetupField({
   value,
   onChange,
   placeholder,
+  suggestions,
+  listId,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  suggestions?: readonly string[];
+  listId?: string;
 }) {
+  const resolvedListId = suggestions && suggestions.length > 0 ? listId : undefined;
   return (
     <label className="block min-w-0">
       <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">{label}</span>
@@ -921,11 +926,33 @@ function AdminSetupField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        list={resolvedListId}
         className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30"
       />
+      {resolvedListId && (
+        <datalist id={resolvedListId}>
+          {suggestions!.map((item) => (
+            <option key={item} value={item} />
+          ))}
+        </datalist>
+      )}
     </label>
   );
 }
+
+const PROVIDER_SUGGESTIONS = {
+  email: ["Gmail", "Outlook", "Apple Mail"],
+  calendar: ["Google Calendar", "Outlook Calendar", "Apple Calendar"],
+  drive: ["Google Drive", "Dropbox", "SharePoint", "OneDrive"],
+  crm: ["Lofty", "kvCORE", "BoldTrail", "Follow Up Boss", "Sierra Interactive", "Chime", "HubSpot"],
+  mls: ["Matrix", "Paragon", "Xposure", "Stellar MLS", "MLS-Touch", "Realtor.ca"],
+  forms: ["WEBForms", "TransactionDesk", "ZipForm", "Authentisign"],
+  signing: ["DigiSign", "DocuSign", "Authentisign", "Dotloop", "PandaDoc"],
+  compliance: ["SkySlope", "Lone Wolf", "Dotloop", "BrokerWolf"],
+  showing: ["ShowingTime", "BrokerBay", "Aligned Showings", "ShowingSmart"],
+  photo: ["Nano Banana", "Higgsfield", "BoxBrownie", "Virtual Staging AI"],
+  fintrac: ["Fintracker", "Manual FIN# capture", "OneID", "Treefort"],
+} as const;
 
 function AdminSetupLaunch({
   setup,
@@ -1155,17 +1182,17 @@ function AdminSetupLaunch({
       <div className="pt-6 pb-2 border-t border-border">
         <div className="mb-3 text-[12px] font-semibold text-muted-foreground">Providers</div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <AdminSetupField label="Email" value={draft.emailProvider} onChange={(v) => updateDraft("emailProvider", v)} placeholder="Gmail / Outlook account" />
-          <AdminSetupField label="Calendar" value={draft.calendarProvider} onChange={(v) => updateDraft("calendarProvider", v)} placeholder="Google Calendar / Outlook" />
-          <AdminSetupField label="Cloud drive" value={draft.driveProvider} onChange={(v) => updateDraft("driveProvider", v)} placeholder="Google Drive / SharePoint" />
-          <AdminSetupField label="CRM" value={draft.crmProvider} onChange={(v) => updateDraft("crmProvider", v)} placeholder="Lofty, kvCORE, BoldTrail..." />
-          <AdminSetupField label="MLS / board portal" value={draft.mlsProvider} onChange={(v) => updateDraft("mlsProvider", v)} placeholder="Matrix, Xposure, Paragon..." />
-          <AdminSetupField label="Forms provider" value={draft.formsProvider} onChange={(v) => updateDraft("formsProvider", v)} placeholder="WEBForms / TransactionDesk" />
-          <AdminSetupField label="Signing provider" value={draft.signingProvider} onChange={(v) => updateDraft("signingProvider", v)} placeholder="DigiSign / DocuSign" />
-          <AdminSetupField label="Compliance platform" value={draft.complianceProvider} onChange={(v) => updateDraft("complianceProvider", v)} placeholder="SkySlope / Lone Wolf" />
-          <AdminSetupField label="Showing platform" value={draft.showingProvider} onChange={(v) => updateDraft("showingProvider", v)} placeholder="ShowingTime / BrokerBay" />
-          <AdminSetupField label="Photo processing" value={draft.photoProcessingProvider} onChange={(v) => updateDraft("photoProcessingProvider", v)} placeholder="Drive + Nano Banana / Higgsfield" />
-          <AdminSetupField label="FINTRAC / ID workflow" value={draft.fintracProvider} onChange={(v) => updateDraft("fintracProvider", v)} placeholder="Fintracker / manual FIN# capture" />
+          <AdminSetupField label="Email" value={draft.emailProvider} onChange={(v) => updateDraft("emailProvider", v)} placeholder="Gmail / Outlook account" suggestions={PROVIDER_SUGGESTIONS.email} listId="provider-email" />
+          <AdminSetupField label="Calendar" value={draft.calendarProvider} onChange={(v) => updateDraft("calendarProvider", v)} placeholder="Google Calendar / Outlook" suggestions={PROVIDER_SUGGESTIONS.calendar} listId="provider-calendar" />
+          <AdminSetupField label="Cloud drive" value={draft.driveProvider} onChange={(v) => updateDraft("driveProvider", v)} placeholder="Google Drive / SharePoint" suggestions={PROVIDER_SUGGESTIONS.drive} listId="provider-drive" />
+          <AdminSetupField label="CRM" value={draft.crmProvider} onChange={(v) => updateDraft("crmProvider", v)} placeholder="Lofty, kvCORE, BoldTrail..." suggestions={PROVIDER_SUGGESTIONS.crm} listId="provider-crm" />
+          <AdminSetupField label="MLS / board portal" value={draft.mlsProvider} onChange={(v) => updateDraft("mlsProvider", v)} placeholder="Matrix, Xposure, Paragon..." suggestions={PROVIDER_SUGGESTIONS.mls} listId="provider-mls" />
+          <AdminSetupField label="Forms provider" value={draft.formsProvider} onChange={(v) => updateDraft("formsProvider", v)} placeholder="WEBForms / TransactionDesk" suggestions={PROVIDER_SUGGESTIONS.forms} listId="provider-forms" />
+          <AdminSetupField label="Signing provider" value={draft.signingProvider} onChange={(v) => updateDraft("signingProvider", v)} placeholder="DigiSign / DocuSign" suggestions={PROVIDER_SUGGESTIONS.signing} listId="provider-signing" />
+          <AdminSetupField label="Compliance platform" value={draft.complianceProvider} onChange={(v) => updateDraft("complianceProvider", v)} placeholder="SkySlope / Lone Wolf" suggestions={PROVIDER_SUGGESTIONS.compliance} listId="provider-compliance" />
+          <AdminSetupField label="Showing platform" value={draft.showingProvider} onChange={(v) => updateDraft("showingProvider", v)} placeholder="ShowingTime / BrokerBay" suggestions={PROVIDER_SUGGESTIONS.showing} listId="provider-showing" />
+          <AdminSetupField label="Photo processing" value={draft.photoProcessingProvider} onChange={(v) => updateDraft("photoProcessingProvider", v)} placeholder="Drive + Nano Banana / Higgsfield" suggestions={PROVIDER_SUGGESTIONS.photo} listId="provider-photo" />
+          <AdminSetupField label="FINTRAC / ID workflow" value={draft.fintracProvider} onChange={(v) => updateDraft("fintracProvider", v)} placeholder="Fintracker / manual FIN# capture" suggestions={PROVIDER_SUGGESTIONS.fintrac} listId="provider-fintrac" />
           <AdminSetupField label="Folder pattern" value={draft.defaultFolderPattern} onChange={(v) => updateDraft("defaultFolderPattern", v)} />
           <AdminSetupField label="Commission / service notes" value={draft.commissionNotes} onChange={(v) => updateDraft("commissionNotes", v)} />
         </div>
