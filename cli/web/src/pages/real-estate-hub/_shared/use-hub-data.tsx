@@ -36,7 +36,12 @@ export function useRealEstateHubData(): HubData {
     pathname.startsWith("/today/") ||
     pathname === "/leads" ||
     pathname.startsWith("/leads/");
-  const includeAdminTaskData = pathname === "/tasks" || pathname.startsWith("/tasks/");
+  const includeAdminTaskData =
+    pathname === "/tasks" ||
+    pathname.startsWith("/tasks/") ||
+    pathname === "/today" ||
+    pathname.startsWith("/today/") ||
+    pathname === "/";
   const includeOrchestration =
     pathname === "/" || pathname === "/today" || pathname.startsWith("/today/");
   const includeAgentHub = includeMemoryGraph || includeOrchestration || includeAdminTaskData;

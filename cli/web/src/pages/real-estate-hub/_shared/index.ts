@@ -23,6 +23,8 @@ export {
   sessionMatches,
 } from "./page-helpers";
 export { HubMetric } from "./hub-metric";
+export { parseIdentity, provenanceLine } from "./parse-identity";
+export type { ParsedIdentity } from "./parse-identity";
 export { HubShell } from "./hub-shell";
 export { LoadingState } from "./loading-state";
 export { useHubHeader, useRealEstateHubData } from "./use-hub-data";

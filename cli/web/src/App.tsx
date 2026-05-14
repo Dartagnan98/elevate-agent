@@ -113,7 +113,7 @@ const RealEstateTasksPage = lazy(() =>
   import("@/pages/real-estate-hub/tasks").then((m) => ({ default: m.RealEstateTasksPage })),
 );
 const RealEstateTodayPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateTodayPage })),
+  import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage })),
 );
 import { useI18n } from "@/i18n";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";

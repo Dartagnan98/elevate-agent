@@ -13,14 +13,11 @@ import {
   Activity,
   AlertTriangle,
   BookText,
-  Bot,
   BriefcaseBusiness,
-  CalendarClock,
   Check,
   CheckCircle2,
   CheckSquare,
   ChevronDown,
-  Clock,
   Database as DatabaseIcon,
   ExternalLink,
   FileCheck2,
@@ -46,9 +43,7 @@ import {
   Radar,
   Repeat,
   Send,
-  ShieldCheck,
   Sparkles,
-  Target,
   Trash2,
   TrendingDown,
   Award,
@@ -118,205 +113,20 @@ import {
   type ProfilePendingAdminAction,
 } from "@/pages/real-estate-hub/profile-workflow";
 import {
-  ActionBoard,
-  ContactOverviewBoard,
-  HubMetric,
   HubShell,
-  jobAction,
   jobMatches,
+  parseIdentity,
+  provenanceLine,
   RecentSessions,
-  sessionAction,
   sessionMatches,
   TimedTasks,
   useHubHeader,
   useRealEstateHubData,
-  WorkflowStrip,
   type BoardAction,
   type HubData,
 } from "@/pages/real-estate-hub/_shared";
 
 export type { BoardAction, HubData };
-
-function platformDisplayName(name: string): string {
-  const cleaned = name.replace(/[-_]/g, " ");
-  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
-}
-
-function approvalActions(data: HubData): BoardAction[] {
-  const pairingActions =
-    data.snapshot?.platforms.flatMap((platform) =>
-      platform.pending_pairings.map((pairing) => ({
-        detail: `${pairing.user_name || pairing.user_id} is waiting to pair with ${platformDisplayName(platform.name)}.`,
-        icon: ShieldCheck,
-        id: `pairing-${platform.name}-${pairing.code}`,
-        meta: `${pairing.age_minutes}m old`,
-        status: "approve",
-        title: `Approve ${platformDisplayName(platform.name)} pairing`,
-        to: "/today",
-        variant: "warning" as const,
-      })),
-    ) ?? [];
-  const waitingRunCount =
-    data.snapshot?.orchestration?.runs?.filter((run) => {
-      if (!run || typeof run !== "object") return false;
-      return JSON.stringify(run).toLowerCase().includes("waiting_for_approval");
-    }).length ?? 0;
-  const runAction =
-    waitingRunCount > 0
-      ? [
-          {
-            detail: `${waitingRunCount} agent run${waitingRunCount === 1 ? "" : "s"} need a human decision before continuing.`,
-            icon: AlertTriangle,
-            id: "waiting-runs",
-            meta: "agent orchestration",
-            status: "review",
-            title: "Review waiting agent approvals",
-            to: "/today",
-            variant: "warning" as const,
-          },
-        ]
-      : [];
-  return [...pairingActions, ...runAction];
-}
-
-function sourceRecordCount(data: HubData, key: string): number {
-  return Number(data.sourceInbox?.recordCounts?.[key] ?? 0);
-}
-
-function ClientInboxPreview({
-  data,
-  title = "Lead inbox",
-}: {
-  data: HubData;
-  title?: string;
-}) {
-  const threads = data.sourceInbox?.threads ?? [];
-  const sources = data.sourceInbox?.sources ?? [];
-  const connected = sources.filter((source) => source.connected || source.importOnly);
-  const blocked = sources.filter((source) => source.blocked);
-  const messageCount = sourceRecordCount(data, "messages");
-  const conversationCount = sourceRecordCount(data, "conversations");
-  const hotCount = sourceRecordCount(data, "hotThreads");
-
-  const updateThread = async (thread: SourceInboxThread, action: "done" | "archive") => {
-    await api.updateSourceInboxThread(thread.sourceId, thread.threadId, action);
-    await data.refresh();
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <CardTitle>{title}</CardTitle>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Source-aware conversations from Messages, Lofty CRM, email, SMS, and future lead channels.
-            </p>
-          </div>
-          <Badge variant={threads.length ? "success" : blocked.length ? "warning" : "outline"}>
-            {threads.length ? "actionable" : blocked.length ? "needs access" : "empty"}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="grid grid-cols-3 gap-2">
-          <HubMetric icon={MessageSquare} label="Messages" value={messageCount} />
-          <HubMetric icon={Users} label="Threads" value={conversationCount} />
-          <HubMetric icon={Target} label="Hot" value={hotCount} />
-        </div>
-        {threads.length ? (
-          <div className="space-y-2">
-            {threads.slice(0, 7).map((thread, index) => {
-              const inbound = thread.direction !== "outbound";
-              return (
-                <div
-                  key={thread.id || `${thread.sourceId}-${thread.threadId}-${index}`}
-                  className="rounded-md border border-border/55 bg-card px-3 py-3"
-                >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        "h-2 w-2 shrink-0 rounded-full",
-                        inbound ? "bg-success" : "bg-primary",
-                      )}
-                    />
-                    <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-                      {thread.personName}
-                    </div>
-                    <span className="shrink-0 text-[0.72rem] text-muted-foreground">
-                      {threadWhen(thread)}
-                    </span>
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                    {thread.latestText}
-                  </p>
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <Badge variant={heatVariant(thread)}>{thread.heatLabel} {thread.heatScore}</Badge>
-                    <Badge variant="outline">{thread.sourceLabel}</Badge>
-                    <Badge variant="outline">{thread.channel}</Badge>
-                    <Badge variant="outline">{inbound ? "inbound" : "outbound"}</Badge>
-                    <div className="ml-auto flex gap-1.5">
-                      <Button size="sm" variant="outline" onClick={() => void updateThread(thread, "done")}>
-                        Done
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => void updateThread(thread, "archive")}>
-                        Remove
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : blocked.length ? (
-          <div className="rounded-md border border-border border-l-2 border-l-warning bg-card px-4 py-4 text-sm text-muted-foreground">
-            <div className="font-semibold text-foreground">A lead source needs access before it can show client rows.</div>
-            <div className="mt-2 space-y-2">
-              {blocked.slice(0, 3).map((source) => (
-                <div key={source.id}>
-                  <span className="font-medium text-foreground">{source.label}: </span>
-                  {source.nextOperatorStep || source.lastError || "Open Settings and reconnect this source."}
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-md border border-dashed border-border bg-card px-4 py-8 text-sm text-muted-foreground">
-            No client-source rows are visible yet. Import Messages or sync Lofty CRM, then refresh this board.
-          </div>
-        )}
-        {connected.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-            {connected.slice(0, 4).map((source) => (
-              <Badge key={source.id} variant="outline">
-                {source.label} {source.importOnly ? "snapshot" : "live"}
-              </Badge>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function sourceSummary(data: HubData): Array<{ label: string; count: number; state: string }> {
-  const sources = data.sourceInbox?.sources ?? [];
-  const sourceCount = (source: typeof sources[number]): number =>
-    Number(
-      source.recordCounts?.conversations
-        ?? source.recordCounts?.contacts
-        ?? source.recordCounts?.messages
-        ?? 0,
-    );
-  return sources
-    .filter((source) => sourceCount(source) > 0)
-    .map((source) => ({
-      label: source.label,
-      count: sourceCount(source),
-      state: source.importOnly ? "snapshot" : source.connected ? "live" : source.state,
-    }))
-    .slice(0, 8);
-}
 
 function LeadProfilesWorkbench({
   onChanged,
@@ -957,135 +767,6 @@ const LeadBoardRow = memo(function LeadBoardRow({
   );
 });
 
-function LeadBoardColumn({
-  data,
-  empty,
-  threads,
-  title,
-  showOpenThread = true,
-}: {
-  data: HubData;
-  empty: string;
-  threads: SourceInboxThread[];
-  title: string;
-  showOpenThread?: boolean;
-}) {
-  return (
-    <div className="min-w-0">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="text-xs font-semibold text-muted-foreground">{title}</div>
-        <Badge variant={threads.length ? "outline" : "secondary"}>{threads.length}</Badge>
-      </div>
-      <div className="space-y-2">
-        {threads.length ? (
-          threads.map((thread) => (
-            <LeadBoardRow
-              key={thread.id}
-              data={data}
-              thread={thread}
-              showOpenThread={showOpenThread}
-            />
-          ))
-        ) : (
-          <div className="rounded-md border border-dashed border-border bg-card px-3 py-6 text-xs leading-5 text-muted-foreground">
-            {empty}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function LeadWorkBoard({
-  data,
-  threads: threadsOverride,
-  layout = "kanban",
-  showSources = true,
-}: {
-  data: HubData;
-  threads?: SourceInboxThread[];
-  layout?: "kanban" | "stack";
-  showSources?: boolean;
-}) {
-  const threads = threadsOverride ?? data.sourceInbox?.threads ?? [];
-  const buckets = leadThreadBuckets(threads);
-  const sources = sourceSummary(data);
-
-  const columns = [
-    { title: "Hot now", threads: buckets.hot, empty: "No hot leads yet." },
-    { title: "Needs follow-up", threads: buckets.followUp, empty: "No reply-needed leads." },
-    { title: "Watch list", threads: buckets.watch, empty: "Nothing on the watch list." },
-  ];
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <CardTitle>Lead workboard</CardTitle>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Prioritized people from CRM, Messages, and other lead sources. Marking a row hides it without touching source data.
-            </p>
-          </div>
-          <Badge variant={threads.length ? "warning" : "outline"}>{threads.length} open</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className={cn(layout === "kanban" ? "space-y-4" : "space-y-5")}>
-        {showSources && sources.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {sources.map((source) => (
-              <div
-                key={source.label}
-                className="flex items-center gap-2 rounded-sm border border-border bg-card px-3 py-1.5 text-xs text-foreground/70"
-              >
-                <span className="font-semibold text-foreground">{source.label}</span>
-                <span>{source.count}</span>
-                <Badge variant="outline">{source.state}</Badge>
-              </div>
-            ))}
-          </div>
-        )}
-        {layout === "kanban" ? (
-          <div className="grid gap-4 xl:grid-cols-3">
-            {columns.map((column) => (
-              <LeadBoardColumn
-                key={column.title}
-                data={data}
-                title={column.title}
-                threads={column.threads}
-                empty={column.empty}
-              />
-            ))}
-          </div>
-        ) : (
-          columns.map((column) => (
-            <section key={column.title} className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {column.title}
-                </h3>
-                <Badge variant={column.threads.length ? "outline" : "secondary"}>
-                  {column.threads.length}
-                </Badge>
-              </div>
-              {column.threads.length ? (
-                <div className="space-y-2">
-                  {column.threads.map((thread) => (
-                    <LeadBoardRow key={thread.id} data={data} thread={thread} />
-                  ))}
-                </div>
-              ) : (
-                <div className="rounded-md border border-dashed border-border bg-card px-3 py-4 text-xs text-muted-foreground">
-                  {column.empty}
-                </div>
-              )}
-            </section>
-          ))
-        )}
-      </CardContent>
-    </Card>
-  );
-}
 
 function draftWhen(draft: SourceInboxDraft): string {
   return draft.latestAt ? isoTimeAgo(draft.latestAt) : "unsynced";
@@ -1486,6 +1167,8 @@ function DraftMessagesBoard({
             const isExpanded = density === "expanded" || expandedId === draft.id || isEditing;
             const isSelected = selectedIds.has(draft.id);
             const heat = heatStyles(String(draft.leadLabel ?? ""));
+            const identity = parseIdentity(draft.personName);
+            const provenance = provenanceLine(draft.sourceLabel, draft.channel);
             return (
               <div
                 key={draft.id}
@@ -1500,12 +1183,6 @@ function DraftMessagesBoard({
                   !isFocused && !isSelected && "hover:bg-foreground/[0.02]",
                 )}
               >
-                {isFocused && (
-                  <span
-                    aria-hidden="true"
-                    className="absolute inset-y-0 left-0 w-0.5 rounded-full bg-primary"
-                  />
-                )}
                 <div className="flex w-full min-w-0 items-start gap-2">
                   <button
                     type="button"
@@ -1533,24 +1210,28 @@ function DraftMessagesBoard({
                     aria-expanded={isExpanded}
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-                          {draft.personName}
+                      <div className="flex min-w-0 items-baseline gap-2">
+                        <div className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-foreground">
+                          {identity.name}
                         </div>
-                        <span className="font-mono-ui shrink-0 text-[0.7rem] text-muted-foreground">
+                        <span className="font-mono-ui shrink-0 text-[0.66rem] tabular-nums text-muted-foreground/80">
                           {draftWhen(draft)}
                         </span>
                       </div>
-                      <div className="font-mono-ui mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[0.7rem] text-muted-foreground">
-                        <span className="truncate">{draft.sourceLabel}</span>
-                        <span aria-hidden className="opacity-50">·</span>
-                        <span className="truncate">{draft.channel}</span>
+                      <div className="font-mono-ui mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/75">
+                        {identity.email && (
+                          <span className="truncate normal-case tracking-normal text-muted-foreground/70">
+                            {identity.email}
+                          </span>
+                        )}
+                        {identity.email && <span aria-hidden className="opacity-50">·</span>}
+                        <span className="truncate">{provenance}</span>
                         {draft.leadLabel && (
                           <>
                             <span aria-hidden className="opacity-50">·</span>
                             <span
                               className={cn(
-                                "inline-flex items-center gap-1 text-[0.66rem]",
+                                "inline-flex items-center gap-1 normal-case tracking-normal",
                                 heat.pill,
                               )}
                               title={draft.scoreReason ?? undefined}
@@ -1563,13 +1244,13 @@ function DraftMessagesBoard({
                         {draft.generated && (
                           <>
                             <span aria-hidden className="opacity-50">·</span>
-                            <span className="text-warning">suggested</span>
+                            <span className="text-muted-foreground/70">suggested</span>
                           </>
                         )}
                       </div>
                       <p
                         className={cn(
-                          "mt-1.5 text-xs leading-5 text-foreground",
+                          "mt-1 text-[0.82rem] leading-5 text-foreground/90",
                           !isExpanded && "line-clamp-2",
                         )}
                       >
@@ -1739,14 +1420,9 @@ function HotLeadsList({
   const hot = leadThreadBuckets(threads).hot.slice(0, 8);
   if (!hot.length) {
     return (
-      <div className="px-4 py-8 text-center">
-        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-          No hot leads
-        </h4>
-        <p className="mt-2 text-sm leading-6 text-foreground/75">
-          Recent replies, viewing requests, and repeat opens push leads here automatically.
-        </p>
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">
+        No hot leads — recent replies and repeat opens land here.
+      </p>
     );
   }
   return (
@@ -1761,26 +1437,20 @@ function HotLeadsList({
 function LeadQueuePanel({
   children,
   count,
-  description,
   title,
 }: {
   children: ReactNode;
   count: number;
-  description: string;
   title: string;
 }) {
   return (
     <div className="min-w-0">
-      <div className="flex items-baseline justify-between gap-3 py-2">
-        <div className="flex items-baseline gap-2">
-          <h3 className="text-sm font-medium text-foreground">{title}</h3>
-          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className={cn("h-1.5 w-1.5 rounded-full", count ? "bg-foreground/50" : "bg-muted-foreground/30")} />
-            {count}
-          </span>
-        </div>
+      <div className="flex items-baseline gap-2 pb-1.5">
+        <h3 className="text-sm font-medium text-foreground">{title}</h3>
+        <span className="inline-flex items-baseline gap-1 font-mono-ui text-[0.7rem] text-muted-foreground/80">
+          ·<span className="tabular-nums">{count}</span>
+        </span>
       </div>
-      <p className="mb-2 text-xs text-muted-foreground">{description}</p>
       <div>{children}</div>
     </div>
   );
@@ -1800,36 +1470,20 @@ function LeadPipelineBoard({
   const buckets = leadThreadBuckets(threads);
 
   return (
-    <div className="grid gap-4 xl:grid-cols-2">
-      <LeadQueuePanel
-        title="Hot leads"
-        count={buckets.hot.length}
-        description="Top scored leads across every connected source."
-      >
+    <div className="grid gap-x-6 gap-y-4 xl:grid-cols-2">
+      <LeadQueuePanel title="Hot leads" count={buckets.hot.length}>
         <HotLeadsList data={data} threads={threads} />
       </LeadQueuePanel>
 
-      <LeadQueuePanel
-        title="Follow-ups"
-        count={buckets.followUp.length}
-        description="Replies waiting on you, hottest and oldest waits first."
-      >
+      <LeadQueuePanel title="Follow-ups" count={buckets.followUp.length}>
         <FollowUpThreadsList data={data} threads={threads} />
       </LeadQueuePanel>
 
-      <LeadQueuePanel
-        title="Buyer searches"
-        count={buyers.length}
-        description="MLS/private-search buyers ranked by score and recency."
-      >
+      <LeadQueuePanel title="Buyer searches" count={buyers.length}>
         <PrivateSearchBuyersList buyers={buyers} />
       </LeadQueuePanel>
 
-      <LeadQueuePanel
-        title="Recently skipped"
-        count={skippedDrafts.length}
-        description="Skipped in the last 3 days. Restore brings the draft back."
-      >
+      <LeadQueuePanel title="Recently skipped" count={skippedDrafts.length}>
         <SkippedDraftsList data={data} drafts={skippedDrafts} />
       </LeadQueuePanel>
     </div>
@@ -1846,14 +1500,9 @@ function FollowUpThreadsList({
   const followUps = leadThreadBuckets(threads).followUp.slice(0, 8);
   if (!followUps.length) {
     return (
-      <div className="px-4 py-8 text-center">
-        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-          Inbox zero on replies
-        </h4>
-        <p className="mt-2 text-sm leading-6 text-foreground/75">
-          People who replied to your outreach across email, SMS, Messenger, IG and WhatsApp surface here, hottest first.
-        </p>
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">
+        Inbox zero — replies across email, SMS, Messenger, IG, WhatsApp will surface here.
+      </p>
     );
   }
   return (
@@ -1868,14 +1517,9 @@ function FollowUpThreadsList({
 function PrivateSearchBuyersList({ buyers }: { buyers: BuyerWatchlistEntry[] }) {
   if (!buyers.length) {
     return (
-      <div className="px-4 py-8 text-center">
-        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-          No active buyer searches yet
-        </h4>
-        <p className="mt-2 text-sm leading-6 text-foreground/75">
-          Run the MLS analyzer to score buyers actively searching the board. Results land here ranked by score and recency.
-        </p>
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">
+        No active buyer searches — run the MLS analyzer to score buyers on the board.
+      </p>
     );
   }
   return (
@@ -2032,20 +1676,17 @@ function SkippedDraftsList({
 
   if (!visible.length) {
     return (
-      <div className="px-4 py-8 text-center">
-        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-          Nothing skipped
-        </h4>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          Skipped drafts auto-clear after 3 days.
-        </p>
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">
+        Nothing skipped — drafts auto-clear after 3 days.
+      </p>
     );
   }
 
   return (
     <div className="divide-y divide-border">
-      {visible.map((draft) => (
+      {visible.map((draft) => {
+        const identity = parseIdentity(draft.personName);
+        return (
         <div
           key={draft.id}
           className="group flex items-start gap-2 px-2.5 py-2.5 transition-colors hover:bg-card"
@@ -2054,15 +1695,20 @@ function SkippedDraftsList({
             <XCircle className="h-3.5 w-3.5" />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                {draft.personName}
+            <div className="flex min-w-0 items-baseline gap-2">
+              <div className="min-w-0 flex-1 truncate text-sm font-medium leading-5 text-foreground">
+                {identity.name}
               </div>
-              <span className="font-mono-ui shrink-0 text-[0.66rem] text-muted-foreground">
+              <span className="font-mono-ui shrink-0 text-[0.62rem] tabular-nums text-muted-foreground/80">
                 {draft.skippedAt ? isoTimeAgo(draft.skippedAt) : "—"}
               </span>
             </div>
-            <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+            {identity.email && (
+              <div className="truncate font-mono-ui text-[0.62rem] text-muted-foreground/70">
+                {identity.email}
+              </div>
+            )}
+            <p className="mt-0.5 line-clamp-2 text-[0.78rem] leading-5 text-muted-foreground">
               {draft.draftText}
             </p>
           </div>
@@ -2070,87 +1716,19 @@ function SkippedDraftsList({
             type="button"
             onClick={() => void restore(draft)}
             title="Restore to queue"
-            aria-label={`Restore draft for ${draft.personName}`}
+            aria-label={`Restore draft for ${identity.name}`}
             className="font-mono-ui inline-flex h-11 shrink-0 items-center rounded-sm px-3 text-[0.7rem] font-semibold text-muted-foreground transition hover:bg-muted hover:text-primary sm:h-9"
           >
             Restore
           </button>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-export function RealEstateTodayPage() {
-  const data = useRealEstateHubData();
-  useHubHeader("Today", data);
-
-  const liveSessions = data.sessions.filter((session) => session.is_active);
-  const enabledJobs = data.cronJobs.filter((job) => job.enabled);
-  const openLeadThreads = Number(data.sourceInbox?.recordCounts?.threads ?? 0);
-  const hotLeadThreads = sourceRecordCount(data, "hotThreads");
-  const draftCount = sourceRecordCount(data, "drafts");
-  const todayActions = [
-    ...approvalActions(data),
-    ...liveSessions.slice(0, 3).map((session) => sessionAction(session, "Continue", MessageSquare)),
-    ...enabledJobs.slice(0, 4).map((job) => jobAction(job, "Scheduled", CalendarClock)),
-  ];
-
-  return (
-    <ThreadDrawerProvider data={data}>
-    <HubShell
-      data={data}
-      eyebrow="Real Estate Command Center"
-      icon={Home}
-      title="Elevate Agent · Today"
-    >
-      <WorkflowStrip
-        items={[
-          { icon: Target, label: "Hot leads", value: hotLeadThreads },
-          { icon: MessageSquare, label: "Open threads", value: openLeadThreads },
-          { icon: Send, label: "Drafts waiting", value: draftCount },
-          { icon: Clock, label: "Timed tasks", value: enabledJobs.length },
-        ]}
-      />
-      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_28rem]">
-        <LeadWorkBoard data={data} />
-        <DraftMessagesBoard data={data} title="Drafts waiting" />
-      </div>
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <ActionBoard
-          actions={todayActions}
-          empty="Nothing urgent is waiting. Start a chat, schedule a pulse, or continue a recent session when work comes in."
-          title="Today's action board"
-        />
-        <TimedTasks jobs={enabledJobs} empty="No enabled timed tasks yet." />
-      </div>
-      <ClientInboxPreview data={data} title="Today's lead inbox" />
-      <ContactOverviewBoard data={data} />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <RecentSessions
-          title="Recent operator activity"
-          sessions={data.sessions}
-          empty="No local sessions have been recorded yet."
-        />
-        <ActionBoard
-          actions={data.snapshot?.agents.filter((agent) => agent.enabled).slice(0, 4).map((agent) => ({
-            detail: agent.description || "Agent is available for routed real-estate work.",
-            icon: Bot,
-            id: `agent-${agent.id}`,
-            meta: agent.role || "agent team",
-            status: agent.status,
-            title: agent.name,
-            to: "/hub",
-            variant: agent.status === "online" ? "success" : "outline" as const,
-          })) ?? []}
-          empty="No enabled agents are configured yet."
-          title="Agent team"
-        />
-      </div>
-    </HubShell>
-    </ThreadDrawerProvider>
-  );
-}
+// RealEstateTodayPage moved to `real-estate-hub/today/index.tsx`.
 
 type LeadSourceOption = {
   id: string;
