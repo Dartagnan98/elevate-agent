@@ -419,7 +419,7 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_stage_3_complete", label: "Photos approved for listing" },
     ],
     4: [
-    { id: "workflow_evalue_bc_age_verified", label: "eValue BC age verified" },
+    { id: "workflow_evalue_bc_age_verified", label: "Property valuation age verified" },
     { id: "workflow_listing_description_approved", label: "Listing description approved" },
     { id: "workflow_feature_sheet_uploaded", label: "Feature sheet uploaded" },
     { id: "workflow_ai_edited_photos_labelled", label: "AI-edited photos labelled" },
@@ -441,14 +441,14 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_stage_6_complete", label: "Accepted-offer admin verified" },
     ],
     7: [
-    { id: "workflow_subject_removal_form_sent", label: "Subject removal form sent" },
+    { id: "workflow_subject_removal_form_sent", label: "Condition removal / waiver sent" },
     { id: "workflow_title_charges_verified", label: "Title charges verified" },
-    { id: "workflow_bir_pds_received", label: "BIR + PDS received" },
+    { id: "workflow_bir_pds_received", label: "Property disclosure docs received" },
     { id: "workflow_lawyer_info_requested", label: "Lawyer info requested" },
-    { id: "workflow_stage_7_complete", label: "Subject removal verified" },
+    { id: "workflow_stage_7_complete", label: "Conditions removed / waived" },
     ],
     8: [
-    { id: "workflow_conveyancer_package_sent", label: "Conveyancer package sent" },
+    { id: "workflow_conveyancer_package_sent", label: "Lawyer / conveyancer package sent" },
     { id: "workflow_down_payment_to_trust", label: "Down payment to trust" },
     { id: "workflow_mortgage_instructions_received", label: "Mortgage instructions received" },
     { id: "workflow_insurance_binder_confirmed", label: "Insurance binder confirmed" },
@@ -482,17 +482,17 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     3: [
     { id: "criteria-update", label: "Buyer criteria updated" },
     { id: "comp-pull", label: "Comparable sales pulled" },
-    { id: "cps-checklist", label: "CPS input checklist + offer strategy" },
+    { id: "cps-checklist", label: "Offer document checklist + strategy" },
     ],
     4: [
     { id: "lender-paperwork", label: "Lender paperwork sent" },
     { id: "accepted-offer-checklist", label: "Accepted-offer checklist run" },
-    { id: "doc-list", label: "Doc list (CPS, addenda, disclosures, deposit receipt)" },
+    { id: "doc-list", label: "Doc list (offer, addenda, disclosures, deposit receipt)" },
     ],
     5: [
     { id: "inspection-booked", label: "Inspection booked" },
     { id: "insurance-deadline", label: "Insurance deadline tracked" },
-    { id: "strata-review", label: "Strata review (if applicable)" },
+    { id: "strata-review", label: "Strata / condo review (if applicable)" },
     ],
     6: [
     { id: "deposit-due", label: "Deposit due date tracked" },
@@ -500,7 +500,7 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "skyslope-docs", label: "SkySlope missing-doc list cleared" },
     ],
     7: [
-    { id: "subjects-removed", label: "All subjects removed" },
+    { id: "subjects-removed", label: "All conditions removed / waived" },
     { id: "deposit-received", label: "Deposit received" },
     { id: "completion-locked", label: "Completion + possession dates locked" },
     ],
