@@ -38,10 +38,42 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
 
+    def _compact_job(job: dict) -> dict:
+        fields = (
+            "id",
+            "name",
+            "prompt",
+            "skills",
+            "skill",
+            "schedule",
+            "schedule_display",
+            "enabled",
+            "state",
+            "paused_at",
+            "paused_reason",
+            "next_run_at",
+            "last_run_at",
+            "last_status",
+            "last_error",
+            "deliver",
+            "origin",
+            "workdir",
+            "agent",
+            "tier",
+            "alignment_status",
+            "alignment_reason",
+        )
+        compact = {key: job.get(key) for key in fields if key in job}
+        prompt = str(compact.get("prompt") or "")
+        if len(prompt) > 520:
+            compact["prompt"] = prompt[:517].rstrip() + "..."
+        return compact
+
     @router.get("/api/cron/jobs")
-    async def list_cron_jobs():
+    async def list_cron_jobs(compact: bool = False):
         from cron.jobs import list_jobs
-        return list_jobs(include_disabled=True)
+        jobs = list_jobs(include_disabled=True)
+        return [_compact_job(job) for job in jobs] if compact else jobs
 
 
     @router.get("/api/cron/jobs/{job_id}")

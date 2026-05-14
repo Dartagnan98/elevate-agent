@@ -251,7 +251,8 @@ export const api = {
   },
 
   // Cron jobs
-  getCronJobs: () => fetchJSON<CronJob[]>("/api/cron/jobs"),
+  getCronJobs: (options?: { compact?: boolean }) =>
+    fetchJSON<CronJob[]>(`/api/cron/jobs${options?.compact ? "?compact=true" : ""}`),
   createCronJob: (job: CronJobCreateRequest) =>
     fetchJSON<CronJob>("/api/cron/jobs", {
       method: "POST",

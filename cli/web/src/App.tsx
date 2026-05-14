@@ -132,6 +132,15 @@ function CoreRootRedirect() {
   return <Navigate to={isDashboardEmbeddedChatEnabled() ? "/chat" : "/hub"} replace />;
 }
 
+function AccessLoadingPage() {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">
+      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+      Loading access…
+    </div>
+  );
+}
+
 function LockedDashboardRedirect() {
   return <Navigate to="/hub" replace />;
 }
@@ -357,24 +366,26 @@ function hasRealEstateDashboard(packs: RealEstatePackAccess): boolean {
 function buildAccessControlledBuiltinRoutes(
   embeddedChat: boolean,
   packs: RealEstatePackAccess,
+  accessPending = false,
 ): Record<string, ComponentType> {
   const realEstateDashboard = hasRealEstateDashboard(packs);
+  const PendingOrLocked = accessPending ? AccessLoadingPage : LockedDashboardRedirect;
   return {
-    "/": realEstateDashboard ? RootRedirect : CoreRootRedirect,
-    "/today": realEstateDashboard ? RealEstateTodayPage : LockedDashboardRedirect,
-    "/leads": packs.realEstateSales ? RealEstateLeadsPage : LockedDashboardRedirect,
-    "/admin": packs.realEstateAdmin ? RealEstateAdminPage : LockedDashboardRedirect,
+    "/": accessPending ? AccessLoadingPage : realEstateDashboard ? RootRedirect : CoreRootRedirect,
+    "/today": realEstateDashboard ? RealEstateTodayPage : PendingOrLocked,
+    "/leads": packs.realEstateSales ? RealEstateLeadsPage : PendingOrLocked,
+    "/admin": packs.realEstateAdmin ? RealEstateAdminPage : PendingOrLocked,
     "/admin/templates": packs.realEstateAdmin
       ? RealEstateTemplatesPage
-      : LockedDashboardRedirect,
-    "/listings": packs.realEstateAdmin ? AdminRedirect : LockedDashboardRedirect,
-    "/deals": packs.realEstateAdmin ? AdminRedirect : LockedDashboardRedirect,
+      : PendingOrLocked,
+    "/listings": packs.realEstateAdmin ? AdminRedirect : PendingOrLocked,
+    "/deals": packs.realEstateAdmin ? AdminRedirect : PendingOrLocked,
     "/social-media": packs.realEstateMarketing
       ? RealEstateSocialMediaPage
-      : LockedDashboardRedirect,
-    "/marketing": packs.realEstateMarketing ? MarketingRedirect : LockedDashboardRedirect,
+      : PendingOrLocked,
+    "/marketing": packs.realEstateMarketing ? MarketingRedirect : PendingOrLocked,
     "/tasks": RealEstateTasksPage,
-    "/approvals": packs.realEstateAdmin ? ApprovalsRedirect : LockedDashboardRedirect,
+    "/approvals": packs.realEstateAdmin ? ApprovalsRedirect : PendingOrLocked,
     "/memory": RealEstateMemoryPage,
     ...BUILTIN_ROUTES_BASE,
     ...(embeddedChat ? { "/chat": ChatPage } : {}),
@@ -415,10 +426,12 @@ export default function App() {
   const isConfigRoute = normalizedPath === "/config";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
   const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
+  const [accessChecked, setAccessChecked] = useState(false);
   const [accessVersion, setAccessVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setAccessChecked(false);
     api
       .getAccessStatus()
       .then((status) => {
@@ -426,6 +439,9 @@ export default function App() {
       })
       .catch(() => {
         if (!cancelled) setAccessStatus(null);
+      })
+      .finally(() => {
+        if (!cancelled) setAccessChecked(true);
       });
     return () => {
       cancelled = true;
@@ -442,8 +458,8 @@ export default function App() {
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
 
   const builtinRoutes = useMemo(
-    () => buildAccessControlledBuiltinRoutes(embeddedChat, realEstatePacks),
-    [embeddedChat, realEstatePacks],
+    () => buildAccessControlledBuiltinRoutes(embeddedChat, realEstatePacks, !accessChecked),
+    [accessChecked, embeddedChat, realEstatePacks],
   );
 
   const builtinNav = useMemo(
@@ -569,6 +585,7 @@ export default function App() {
               navItems={navItems}
               onNavigate={closeMobile}
               onToggleSidebar={toggleSidebar}
+              readyToLoad={accessChecked}
               realEstatePacks={realEstatePacks}
             />
           </aside>
@@ -790,12 +807,14 @@ function DesktopSidebar({
   navItems,
   onNavigate,
   onToggleSidebar,
+  readyToLoad,
   realEstatePacks,
 }: {
   embeddedChat: boolean;
   navItems: NavItem[];
   onNavigate: () => void;
   onToggleSidebar: () => void;
+  readyToLoad: boolean;
   realEstatePacks: RealEstatePackAccess;
 }) {
   const { t } = useI18n();
@@ -857,6 +876,7 @@ function DesktopSidebar({
   }, []);
 
   useEffect(() => {
+    if (!readyToLoad) return;
     loadSessions();
     if (typeof document === "undefined") return;
     let id: ReturnType<typeof setInterval> | null = null;
@@ -875,13 +895,14 @@ function DesktopSidebar({
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [loadSessions]);
+  }, [loadSessions, readyToLoad]);
 
   useEffect(() => {
+    if (!readyToLoad) return;
     let cancelled = false;
     const loadJobs = () => {
       api
-        .getCronJobs()
+        .getCronJobs({ compact: true })
         .then((jobs) => {
           if (!cancelled) setCronJobs(jobs ?? []);
         })
@@ -895,7 +916,7 @@ function DesktopSidebar({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [readyToLoad]);
 
   useEffect(() => {
     try {

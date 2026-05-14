@@ -45,11 +45,16 @@ export function SystemActionsProvider({
   }, [toast]);
 
   useEffect(() => {
-    void refreshUpdateStatus();
+    const initial = window.setTimeout(() => {
+      void refreshUpdateStatus();
+    }, 2500);
     const interval = window.setInterval(() => {
       void refreshUpdateStatus();
     }, 5 * 60 * 1000);
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
   }, [refreshUpdateStatus]);
 
   useEffect(() => {

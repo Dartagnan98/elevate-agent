@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
@@ -28,31 +28,41 @@ export function useRealEstateHubData(): HubData {
   const [actionRuns, setActionRuns] = useState<AdminActionRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const refreshSeq = useRef(0);
   const includeMemoryGraph = pathname === "/memory" || pathname.startsWith("/memory/");
+  const includeSourceInbox =
+    pathname === "/" ||
+    pathname === "/today" ||
+    pathname.startsWith("/today/") ||
+    pathname === "/leads" ||
+    pathname.startsWith("/leads/");
+  const includeAdminTaskData = pathname === "/tasks" || pathname.startsWith("/tasks/");
+  const includeOrchestration =
+    pathname === "/" || pathname === "/today" || pathname.startsWith("/today/");
+  const includeAgentHub = includeMemoryGraph || includeOrchestration || includeAdminTaskData;
 
   const refresh = useCallback(async () => {
+    const refreshId = ++refreshSeq.current;
     setError(null);
     const [
       hubResult,
       statusResult,
       sessionsResult,
       cronResult,
-      sourceInboxResult,
-      dealTasksResult,
-      actionRunsResult,
     ] = await Promise.allSettled([
-      api.getAgentHub({
-        lite: true,
-        includeMemoryGraph,
-        includeOrchestration: true,
-      }),
+      includeAgentHub
+        ? api.getAgentHub({
+            lite: true,
+            includeMemoryGraph,
+            includeOrchestration,
+          })
+        : Promise.resolve(null),
       api.getStatus(),
       api.getSessions(36, 0, { includeTotal: false }),
-      api.getCronJobs(),
-      api.getSourceInbox(200),
-      api.getAdminDealTasks({ status: "open", limit: 200 }),
-      api.getAdminActionRuns({ limit: 200 }),
+      api.getCronJobs({ compact: true }),
     ]);
+
+    if (refreshSeq.current !== refreshId) return;
 
     if (hubResult.status === "fulfilled") setSnapshot(hubResult.value);
     if (statusResult.status === "fulfilled") setStatus(statusResult.value);
@@ -60,21 +70,6 @@ export function useRealEstateHubData(): HubData {
       setSessions((sessionsResult.value as PaginatedSessions).sessions);
     }
     if (cronResult.status === "fulfilled") setCronJobs(cronResult.value);
-    if (sourceInboxResult.status === "fulfilled") {
-      setSourceInbox(sourceInboxResult.value);
-    } else {
-      setSourceInbox(null);
-    }
-    if (dealTasksResult.status === "fulfilled") {
-      setDealTasks(dealTasksResult.value.items);
-    } else {
-      setDealTasks([]);
-    }
-    if (actionRunsResult.status === "fulfilled") {
-      setActionRuns(actionRunsResult.value.items);
-    } else {
-      setActionRuns([]);
-    }
 
     const failed = [hubResult, statusResult, sessionsResult, cronResult].find(
       (result) => result.status === "rejected",
@@ -83,7 +78,30 @@ export function useRealEstateHubData(): HubData {
     if (failed?.status === "rejected") {
       setError(failed.reason instanceof Error ? failed.reason.message : "Some hub data failed");
     }
-  }, [includeMemoryGraph]);
+
+    void Promise.allSettled([
+      includeSourceInbox ? api.getSourceInbox(200) : Promise.resolve(null),
+      includeAdminTaskData ? api.getAdminDealTasks({ status: "open", limit: 200 }) : Promise.resolve(null),
+      includeAdminTaskData ? api.getAdminActionRuns({ limit: 200 }) : Promise.resolve(null),
+    ]).then(([sourceInboxResult, dealTasksResult, actionRunsResult]) => {
+      if (refreshSeq.current !== refreshId) return;
+      if (sourceInboxResult.status === "fulfilled" && sourceInboxResult.value) {
+        setSourceInbox(sourceInboxResult.value);
+      } else {
+        setSourceInbox(null);
+      }
+      if (dealTasksResult.status === "fulfilled" && dealTasksResult.value) {
+        setDealTasks(dealTasksResult.value.items);
+      } else {
+        setDealTasks([]);
+      }
+      if (actionRunsResult.status === "fulfilled" && actionRunsResult.value) {
+        setActionRuns(actionRunsResult.value.items);
+      } else {
+        setActionRuns([]);
+      }
+    });
+  }, [includeAdminTaskData, includeMemoryGraph, includeOrchestration, includeSourceInbox, includeAgentHub]);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,6 +115,7 @@ export function useRealEstateHubData(): HubData {
       });
     return () => {
       cancelled = true;
+      refreshSeq.current += 1;
     };
   }, [refresh]);
 

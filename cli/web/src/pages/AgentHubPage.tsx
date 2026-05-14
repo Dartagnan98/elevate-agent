@@ -1,12 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import {
-  Activity,
   Brain,
-  CalendarClock,
-  CheckCircle2,
-  CircleOff,
-  Database,
   KeyRound,
   Loader2,
   MessageSquare,
@@ -22,7 +17,6 @@ import {
 import { api } from "@/lib/api";
 import type {
   AgentHubAgent,
-  AgentHubPlatform,
   AgentHubSnapshot,
   EnvVarInfo,
   HarnessSnapshot,
@@ -30,7 +24,6 @@ import type {
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MemoryConstellation } from "@/components/MemoryConstellation";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -76,22 +69,6 @@ function looksLikeTelegramBotToken(value: string) {
   return /^\d{6,}:[A-Za-z0-9_-]{20,}$/.test(text);
 }
 
-function Stat({
-  label,
-  value,
-}: {
-  icon: typeof Activity;
-  label: string;
-  value: string | number;
-}) {
-  return (
-    <span className="text-sm text-muted-foreground">
-      <span className="font-medium tabular-nums text-foreground">{value}</span>{" "}
-      {label}
-    </span>
-  );
-}
-
 function AgentCard({
   agent,
   telegramBotTokenPlaceholder,
@@ -134,7 +111,7 @@ function AgentCard({
     : "No Telegram lane required";
 
   return (
-    <div className="rounded-md p-2 hover:bg-foreground/5">
+    <div className="rounded-md p-2 hover:bg-muted">
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -146,7 +123,7 @@ function AgentCard({
           )}>
             <span className={cn(
               "inline-block h-1.5 w-1.5 rounded-full",
-              agent.status === "active" ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]"
+              agent.status === "active" ? "bg-success" : "bg-warning"
             )} />
             {STATUS_COPY[agent.status] ?? agent.status}
           </span>
@@ -164,70 +141,86 @@ function AgentCard({
           <ChipRow icon={Sparkles} items={agent.skills} empty="No skills" />
         )}
         {onTelegramLaneChange && (
-          <div className="grid gap-1">
-            <div className="flex items-center gap-2 text-[0.68rem] font-medium text-muted-foreground">
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>{agent.name} Telegram</span>
-            </div>
-            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
-              <label className="grid gap-1 text-[0.68rem] font-medium text-muted-foreground">
-                <span>Bot token</span>
-                <Input
-                  autoComplete="new-password"
-                  type="password"
-                  value={telegramBotTokenValue ?? ""}
-                  placeholder={telegramBotTokenPlaceholder ?? "BotFather token"}
-                  onChange={(event) => onTelegramBotTokenChange?.(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && agentTelegramChanged && onTelegramLaneSave) {
-                      event.preventDefault();
-                      onTelegramLaneSave();
-                    }
-                  }}
-                />
-              </label>
-              <label className="grid gap-1 text-[0.68rem] font-medium text-muted-foreground">
-                <span>Chat/topic ID</span>
-                <Input
-                  value={telegramLaneValue ?? ""}
-                  placeholder={telegramLanePlaceholder ?? "Chat ID or chat:topic"}
-                  onChange={(event) => onTelegramLaneChange(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && agentTelegramChanged && onTelegramLaneSave) {
-                      event.preventDefault();
-                      onTelegramLaneSave();
-                    }
-                  }}
-                />
-              </label>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onTelegramLaneSave}
-                disabled={savingTelegram || !agentTelegramChanged}
-              >
-                {savingTelegram ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Save className="h-3.5 w-3.5" />
+          <details className="group/telegram rounded-md border border-border/60 bg-background/40">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+              <span className="flex items-center gap-2">
+                <MessageSquare className="h-3.5 w-3.5" />
+                <span>Telegram lane</span>
+              </span>
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1.5",
+                  telegramLaneReady ? "text-muted-foreground" : "text-warning",
                 )}
-                Save
-              </Button>
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "inline-block h-1.5 w-1.5 rounded-full",
+                    telegramLaneReady ? "bg-success" : "bg-warning",
+                  )}
+                />
+                {telegramLaneState}
+              </span>
+            </summary>
+            <div className="grid gap-2 px-2.5 pb-2.5 pt-1">
+              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+                <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+                  <span>Bot token</span>
+                  <Input
+                    autoComplete="new-password"
+                    type="password"
+                    value={telegramBotTokenValue ?? ""}
+                    placeholder={telegramBotTokenPlaceholder ?? "BotFather token"}
+                    onChange={(event) => onTelegramBotTokenChange?.(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && agentTelegramChanged && onTelegramLaneSave) {
+                        event.preventDefault();
+                        onTelegramLaneSave();
+                      }
+                    }}
+                  />
+                </label>
+                <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+                  <span>Chat/topic ID</span>
+                  <Input
+                    value={telegramLaneValue ?? ""}
+                    placeholder={telegramLanePlaceholder ?? "Chat ID or chat:topic"}
+                    onChange={(event) => onTelegramLaneChange(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && agentTelegramChanged && onTelegramLaneSave) {
+                        event.preventDefault();
+                        onTelegramLaneSave();
+                      }
+                    }}
+                  />
+                </label>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onTelegramLaneSave}
+                  disabled={savingTelegram || !agentTelegramChanged}
+                >
+                  {savingTelegram ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                  Save
+                </Button>
+              </div>
+              {telegramLane && (
+                <div className="min-w-0 truncate text-xs text-muted-foreground">
+                  {telegramLaneDetail}
+                </div>
+              )}
+              {telegramLane?.duplicateSharedBot && (
+                <div className="text-xs leading-5 text-warning">
+                  This agent is using the Executive bot token. Create a separate BotFather token for this agent.
+                </div>
+              )}
             </div>
-            {telegramLane && (
-              <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-muted-foreground">
-                <span className={cn("text-[0.68rem]", telegramLaneReady ? "text-muted-foreground" : "text-warning")}>
-                  {telegramLaneState}
-                </span>
-                <span className="min-w-0 truncate">{telegramLaneDetail}</span>
-              </div>
-            )}
-            {telegramLane?.duplicateSharedBot && (
-              <div className="text-[0.68rem] leading-5 text-warning">
-                This agent is using the Executive bot token. Create a separate BotFather token for this agent.
-              </div>
-            )}
-          </div>
+          </details>
         )}
       </div>
     </div>
@@ -237,7 +230,7 @@ function AgentCard({
 function MiniMetric({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="py-1">
-      <div className="text-[0.68rem] text-muted-foreground">
+      <div className="text-xs text-muted-foreground">
         {label}
       </div>
       <div className="text-sm font-medium">{value}</div>
@@ -260,50 +253,6 @@ function ChipRow({
           {item}
         </span>
       ))}
-    </div>
-  );
-}
-
-function PlatformRow({ platform }: { platform: AgentHubPlatform }) {
-  const runtimeState = platform.runtime?.state ?? (platform.configured ? "configured" : "blank");
-  return (
-    <div className="px-3 py-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          {platform.configured ? (
-            <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
-          ) : (
-            <CircleOff className="h-4 w-4 shrink-0 text-muted-foreground" />
-          )}
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{platform.name}</div>
-            <div className="text-xs text-muted-foreground">{runtimeState}</div>
-          </div>
-        </div>
-        <div className="flex shrink-0 gap-2 text-xs text-muted-foreground">
-          {platform.token_configured && <span>token</span>}
-          {platform.api_key_configured && <span>key</span>}
-        </div>
-      </div>
-      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span>{platform.approved_users} paired</span>
-        <span>·</span>
-        <span className={platform.pending_pairings.length ? "text-warning" : ""}>
-          {platform.pending_pairings.length} pending
-        </span>
-        {platform.home_channel?.name && (
-          <><span>·</span><span>{platform.home_channel.name}</span></>
-        )}
-      </div>
-      {platform.pending_pairings.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-2 text-xs text-warning">
-          {platform.pending_pairings.map((pairing) => (
-            <span key={`${platform.name}-${pairing.code}`}>
-              {pairing.code}
-            </span>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -351,7 +300,7 @@ function TelegramGatewayControls({
       </div>
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
         <div className="grid gap-1">
-          <div className="text-[0.68rem] font-medium text-muted-foreground">Executive bot token</div>
+          <div className="text-xs font-medium text-muted-foreground">Executive bot token</div>
           <Input
             autoComplete="new-password"
             type="password"
@@ -366,7 +315,7 @@ function TelegramGatewayControls({
           />
         </div>
         <div className="grid gap-1">
-          <div className="text-[0.68rem] font-medium text-muted-foreground">Executive chat/topic</div>
+          <div className="text-xs font-medium text-muted-foreground">Executive chat/topic</div>
           <Input
             value={home}
             placeholder={envPlaceholder(
@@ -574,15 +523,15 @@ function HandoffBusCard({
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
-            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", workerHealthy ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", workerHealthy ? "bg-success" : "bg-warning")} />
             {worker.enabled ? "auto-drain on" : "auto-drain off"}
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", loopRunning ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", loopRunning ? "bg-success" : "bg-warning")} />
             wake loop {loopRunning ? "on" : "off"}
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", heartbeat?.enabled ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
+            <span className={cn("inline-block h-1.5 w-1.5 rounded-full", heartbeat?.enabled ? "bg-success" : "bg-warning")} />
             heartbeat {heartbeat?.intervalSeconds ?? "off"}s
           </span>
           {wake?.pending && <span className="text-warning">wake pending</span>}
@@ -602,7 +551,7 @@ function HandoffBusCard({
           {handoffs.recent.slice(0, 5).map((handoff) => (
             <div
               key={handoff.id}
-              className="rounded-md px-1 py-1.5 hover:bg-foreground/5"
+              className="rounded-md px-1 py-1.5 hover:bg-muted"
             >
               <div className="flex items-center gap-2">
                 <div className="min-w-0 truncate text-sm font-medium">
@@ -712,9 +661,9 @@ function SetupRunway({
                   <span className={cn(
                     "inline-block h-1.5 w-1.5 rounded-full",
                     item.state === "ready" || item.state === "online"
-                      ? "bg-[var(--color-success)]"
+                      ? "bg-success"
                       : item.state === "review" || item.state === "needs setup"
-                        ? "bg-[var(--color-warning)]"
+                        ? "bg-warning"
                         : "bg-border"
                   )} />
                   {item.state}
@@ -731,7 +680,7 @@ function SetupRunway({
                 type="button"
                 onClick={item.action}
                 disabled={busyAction !== null}
-                className="p-2 text-left transition-colors hover:bg-foreground/5 disabled:opacity-60 rounded-md"
+                className="p-2 text-left transition-colors hover:bg-muted disabled:opacity-60 rounded-md"
               >
                 {content}
               </button>
@@ -742,7 +691,7 @@ function SetupRunway({
             <Link
               key={item.label}
               to={item.to ?? "/config"}
-              className="p-2 transition-colors hover:bg-foreground/5 rounded-md"
+              className="p-2 transition-colors hover:bg-muted rounded-md"
             >
               {content}
             </Link>
@@ -766,28 +715,52 @@ export default function AgentHubPage() {
   const [telegramAgentTokens, setTelegramAgentTokens] = useState<Record<string, string>>({});
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
+  const hydrationTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
+    if (hydrationTimerRef.current) {
+      window.clearTimeout(hydrationTimerRef.current);
+      hydrationTimerRef.current = null;
+    }
     const envVarsPromise = api
       .getEnvVars()
       .then((nextEnvVars) => {
-        setEnvVars(nextEnvVars);
+        if (mountedRef.current) setEnvVars(nextEnvVars);
       })
       .catch(() => null);
     try {
-      const nextSnapshot = await api.getAgentHub({ includeMemoryGraph: true });
-      setSnapshot(nextSnapshot);
+      const nextSnapshot = await api.getAgentHub({ lite: true });
+      if (mountedRef.current) {
+        setSnapshot(nextSnapshot);
+        hydrationTimerRef.current = window.setTimeout(() => {
+          void api
+            .getAgentHub({ includeMemoryGraph: true })
+            .then((fullSnapshot) => {
+              if (mountedRef.current) setSnapshot(fullSnapshot);
+            })
+            .catch(() => null);
+        }, 900);
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Agent Hub failed", "error");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
     void envVarsPromise;
   }, [showToast]);
 
   useEffect(() => {
+    mountedRef.current = true;
     load();
+    return () => {
+      mountedRef.current = false;
+      if (hydrationTimerRef.current) {
+        window.clearTimeout(hydrationTimerRef.current);
+        hydrationTimerRef.current = null;
+      }
+    };
   }, [load]);
 
   useLayoutEffect(() => {
@@ -810,10 +783,6 @@ export default function AgentHubPage() {
     };
   }, [load, loading, setAfterTitle, setEnd, snapshot]);
 
-  const connectedPlatforms = useMemo(
-    () => snapshot?.platforms.filter((platform) => platform.configured) ?? [],
-    [snapshot],
-  );
   const executiveAgent = useMemo(
     () =>
       snapshot?.agents.find((agent) => agent.id === "executive-assistant") ??
@@ -823,12 +792,6 @@ export default function AgentHubPage() {
   );
   const activeAgents = snapshot?.agents.filter((agent) => agent.enabled) ?? [];
   const liveSessions = snapshot?.sessions.recent.filter((session) => session.is_active) ?? [];
-  const pendingPairings =
-    snapshot?.platforms.reduce((total, platform) => total + platform.pending_pairings.length, 0) ??
-    0;
-  const memoryEmbeddingLabel = snapshot?.memory.embedding.enabled
-    ? `${snapshot.memory.embedding.provider}:${snapshot.memory.embedding.model}`
-    : "off";
   const telegramPlatform = snapshot?.platforms.find(
     (platform) => platform.name.toLowerCase() === "telegram",
   );
@@ -981,104 +944,60 @@ export default function AgentHubPage() {
       <Toast toast={toast} />
 
       <section className="px-1">
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-          <div className="min-w-0 space-y-3">
-            <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5">
-                <span className={cn("inline-block h-1.5 w-1.5 rounded-full", snapshot.gateway.running ? "bg-[var(--color-success)]" : "bg-[var(--color-warning)]")} />
-                {snapshot.gateway.running ? "Gateway online" : "Gateway offline"}
-              </span>
-              <span>{snapshot.model.provider || "model"} / {snapshot.model.model || "not set"}</span>
-              <span>Memory {memoryEmbeddingLabel}</span>
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-muted-foreground">Main agent</div>
+              <h1 className="mt-1 truncate text-2xl font-semibold leading-tight text-foreground sm:text-3xl">
+                {executiveAgent?.name ?? "Executive Assistant"}
+              </h1>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+                {executiveAgent?.description ||
+                  executiveAgent?.role ||
+                  "Primary operator and orchestration agent for the local Elevate workspace."}
+              </p>
             </div>
-
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
-              <div className="min-w-0">
-                <div className="text-xs font-medium text-muted-foreground">
-                  Main agent
-                </div>
-                <h1 className="mt-1 truncate text-2xl font-semibold leading-tight text-foreground sm:text-3xl">
-                  {executiveAgent?.name ?? "Executive Assistant"}
-                </h1>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-                  {executiveAgent?.description ||
-                    executiveAgent?.role ||
-                    "Primary operator and orchestration agent for the local Elevate workspace."}
-                </p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <MiniMetric label="Agent team" value={activeAgents.length} />
-                <MiniMetric label="Live chats" value={liveSessions.length} />
-                <MiniMetric label="Handoffs" value={snapshot.handoffs.open} />
-                <MiniMetric label="Memory queue" value={snapshot.memory.journal.pending} />
-                <MiniMetric label="Cron live" value={snapshot.cron.enabled} />
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => runAction("start")}
+                disabled={busyAction !== null}
+                aria-label={snapshot.gateway.running ? "Restart gateway" : "Start gateway"}
+              >
+                {busyAction === "start" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Play className="h-3.5 w-3.5" />
+                )}
+                Start gateway
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runAction("restart")}
+                disabled={busyAction !== null}
+                aria-label="Restart gateway"
+              >
+                {busyAction === "restart" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RotateCw className="h-3.5 w-3.5" />
+                )}
+                Restart
+              </Button>
             </div>
           </div>
 
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium">Gateway</span>
-              <span className="text-xs text-muted-foreground">
-                {snapshot.gateway.pid ? `PID ${snapshot.gateway.pid}` : "Stopped"}
-              </span>
-            </div>
-            <div className="space-y-3">
-              <div className="flex gap-2">
-                <Button
-                  className="flex-1"
-                  size="sm"
-                  onClick={() => runAction("start")}
-                  disabled={busyAction !== null}
-                >
-                  {busyAction === "start" ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Play className="h-3.5 w-3.5" />
-                  )}
-                  Start
-                </Button>
-                <Button
-                  className="flex-1"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => runAction("restart")}
-                  disabled={busyAction !== null}
-                >
-                  {busyAction === "restart" ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <RotateCw className="h-3.5 w-3.5" />
-                  )}
-                  Restart
-                </Button>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <MiniMetric label="State" value={snapshot.gateway.state || "unknown"} />
-                <MiniMetric
-                  label="Updated"
-                  value={snapshot.gateway.updated_at ? isoTimeAgo(snapshot.gateway.updated_at) : "unknown"}
-                />
-              </div>
-            </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            <MiniMetric label="Agent team" value={activeAgents.length} />
+            <MiniMetric label="Live chats" value={liveSessions.length} />
+            <MiniMetric label="Open handoffs" value={snapshot.handoffs.open} />
+            <MiniMetric label="Memory queue" value={snapshot.memory.journal.pending} />
+            <MiniMetric label="Toolsets" value={snapshot.toolsets.enabled.length} />
+            <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
           </div>
         </div>
       </section>
-
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1">
-        <Stat icon={Activity} label="Gateway" value={snapshot.gateway.running ? "Online" : "Offline"} />
-        <span className="text-border">·</span>
-        <Stat icon={Users} label="Agents" value={snapshot.agents.length} />
-        <span className="text-border">·</span>
-        <Stat icon={Terminal} label="Active" value={snapshot.sessions.active} />
-        <span className="text-border">·</span>
-        <Stat icon={Brain} label="Facts" value={snapshot.memory.facts} />
-        <span className="text-border">·</span>
-        <Stat icon={Database} label="Entities" value={snapshot.memory.entities} />
-        <span className="text-border">·</span>
-        <Stat icon={CalendarClock} label="Cron" value={snapshot.cron.enabled} />
-      </div>
 
       <SetupRunway
         busyAction={busyAction}
@@ -1087,13 +1006,13 @@ export default function AgentHubPage() {
         snapshot={snapshot}
       />
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <div className="flex flex-col gap-6">
-          <div>
-            <div className="mb-3 flex items-center gap-2 px-1">
-              <span className="text-sm font-medium">Agent Orchestration</span>
-              <span className="text-xs text-muted-foreground">· {activeAgents.length} enabled</span>
-            </div>
+      <div className="flex flex-col gap-6">
+        <div>
+          <div className="mb-3 flex items-center gap-2 px-1">
+            <span className="text-sm font-medium">Agent orchestration</span>
+            <span aria-hidden="true" className="text-xs text-muted-foreground">·</span>
+            <span className="text-xs text-muted-foreground">{activeAgents.length} enabled</span>
+          </div>
             <div className="space-y-3">
               <TelegramGatewayControls
                 envVars={envVars}
@@ -1152,124 +1071,37 @@ export default function AgentHubPage() {
             </div>
           </div>
 
-          <HandoffBusCard
-            busy={handoffBusy}
-            handoffs={snapshot.handoffs}
-            onRunWorker={() => void runAgentWorker()}
-            onWakeWorker={() => void wakeAgentWorker()}
-            worker={snapshot.agentWorker}
-          />
+        <HandoffBusCard
+          busy={handoffBusy}
+          handoffs={snapshot.handoffs}
+          onRunWorker={() => void runAgentWorker()}
+          onWakeWorker={() => void wakeAgentWorker()}
+          worker={snapshot.agentWorker}
+        />
 
-          <div>
-            <div className="mb-2 px-1 text-sm font-medium">Runtime</div>
-            <div className="grid gap-3 md:grid-cols-4 px-1">
-              <MiniMetric label="Model" value={snapshot.model.model || "Not set"} />
-              <MiniMetric label="Toolsets" value={snapshot.toolsets.enabled.length} />
-              <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
-              <MiniMetric label="Pairings" value={pendingPairings} />
-            </div>
+        <HarnessCard harness={snapshot.harness} />
+
+        <div className="px-1">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-sm font-medium">Access</span>
+            <span aria-hidden="true" className="text-xs text-muted-foreground">·</span>
+            <span className="text-xs text-muted-foreground">{snapshot.access.label}</span>
           </div>
-
-          <HarnessCard harness={snapshot.harness} />
-        </div>
-
-        <div className="flex flex-col gap-6">
-          <div>
-            <div className="mb-2 px-1 text-sm font-medium">Memory Graph</div>
-            <div className="space-y-3">
-              <MemoryConstellation
-                compact
-                className="min-h-[21rem] rounded-md"
-                nodes={snapshot.memory.graph.nodes}
-                edges={snapshot.memory.graph.edges}
-              />
-              <div className="grid grid-cols-2 gap-2 px-1 md:grid-cols-4">
-                <MiniMetric label="Pending" value={snapshot.memory.journal.pending} />
-                <MiniMetric label="Segments" value={snapshot.memory.journal.session_segment_count} />
-                <MiniMetric label="Communities" value={snapshot.memory.community_reports} />
-                <MiniMetric label="Relations" value={snapshot.memory.relations} />
-              </div>
-              <div className="px-1 pb-2 text-xs text-muted-foreground">
-                {snapshot.memory.provider} memory / {memoryEmbeddingLabel}
-              </div>
-            </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            {Object.entries(snapshot.access.entitlements).map(([name, entitlement]) => (
+              <span key={name} className="inline-flex items-center gap-1.5">
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "inline-block h-1.5 w-1.5 rounded-full",
+                    entitlement.status === "active" ? "bg-success" : "bg-border",
+                  )}
+                />
+                <span className="text-muted-foreground">{name}</span>
+              </span>
+            ))}
           </div>
-
-          <div>
-            <div className="mb-2 px-1 text-sm font-medium">Sessions</div>
-            <div className="space-y-0.5">
-              {snapshot.sessions.recent.slice(0, 8).map((session) => (
-                <div key={session.id} className="rounded-md px-1 py-1.5 hover:bg-foreground/5">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm">{session.title || "Untitled session"}</span>
-                    {session.is_active && (
-                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-success)]" />
-                        live
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{session.source}</span>
-                    <span>·</span>
-                    <span>{session.message_count} msgs</span>
-                    <span>·</span>
-                    <span>{timeAgo(session.last_active)}</span>
-                  </div>
-                </div>
-              ))}
-              {!snapshot.sessions.recent.length && (
-                <div className="py-4 text-sm text-muted-foreground">No sessions yet</div>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <div className="mb-2 px-1 text-sm font-medium">Connections</div>
-            <div className="max-h-[24rem] overflow-y-auto">
-              {(connectedPlatforms.length ? connectedPlatforms : snapshot.platforms.slice(0, 5)).map(
-                (platform) => (
-                  <PlatformRow key={platform.name} platform={platform} />
-                ),
-              )}
-            </div>
-          </div>
-
-          <div>
-            <div className="mb-2 px-1 text-sm font-medium">Access</div>
-            <div className="space-y-2 px-1">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">{snapshot.access.label}</span>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                {Object.entries(snapshot.access.entitlements).map(([name, entitlement]) => (
-                  <span
-                    key={name}
-                    className="inline-flex items-center gap-1.5"
-                  >
-                    <span className={cn(
-                      "inline-block h-1.5 w-1.5 rounded-full",
-                      entitlement.status === "active" ? "bg-[var(--color-success)]" : "bg-border"
-                    )} />
-                    <span className="text-muted-foreground">{name}</span>
-                  </span>
-                ))}
-              </div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span className="truncate">{snapshot.config_path}</span>
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <div className="mb-2 px-1 text-sm font-medium">Tools</div>
-            <div className="flex flex-wrap gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
-              {snapshot.toolsets.enabled.slice(0, 16).map((toolset) => (
-                <span key={toolset}>{toolset}</span>
-              ))}
-              {!snapshot.toolsets.enabled.length && <span className="text-warning">No toolsets</span>}
-            </div>
-          </div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">{snapshot.config_path}</div>
         </div>
       </div>
 
