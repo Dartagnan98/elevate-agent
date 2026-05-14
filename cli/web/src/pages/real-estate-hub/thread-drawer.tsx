@@ -64,7 +64,7 @@ function ThreadMessageBubble({ message }: { message: ThreadContextMessage }) {
         className={cn(
           "max-w-[82%] rounded-lg px-3.5 py-2.5 text-[0.875rem] leading-[1.45] whitespace-pre-wrap break-words text-foreground",
           inbound
-            ? "bg-card border border-border"
+            ? "bg-background border border-border"
             : "bg-primary/15 border border-primary/45",
         )}
       >
@@ -162,17 +162,17 @@ function ThreadDrawer({
   const messages = context?.messages ?? [];
 
   return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      className="fixed inset-0 z-50 flex justify-end bg-black/60 animate-[fade-in_120ms_ease-out]"
-    >
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center animate-[fade-in_120ms_ease-out] sm:items-center sm:p-6">
+      <button
+        type="button"
+        aria-label="Close thread"
+        onClick={onClose}
+        className="absolute inset-0 z-0 bg-background/80"
+      />
       <div
-        className="flex h-full w-full max-w-[1100px] flex-col border-l border-border bg-background shadow-[0_24px_90px_rgba(0,0,0,0.32)]"
-        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        className="relative z-10 flex h-full w-full flex-col bg-card shadow-[0_24px_90px_rgba(0,0,0,0.32)] sm:h-auto sm:max-h-full sm:w-full sm:max-w-[56rem] sm:rounded-md sm:border sm:border-border lg:max-w-[68rem] xl:max-w-[80rem]"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div className="flex min-w-0 flex-col gap-1.5">
@@ -252,7 +252,7 @@ function ThreadDrawer({
             </div>
 
             {context?.pendingDraft && (
-              <div className="border-t border-border bg-card/70 px-5 py-4">
+              <div className="border-t border-border bg-background/60 px-5 py-4">
                 <div
                   className="mb-2 flex items-center justify-between text-[0.68rem] font-semibold uppercase tracking-[0.1em]"
                   style={{ fontFamily: "var(--theme-font-mono)" }}
@@ -288,7 +288,7 @@ function ThreadDrawer({
             )}
           </div>
 
-          <div className="min-h-0 overflow-y-auto bg-card/30 px-5 py-5">
+          <div className="min-h-0 overflow-y-auto bg-background/40 px-5 py-5">
             <ThreadContextSidebar context={context} loading={loading} sends={sends} />
           </div>
         </div>
@@ -373,7 +373,7 @@ function ThreadContextSidebar({
                       .map((tag) => (
                         <span
                           key={tag}
-                          className="font-mono-ui inline-flex items-center rounded-full border border-border/60 bg-card px-2 py-0.5 text-[0.65rem] font-medium text-foreground/75"
+                          className="font-mono-ui inline-flex items-center rounded-full border border-border/60 bg-background px-2 py-0.5 text-[0.65rem] font-medium text-foreground/75"
                         >
                           {tag}
                         </span>
@@ -430,7 +430,7 @@ function ThreadContextSidebar({
         ) : (
           <ul className="mt-2 space-y-2.5">
             {notes.slice(0, 8).map((note) => (
-              <li key={note.id} className="rounded-md border border-border/40 bg-card/40 px-3 py-2">
+              <li key={note.id} className="rounded-md border border-border/40 bg-background/60 px-3 py-2">
                 <div className="font-mono-ui flex items-center justify-between gap-2 text-[0.62rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
                   <span>{note.author || "note"}</span>
                   {note.timestamp && (
