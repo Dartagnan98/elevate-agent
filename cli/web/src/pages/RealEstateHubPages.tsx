@@ -24,7 +24,6 @@ import {
   FileText,
   Flame,
   Filter,
-  Home,
   Inbox,
   Loader2,
   HelpCircle,
@@ -56,7 +55,6 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
-  AdminDealSide,
   BuyerWatchlistEntry,
   ComposioConnectedAccount,
   ComposioStatus,
@@ -95,25 +93,18 @@ import {
   profileConversationSort,
   profileHasActiveConversation,
   profileHasVerifier,
-  profileHandoffBadgeLabel,
-  profileHandoffIsActive,
-  profileHandoffSide,
   profilePrimaryContactId,
-  profileSkillWorkflowContext,
-  profileSkillWorkflowName,
-  profileSkillWorkflowPrompt,
   profileSourceMeta,
   profileVerifierSummary,
-  profileVerifiers,
   threadSortTime,
   type ProfileActionBucketId,
   type ProfileAdminDealIds,
-  type ProfileHandoffIds,
-  type ProfilePendingAdminAction,
 } from "@/pages/real-estate-hub/profile-workflow";
 import {
   HubShell,
   jobMatches,
+  LeadStatusBadge,
+  LeadStatusControl,
   parseIdentity,
   provenanceLine,
   RecentSessions,
@@ -140,49 +131,28 @@ function LeadProfilesWorkbench({
 }) {
   const drawer = useThreadDrawer();
   const navigate = useNavigate();
-  const [pendingProfileAction, setPendingProfileAction] = useState<ProfilePendingAdminAction | null>(null);
-  const [profileHandoffs, setProfileHandoffs] = useState<Record<string, ProfileHandoffIds>>({});
-  const [existingDealIds, setExistingDealIds] = useState<Record<string, ProfileAdminDealIds>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [dealIdsByProfile, setDealIdsByProfile] = useState<Record<string, ProfileAdminDealIds>>({});
 
   useEffect(() => {
     let live = true;
-    Promise.all([
-      api.getAdminDeals({ status: "active", limit: 200 }),
-      api.getAgentHandoffs({ fromAgentId: "executive-assistant", toAgentId: "admin", limit: 500 }),
-    ])
-      .then(([dealsResponse, handoffsResponse]) => {
+    api
+      .getAdminDeals({ status: "active", limit: 200 })
+      .then((dealsResponse) => {
         if (!live) return;
-        const nextDeals: Record<string, ProfileAdminDealIds> = {};
+        const next: Record<string, ProfileAdminDealIds> = {};
         for (const deal of dealsResponse.items) {
           const sourceProfileId = deal.extraToggles?.sourceProfileId;
           if (typeof sourceProfileId === "string" && (deal.side === "listing" || deal.side === "buyer")) {
-            nextDeals[sourceProfileId] = {
-              ...nextDeals[sourceProfileId],
+            next[sourceProfileId] = {
+              ...next[sourceProfileId],
               [deal.side]: deal.id,
             };
           }
         }
-        const nextHandoffs: Record<string, ProfileHandoffIds> = {};
-        for (const handoff of handoffsResponse.items) {
-          if (!handoff.profileId) continue;
-          const side = profileHandoffSide(handoff);
-          if (!side) continue;
-          const existing = nextHandoffs[handoff.profileId]?.[side];
-          if (existing && Date.parse(existing.updatedAt || "") >= Date.parse(handoff.updatedAt || "")) continue;
-          nextHandoffs[handoff.profileId] = {
-            ...nextHandoffs[handoff.profileId],
-            [side]: handoff,
-          };
-        }
-        setExistingDealIds(nextDeals);
-        setProfileHandoffs(nextHandoffs);
+        setDealIdsByProfile(next);
       })
       .catch(() => {
-        if (live) {
-          setExistingDealIds({});
-          setProfileHandoffs({});
-        }
+        if (live) setDealIdsByProfile({});
       });
     return () => {
       live = false;
@@ -225,14 +195,6 @@ function LeadProfilesWorkbench({
     return next;
   }, [threadsByProfileId]);
 
-  const combinedDealIdsByProfile = useMemo(() => {
-    const next: Record<string, ProfileAdminDealIds> = {};
-    for (const [profileId, dealIds] of Object.entries(existingDealIds)) {
-      next[profileId] = { ...dealIds };
-    }
-    return next;
-  }, [existingDealIds]);
-
   const profileSections = useMemo(() => {
     const grouped: Record<ProfileActionBucketId, SourceInboxProfile[]> = {
       "active-conversation": [],
@@ -245,7 +207,7 @@ function LeadProfilesWorkbench({
       grouped[
         profileActionBucket(
           profile,
-          combinedDealIdsByProfile[profile.id],
+          dealIdsByProfile[profile.id],
           profileHasActiveConversation(profile, threadsByProfileId.get(profile.id)),
         )
       ].push(profile);
@@ -256,75 +218,7 @@ function LeadProfilesWorkbench({
         .slice()
         .sort(bucket.id === "active-conversation" ? profileConversationSort : profileActionSort),
     })).filter((section) => section.profiles.length > 0);
-  }, [combinedDealIdsByProfile, profiles, threadsByProfileId]);
-
-  const queueProfileSkillWorkflow = async (profile: SourceInboxProfile, side: AdminDealSide) => {
-    if (pendingProfileAction) return;
-    const sideCopy = PROFILE_ADMIN_SIDE_COPY[side];
-    setPendingProfileAction({ profileId: profile.id, side });
-    setErrors((prev) => {
-      const next = { ...prev };
-      delete next[profile.id];
-      return next;
-    });
-    try {
-      const verifiers = profileVerifiers(profile);
-      if (!verifiers.length) {
-        setErrors((prev) => ({
-          ...prev,
-          [profile.id]: "Add or sync a phone/email verifier before sending this profile to Admin.",
-        }));
-        return;
-      }
-      const setup = await api.getAdminSetup();
-      if (!setup.complete) {
-        setErrors((prev) => ({
-          ...prev,
-          [profile.id]: `Admin setup must be completed before ${sideCopy.errorLabel}. Missing: ${setup.missingRequiredKeys.join(", ")}`,
-        }));
-        return;
-      }
-      const priorHandoff = profileHandoffs[profile.id]?.[side];
-      const activeHandoff = profileHandoffIsActive(priorHandoff);
-      const handoff = await api.createAgentHandoff({
-        fromAgentId: "executive-assistant",
-        toAgentId: "admin",
-        title: profileSkillWorkflowName(profile, side),
-        task: profileSkillWorkflowPrompt(profile, side),
-        priority: side === "listing" ? "high" : "normal",
-        profileId: profile.id,
-        contactId: profilePrimaryContactId(profile),
-        conversationId: profile.conversationIds?.[0] ?? null,
-        payload: {
-          targetSide: side,
-          workflow: sideCopy.workflow,
-          workflowLabel: sideCopy.workflowLabel,
-          skill: sideCopy.skill,
-          profileContext: JSON.parse(profileSkillWorkflowContext(profile, side)),
-          verifiers,
-        },
-        idempotencyKey: priorHandoff && !activeHandoff
-          ? `profile-admin-handoff:${profile.id}:${sideCopy.workflow}:${Date.now()}`
-          : `profile-admin-handoff:${profile.id}:${sideCopy.workflow}`,
-        runNow: true,
-      });
-      setProfileHandoffs((prev) => ({
-        ...prev,
-        [profile.id]: {
-          ...prev[profile.id],
-          [side]: handoff,
-        },
-      }));
-      await onChanged();
-    } catch (error) {
-      setErrors((prev) => ({
-        ...prev,
-        [profile.id]: error instanceof Error ? error.message : `Could not queue ${sideCopy.errorLabel}`,
-      }));
-    } finally {
-      setPendingProfileAction(null);
-    }
-  };
+  }, [dealIdsByProfile, profiles, threadsByProfileId]);
 
   const openProfileThread = (profile: SourceInboxProfile) => {
     const thread = threadByProfileId.get(profile.id);
@@ -378,19 +272,9 @@ function LeadProfilesWorkbench({
           {section.profiles.map((profile) => {
             const thread = threadByProfileId.get(profile.id);
             const activeConversation = profileHasActiveConversation(profile, threadsByProfileId.get(profile.id));
-            const dealIds = combinedDealIdsByProfile[profile.id] ?? {};
+            const dealIds = dealIdsByProfile[profile.id] ?? {};
             const sellerDealId = dealIds.listing;
             const buyerDealId = dealIds.buyer;
-            const sellerPending =
-              pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "listing";
-            const buyerPending =
-              pendingProfileAction?.profileId === profile.id && pendingProfileAction.side === "buyer";
-            const sellerHandoff = profileHandoffs[profile.id]?.listing;
-            const buyerHandoff = profileHandoffs[profile.id]?.buyer;
-            const error = errors[profile.id];
-            const canHandoff = profileHasVerifier(profile);
-            const sellerHandoffLabel = profileHandoffBadgeLabel(sellerHandoff, "listing");
-            const buyerHandoffLabel = profileHandoffBadgeLabel(buyerHandoff, "buyer");
             return (
               <div key={profile.id} className="px-4 py-3">
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
@@ -440,10 +324,9 @@ function LeadProfilesWorkbench({
                       {profile.isPotentialLead && !profile.hasCrm && (
                         <Badge variant="warning">potential lead</Badge>
                       )}
-                      {sellerHandoffLabel && <Badge variant={sellerHandoff?.status === "failed" ? "destructive" : "warning"}>{sellerHandoffLabel}</Badge>}
-                      {buyerHandoffLabel && <Badge variant={buyerHandoff?.status === "failed" ? "destructive" : "warning"}>{buyerHandoffLabel}</Badge>}
                       {sellerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.listing.badgeLabel}</Badge>}
                       {buyerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.buyer.badgeLabel}</Badge>}
+                      <LeadStatusBadge status={profile.status} />
                     </div>
                     <p className="mt-1.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
                       {profile.latestText || "No recent source context yet."}
@@ -469,11 +352,6 @@ function LeadProfilesWorkbench({
                         <Badge key={tag} variant="outline">{tag}</Badge>
                       ))}
                     </div>
-                    {error && (
-                      <p className="mt-2 text-xs leading-5 text-destructive">
-                        {error}
-                      </p>
-                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                     <Button
@@ -486,61 +364,19 @@ function LeadProfilesWorkbench({
                       <MessageSquare className="h-3.5 w-3.5" />
                       Open thread
                     </Button>
-                    {sellerDealId ? (
+                    <LeadStatusControl
+                      profileId={profile.id}
+                      status={profile.status}
+                      onChanged={onChanged}
+                    />
+                    {(sellerDealId || buyerDealId) && (
                       <Link
                         to="/admin"
                         className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
-                        {PROFILE_ADMIN_SIDE_COPY.listing.openLabel}
+                        Open in admin
                       </Link>
-                    ) : (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => queueProfileSkillWorkflow(profile, "listing")}
-                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(sellerHandoff)}
-                      >
-                        {sellerPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : profileHandoffIsActive(sellerHandoff) ? (
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                        ) : (
-                          <Home className="h-3.5 w-3.5" />
-                        )}
-                        {profileHandoffIsActive(sellerHandoff)
-                          ? PROFILE_ADMIN_SIDE_COPY.listing.queuedLabel
-                          : PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
-                      </Button>
-                    )}
-                    {buyerDealId ? (
-                      <Link
-                        to="/admin"
-                        className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        {PROFILE_ADMIN_SIDE_COPY.buyer.openLabel}
-                      </Link>
-                    ) : (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => queueProfileSkillWorkflow(profile, "buyer")}
-                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(buyerHandoff)}
-                      >
-                        {buyerPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : profileHandoffIsActive(buyerHandoff) ? (
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                        ) : (
-                          <Users className="h-3.5 w-3.5" />
-                        )}
-                        {profileHandoffIsActive(buyerHandoff)
-                          ? PROFILE_ADMIN_SIDE_COPY.buyer.queuedLabel
-                          : PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
-                      </Button>
                     )}
                   </div>
                 </div>
@@ -835,6 +671,16 @@ function DraftMessagesBoard({
   const visibleDrafts = showAll ? drafts : drafts.slice(0, pageSize);
   const selectedVisible = visibleDrafts.filter((d) => selectedIds.has(d.id));
   const allVisibleSelected = visibleDrafts.length > 0 && selectedVisible.length === visibleDrafts.length;
+
+  const profileByThreadId = useMemo(() => {
+    const map = new Map<string, SourceInboxProfile>();
+    for (const profile of data.sourceInbox?.profiles ?? []) {
+      for (const threadId of profile.threadIds) {
+        map.set(threadId, profile);
+      }
+    }
+    return map;
+  }, [data.sourceInbox?.profiles]);
 
   useEffect(() => {
     const liveIds = new Set(allDrafts.map((d) => d.id));
@@ -1196,6 +1042,7 @@ function DraftMessagesBoard({
             const heat = heatStyles(String(draft.leadLabel ?? ""));
             const identity = parseIdentity(draft.personName);
             const provenance = provenanceLine(draft.sourceLabel, draft.channel);
+            const draftProfile = profileByThreadId.get(draft.threadId);
             return (
               <div
                 key={draft.id}
@@ -1331,6 +1178,13 @@ function DraftMessagesBoard({
                       />
                     )}
                     <div className="flex flex-wrap items-center justify-end gap-1.5">
+                      {!isEditing && draftProfile && (
+                        <LeadStatusControl
+                          profileId={draftProfile.id}
+                          status={draftProfile.status}
+                          onChanged={data.refresh}
+                        />
+                      )}
                       {!isEditing && showOpenThread && (
                         <Button size="sm" variant="ghost" className="h-11 px-3 sm:h-9" onClick={() => void openInChat(draft)}>
                           <ExternalLink className="h-3.5 w-3.5" />

@@ -192,6 +192,13 @@ export interface SourceInboxProfileVerifier {
   key: string;
 }
 
+export type SourceInboxProfileStatus =
+  | "follow_up"
+  | "ghosting"
+  | "dead"
+  | "closed_seller"
+  | "closed_buyer";
+
 export interface SourceInboxProfile {
   id: string;
   displayName: string;
@@ -215,6 +222,8 @@ export interface SourceInboxProfile {
   crmStage: string | null;
   leadSource: string | null;
   tags: string[];
+  status: SourceInboxProfileStatus | null;
+  statusUpdatedAt: string | null;
 }
 
 export interface SourceInboxDraft {

@@ -409,6 +409,38 @@ def _write_source_ui_state(source_dir: Path, state: JsonRecord) -> None:
     _write_json(_source_ui_state_path(source_dir), state)
 
 
+# Profile-level statuses set by the operator from the /leads UI. These
+# describe where the lead is in the pipeline so cron-pulled queues can
+# skip cold/closed people. Distinct from thread-level status which only
+# tracks open/done/archived.
+PROFILE_STATUS_VALUES: tuple[str, ...] = (
+    "follow_up",
+    "ghosting",
+    "dead",
+    "closed_seller",
+    "closed_buyer",
+)
+
+
+def _profile_state_path(source_root: Path) -> Path:
+    return source_root / "profile-state.json"
+
+
+def _read_profile_state(source_root: Path) -> JsonRecord:
+    state = _read_json(_profile_state_path(source_root))
+    if not isinstance(state, dict):
+        return {"profiles": {}}
+    profiles = state.get("profiles")
+    if not isinstance(profiles, dict):
+        state["profiles"] = {}
+    return state
+
+
+def _write_profile_state(source_root: Path, state: JsonRecord) -> None:
+    state["updated_at"] = _now()
+    _write_json(_profile_state_path(source_root), state)
+
+
 def _thread_key(record: JsonRecord) -> str:
     for key in ("conversation_id", "source_record_id", "contact_id", "handle", "chat_identifier"):
         value = str(record.get(key) or "").strip()
@@ -2164,6 +2196,11 @@ def build_source_inbox_response(
         reverse=True,
     )
     profiles = _profiles_from_threads(threads, source_by_id)
+    profile_state_entries = _as_dict(_read_profile_state(source_root).get("profiles"))
+    for profile in profiles:
+        entry = _as_dict(profile_state_entries.get(str(profile.get("id") or "")))
+        profile["status"] = entry.get("status")
+        profile["statusUpdatedAt"] = entry.get("updated_at")
     visible_threads = threads[:safe_limit]
     totals["threads"] = len(threads)
     totals["drafts"] = len(drafts)
@@ -2597,6 +2634,38 @@ def build_thread_context_response(
         "tasks": tasks_records,
         "activity": activity_records,
     }
+
+
+def update_profile_state(
+    profile_id: str,
+    status: str | None,
+    config: dict[str, Any] | None = None,
+) -> JsonRecord:
+    """Persist the operator-set pipeline status for a profile (e.g.
+    follow_up, ghosting, dead, closed_seller, closed_buyer). Passing
+    a falsy/`none` status clears the entry. Returns the refreshed
+    /leads response so the caller can rerender without a second fetch."""
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profileId is required")
+    normalized = str(status or "").strip().lower()
+    if normalized == "none":
+        normalized = ""
+    if normalized and normalized not in PROFILE_STATUS_VALUES:
+        raise ValueError(f"Unsupported profile status: {status}")
+
+    config = config or load_config()
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    state = _read_profile_state(source_root)
+    profiles = _as_dict(state.get("profiles"))
+    if not normalized:
+        profiles.pop(pid, None)
+    else:
+        profiles[pid] = {"status": normalized, "updated_at": _now()}
+    state["profiles"] = profiles
+    _write_profile_state(source_root, state)
+    return build_source_inbox_response(config)
 
 
 def update_source_thread_state(

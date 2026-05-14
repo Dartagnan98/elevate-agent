@@ -19,6 +19,11 @@ class SourceInboxDraftAction(BaseModel):
     draftText: str = ""
 
 
+class SourceInboxProfileAction(BaseModel):
+    profileId: str
+    status: str | None = None
+
+
 def create_source_connectors_router(*, log: logging.Logger | None = None) -> APIRouter:
     """Build routes for source connectors, source inbox, and sender controls."""
     router = APIRouter()
@@ -102,6 +107,19 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         except Exception as exc:
             _log.exception("POST /api/source-inbox/thread failed")
             raise HTTPException(status_code=500, detail=f"Source inbox update failed: {exc}")
+
+
+    @router.post("/api/source-inbox/profile")
+    async def update_source_inbox_profile(body: SourceInboxProfileAction):
+        try:
+            from elevate_cli.source_connectors import update_profile_state
+
+            return update_profile_state(body.profileId, body.status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("POST /api/source-inbox/profile failed")
+            raise HTTPException(status_code=500, detail=f"Profile update failed: {exc}")
 
 
     @router.post("/api/source-inbox/draft")

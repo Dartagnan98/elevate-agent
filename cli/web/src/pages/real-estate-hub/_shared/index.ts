@@ -23,6 +23,7 @@ export {
   sessionMatches,
 } from "./page-helpers";
 export { HubMetric } from "./hub-metric";
+export { LeadStatusBadge, LeadStatusControl } from "./lead-status-control";
 export { parseIdentity, provenanceLine } from "./parse-identity";
 export type { ParsedIdentity } from "./parse-identity";
 export { HubShell } from "./hub-shell";
