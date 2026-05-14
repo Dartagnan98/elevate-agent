@@ -7,7 +7,6 @@ import {
   Database,
   Folder,
   KeyRound,
-  Loader2,
   RefreshCw,
   Settings,
   Terminal,
@@ -128,9 +127,7 @@ export default function ProjectPage() {
 
   if (loading && !status && !hub) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading project…</p>
     );
   }
 

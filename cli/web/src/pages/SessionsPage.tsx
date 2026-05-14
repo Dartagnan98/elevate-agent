@@ -101,7 +101,7 @@ function ToolCallBlock({
   }
 
   return (
-    <div className="mt-2 border border-border border-l-2 border-l-warning bg-card">
+    <div className="mt-2 rounded-md border border-border bg-card">
       <button
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-xs text-warning cursor-pointer hover:bg-muted transition-colors"
@@ -294,11 +294,7 @@ function SessionRow({
   return (
     <div
       id={`session-row-${session.id}`}
-      className={`overflow-hidden rounded-md border bg-card transition-colors ${
-        session.is_active
-          ? "border-border border-l-2 border-l-success"
-          : "border-border"
-      }`}
+      className="overflow-hidden rounded-md border border-border bg-card transition-colors"
     >
       <button
         type="button"
@@ -407,15 +403,15 @@ function SessionRow({
       {isExpanded && (
         <div className="border-t border-border bg-background p-4">
           {loading && (
-            <div className="flex items-center justify-center py-8">
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-            </div>
+            <p className="px-1 py-1 text-xs text-muted-foreground/80">
+              {t.common.loading}
+            </p>
           )}
           {error && (
-            <p className="text-sm text-destructive py-4 text-center">{error}</p>
+            <p className="px-1 py-1 text-xs text-destructive">{error}</p>
           )}
           {messages && messages.length === 0 && (
-            <p className="text-sm text-muted-foreground py-4 text-center">
+            <p className="px-1 py-1 text-xs text-muted-foreground/80">
               {t.sessions.noMessages}
             </p>
           )}
