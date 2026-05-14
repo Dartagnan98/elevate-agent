@@ -79,7 +79,6 @@ import {
   computeResponsePulse,
   formatMinutes,
   heatStyles,
-  heatVariant,
   inboundWaitMinutes,
   leadThreadBuckets,
   profileWhen,
@@ -396,10 +395,10 @@ function LeadProfilesWorkbench({
               <div key={profile.id} className="px-4 py-3">
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                   <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                       <span
                         className={cn(
-                          "h-2.5 w-2.5 rounded-full",
+                          "h-2 w-2 shrink-0 rounded-full",
                           profile.heatLabel === "hot"
                             ? "bg-destructive"
                             : profile.heatLabel === "warm"
@@ -408,33 +407,64 @@ function LeadProfilesWorkbench({
                                 ? "bg-success"
                                 : "bg-muted-foreground/45",
                         )}
+                        aria-hidden
                       />
                       <div className="min-w-0 truncate text-sm font-semibold text-foreground">
                         {profile.displayName}
                       </div>
-                      <Badge variant={heatVariant(profile)}>
+                      <span
+                        className="font-mono-ui shrink-0 text-[0.68rem] font-medium uppercase tracking-[0.08em] text-muted-foreground"
+                        title={`${profile.heatLabel} · score ${profile.heatScore}`}
+                      >
                         {profile.heatLabel} {profile.heatScore}
-                      </Badge>
+                      </span>
+                      {profileHasVerifier(profile) ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-[0.72rem] text-success"
+                          title={profileVerifierSummary(profile)}
+                        >
+                          <CheckCircle2 className="h-3 w-3" aria-hidden />
+                          verified
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center gap-1 text-[0.72rem] text-warning"
+                          title={profileVerifierSummary(profile)}
+                        >
+                          <AlertTriangle className="h-3 w-3" aria-hidden />
+                          needs verifier
+                        </span>
+                      )}
                       {profile.hasCrm && <Badge variant="success">CRM</Badge>}
-                      {profile.isPotentialLead && <Badge variant="warning">potential lead</Badge>}
-                      {activeConversation && <Badge variant="success">active conversation</Badge>}
-                      <Badge variant={profileHasVerifier(profile) ? "success" : "warning"}>
-                        {profileVerifierSummary(profile)}
-                      </Badge>
+                      {activeConversation && <Badge variant="success">active</Badge>}
+                      {profile.isPotentialLead && !profile.hasCrm && (
+                        <Badge variant="warning">potential lead</Badge>
+                      )}
                       {sellerHandoffLabel && <Badge variant={sellerHandoff?.status === "failed" ? "destructive" : "warning"}>{sellerHandoffLabel}</Badge>}
                       {buyerHandoffLabel && <Badge variant={buyerHandoff?.status === "failed" ? "destructive" : "warning"}>{buyerHandoffLabel}</Badge>}
                       {sellerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.listing.badgeLabel}</Badge>}
                       {buyerDealId && <Badge variant="success">{PROFILE_ADMIN_SIDE_COPY.buyer.badgeLabel}</Badge>}
                     </div>
-                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                    <p className="mt-1.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
                       {profile.latestText || "No recent source context yet."}
                     </p>
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[0.72rem] text-muted-foreground">
-                      <Badge variant="outline">{profileSourceMeta(profile)}</Badge>
-                      <Badge variant="outline">{profileContactLine(profile)}</Badge>
-                      {profilePrimaryContactId(profile) && <Badge variant="outline">DB contact</Badge>}
-                      <Badge variant="outline">{profile.threadCount} thread{profile.threadCount === 1 ? "" : "s"}</Badge>
-                      <Badge variant="outline">{profileWhen(profile)}</Badge>
+                    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.72rem] text-muted-foreground">
+                      <span>{profileSourceMeta(profile)}</span>
+                      <span aria-hidden className="text-muted-foreground/50">·</span>
+                      <span>{profileContactLine(profile)}</span>
+                      {profilePrimaryContactId(profile) && (
+                        <>
+                          <span aria-hidden className="text-muted-foreground/50">·</span>
+                          <span>DB contact</span>
+                        </>
+                      )}
+                      <span aria-hidden className="text-muted-foreground/50">·</span>
+                      <span>{profile.threadCount} thread{profile.threadCount === 1 ? "" : "s"}</span>
+                      <span aria-hidden className="text-muted-foreground/50">·</span>
+                      <span>{profileWhen(profile)}</span>
+                      {profile.tags.length > 0 && (
+                        <span aria-hidden className="text-muted-foreground/50">·</span>
+                      )}
                       {profile.tags.slice(0, 3).map((tag) => (
                         <Badge key={tag} variant="outline">{tag}</Badge>
                       ))}
@@ -449,7 +479,7 @@ function LeadProfilesWorkbench({
                     <Button
                       type="button"
                       size="sm"
-                      variant="outline"
+                      variant="default"
                       disabled={!thread}
                       onClick={() => openProfileThread(profile)}
                     >
@@ -459,35 +489,35 @@ function LeadProfilesWorkbench({
                     {sellerDealId ? (
                       <Link
                         to="/admin"
-                        className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3")}
+                        className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
                         {PROFILE_ADMIN_SIDE_COPY.listing.openLabel}
                       </Link>
                     ) : (
-	                      <Button
-	                        type="button"
-	                        size="sm"
-	                        variant="outline"
-	                        onClick={() => queueProfileSkillWorkflow(profile, "listing")}
-	                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(sellerHandoff)}
-	                      >
-	                        {sellerPending ? (
-	                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-	                        ) : profileHandoffIsActive(sellerHandoff) ? (
-	                          <CheckCircle2 className="h-3.5 w-3.5" />
-	                        ) : (
-	                          <Home className="h-3.5 w-3.5" />
-	                        )}
-	                        {profileHandoffIsActive(sellerHandoff)
-	                          ? PROFILE_ADMIN_SIDE_COPY.listing.queuedLabel
-	                          : PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => queueProfileSkillWorkflow(profile, "listing")}
+                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(sellerHandoff)}
+                      >
+                        {sellerPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : profileHandoffIsActive(sellerHandoff) ? (
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                        ) : (
+                          <Home className="h-3.5 w-3.5" />
+                        )}
+                        {profileHandoffIsActive(sellerHandoff)
+                          ? PROFILE_ADMIN_SIDE_COPY.listing.queuedLabel
+                          : PROFILE_ADMIN_SIDE_COPY.listing.actionLabel}
                       </Button>
                     )}
                     {buyerDealId ? (
                       <Link
                         to="/admin"
-                        className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-9 px-3")}
+                        className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
                         {PROFILE_ADMIN_SIDE_COPY.buyer.openLabel}
@@ -495,21 +525,21 @@ function LeadProfilesWorkbench({
                     ) : (
                       <Button
                         type="button"
-	                        size="sm"
-	                        variant="outline"
-	                        onClick={() => queueProfileSkillWorkflow(profile, "buyer")}
-	                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(buyerHandoff)}
-	                      >
-	                        {buyerPending ? (
-	                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-	                        ) : profileHandoffIsActive(buyerHandoff) ? (
-	                          <CheckCircle2 className="h-3.5 w-3.5" />
-	                        ) : (
-	                          <Users className="h-3.5 w-3.5" />
-	                        )}
-	                        {profileHandoffIsActive(buyerHandoff)
-	                          ? PROFILE_ADMIN_SIDE_COPY.buyer.queuedLabel
-	                          : PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
+                        size="sm"
+                        variant="outline"
+                        onClick={() => queueProfileSkillWorkflow(profile, "buyer")}
+                        disabled={pendingProfileAction !== null || !canHandoff || profileHandoffIsActive(buyerHandoff)}
+                      >
+                        {buyerPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : profileHandoffIsActive(buyerHandoff) ? (
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                        ) : (
+                          <Users className="h-3.5 w-3.5" />
+                        )}
+                        {profileHandoffIsActive(buyerHandoff)
+                          ? PROFILE_ADMIN_SIDE_COPY.buyer.queuedLabel
+                          : PROFILE_ADMIN_SIDE_COPY.buyer.actionLabel}
                       </Button>
                     )}
                   </div>
