@@ -3071,9 +3071,9 @@ function TemplatesPanel() {
               )}
 
               {list.length === 0 && showNew !== lane && (
-                <div className="rounded-md border border-dashed border-border bg-card px-4 py-6 text-center text-xs text-muted-foreground">
-                  No templates yet. The agent on this lane will skip drafting until at least one exists.
-                </div>
+                <p className="px-1 py-1 text-xs text-muted-foreground/80">
+                  No templates yet — the agent on this lane will skip drafting until at least one exists.
+                </p>
               )}
 
               {list.map((t) => {
