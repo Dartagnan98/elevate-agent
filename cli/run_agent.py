@@ -3850,6 +3850,37 @@ class AIAgent:
                 child.interrupt(message)
             except Exception as e:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
+        # Close the underlying httpx client from a worker thread so any
+        # in-flight outbound API request unblocks with a connection-closed
+        # error. Without this, providers with no in-flight cancel hook
+        # (openai-codex non-streaming + 300s timeout, hung gateways, etc.)
+        # leave the agent stuck on the synchronous HTTPX call for the full
+        # timeout window even though _interrupt_requested is already True.
+        # The retry loop in _run_conversation has an interrupt check that
+        # fires *after* the API call returns or raises (L10860), so the
+        # close triggers that branch immediately. `_ensure_primary_openai_client`
+        # auto-rebuilds on next use, so closing here is safe for follow-up
+        # turns. Threaded because httpx_client.close() can block briefly
+        # waiting for pool teardown and we don't want to stall the caller.
+        try:
+            _client_ref = getattr(self, "client", None)
+            _http_client_ref = getattr(_client_ref, "_client", None) if _client_ref else None
+            if _http_client_ref is not None and not getattr(_http_client_ref, "is_closed", False):
+                import threading as _threading
+
+                def _close_in_flight_http() -> None:
+                    try:
+                        _http_client_ref.close()
+                    except Exception as _close_err:
+                        logger.debug("interrupt http_client.close failed: %s", _close_err)
+
+                _threading.Thread(
+                    target=_close_in_flight_http,
+                    name="agent-interrupt-http-close",
+                    daemon=True,
+                ).start()
+        except Exception as _wire_err:
+            logger.debug("interrupt http_client close wiring failed: %s", _wire_err)
         if not self.quiet_mode:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
     
