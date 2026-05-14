@@ -1925,12 +1925,12 @@ function AutomationsSection({
             const recentRuns = runs.slice(0, 8);
             return (
               <div key={job.id}>
-              <div className="group/row flex w-full items-center">
+              <div className="group/row flex min-h-11 w-full items-center lg:min-h-[34px]">
               <button
                 type="button"
                 onClick={() => onOpenCron(job.id)}
                 className={cn(
-                  "group flex flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                  "group flex min-h-11 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[34px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
                   "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                 )}
                 title={`${title} · ${job.schedule_display}${running ? " · running now" : ""}${job.last_error ? ` · ${job.last_error}` : ""}`}
@@ -1985,25 +1985,33 @@ function AutomationsSection({
               </div>
               {isExpanded && recentRuns.length > 0 && (
                 <div className="ml-3.5 mt-0.5 mb-1 space-y-0.5 border-l border-[var(--sidebar-border)]/60 pl-1.5 lg:mt-0.5 lg:space-y-0">
-                  {recentRuns.map((session) => (
+                  {recentRuns.map((session) => {
+                    const runLabel =
+                      session.preview?.trim() ||
+                      (session.title && session.title.trim() !== "Untitled"
+                        ? session.title.trim()
+                        : "") ||
+                      `Run · ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`;
+                    return (
                     <button
                       key={session.id}
                       type="button"
                       onClick={() => onOpenSession(session)}
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                        "flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[34px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
                         "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                       )}
-                      title={`Run ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
+                      title={`${runLabel} · ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
                     >
                       <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
-                        {sessionTitle(session)}
+                        {runLabel}
                       </span>
                       <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem]">
                         {compactSessionAge(session.last_active ?? 0)}
                       </span>
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               </div>
