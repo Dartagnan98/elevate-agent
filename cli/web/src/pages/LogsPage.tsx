@@ -187,8 +187,8 @@ export default function LogsPage() {
         </CardHeader>
         <CardContent className="p-0">
           {error && (
-            <div className="bg-card border-b border-border border-l-2 border-l-destructive p-3">
-              <p className="text-sm text-destructive">{error}</p>
+            <div className="bg-card border-b border-border px-4 py-2">
+              <p className="text-xs text-destructive">{error}</p>
             </div>
           )}
 
@@ -197,7 +197,7 @@ export default function LogsPage() {
             className="p-4 font-mono-ui text-xs leading-5 overflow-auto min-h-[400px] max-h-[calc(100vh-220px)]"
           >
             {lines.length === 0 && !loading && (
-              <p className="text-muted-foreground text-center py-8">
+              <p className="px-1 py-1 text-xs text-muted-foreground/80">
                 {t.logs.noLogLines}
               </p>
             )}

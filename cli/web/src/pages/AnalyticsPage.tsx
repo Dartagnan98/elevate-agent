@@ -354,17 +354,13 @@ export default function AnalyticsPage() {
   return (
     <div className="flex flex-col gap-6">
       {loading && !data && (
-        <div className="flex items-center justify-center py-24">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        </div>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
+          {t.common.loading}
+        </p>
       )}
 
       {error && (
-        <Card>
-          <CardContent className="py-6">
-            <p className="text-sm text-destructive text-center">{error}</p>
-          </CardContent>
-        </Card>
+        <p className="px-1 py-1 text-xs text-destructive">{error}</p>
       )}
 
       {data && (
@@ -402,15 +398,9 @@ export default function AnalyticsPage() {
       )}
 
       {data && data.daily.length === 0 && data.by_model.length === 0 && data.skills.top_skills.length === 0 && (
-        <Card>
-          <CardContent className="py-12">
-            <div className="flex flex-col items-center text-muted-foreground">
-              <BarChart3 className="h-8 w-8 mb-3 opacity-40" />
-              <p className="text-sm font-medium">{t.analytics.noUsageData}</p>
-              <p className="text-xs mt-1 text-muted-foreground/60">{t.analytics.startSession}</p>
-            </div>
-          </CardContent>
-        </Card>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
+          {t.analytics.noUsageData} {t.analytics.startSession}
+        </p>
       )}
     </div>
   );
