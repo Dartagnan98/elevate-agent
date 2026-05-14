@@ -992,6 +992,18 @@ function DesktopSidebar({
   const chatSessions = filteredSessions
     .filter((session) => !spotlightIds.has(session.id) && !isCronSession(session))
     .slice(0, 18);
+  const latestCronSessionByJobId = useMemo(() => {
+    const map = new Map<string, SessionInfo>();
+    for (const session of sessions) {
+      const jobId = cronJobIdFromSession(session);
+      if (!jobId) continue;
+      const current = map.get(jobId);
+      if (!current || (session.last_active ?? 0) > (current.last_active ?? 0)) {
+        map.set(jobId, session);
+      }
+    }
+    return map;
+  }, [sessions]);
   const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
   const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
@@ -1417,6 +1429,11 @@ function DesktopSidebar({
           open={automationsOpen}
           onToggle={() => setAutomationsOpen((prev) => !prev)}
           onOpenCron={(jobId) => {
+            const latest = latestCronSessionByJobId.get(jobId);
+            if (latest) {
+              openSession(latest);
+              return;
+            }
             navigate(`/cron#cron-job-${jobId}`);
             onNavigate();
           }}
