@@ -631,12 +631,12 @@ const LeadBoardRow = memo(function LeadBoardRow({
       {inbound && wait != null && wait >= 5 && (
         <span
           className={cn(
-            "rounded-sm border px-1.5 py-0.5",
+            "rounded-sm border border-border bg-card px-1.5 py-0.5",
             wait >= 60
-              ? "border-border border-l-2 border-l-destructive bg-card text-destructive"
+              ? "text-destructive"
               : wait >= 30
-                ? "border-border border-l-2 border-l-warning bg-card text-warning"
-                : "border-border bg-card text-foreground/70",
+                ? "text-warning"
+                : "text-foreground/70",
           )}
         >
           waited {formatMinutes(wait)}
@@ -1105,7 +1105,7 @@ function DraftMessagesBoard({
                 className={cn(
                   "px-3 transition",
                   density === "compact"
-                    ? "bg-muted text-foreground border-l-2 border-l-primary"
+                    ? "bg-muted text-foreground"
                     : "text-muted-foreground hover:bg-card",
                 )}
               >
@@ -1118,7 +1118,7 @@ function DraftMessagesBoard({
                 className={cn(
                   "px-3 transition",
                   density === "expanded"
-                    ? "bg-muted text-foreground border-l-2 border-l-primary"
+                    ? "bg-muted text-foreground"
                     : "text-muted-foreground hover:bg-card",
                 )}
               >
@@ -1538,9 +1538,9 @@ function BuyerWatchlistRow({ buyer }: { buyer: BuyerWatchlistEntry }) {
   const searches = (buyer.searches ?? []).filter(Boolean);
   const tone =
     tier === "HOT"
-      ? "border-border border-l-2 border-l-destructive bg-card text-destructive"
+      ? "border-border bg-card text-destructive"
       : tier === "WARM"
-        ? "border-border border-l-2 border-l-warning bg-card text-warning"
+        ? "border-border bg-card text-warning"
         : "border-border bg-card text-foreground/70";
   const dot =
     tier === "HOT"
@@ -1881,7 +1881,7 @@ function FilterChip({
       className={cn(
         "inline-flex h-11 items-center gap-1.5 rounded-sm border px-3 text-xs font-medium transition-colors sm:h-8",
         active
-          ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+          ? "border-primary bg-muted text-foreground"
           : "border-border bg-card text-muted-foreground hover:bg-card hover:text-foreground",
       )}
     >
@@ -2729,7 +2729,7 @@ function PendingApprovalRow({
   busy: boolean;
 }) {
   return (
-    <div className="rounded-md border border-border border-l-2 border-l-warning bg-card p-3">
+    <div className="rounded-md border border-border bg-card p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Sparkles className="h-3.5 w-3.5 text-warning" />
@@ -2968,7 +2968,7 @@ function TemplatesPanel() {
           </div>
         </div>
         {error && (
-          <div className="mt-3 rounded-sm border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-destructive">
+          <div className="mt-3 rounded-sm border border-border bg-card px-3 py-2 text-xs text-destructive">
             {error}
           </div>
         )}
@@ -3034,7 +3034,7 @@ function TemplatesPanel() {
                 </div>
               )}
               {showNew === lane && (
-                <div className="rounded-md border border-border border-l-2 border-l-primary bg-card p-3">
+                <div className="rounded-md border border-border bg-card p-3">
                   <input
                     type="text"
                     placeholder="Template name (e.g. 'Quick warm intro')"
@@ -3337,7 +3337,7 @@ export function RealEstateLeadsPage() {
             />
 
             {blockedSources.length > 0 && (
-              <div className="rounded-md border border-border border-l-2 border-l-warning bg-card px-4 py-3 text-sm text-foreground">
+              <div className="rounded-md border border-border bg-card px-4 py-3 text-sm text-foreground">
                 <div className="flex items-center gap-2 text-warning">
                   <AlertTriangle className="h-4 w-4" />
                   <span className="font-semibold">A lead source needs access.</span>
