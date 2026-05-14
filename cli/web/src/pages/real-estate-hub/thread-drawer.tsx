@@ -232,27 +232,15 @@ function ThreadDrawer({
           <div className="flex min-h-0 flex-col border-r border-border">
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
               {loading && (
-                <div className="flex items-center justify-center py-12 text-xs font-medium text-foreground/65">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading thread...
-                </div>
+                <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading thread…</p>
               )}
               {error && (
-                <div className="rounded-xl border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+                <div className="rounded-md border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
                   {error}
                 </div>
               )}
               {!loading && !error && messages.length === 0 && (
-                <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-border bg-card/60 px-6 py-12 text-center">
-                  <div
-                    className="text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-foreground/55"
-                    style={{ fontFamily: "var(--theme-font-mono)" }}
-                  >
-                    Empty thread
-                  </div>
-                  <div className="text-sm text-foreground/75">
-                    No messages on file yet.
-                  </div>
-                </div>
+                <p className="px-1 py-1 text-xs text-muted-foreground/80">No messages on file yet.</p>
               )}
               {!loading && messages.length > 0 && (
                 <div className="space-y-4">

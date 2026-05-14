@@ -1395,19 +1395,11 @@ export default function AgentHubPage() {
   );
 
   if (loading && !snapshot) {
-    return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
-      </div>
-    );
+    return <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading agent hub…</p>;
   }
 
   if (!snapshot) {
-    return (
-      <div className="py-24 text-center text-muted-foreground">
-        Agent Hub unavailable
-      </div>
-    );
+    return <p className="px-1 py-1 text-xs text-muted-foreground/80">Agent Hub unavailable</p>;
   }
 
   return (
