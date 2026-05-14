@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Lock, Play, Copy, RefreshCw } from "lucide-react";
+import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Lock, Play, Copy, RefreshCw, Plus, Pencil, Trash2, X } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
@@ -371,6 +371,7 @@ function LeadsOnboardingWizard({
   refreshSourceConnectors,
   sourceConnectorsLoading,
   firstTouchTemplates,
+  refreshTemplates,
 }: {
   draft: LeadsSetupDraft;
   updateField: <K extends keyof LeadsSetupDraft>(key: K, value: LeadsSetupDraft[K]) => void;
@@ -384,6 +385,7 @@ function LeadsOnboardingWizard({
   refreshSourceConnectors: () => Promise<void>;
   sourceConnectorsLoading: boolean;
   firstTouchTemplates: OutreachTemplate[];
+  refreshTemplates: () => Promise<void>;
 }) {
   const navigate = useNavigate();
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
@@ -415,6 +417,71 @@ function LeadsOnboardingWizard({
       // clipboard unavailable — silent fail
     }
   }, []);
+
+  type TemplateEditor =
+    | { mode: "create"; lane: string; name: string; body: string }
+    | { mode: "edit"; id: string; lane: string; name: string; body: string };
+  const [templateEditor, setTemplateEditor] = useState<TemplateEditor | null>(null);
+  const [templateMutating, setTemplateMutating] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+
+  const openCreateTemplate = useCallback((lane: string) => {
+    setTemplateError(null);
+    setTemplateEditor({ mode: "create", lane, name: "", body: "" });
+  }, []);
+
+  const openEditTemplate = useCallback((tpl: OutreachTemplate) => {
+    setTemplateError(null);
+    setTemplateEditor({ mode: "edit", id: tpl.id, lane: tpl.lane, name: tpl.name, body: tpl.body });
+  }, []);
+
+  const closeTemplateEditor = useCallback(() => {
+    setTemplateEditor(null);
+    setTemplateError(null);
+  }, []);
+
+  const saveTemplate = useCallback(async () => {
+    if (!templateEditor) return;
+    const name = templateEditor.name.trim();
+    const body = templateEditor.body.trim();
+    if (!name || !body) {
+      setTemplateError("Name and body are both required.");
+      return;
+    }
+    setTemplateMutating(true);
+    setTemplateError(null);
+    try {
+      if (templateEditor.mode === "create") {
+        await api.createOutreachTemplate({ lane: templateEditor.lane, name, body });
+      } else {
+        await api.updateOutreachTemplate(templateEditor.id, { name, body });
+      }
+      await refreshTemplates();
+      setTemplateEditor(null);
+    } catch (err) {
+      setTemplateError(errorMessage(err, "Could not save template."));
+    } finally {
+      setTemplateMutating(false);
+    }
+  }, [templateEditor, refreshTemplates]);
+
+  const deleteTemplate = useCallback(
+    async (tpl: OutreachTemplate) => {
+      if (!window.confirm(`Delete "${tpl.name}"? This can't be undone from the wizard.`)) return;
+      setTemplateMutating(true);
+      setTemplateError(null);
+      try {
+        await api.deleteOutreachTemplate(tpl.id);
+        await refreshTemplates();
+      } catch (err) {
+        setTemplateError(errorMessage(err, "Could not delete template."));
+      } finally {
+        setTemplateMutating(false);
+      }
+    },
+    [refreshTemplates],
+  );
+
   const [stepIdx, setStepIdx] = useState(0);
   const [showMissing, setShowMissing] = useState(false);
   const step = LEADS_WIZARD_STEPS[stepIdx];
@@ -785,56 +852,89 @@ function LeadsOnboardingWizard({
                     </p>
                   </div>
                 </label>
-                {firstTouchTemplates.length > 0 && (
-                  <div className="flex flex-col gap-4">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-[12.5px] font-medium text-foreground">
-                          Template library
-                        </span>
-                        <span className="text-[11px] leading-[1.4] text-muted-foreground">
-                          Elevate picks per situation — best-fit template is auto-attached by ID and tracked for reply rate. Click any card to pin it as the default first-touch.
-                        </span>
-                      </div>
-                      <Link
-                        to="/real-estate/templates"
-                        className="shrink-0 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                      >
-                        Manage all
-                      </Link>
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-[12.5px] font-medium text-foreground">
+                        Template library
+                      </span>
+                      <span className="text-[11px] leading-[1.4] text-muted-foreground">
+                        Elevate picks per situation — best-fit template is auto-attached by ID and tracked for reply rate. Click any card to pin it as the default first-touch.
+                      </span>
                     </div>
-                    {LEADS_TEMPLATE_LANES.map((lane) => {
-                      const laneTemplates = firstTouchTemplates.filter((t) => t.lane === lane.id);
-                      if (laneTemplates.length === 0) return null;
-                      return (
-                        <div key={lane.id} className="flex flex-col gap-2">
-                          <div className="flex items-baseline justify-between gap-2">
-                            <div className="flex items-baseline gap-2">
-                              <span className="font-mono-ui text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                                {lane.label}
-                              </span>
-                              <span className="text-[10.5px] text-muted-foreground/70">
-                                {laneTemplates.length} · {lane.hint}
-                              </span>
-                            </div>
+                    <Link
+                      to="/real-estate/templates"
+                      className="shrink-0 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                    >
+                      Manage all
+                    </Link>
+                  </div>
+                  {templateError && (
+                    <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-[11.5px] text-destructive">
+                      {templateError}
+                    </div>
+                  )}
+                  {LEADS_TEMPLATE_LANES.map((lane) => {
+                    const laneTemplates = firstTouchTemplates.filter((t) => t.lane === lane.id);
+                    const editingThisLane =
+                      templateEditor && templateEditor.lane === lane.id ? templateEditor : null;
+                    return (
+                      <div key={lane.id} className="flex flex-col gap-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <div className="flex items-baseline gap-2">
+                            <span className="font-mono-ui text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                              {lane.label}
+                            </span>
+                            <span className="text-[10.5px] text-muted-foreground/70">
+                              {laneTemplates.length} · {lane.hint}
+                            </span>
                           </div>
-                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                            {laneTemplates.map((tpl) => {
-                              const isActive = draft.autoReplyTemplate.trim() === tpl.body.trim();
-                              const hasGif = /\[\[gif:/i.test(tpl.body);
+                          <button
+                            type="button"
+                            onClick={() => openCreateTemplate(lane.id)}
+                            className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 font-mono-ui text-[10px] uppercase tracking-wide text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                            disabled={templateMutating}
+                          >
+                            <Plus className="h-3 w-3" />
+                            Add
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {laneTemplates.map((tpl) => {
+                            const isActive = draft.autoReplyTemplate.trim() === tpl.body.trim();
+                            const hasGif = /\[\[gif:/i.test(tpl.body);
+                            const isEditingThis =
+                              editingThisLane?.mode === "edit" && editingThisLane.id === tpl.id;
+                            if (isEditingThis) {
                               return (
-                                <button
+                                <TemplateEditorCard
                                   key={tpl.id}
+                                  editor={editingThisLane}
+                                  onChange={(patch) =>
+                                    setTemplateEditor((prev) => (prev ? { ...prev, ...patch } : prev))
+                                  }
+                                  onSave={saveTemplate}
+                                  onCancel={closeTemplateEditor}
+                                  busy={templateMutating}
+                                />
+                              );
+                            }
+                            return (
+                              <div
+                                key={tpl.id}
+                                className={cn(
+                                  "group relative flex flex-col gap-1 rounded-md border px-3 py-2.5 text-left backdrop-blur-sm transition",
+                                  isActive
+                                    ? "border-primary/60 bg-primary/10"
+                                    : "border-border bg-card/60 hover:border-border/80 hover:bg-card",
+                                )}
+                              >
+                                <button
                                   type="button"
                                   onClick={() => updateField("autoReplyTemplate", tpl.body)}
-                                  className={cn(
-                                    "flex flex-col gap-1 rounded-md border px-3 py-2.5 text-left backdrop-blur-sm transition",
-                                    isActive
-                                      ? "border-primary/60 bg-primary/10"
-                                      : "border-border bg-card/60 hover:border-border/80 hover:bg-card",
-                                  )}
+                                  className="flex flex-col gap-1 text-left"
                                 >
-                                  <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center justify-between gap-2 pr-12">
                                     <span className="text-[12.5px] font-medium text-foreground">{tpl.name}</span>
                                     <div className="flex items-center gap-1.5">
                                       {hasGif && (
@@ -852,14 +952,62 @@ function LeadsOnboardingWizard({
                                     id · {tpl.id.slice(0, 8)}
                                   </span>
                                 </button>
-                              );
-                            })}
-                          </div>
+                                <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openEditTemplate(tpl);
+                                    }}
+                                    className="rounded-sm p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    title="Rename or edit body"
+                                    disabled={templateMutating}
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void deleteTemplate(tpl);
+                                    }}
+                                    className="rounded-sm p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+                                    title="Delete template"
+                                    disabled={templateMutating}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {editingThisLane?.mode === "create" && (
+                            <TemplateEditorCard
+                              editor={editingThisLane}
+                              onChange={(patch) =>
+                                setTemplateEditor((prev) => (prev ? { ...prev, ...patch } : prev))
+                              }
+                              onSave={saveTemplate}
+                              onCancel={closeTemplateEditor}
+                              busy={templateMutating}
+                            />
+                          )}
+                          {laneTemplates.length === 0 && editingThisLane?.mode !== "create" && (
+                            <button
+                              type="button"
+                              onClick={() => openCreateTemplate(lane.id)}
+                              className="flex flex-col items-center justify-center gap-1 rounded-md border border-dashed border-border/70 px-3 py-4 text-[11.5px] text-muted-foreground hover:border-border hover:text-foreground"
+                              disabled={templateMutating}
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              Add the first {lane.label.toLowerCase()} template
+                            </button>
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      </div>
+                    );
+                  })}
+                </div>
                 <label className="block">
                   <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
                     Initial reply template {draft.autoReplyEnabled && <span className="text-destructive">*</span>}
@@ -929,6 +1077,72 @@ function LeadsOnboardingWizard({
       </div>
     </div>,
     document.body,
+  );
+}
+
+type TemplateEditorState =
+  | { mode: "create"; lane: string; name: string; body: string }
+  | { mode: "edit"; id: string; lane: string; name: string; body: string };
+
+function TemplateEditorCard({
+  editor,
+  onChange,
+  onSave,
+  onCancel,
+  busy,
+}: {
+  editor: TemplateEditorState;
+  onChange: (patch: Partial<{ name: string; body: string }>) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-primary/40 bg-card/70 px-3 py-2.5 backdrop-blur-sm sm:col-span-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono-ui text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+          {editor.mode === "create" ? "New template" : "Edit template"}
+        </span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-sm p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          disabled={busy}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+      <input
+        type="text"
+        value={editor.name}
+        onChange={(e) => onChange({ name: e.target.value })}
+        placeholder="Template name (e.g. Open house live)"
+        className="w-full rounded-md border border-border bg-background/40 px-3 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+        disabled={busy}
+      />
+      <textarea
+        value={editor.body}
+        onChange={(e) => onChange({ body: e.target.value })}
+        rows={4}
+        placeholder="Body. Use {first_name}, {area}, {topic}, etc. Add [[gif:keyword]] to attach a GIF."
+        className="min-h-24 w-full resize-y rounded-md border border-border bg-background/40 px-3 py-2 text-[12.5px] leading-5 text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
+        disabled={busy}
+      />
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-md px-2 py-1 text-[11.5px] text-muted-foreground hover:text-foreground"
+          disabled={busy}
+        >
+          Cancel
+        </button>
+        <Button size="sm" onClick={onSave} disabled={busy} className="h-7 px-3 text-[11.5px]">
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+          {editor.mode === "create" ? "Add template" : "Save changes"}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1235,6 +1449,15 @@ export function LeadsSetupLaunch({
     void refreshSourceConnectors();
   }, [refreshSourceConnectors]);
 
+  const refreshTemplates = useCallback(async () => {
+    try {
+      const resp = await api.getOutreachTemplates();
+      setFirstTouchTemplates(resp.templates.filter((t) => t.active));
+    } catch {
+      // best-effort
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1257,7 +1480,7 @@ export function LeadsSetupLaunch({
     return () => {
       cancelled = true;
     };
-    // intentional one-shot on mount — refetch is via Manage all link if needed
+    // intentional one-shot on mount — refetch is via refreshTemplates
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1365,6 +1588,7 @@ export function LeadsSetupLaunch({
         refreshSourceConnectors={refreshSourceConnectors}
         sourceConnectorsLoading={sourceConnectorsLoading}
         firstTouchTemplates={firstTouchTemplates}
+        refreshTemplates={refreshTemplates}
       />
     );
   }
