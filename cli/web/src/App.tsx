@@ -135,9 +135,14 @@ function CoreRootRedirect() {
 
 function AccessLoadingPage() {
   return (
-    <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">
-      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-      Loading access…
+    <div className="onboarding-overlay relative flex min-h-[calc(100vh-4rem)] items-center justify-center overflow-hidden">
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex flex-col items-center gap-3">
+        <Loader2 className="onboarding-rise h-5 w-5 animate-spin text-primary" />
+        <span className="onboarding-rise-delay-1 font-mono-ui text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+          Loading access
+        </span>
+      </div>
     </div>
   );
 }
@@ -631,9 +636,14 @@ export default function App() {
                 >
                   <Suspense
                     fallback={
-                      <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Loading…
+                      <div className="onboarding-overlay relative flex min-h-[calc(100vh-9rem)] items-center justify-center overflow-hidden">
+                        <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+                        <div className="relative flex flex-col items-center gap-3">
+                          <Loader2 className="onboarding-rise h-5 w-5 animate-spin text-primary" />
+                          <span className="onboarding-rise-delay-1 font-mono-ui text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                            Loading
+                          </span>
+                        </div>
                       </div>
                     }
                   >
