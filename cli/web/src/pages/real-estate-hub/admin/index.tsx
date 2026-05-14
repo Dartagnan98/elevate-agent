@@ -5157,14 +5157,6 @@ export function RealEstateAdminPage() {
           <Sparkles className="h-3.5 w-3.5" />
           Re-run onboarding
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={openCoach}
-        >
-          <MessageCircle className="h-3.5 w-3.5" />
-          Ask the coach
-        </Button>
       </div>
       <AdminKanbanBoard />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
