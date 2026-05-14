@@ -156,3 +156,38 @@ The dashboard surfaces:
 - **Suggest variant** button per lane — calls the suggester, which writes a new `pending_approval` template anchored to (a) the lane's current best template and (b) the user's voice from `~/.elevate/SOUL.md`. Falls back to a heuristic copy of the anchor if no Anthropic key is configured. Either way, the human approves before it ships.
 
 You don't need to invoke the suggester from inside this skill. It runs on demand from `/leads`. Your job is still: pick from active, draft, log.
+
+## Full Lead Workflow Handoff
+
+When a lead lane is used as part of a larger realtor workflow, preserve a small handoff for the dashboard and the next agent:
+
+```json
+{
+  "workflow": "outreach-lanes",
+  "lane": "new-outreach|hot-leads-watcher|follow-ups",
+  "status": "done|partial|waiting_human|failed",
+  "drafts_created": 0,
+  "profiles_skipped": [],
+  "blocked_sources": [],
+  "next_review_surface": "/leads",
+  "risks": []
+}
+```
+
+## Realtor-Safe Routing
+
+Before drafting, classify the lead situation:
+
+1. Lead role: buyer, seller, investor, chitchat, unknown.
+2. Trigger: new lead, live reply, property view, showing ask, stale follow-up, stage move.
+3. Listing ownership: whether the lead is asking about the realtor's own listing.
+4. Representation safety: whether the lead appears represented or has an agency-conflict risk.
+5. Sales situation: first touch, nurture, appointment ask, CMA/listing conversation, or post-showing follow-up.
+
+If a buyer lead touched the realtor's own listing, use disclosure-safe wording and do not pitch buyer representation for that same listing unless the context is safe and human-approved.
+
+## Source Of Truth
+
+- Profiles and threads come from the source-inbox/SQLite read path.
+- Skipped, dead, and blocked leads must be reflected immediately through the backend endpoints, not only in the chat summary.
+- Approved sends are separate from drafts. A draft in `/leads` is not a sent message.

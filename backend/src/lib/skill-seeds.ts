@@ -40,6 +40,10 @@ function defaultSeedRoots(): SeedRoot[] {
       dir: path.join(root, "cli", "skills", "social-content-engine"),
       entitlement: "real_estate_marketing",
     },
+    {
+      dir: path.join(root, "cli", "skills", "cma"),
+      entitlement: "real_estate_cma",
+    },
   ];
 }
 

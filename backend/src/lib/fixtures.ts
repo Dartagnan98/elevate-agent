@@ -19,7 +19,7 @@ export const FIXTURE_SKILLS = [
       tags: ["real-estate", "pricing"],
       entitlement: "real_estate_cma",
     },
-    body: "# CMA Generator\n\nProduce a full CMA for the provided listing...\n\n(stub fixture body — real skill loads from the HQ skill store in prod)\n",
+    body: "# CMA Generator\n\nUse the `cma` workflow for full comparative market analysis: collect property facts, pull comparable listings from the configured MLS/CMA source, analyze condition and market stats, produce pricing guidance, render the report, and require human approval before client delivery.\n",
   },
   {
     name: "listing-outreach",
@@ -30,7 +30,7 @@ export const FIXTURE_SKILLS = [
       tags: ["real-estate", "outreach"],
       entitlement: "real_estate_sales",
     },
-    body: "# Listing Outreach\n\nGiven a seller and their listing context, draft tone-appropriate messages...\n\n(stub fixture body)\n",
+    body: "# Listing Outreach\n\nUse `outreach-lanes` for real estate sales outreach. Draft approval-gated messages from connected profiles, threads, CRM signals, and active templates. Never auto-send; write drafts to `/leads` for human approval and log attempts for outcome learning.\n",
   },
   {
     name: "builder-only-skill",
