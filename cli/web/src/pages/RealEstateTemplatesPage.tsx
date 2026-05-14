@@ -166,12 +166,8 @@ function TabPill({
 function LaneChannelBadges({ lane, channel }: { lane: string; channel: string }) {
   return (
     <div className="flex items-center gap-1.5">
-      <Badge variant="outline" className="font-mono text-[0.6rem] uppercase tracking-wider">
-        {lane}
-      </Badge>
-      <Badge variant="secondary" className="font-mono text-[0.6rem] uppercase tracking-wider">
-        {channel}
-      </Badge>
+      <Badge variant="outline">{lane}</Badge>
+      <Badge variant="secondary">{channel}</Badge>
     </div>
   );
 }
@@ -189,7 +185,7 @@ function MetricCell({
 }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="font-mono text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+      <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground">
         {label}
       </span>
       <span
@@ -222,7 +218,7 @@ function LeaderboardCard({
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2">
             <CardTitle>{row.name}</CardTitle>
-            <span className="font-mono text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+            <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground">
               v{row.version}
               {row.versionCount > 1 ? ` · ${row.versionCount} versions` : ""}
             </span>
@@ -231,9 +227,7 @@ function LeaderboardCard({
         </div>
         <div className="flex items-center gap-1">
           {bucket === "trial" && (
-            <Badge variant="warning" className="font-mono uppercase tracking-wider">
-              Trial
-            </Badge>
+            <Badge variant="warning">Trial</Badge>
           )}
           <Button
             variant="ghost"
@@ -304,9 +298,7 @@ function ProposedCard({
             <CardTitle>{template.name}</CardTitle>
             <LaneChannelBadges lane={template.lane} channel={template.channel} />
           </div>
-          <Badge variant="outline" className="font-mono text-[0.6rem] uppercase tracking-wider">
-            {ORIGIN_LABEL[template.origin] ?? template.origin}
-          </Badge>
+          <Badge variant="outline">{ORIGIN_LABEL[template.origin] ?? template.origin}</Badge>
         </div>
         {template.rationale && (
           <CardDescription className="flex items-start gap-1.5 leading-snug">
@@ -328,7 +320,7 @@ function ProposedCard({
           rows={6}
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="font-mono text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+          <span className="font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground">
             Proposed {isoTimeAgo(template.createdAt)}
           </span>
           <div className="flex items-center gap-2">

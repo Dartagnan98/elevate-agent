@@ -62,7 +62,7 @@ function ThreadMessageBubble({ message }: { message: ThreadContextMessage }) {
     <div className={cn("flex flex-col gap-1.5", inbound ? "items-start" : "items-end")}>
       <div
         className={cn(
-          "max-w-[82%] rounded-2xl px-3.5 py-2.5 text-[0.875rem] leading-[1.45] whitespace-pre-wrap break-words text-foreground",
+          "max-w-[82%] rounded-lg px-3.5 py-2.5 text-[0.875rem] leading-[1.45] whitespace-pre-wrap break-words text-foreground",
           inbound
             ? "bg-card border border-border"
             : "bg-primary/15 border border-primary/45",
