@@ -17,6 +17,7 @@ import type {
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { playOnboardingWhoosh } from "@/lib/onboarding-sounds";
 import {
   AgentOnboardingWelcome,
   AgentOnboardingWizard,
@@ -915,6 +916,7 @@ export function AgentOnboardingPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => {
+                  playOnboardingWhoosh();
                   setForceOnboarding(true);
                   setWizardPhase("welcome");
                 }}

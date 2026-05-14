@@ -19,8 +19,8 @@ import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
   playOnboardingClick,
-  playOnboardingRiser,
   playOnboardingSwell,
+  playOnboardingWhoosh,
 } from "@/lib/onboarding-sounds";
 import {
   buildItemUpdates,
@@ -98,8 +98,8 @@ export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void 
   const [exiting, setExiting] = useState(false);
 
   const handleStart = useCallback(() => {
+    playOnboardingWhoosh();
     playOnboardingSwell();
-    playOnboardingRiser(1.6);
     setExiting(true);
   }, []);
 
@@ -226,18 +226,15 @@ export function AgentOnboardingWizard({
   const handleFinish = useCallback(async () => {
     setError(null);
     setCompleting(true);
-    const riser = playOnboardingRiser(2.4);
     try {
       await api.updateAgentSetup(buildItemUpdates(draft));
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
     } catch (err) {
-      riser.stop();
       setError(errorMessage(err, "Could not complete onboarding"));
       setCompleting(false);
       return;
     }
-    riser.stop();
     playOnboardingChime();
     setCompleting(false);
     onFinish();

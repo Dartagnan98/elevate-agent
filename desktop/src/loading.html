@@ -7,72 +7,143 @@
     <style>
       :root {
         color-scheme: dark;
-        font-family: -apple-system, BlinkMacSystemFont, "Geist", "Inter", system-ui, sans-serif;
         --bg: #1a1b1a;
         --surface: #212321;
         --border: #2a2c2a;
         --text: #ececec;
         --muted: #8a8c8a;
+        --muted-strong: #b6b8b6;
         --accent: #D97757;
-        --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-        background: var(--bg);
-        color: var(--text);
+        --aurora-a: rgba(217, 119, 87, 0.10);
+        --aurora-b: rgba(122, 158, 135, 0.07);
+        --aurora-c: rgba(217, 119, 87, 0.04);
+        --sans: "Geist", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
       }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
         background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        overflow: hidden;
+        position: relative;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+      .aurora {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(60% 50% at 20% 25%, var(--aurora-a), transparent 65%),
+          radial-gradient(55% 45% at 80% 70%, var(--aurora-b), transparent 65%),
+          radial-gradient(40% 35% at 50% 95%, var(--aurora-c), transparent 70%);
+        animation: aurora-drift 18s ease-in-out infinite alternate;
+      }
+      @keyframes aurora-drift {
+        0%   { transform: translate3d(0, 0, 0) scale(1); opacity: 0.95; }
+        100% { transform: translate3d(0, -10px, 0) scale(1.04); opacity: 1; }
       }
       main {
-        width: min(420px, calc(100vw - 48px));
+        position: relative;
+        z-index: 1;
+        width: min(520px, calc(100vw - 48px));
+        padding: 0 24px;
         text-align: center;
       }
-      .mark {
-        width: 48px;
-        height: 48px;
-        margin: 0 auto 28px;
-        border: 1px solid var(--border);
+      .logo {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        opacity: 0;
+        transform: translateY(8px);
+        animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) 0.05s forwards;
+      }
+      .logo-mark {
+        width: 36px;
+        height: 36px;
         border-radius: 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
         display: grid;
         place-items: center;
-        background: var(--surface);
-        color: var(--accent);
-        font-family: var(--mono);
-        font-size: 22px;
-        font-weight: 600;
-        letter-spacing: -0.02em;
+        position: relative;
+        overflow: hidden;
       }
-      h1 {
-        margin: 0 0 10px;
-        font-size: 22px;
-        font-weight: 500;
+      .logo-mark::after {
+        content: "";
+        position: absolute;
+        right: 4px;
+        bottom: 4px;
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        background: var(--accent);
+      }
+      .logo-mark span {
+        font-family: var(--sans);
+        color: var(--text);
+        font-size: 17px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        line-height: 1;
+      }
+      .logo-word {
+        font-family: var(--sans);
+        font-size: 18px;
+        font-weight: 600;
         letter-spacing: -0.01em;
         color: var(--text);
       }
-      p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 14px;
-        line-height: 1.55;
-      }
-      .status {
-        margin-top: 28px;
+      .eyebrow {
+        margin-top: 36px;
         font-family: var(--mono);
-        font-size: 11px;
+        font-size: 10px;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.18em;
         color: var(--muted);
+        opacity: 0;
+        transform: translateY(8px);
+        animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) 0.15s forwards;
+      }
+      h1 {
+        margin: 12px 0 0;
+        font-family: var(--sans);
+        font-size: 28px;
+        font-weight: 500;
+        line-height: 1.1;
+        letter-spacing: -0.015em;
+        color: var(--text);
+        opacity: 0;
+        transform: translateY(8px);
+        animation: rise 0.75s cubic-bezier(0.2, 0.7, 0.2, 1) 0.25s forwards;
+      }
+      p {
+        margin: 10px auto 0;
+        max-width: 380px;
+        font-family: var(--sans);
+        font-size: 13.5px;
+        line-height: 1.55;
+        color: var(--muted-strong);
+        opacity: 0;
+        transform: translateY(8px);
+        animation: rise 0.75s cubic-bezier(0.2, 0.7, 0.2, 1) 0.35s forwards;
       }
       .bar {
         position: relative;
         height: 2px;
-        margin: 14px auto 0;
+        margin: 28px auto 0;
         max-width: 220px;
         overflow: hidden;
         border-radius: 2px;
         background: var(--border);
+        opacity: 0;
+        animation: fade-in 0.6s ease-out 0.45s forwards;
       }
       .bar::after {
         content: "";
@@ -83,18 +154,32 @@
         background: var(--accent);
         animation: sweep 1.4s ease-in-out infinite;
       }
+      @keyframes rise {
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes fade-in {
+        to { opacity: 1; }
+      }
       @keyframes sweep {
         0% { transform: translateX(-110%); }
         100% { transform: translateX(260%); }
       }
+      @media (prefers-reduced-motion: reduce) {
+        .aurora, .bar::after { animation: none; }
+        .logo, .eyebrow, h1, p, .bar { opacity: 1; transform: none; animation: none; }
+      }
     </style>
   </head>
   <body>
+    <div class="aurora" aria-hidden="true"></div>
     <main>
-      <div class="mark">E</div>
+      <div class="logo" aria-label="Elevate">
+        <div class="logo-mark" aria-hidden="true"><span>E</span></div>
+        <div class="logo-word">Elevate</div>
+      </div>
+      <div class="eyebrow">Booting runtime</div>
       <h1>Starting Elevate</h1>
-      <p>Bringing the local agent runtime online.</p>
-      <div class="status">BOOTING RUNTIME</div>
+      <p>Bringing the local agent runtime online. This usually takes a few seconds.</p>
       <div class="bar" aria-hidden="true"></div>
     </main>
   </body>

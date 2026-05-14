@@ -17,8 +17,8 @@ import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
   playOnboardingClick,
-  playOnboardingRiser,
   playOnboardingSwell,
+  playOnboardingWhoosh,
 } from "@/lib/onboarding-sounds";
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -264,8 +264,8 @@ function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
   const [exiting, setExiting] = useState(false);
 
   const handleStart = useCallback(() => {
+    playOnboardingWhoosh();
     playOnboardingSwell();
-    playOnboardingRiser(1.6);
     setExiting(true);
   }, []);
 
@@ -1552,15 +1552,12 @@ export function LeadsSetupLaunch({
   const handleWizardFinish = useCallback(async () => {
     setError(null);
     setSavedMessage(null);
-    const riser = playOnboardingRiser(2.0);
     try {
       await api.updateLeadsSetup(buildItemUpdates(draft));
     } catch (err) {
-      riser.stop();
       setError(errorMessage(err, "Save failed"));
       return;
     }
-    riser.stop();
     playOnboardingChime();
     setPhase("form");
   }, [draft]);
