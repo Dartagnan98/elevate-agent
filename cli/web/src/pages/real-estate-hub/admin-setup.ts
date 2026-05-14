@@ -21,11 +21,14 @@ export type AdminSetupDraft = {
   showingProvider: string;
   photoProcessingProvider: string;
   mlsLoginUrl: string;
-  mlsCredentialRef: string;
+  mlsLoginEmail: string;
+  mlsLoginPassword: string;
   complianceLoginUrl: string;
-  complianceCredentialRef: string;
+  complianceLoginEmail: string;
+  complianceLoginPassword: string;
   showingLoginUrl: string;
-  showingCredentialRef: string;
+  showingLoginEmail: string;
+  showingLoginPassword: string;
   browserWorkflowNotes: string;
   fintracProvider: string;
   defaultFolderPattern: string;
@@ -100,11 +103,14 @@ export function adminSetupDraftFromSnapshot(setup: AdminSetupSnapshot): AdminSet
     showingProvider: profile.showingProvider ?? "",
     photoProcessingProvider: setupString(photoValue.provider),
     mlsLoginUrl: setupString(mlsPlaybook.loginUrl),
-    mlsCredentialRef: setupString(mlsPlaybook.credentialRef),
+    mlsLoginEmail: setupString(mlsPlaybook.loginEmail),
+    mlsLoginPassword: setupString(mlsPlaybook.loginPassword),
     complianceLoginUrl: setupString(compliancePlaybook.loginUrl),
-    complianceCredentialRef: setupString(compliancePlaybook.credentialRef),
+    complianceLoginEmail: setupString(compliancePlaybook.loginEmail),
+    complianceLoginPassword: setupString(compliancePlaybook.loginPassword),
     showingLoginUrl: setupString(showingPlaybook.loginUrl),
-    showingCredentialRef: setupString(showingPlaybook.credentialRef),
+    showingLoginEmail: setupString(showingPlaybook.loginEmail),
+    showingLoginPassword: setupString(showingPlaybook.loginPassword),
     browserWorkflowNotes: setupString(browserValue.notes),
     fintracProvider: profile.fintracProvider ?? "",
     defaultFolderPattern: profile.defaultFolderPattern ?? "Address - Client - Deal Type",
@@ -127,24 +133,27 @@ export function adminSetupPayloadFromDraft(draft: AdminSetupDraft) {
     mls: {
       provider: draft.mlsProvider.trim(),
       loginUrl: draft.mlsLoginUrl.trim(),
-      credentialRef: draft.mlsCredentialRef.trim(),
+      loginEmail: draft.mlsLoginEmail.trim(),
+      loginPassword: draft.mlsLoginPassword,
       notes: draft.browserWorkflowNotes.trim(),
     },
     compliance: {
       provider: draft.complianceProvider.trim(),
       loginUrl: draft.complianceLoginUrl.trim(),
-      credentialRef: draft.complianceCredentialRef.trim(),
+      loginEmail: draft.complianceLoginEmail.trim(),
+      loginPassword: draft.complianceLoginPassword,
       notes: draft.browserWorkflowNotes.trim(),
     },
     showing: {
       provider: draft.showingProvider.trim(),
       loginUrl: draft.showingLoginUrl.trim(),
-      credentialRef: draft.showingCredentialRef.trim(),
+      loginEmail: draft.showingLoginEmail.trim(),
+      loginPassword: draft.showingLoginPassword,
       notes: draft.browserWorkflowNotes.trim(),
     },
   };
   const browserWorkflowReady = Object.values(browserPlaybooks).every(
-    (playbook) => playbook.provider && (playbook.loginUrl || playbook.credentialRef || playbook.notes),
+    (playbook) => playbook.provider && (playbook.loginUrl || playbook.loginEmail || playbook.loginPassword || playbook.notes),
   );
   const items = [
     {

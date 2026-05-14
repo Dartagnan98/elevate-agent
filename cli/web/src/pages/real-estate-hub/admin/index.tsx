@@ -924,6 +924,9 @@ function AdminSetupField({
   placeholder,
   suggestions,
   listId,
+  type,
+  helper,
+  autoComplete,
 }: {
   label: string;
   value: string;
@@ -931,18 +934,27 @@ function AdminSetupField({
   placeholder?: string;
   suggestions?: readonly string[];
   listId?: string;
+  type?: "text" | "email" | "password" | "url";
+  helper?: string;
+  autoComplete?: string;
 }) {
   const resolvedListId = suggestions && suggestions.length > 0 ? listId : undefined;
   return (
     <label className="block min-w-0">
       <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">{label}</span>
       <input
+        type={type ?? "text"}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         list={resolvedListId}
-        className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30"
+        autoComplete={autoComplete ?? (type === "password" ? "new-password" : "off")}
+        spellCheck={type === "password" || type === "email" ? false : undefined}
+        className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30"
       />
+      {helper && (
+        <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">{helper}</span>
+      )}
       {resolvedListId && (
         <datalist id={resolvedListId}>
           {suggestions!.map((item) => (
@@ -968,7 +980,7 @@ const PROVIDER_SUGGESTIONS = {
   fintrac: ["Fintracker", "Manual FIN# capture", "OneID", "Treefort"],
 } as const;
 
-type OnboardingFieldType = "text" | "textarea" | "province";
+type OnboardingFieldType = "text" | "textarea" | "province" | "email" | "password" | "url";
 
 type OnboardingField = {
   key: keyof AdminSetupDraft;
@@ -978,6 +990,8 @@ type OnboardingField = {
   suggestions?: readonly string[];
   listId?: string;
   helper?: string;
+  fullWidth?: boolean;
+  autoComplete?: string;
 };
 
 type OnboardingStep = {
@@ -1075,40 +1089,57 @@ const WIZARD_STEPS: OnboardingStep[] = [
   {
     id: "credentials",
     eyebrow: "Step 8 of 9",
-    title: "Login URLs + credential refs",
-    subtitle: "Where Admin opens browser sessions. Reference how a credential is reached, not the password itself.",
+    title: "Portal logins",
+    subtitle: "Where Admin signs in to your MLS, compliance, and showing platforms on your behalf. Same login you'd type yourself — email + password.",
     banner: {
       tone: "credentials",
-      text: "Stored locally on this computer in a .env-style config the agent pulls from. Nothing leaves your machine.",
+      text: "Stored locally on this computer in a .env-style config the agent pulls from. Nothing leaves your machine and nothing is sent to a third-party LLM.",
     },
     fields: [
-      { key: "mlsLoginUrl", label: "MLS login URL", placeholder: "https://..." },
-      { key: "mlsCredentialRef", label: "MLS credential ref", placeholder: "Saved browser / keychain / 1Password" },
-      { key: "complianceLoginUrl", label: "Compliance login URL", placeholder: "https://..." },
-      { key: "complianceCredentialRef", label: "Compliance credential ref", placeholder: "Saved browser / keychain / 1Password" },
-      { key: "showingLoginUrl", label: "Showing login URL", placeholder: "https://..." },
-      { key: "showingCredentialRef", label: "Showing credential ref", placeholder: "Saved browser / keychain / 1Password" },
+      { key: "mlsLoginUrl", label: "MLS login URL", placeholder: "https://xposure.ca/login", type: "url", helper: "Paste the page you land on to sign in — full https:// URL.", fullWidth: true },
+      { key: "mlsLoginEmail", label: "MLS email / username", placeholder: "you@brokerage.com", type: "email" },
+      { key: "mlsLoginPassword", label: "MLS password", placeholder: "•••••••••", type: "password" },
+      { key: "complianceLoginUrl", label: "Compliance login URL", placeholder: "https://skyslope.com", type: "url", helper: "Where you log in to SkySlope / Lone Wolf / Dotloop.", fullWidth: true },
+      { key: "complianceLoginEmail", label: "Compliance email / username", placeholder: "you@brokerage.com", type: "email" },
+      { key: "complianceLoginPassword", label: "Compliance password", placeholder: "•••••••••", type: "password" },
+      { key: "showingLoginUrl", label: "Showing login URL", placeholder: "https://showingtime.com", type: "url", helper: "Where you log in to ShowingTime / BrokerBay.", fullWidth: true },
+      { key: "showingLoginEmail", label: "Showing email / username", placeholder: "you@brokerage.com", type: "email" },
+      { key: "showingLoginPassword", label: "Showing password", placeholder: "•••••••••", type: "password" },
     ],
   },
   {
     id: "workflow",
     eyebrow: "Step 9 of 9",
-    title: "Workflow notes",
-    subtitle: "Folder conventions, commission specifics, and the regional memory Admin will read every run.",
+    title: "How you work",
+    subtitle: "A few specifics about folders, commissions, and your local market so Admin matches the way you already operate.",
     fields: [
-      { key: "defaultFolderPattern", label: "Folder pattern" },
-      { key: "commissionNotes", label: "Commission / service notes" },
+      {
+        key: "defaultFolderPattern",
+        label: "Folder name pattern",
+        placeholder: "{address} - {client} - {deal_type}",
+        helper: "How Admin names new deal folders in your drive. The words in curly braces get filled in automatically — e.g. 123 Main St - Smith - Sell. Leave the default if you're not sure.",
+        fullWidth: true,
+      },
+      {
+        key: "commissionNotes",
+        label: "Commission / service notes",
+        placeholder: "Standard 7% on first $100K, 2.5% on balance. Confirm splits with broker per listing.",
+        helper: "How you usually structure commissions or service fees. Plain English is fine — Admin reads this before filling listing paperwork.",
+        fullWidth: true,
+      },
       {
         key: "browserWorkflowNotes",
         label: "Browser-use notes",
         type: "textarea",
+        helper: "Anything Admin should know when logging into your portals (extra MFA steps, where a button lives, etc). Optional.",
         placeholder: "Board portal quirks, browser profile, MFA expectations, where to find MLS number, showing feedback, compliance status, confirmation screens.",
       },
       {
         key: "regionalMemory",
         label: "Regional memory",
         type: "textarea",
-        placeholder: "Province docs, local MLS quirks, deposit rules, admin emails, property lookup sources, showing platform notes.",
+        placeholder: "We work mostly in Kamloops + the Okanagan. Deposits go to our brokerage trust within 24h. Showing feedback chases through ShowingTime, not phone.",
+        helper: "Local market context Admin reads on every run — neighbourhoods, board rules, deposit timing, anything specific to where you work.",
       },
     ],
   },
@@ -1332,19 +1363,32 @@ function AdminOnboardingWizard({
                       placeholder={field.placeholder}
                       className="min-h-28 w-full rounded-md border border-border bg-card/60 px-3 py-2 text-[13px] leading-5 text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
                     />
+                    {field.helper && (
+                      <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">
+                        {field.helper}
+                      </span>
+                    )}
                   </label>
                 );
               }
               return (
-                <AdminSetupField
-                  key={field.key}
-                  label={field.label}
-                  placeholder={field.placeholder}
-                  value={draft[field.key]}
-                  onChange={(value) => updateDraft(field.key, value)}
-                  suggestions={field.suggestions}
-                  listId={field.listId}
-                />
+                <div key={field.key} className={cn("min-w-0", field.fullWidth && "md:col-span-2")}>
+                  <AdminSetupField
+                    label={field.label}
+                    placeholder={field.placeholder}
+                    value={draft[field.key]}
+                    onChange={(value) => updateDraft(field.key, value)}
+                    suggestions={field.suggestions}
+                    listId={field.listId}
+                    type={
+                      field.type === "email" || field.type === "password" || field.type === "url"
+                        ? field.type
+                        : "text"
+                    }
+                    helper={field.helper}
+                    autoComplete={field.autoComplete}
+                  />
+                </div>
               );
             })}
           </div>
@@ -1565,14 +1609,14 @@ const ONBOARDING_CONNECTOR_TEMPLATES: Record<string, Omit<OnboardingConnectorCar
   mls: {
     title: "MLS / board portal",
     question: "What's your MLS login URL? We'll log in and scan your dashboard.",
-    helpText: "Save the URL + credential ref under Browser-use, then hit Connect & analyze to launch the browser session.",
+    helpText: "Save the URL + login email + password under Portal logins, then hit Connect & analyze to launch the browser session.",
     icon: Globe,
     action: { kind: "browser-use", portalKey: "mls", label: "Connect & analyze MLS" },
   },
   compliance_platform: {
     title: "Compliance platform",
     question: "Where does compliance review happen?",
-    helpText: "SkySlope, Lone Wolf, or similar — same flow: URL + credential ref → analyze.",
+    helpText: "SkySlope, Lone Wolf, or similar — same flow: URL + email + password → analyze.",
     icon: ShieldCheck,
     action: { kind: "browser-use", portalKey: "compliance", label: "Connect & analyze compliance" },
   },
@@ -1731,7 +1775,7 @@ function AdminOnboardingConnectors({
           Connect your systems
         </h2>
         <p className="mt-2 max-w-2xl text-[13.5px] leading-6 text-muted-foreground">
-          The coach on the right will walk you through each one. For browser-based portals, save the URL + credential ref first, then hit Connect & analyze — Admin launches browser-use and scans the dashboard.
+          The coach on the right will walk you through each one. For browser-based portals, save the URL + email + password first, then hit Connect & analyze — Admin launches browser-use and scans the dashboard.
         </p>
 
         <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground">
@@ -2499,14 +2543,39 @@ function AdminSetupLaunch({
       </div>
 
       <div className="pt-6 pb-2 border-t border-border">
-        <div className="mb-3 text-[12px] font-semibold text-muted-foreground">Credentials</div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <AdminSetupField label="MLS login URL" value={draft.mlsLoginUrl} onChange={(v) => updateDraft("mlsLoginUrl", v)} placeholder="https://..." />
-          <AdminSetupField label="MLS credential ref" value={draft.mlsCredentialRef} onChange={(v) => updateDraft("mlsCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
-          <AdminSetupField label={`${draft.complianceProvider?.trim() || "Compliance"} login URL`} value={draft.complianceLoginUrl} onChange={(v) => updateDraft("complianceLoginUrl", v)} placeholder="https://..." />
-          <AdminSetupField label={`${draft.complianceProvider?.trim() || "Compliance"} credential ref`} value={draft.complianceCredentialRef} onChange={(v) => updateDraft("complianceCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
-          <AdminSetupField label="Showing login URL" value={draft.showingLoginUrl} onChange={(v) => updateDraft("showingLoginUrl", v)} placeholder="https://..." />
-          <AdminSetupField label="Showing credential ref" value={draft.showingCredentialRef} onChange={(v) => updateDraft("showingCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
+        <div className="mb-1 text-[12px] font-semibold text-muted-foreground">Portal logins</div>
+        <div className="mb-3 text-[11.5px] text-muted-foreground/80">Same login you'd type yourself — email + password. Stored locally only.</div>
+        <div className="space-y-5">
+          <div>
+            <div className="mb-2 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              {draft.mlsProvider?.trim() || "MLS"}
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <AdminSetupField label="Login URL" value={draft.mlsLoginUrl} onChange={(v) => updateDraft("mlsLoginUrl", v)} placeholder="https://xposure.ca/login" type="url" />
+              <AdminSetupField label="Email / username" value={draft.mlsLoginEmail} onChange={(v) => updateDraft("mlsLoginEmail", v)} placeholder="you@brokerage.com" type="email" />
+              <AdminSetupField label="Password" value={draft.mlsLoginPassword} onChange={(v) => updateDraft("mlsLoginPassword", v)} placeholder="•••••••••" type="password" />
+            </div>
+          </div>
+          <div>
+            <div className="mb-2 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              {draft.complianceProvider?.trim() || "Compliance"}
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <AdminSetupField label="Login URL" value={draft.complianceLoginUrl} onChange={(v) => updateDraft("complianceLoginUrl", v)} placeholder="https://skyslope.com" type="url" />
+              <AdminSetupField label="Email / username" value={draft.complianceLoginEmail} onChange={(v) => updateDraft("complianceLoginEmail", v)} placeholder="you@brokerage.com" type="email" />
+              <AdminSetupField label="Password" value={draft.complianceLoginPassword} onChange={(v) => updateDraft("complianceLoginPassword", v)} placeholder="•••••••••" type="password" />
+            </div>
+          </div>
+          <div>
+            <div className="mb-2 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              {draft.showingProvider?.trim() || "Showing"}
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <AdminSetupField label="Login URL" value={draft.showingLoginUrl} onChange={(v) => updateDraft("showingLoginUrl", v)} placeholder="https://showingtime.com" type="url" />
+              <AdminSetupField label="Email / username" value={draft.showingLoginEmail} onChange={(v) => updateDraft("showingLoginEmail", v)} placeholder="you@brokerage.com" type="email" />
+              <AdminSetupField label="Password" value={draft.showingLoginPassword} onChange={(v) => updateDraft("showingLoginPassword", v)} placeholder="•••••••••" type="password" />
+            </div>
+          </div>
         </div>
       </div>
 
