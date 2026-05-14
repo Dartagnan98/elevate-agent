@@ -12,7 +12,6 @@ import {
   FileText,
   FolderOpen,
   KeyRound,
-  Loader2,
   LockKeyhole,
   MessageSquare,
   RefreshCw,
@@ -432,7 +431,7 @@ function PackUnlockOnboarding({
                   className={cn(
                     "pack-unlock-card group w-full rounded-md border px-3 py-3 text-left transition-colors",
                     selected
-                      ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+                      ? "border-primary bg-muted text-foreground"
                       : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
                     !pack.unlocked && "opacity-60",
                   )}
@@ -487,7 +486,7 @@ function PackUnlockOnboarding({
                   className={cn(
                     "inline-flex min-h-9 items-center gap-2 rounded-sm border px-3 text-xs font-medium transition-colors",
                     step === name
-                      ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+                      ? "border-primary bg-muted text-foreground"
                       : "border-border bg-card text-muted-foreground hover:text-foreground",
                   )}
                   onClick={() => setStep(name)}
@@ -769,9 +768,7 @@ export default function DesktopSetupPage() {
 
   if (loading && !state.status && !state.hub) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading desktop setup…</p>
     );
   }
 
