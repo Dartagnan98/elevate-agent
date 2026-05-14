@@ -9,6 +9,7 @@ import type {
   LeadsSetupItemUpdate,
   LeadsSetupSnapshot,
   OutreachConnectorRef,
+  OutreachTemplate,
   SourceConnectorStatus,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
@@ -363,6 +364,7 @@ function LeadsOnboardingWizard({
   outreachSourceConnectors,
   refreshSourceConnectors,
   sourceConnectorsLoading,
+  firstTouchTemplates,
 }: {
   draft: LeadsSetupDraft;
   updateField: <K extends keyof LeadsSetupDraft>(key: K, value: LeadsSetupDraft[K]) => void;
@@ -375,6 +377,7 @@ function LeadsOnboardingWizard({
   outreachSourceConnectors: SourceConnectorStatus[];
   refreshSourceConnectors: () => Promise<void>;
   sourceConnectorsLoading: boolean;
+  firstTouchTemplates: OutreachTemplate[];
 }) {
   const navigate = useNavigate();
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
@@ -776,6 +779,47 @@ function LeadsOnboardingWizard({
                     </p>
                   </div>
                 </label>
+                {firstTouchTemplates.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-[12px] font-medium text-muted-foreground">
+                        Pick from your saved first-touch templates
+                      </span>
+                      <Link
+                        to="/real-estate/templates"
+                        className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                      >
+                        Manage all
+                      </Link>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {firstTouchTemplates.map((tpl) => {
+                        const isActive = draft.autoReplyTemplate.trim() === tpl.body.trim();
+                        return (
+                          <button
+                            key={tpl.id}
+                            type="button"
+                            onClick={() => updateField("autoReplyTemplate", tpl.body)}
+                            className={cn(
+                              "flex flex-col gap-1 rounded-md border px-3 py-2.5 text-left backdrop-blur-sm transition",
+                              isActive
+                                ? "border-primary/60 bg-primary/10"
+                                : "border-border bg-card/60 hover:border-border/80 hover:bg-card",
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[12.5px] font-medium text-foreground">{tpl.name}</span>
+                              {isActive && <CheckCircle2 className="h-3.5 w-3.5 text-primary" />}
+                            </div>
+                            <span className="line-clamp-2 text-[11.5px] leading-[1.4] text-muted-foreground">
+                              {tpl.body}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <label className="block">
                   <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
                     Initial reply template {draft.autoReplyEnabled && <span className="text-destructive">*</span>}
@@ -788,7 +832,9 @@ function LeadsOnboardingWizard({
                     className="min-h-28 w-full resize-y rounded-md border border-border bg-card/60 px-3 py-2 text-[13px] leading-5 text-foreground outline-none backdrop-blur-sm placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
                   />
                   <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">
-                    Used both as the auto-send template (if enabled) and the default draft otherwise.
+                    {firstTouchTemplates.length > 0
+                      ? "Pick one above to load it here — edit freely. Used both as the auto-send template (if enabled) and the default draft otherwise."
+                      : "Used both as the auto-send template (if enabled) and the default draft otherwise."}
                   </span>
                 </label>
                 <WizardField
@@ -1130,6 +1176,7 @@ export function LeadsSetupLaunch({
   );
   const [outreachSourceConnectors, setOutreachSourceConnectors] = useState<SourceConnectorStatus[]>([]);
   const [sourceConnectorsLoading, setSourceConnectorsLoading] = useState(true);
+  const [firstTouchTemplates, setFirstTouchTemplates] = useState<OutreachTemplate[]>([]);
 
   const refreshSourceConnectors = useCallback(async () => {
     setSourceConnectorsLoading(true);
@@ -1147,6 +1194,31 @@ export function LeadsSetupLaunch({
   useEffect(() => {
     void refreshSourceConnectors();
   }, [refreshSourceConnectors]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await api.getOutreachTemplates("new-outreach");
+        if (cancelled) return;
+        const actives = resp.templates.filter((t) => t.active);
+        setFirstTouchTemplates(actives);
+        const policyVal = (setup.items.find((i) => i.key === "auto_reply_policy")?.value ?? {}) as Record<string, unknown>;
+        const stored = String(policyVal.initialMessageTemplate ?? "").trim();
+        const currentMatchesDefault = draft.autoReplyTemplate.trim() === DEFAULT_AUTO_REPLY_TEMPLATE.trim();
+        if (actives.length > 0 && !stored && currentMatchesDefault) {
+          setDraft((prev) => ({ ...prev, autoReplyTemplate: actives[0].body }));
+        }
+      } catch {
+        // best-effort — empty list falls back to default opener
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // intentional one-shot on mount — refetch is via Manage all link if needed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (forceOnboarding && phase === "form") {
@@ -1251,6 +1323,7 @@ export function LeadsSetupLaunch({
         outreachSourceConnectors={outreachSourceConnectors}
         refreshSourceConnectors={refreshSourceConnectors}
         sourceConnectorsLoading={sourceConnectorsLoading}
+        firstTouchTemplates={firstTouchTemplates}
       />
     );
   }
