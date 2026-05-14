@@ -69,3 +69,5 @@ Working out of `cli/web/src/`. Build verified after every slice (`npx tsc -b && 
 - **S6** 2018c5f — Cron page: collapse New job form behind a button at the list header (auto-closes after a successful create). Job row meta wraps cleanly with schedule on its own line under lg.
 - **S7** ffe2713 — Sidebar: AutomationsSection now uses SidebarSectionLabel for its toggle, matching every other section heading. Restores vertical rhythm.
 - **S8** 97e8cb0 — Today + Admin: drop "Elevate Agent" prefix and marketing-style hero/title copy. Today = "Today", Admin = "Admin".
+- **S9** 09e0733 — Skills page: drop "Skills live here; dashboards show connectors." marketing tagline; collapse workflow section header to single muted eyebrow + counter badge. Three empty states (search, category, toolset grid) trade py-8 text-center for the muted single-line style used on /leads.
+- **S10** 1d50ba8 — Settings + OAuth: remaining heavy empty states (ConfigPage search results, OAuthProvidersCard zero-providers) drop py-8/py-12 text-center for the muted single-line style.
