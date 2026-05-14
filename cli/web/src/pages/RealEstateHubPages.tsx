@@ -340,12 +340,9 @@ function LeadProfilesWorkbench({
 
   if (!profiles.length) {
     return (
-      <div className="px-4 py-8 text-center">
-        <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-          No profiles yet
-        </h4>
-        <p className="mt-2 text-sm leading-6 text-foreground/75">
-          Synced contacts and conversations will appear here with buyer and seller admin handoff actions.
+      <div className="px-4 py-3">
+        <p className="text-xs text-muted-foreground/80">
+          No profiles yet. Synced contacts and conversations will appear here with buyer and seller admin handoff actions.
         </p>
       </div>
     );
@@ -1354,12 +1351,9 @@ function DraftMessagesBoard({
             );
           })
         ) : (
-          <div className="px-4 py-10 text-center">
-            <h4 className="font-mono-ui text-[0.66rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-              Inbox empty
-            </h4>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">{fallbackEmpty}</p>
-          </div>
+          <p className="px-4 py-3 text-xs text-muted-foreground/80">
+            Inbox empty. {fallbackEmpty}
+          </p>
         )}
         {selectedVisible.length > 0 && (
           <div
@@ -1838,7 +1832,7 @@ function LeadFilterBar({
       </div>
       {options.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 px-1 py-1.5">
-          <span className="font-mono-ui mr-1 inline-flex items-center gap-1 text-[0.66rem] uppercase tracking-[0.14em] text-muted-foreground">
+          <span className="mr-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
             <Filter className="h-3 w-3" />
             Filter
           </span>
@@ -3018,7 +3012,7 @@ function TemplatesPanel() {
             <CardContent className="flex flex-col gap-3 pt-0">
               {pendingByLane[lane].length > 0 && (
                 <div className="space-y-2">
-                  <h4 className="font-mono-ui flex items-center gap-2 text-[0.7rem] uppercase tracking-[0.12em] text-warning">
+                  <h4 className="flex items-center gap-2 text-[12px] font-semibold text-warning">
                     <Sparkles className="h-3 w-3" />
                     {pendingByLane[lane].length} variant{pendingByLane[lane].length === 1 ? "" : "s"} awaiting approval
                   </h4>
