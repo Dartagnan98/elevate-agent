@@ -15,9 +15,9 @@ import type {
   AgentHubSnapshot,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { isoTimeAgo } from "@/lib/utils";
+import { cn, isoTimeAgo } from "@/lib/utils";
 import {
   AdminActionRuns,
   AdminDealTasks,
@@ -294,6 +294,13 @@ function ColumnEmpty({ children }: { children: React.ReactNode }) {
   );
 }
 
+function humanizeAgentId(id: string): string {
+  if (!id) return "agent";
+  const parts = id.replace(/[_-]+/g, " ").trim().split(/\s+/);
+  if (parts.length === 0) return id;
+  return parts.map((p, i) => (i === 0 ? p[0].toUpperCase() + p.slice(1) : p)).join(" ");
+}
+
 function HandoffRow({ handoff }: { handoff: Handoff }) {
   return (
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
@@ -302,11 +309,11 @@ function HandoffRow({ handoff }: { handoff: Handoff }) {
           <div className="truncate text-sm font-medium text-foreground">
             {handoff.title}
           </div>
-          <div className="mt-1 flex flex-wrap gap-2 text-[0.72rem] text-muted-foreground">
-            <span>{handoff.fromAgentId}</span>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.72rem] text-muted-foreground">
+            <span>{humanizeAgentId(handoff.fromAgentId)}</span>
             <span>→</span>
-            <span>{handoff.toAgentId}</span>
-            <span>{isoTimeAgo(handoff.updatedAt)}</span>
+            <span>{humanizeAgentId(handoff.toAgentId)}</span>
+            <span className="text-muted-foreground/70">{isoTimeAgo(handoff.updatedAt)}</span>
           </div>
         </div>
         <Badge variant="warning">waiting</Badge>
@@ -372,10 +379,7 @@ function DealTaskRow({
             Run AI
           </Button>
         )}
-        <Link
-          to="/admin"
-          className="inline-flex h-8 items-center rounded-md px-2 font-mono-ui text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-primary hover:text-primary/80"
-        >
+        <Link to="/admin" className={cn(buttonVariants({ size: "sm", variant: "ghost" }))}>
           Open deal
         </Link>
       </div>
