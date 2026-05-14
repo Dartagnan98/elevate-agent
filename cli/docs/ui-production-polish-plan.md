@@ -61,4 +61,11 @@ Working out of `cli/web/src/`. Build verified after every slice (`npx tsc -b && 
 
 ## Change log
 
-(filled as slices ship)
+- **S1** 547b90d — Redesign /today around priority queue and compact /leads lanes.
+- **S2** 2465f42 — Restructure /tasks around approval queue. Replace 6-surface dump (workflow strip, handoff card, worker card, deal tasks, action runs, timed tasks, two session lists) with summary tiles → Waiting-on-you board (handoffs, deal tasks, admin runs in 3 columns) → in-flight strip → scheduled + history. Tasks page now its own chunk.
+- **S3** 3f11a42 — Agent Hub: HandoffBusCard picks its primary CTA from worker health (Wake loop when stopped, Run worker now when work is queued). AgentCard MiniMetric pair replaced with single contextual "X active now" line. Telegram lane gets a one-liner explaining both fields required and where to find the bot token. Drop "Memory queue" metric (belongs on Memory).
+- **S4** db8038a — Memory page: drop 6-tile WorkflowStrip (Facts/Entities/Documents/Chunks/Communities/Relations) for three operator-meaningful tiles (pipeline state · last ingest · embeddings model). Bound graph height max-h-[38rem] min-h-[24rem] and show inline empty state when nodes is empty. Drop marketing hero copy.
+- **S5** 9d09173 — Social page: zero-state collapses to a single muted line instead of always-four-tile WorkflowStrip. Idea queue + posts empty states use single-line muted text matching /leads behavior. Refresh, Show 100 more, Show all, and lookback select drop the loud `font-mono-ui uppercase tracking-wider min-h-[44px]` styling.
+- **S6** 2018c5f — Cron page: collapse New job form behind a button at the list header (auto-closes after a successful create). Job row meta wraps cleanly with schedule on its own line under lg.
+- **S7** ffe2713 — Sidebar: AutomationsSection now uses SidebarSectionLabel for its toggle, matching every other section heading. Restores vertical rhythm.
+- **S8** 97e8cb0 — Today + Admin: drop "Elevate Agent" prefix and marketing-style hero/title copy. Today = "Today", Admin = "Admin".
