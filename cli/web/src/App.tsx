@@ -1004,6 +1004,13 @@ function DesktopSidebar({
     }
     return map;
   }, [sessions]);
+  const runningCronJobIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const [jobId, session] of latestCronSessionByJobId) {
+      if (session.is_active) ids.add(jobId);
+    }
+    return ids;
+  }, [latestCronSessionByJobId]);
   const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
   const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
@@ -1428,6 +1435,7 @@ function DesktopSidebar({
           jobs={cronJobs}
           open={automationsOpen}
           onToggle={() => setAutomationsOpen((prev) => !prev)}
+          liveJobIds={runningCronJobIds}
           onOpenCron={(jobId) => {
             const latest = latestCronSessionByJobId.get(jobId);
             if (latest) {
@@ -1840,17 +1848,20 @@ function AutomationsSection({
   open,
   onToggle,
   onOpenCron,
+  liveJobIds,
 }: {
   jobs: CronJob[];
   open: boolean;
   onToggle: () => void;
   onOpenCron: (jobId: string) => void;
+  liveJobIds: Set<string>;
 }) {
   if (jobs.length === 0) return null;
   const visible = jobs.slice(0, 24);
   const liveCount = jobs.filter(
     (job) => job.state === "enabled" || job.state === "scheduled",
   ).length;
+  const runningCount = liveJobIds.size;
   return (
     <div className="mt-3 lg:mt-2.5">
       <SidebarSectionLabel collapsed={!open} onToggle={onToggle}>
@@ -1861,8 +1872,15 @@ function AutomationsSection({
           </span>
           {liveCount > 0 && (
             <span className="ml-auto flex items-center gap-1 normal-case tracking-normal text-[var(--sidebar-text-muted)]">
-              <Clock className="h-3 w-3" />
-              {liveCount} live
+              {runningCount > 0 ? (
+                <span className="relative flex h-2 w-2 items-center justify-center">
+                  <span className="absolute h-2 w-2 animate-ping rounded-full bg-success/60" />
+                  <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
+                </span>
+              ) : (
+                <Clock className="h-3 w-3" />
+              )}
+              {runningCount > 0 ? `${runningCount} running` : `${liveCount} live`}
             </span>
           )}
         </span>
@@ -1876,6 +1894,7 @@ function AutomationsSection({
               job.id;
             const paused = job.state === "paused";
             const errored = job.state === "error" || !!job.last_error;
+            const running = liveJobIds.has(job.id);
             return (
               <button
                 key={job.id}
@@ -1885,9 +1904,14 @@ function AutomationsSection({
                   "group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
                   "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                 )}
-                title={`${title} · ${job.schedule_display}${job.last_error ? ` · ${job.last_error}` : ""}`}
+                title={`${title} · ${job.schedule_display}${running ? " · running now" : ""}${job.last_error ? ` · ${job.last_error}` : ""}`}
               >
-                {errored ? (
+                {running ? (
+                  <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
+                    <span className="absolute h-2.5 w-2.5 animate-ping rounded-full bg-success/60" />
+                    <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
+                  </span>
+                ) : errored ? (
                   <AlertTriangle className="h-3 w-3 shrink-0 text-destructive" />
                 ) : paused ? (
                   <Pause className="h-3 w-3 shrink-0 text-warning" />
@@ -1897,8 +1921,13 @@ function AutomationsSection({
                 <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
                   {title}
                 </span>
-                <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem]">
-                  {paused ? "paused" : formatNextRun(job.next_run_at)}
+                <span
+                  className={cn(
+                    "ml-auto shrink-0 text-[0.75rem] leading-none tabular-nums lg:text-[0.82rem]",
+                    running ? "text-success" : "text-[var(--sidebar-text-muted)]",
+                  )}
+                >
+                  {running ? "live" : paused ? "paused" : formatNextRun(job.next_run_at)}
                 </span>
               </button>
             );
