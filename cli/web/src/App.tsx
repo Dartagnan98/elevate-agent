@@ -25,6 +25,7 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  AlertTriangle,
   Brain,
   BriefcaseBusiness,
   Building2,
@@ -52,6 +53,7 @@ import {
   MoreHorizontal,
   Package,
   PanelLeftClose,
+  Pause,
   Pencil,
   Pin,
   Plus,
@@ -72,7 +74,7 @@ import {
 } from "lucide-react";
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
-import { api, type SessionInfo } from "@/lib/api";
+import { api, type CronJob, type SessionInfo } from "@/lib/api";
 import type { AccessStatusResponse } from "@/lib/api-types";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
@@ -786,6 +788,24 @@ function DesktopSidebar({
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionError, setSessionError] = useState(false);
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
+  const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("elevate.sidebar.automations.v3") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "elevate.sidebar.automations.v3",
+        automationsOpen ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [automationsOpen]);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem("elevate.sidebar.sections.v1");
@@ -861,6 +881,29 @@ function DesktopSidebar({
     };
   }, [loadSessions, readyToLoad]);
 
+  useEffect(() => {
+    if (!readyToLoad) return;
+    let cancelled = false;
+    const loadJobs = () => {
+      api
+        .getCronJobs()
+        .then((jobs) => {
+          if (!cancelled) setCronJobs(jobs ?? []);
+        })
+        .catch(() => {
+          /* sidebar can render empty if cron API is down */
+        });
+    };
+    const initialLoad = window.setTimeout(loadJobs, 300);
+    const id = window.setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden) loadJobs();
+    }, 20000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialLoad);
+      window.clearInterval(id);
+    };
+  }, [readyToLoad]);
 
   useEffect(() => {
     writePinnedSessionIds(pinnedIds);
@@ -1369,7 +1412,15 @@ function DesktopSidebar({
           }
         />
 
-        {/* Cron job runs live on the /cron dashboard, not in the sidebar. */}
+        <AutomationsSection
+          jobs={cronJobs}
+          open={automationsOpen}
+          onToggle={() => setAutomationsOpen((prev) => !prev)}
+          onOpenCron={(jobId) => {
+            navigate(`/cron#cron-job-${jobId}`);
+            onNavigate();
+          }}
+        />
 
         {toolNavItems.length > 0 && (
           <div className="mt-3">
@@ -1748,6 +1799,95 @@ function SessionListItem({
       >
         <MoreHorizontal className="h-3.5 w-3.5" />
       </button>
+    </div>
+  );
+}
+
+function formatNextRun(iso?: string | null): string {
+  if (!iso) return "—";
+  const target = new Date(iso).getTime();
+  const delta = target - Date.now();
+  if (Number.isNaN(target)) return "—";
+  if (delta < 0) return "due";
+  const minutes = Math.round(delta / 60_000);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
+}
+
+function AutomationsSection({
+  jobs,
+  open,
+  onToggle,
+  onOpenCron,
+}: {
+  jobs: CronJob[];
+  open: boolean;
+  onToggle: () => void;
+  onOpenCron: (jobId: string) => void;
+}) {
+  if (jobs.length === 0) return null;
+  const visible = jobs.slice(0, 24);
+  const liveCount = jobs.filter(
+    (job) => job.state === "enabled" || job.state === "scheduled",
+  ).length;
+  return (
+    <div className="mt-3 lg:mt-2.5">
+      <SidebarSectionLabel collapsed={!open} onToggle={onToggle}>
+        <span className="flex w-full items-center gap-1.5">
+          <span>Automations</span>
+          <span className="font-normal normal-case tracking-normal text-[var(--sidebar-text-muted)]/80 tabular-nums">
+            {jobs.length}
+          </span>
+          {liveCount > 0 && (
+            <span className="ml-auto flex items-center gap-1 normal-case tracking-normal text-[var(--sidebar-text-muted)]">
+              <Clock className="h-3 w-3" />
+              {liveCount} live
+            </span>
+          )}
+        </span>
+      </SidebarSectionLabel>
+      {open && (
+        <div className="mt-1 space-y-0.5 lg:mt-0.5">
+          {visible.map((job) => {
+            const title =
+              (job.name && job.name.trim()) ||
+              job.prompt.slice(0, 48).trim() ||
+              job.id;
+            const paused = job.state === "paused";
+            const errored = job.state === "error" || !!job.last_error;
+            return (
+              <button
+                key={job.id}
+                type="button"
+                onClick={() => onOpenCron(job.id)}
+                className={cn(
+                  "group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                  "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
+                )}
+                title={`${title} · ${job.schedule_display}${job.last_error ? ` · ${job.last_error}` : ""}`}
+              >
+                {errored ? (
+                  <AlertTriangle className="h-3 w-3 shrink-0 text-destructive" />
+                ) : paused ? (
+                  <Pause className="h-3 w-3 shrink-0 text-warning" />
+                ) : (
+                  <Clock className="h-3 w-3 shrink-0 text-[var(--sidebar-icon-muted)]" />
+                )}
+                <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
+                  {title}
+                </span>
+                <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem]">
+                  {paused ? "paused" : formatNextRun(job.next_run_at)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -448,6 +448,19 @@ export default function CronPage() {
     });
   }, [editParam, jobs]);
 
+  useEffect(() => {
+    if (!jobs.length) return;
+    const hash = window.location.hash;
+    if (!hash.startsWith("#cron-job-")) return;
+    const id = hash.slice(1);
+    requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }, [jobs]);
+
   const closeEditor = useCallback(() => {
     setEditingId(null);
     if (editParam) {

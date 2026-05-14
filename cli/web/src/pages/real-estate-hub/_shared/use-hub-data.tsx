@@ -124,6 +124,27 @@ export function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (!id) id = window.setInterval(() => void refresh(), 25_000);
+    };
+    const stop = () => {
+      if (id) { window.clearInterval(id); id = null; }
+    };
+    const onVisibility = () => {
+      if (document.hidden) stop();
+      else { void refresh(); start(); }
+    };
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refresh]);
+
   return { actionRuns, cronJobs, dealTasks, error, loading, refresh, sourceInbox, sessions, snapshot, status };
 }
 
