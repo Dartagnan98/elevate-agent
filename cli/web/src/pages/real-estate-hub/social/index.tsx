@@ -17,7 +17,6 @@ import {
   HubShell,
   useHubHeader,
   useRealEstateHubData,
-  WorkflowStrip,
 } from "@/pages/real-estate-hub/_shared";
 import {
   IdeaCard,
@@ -165,25 +164,45 @@ export function RealEstateSocialMediaPage() {
     }
   }, [refresh, lookbackDays]);
 
-  const summaryStats: Array<{ label: string; value: string | number }> = [
-    { label: "Posts", value: totals?.post_count ?? 0 },
-    { label: "Reach", value: formatCompact(totals?.reach) },
-    ...(avgEngagement != null
-      ? [{ label: "Avg engagement", value: formatPct(avgEngagement, 2) }]
-      : []),
-    ...(avgHook != null
-      ? [{ label: "Avg hook rate", value: formatPct(avgHook, 2) }]
-      : []),
-  ];
+  const hasData = (totals?.post_count ?? 0) > 0 || avgEngagement != null;
 
   return (
     <HubShell
       data={data}
       eyebrow="Social Studio"
       icon={Megaphone}
-      title="Social Media · weekly content engine"
+      title="Social Media"
     >
-      <WorkflowStrip items={summaryStats} />
+      {hasData ? (
+        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-xs text-muted-foreground">
+          <span>
+            <span className="font-medium tabular-nums text-foreground">
+              {totals?.post_count ?? 0}
+            </span>{" "}
+            posts
+          </span>
+          <span>
+            <span className="tabular-nums text-foreground">{formatCompact(totals?.reach)}</span>{" "}
+            reach
+          </span>
+          {avgEngagement != null && (
+            <span>
+              <span className="tabular-nums text-foreground">{formatPct(avgEngagement, 2)}</span>{" "}
+              avg engagement
+            </span>
+          )}
+          {avgHook != null && (
+            <span>
+              <span className="tabular-nums text-foreground">{formatPct(avgHook, 2)}</span>{" "}
+              avg hook rate
+            </span>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Weekly content engine runs Monday 7am Pacific. Connect a social platform in Channels to populate this view.
+        </p>
+      )}
 
       {socialError && (
         <div className="rounded-sm border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-destructive">
@@ -219,7 +238,6 @@ export function RealEstateSocialMediaPage() {
                 onClick={refresh}
                 disabled={loadingSocial}
                 aria-label="Refresh idea queue"
-                className="min-h-[44px] min-w-[44px]"
               >
                 <RefreshCw className={cn("h-3.5 w-3.5", loadingSocial && "animate-spin")} />
               </Button>
@@ -232,14 +250,9 @@ export function RealEstateSocialMediaPage() {
               <Loader2 className="h-4 w-4 animate-spin" />
             </div>
           ) : ideas.length === 0 ? (
-            <div className="rounded-md border border-dashed border-border bg-card px-6 py-12 text-center">
-              <div className="mx-auto max-w-sm space-y-1.5">
-                <h3 className="text-sm font-semibold text-foreground">No ideas waiting</h3>
-                <p className="text-sm text-muted-foreground">
-                  The engine queues 5–10 every Monday morning.
-                </p>
-              </div>
-            </div>
+            <p className="px-1 py-1 text-xs text-muted-foreground/80">
+              No ideas waiting — the engine queues 5–10 every Monday morning.
+            </p>
           ) : (
             ideas.map((idea) => (
               <IdeaCard
@@ -308,14 +321,14 @@ export function RealEstateSocialMediaPage() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <label className="font-mono-ui flex items-center gap-1.5 text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span>Lookback</span>
                 <select
                   value={lookbackDays}
                   onChange={(e) => setLookbackDays(Number(e.target.value))}
                   disabled={refreshing !== null}
                   aria-label="Lookback period"
-                  className="font-mono-ui min-h-[44px] rounded-md border border-border bg-background px-2 text-[0.75rem] uppercase tracking-wider text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
                 >
                   <option value={30}>30 days</option>
                   <option value={90}>90 days</option>
@@ -329,9 +342,13 @@ export function RealEstateSocialMediaPage() {
                 size="sm"
                 onClick={handleRefreshAll}
                 disabled={refreshing !== null}
-                className="font-mono-ui min-h-[44px] px-4 text-[0.75rem] uppercase tracking-wider"
               >
-                {refreshing ? "pulling…" : "refresh from platforms"}
+                {refreshing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                {refreshing ? "Pulling…" : "Refresh"}
               </Button>
             </div>
           </div>
@@ -369,18 +386,11 @@ export function RealEstateSocialMediaPage() {
                   <PlatformRankingsBlock posts={filteredPosts} onSelect={setSelectedPost} />
                 )}
                 {filteredPosts.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border bg-card px-6 py-16 text-center">
-                    <div className="mx-auto max-w-md space-y-2">
-                      <h3 className="text-base font-semibold text-foreground">
-                        {recentPosts.length === 0 ? "No posts pulled yet" : "Nothing here"}
-                      </h3>
-                      <p className="text-sm text-muted-foreground">
-                        {recentPosts.length === 0
-                          ? "Click refresh from platforms above to pull live from every connected account."
-                          : `No ${platformFilter} posts in the last ${lookbackDays} days. Connect ${platformFilter} or extend the lookback.`}
-                      </p>
-                    </div>
-                  </div>
+                  <p className="px-1 py-1 text-xs text-muted-foreground/80">
+                    {recentPosts.length === 0
+                      ? "No posts pulled yet — click Refresh to pull live from every connected account."
+                      : `No ${platformFilter} posts in the last ${lookbackDays} days. Connect ${platformFilter} or extend the lookback.`}
+                  </p>
                 ) : (
                   <section className="space-y-4" aria-labelledby="all-posts-heading">
                     <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -419,20 +429,18 @@ export function RealEstateSocialMediaPage() {
                       })()}
                     </div>
                     {filteredPosts.length > postLimit && (
-                      <div className="mt-2 flex flex-wrap justify-center gap-2 border-t border-border/40 pt-6">
+                      <div className="mt-2 flex flex-wrap justify-center gap-2 border-t border-border/40 pt-4">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={() => setPostLimit((n) => n + 100)}
-                          className="font-mono-ui min-h-[44px] px-4 text-[0.75rem] uppercase tracking-wider"
                         >
                           Show 100 more ({filteredPosts.length - postLimit} remaining)
                         </Button>
                         <Button
-                          variant="outline"
+                          variant="ghost"
                           size="sm"
                           onClick={() => setPostLimit(filteredPosts.length)}
-                          className="font-mono-ui min-h-[44px] px-4 text-[0.75rem] uppercase tracking-wider"
                         >
                           Show all ({filteredPosts.length})
                         </Button>
