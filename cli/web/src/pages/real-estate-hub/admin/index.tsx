@@ -15,16 +15,22 @@ import {
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  Cloud,
   Clock,
   Database as DatabaseIcon,
+  ExternalLink,
   FileCheck2,
   FileText,
   Flame,
+  Globe,
   Home,
+  KeyRound,
   Loader2,
   Lock,
   Mail,
+  MessageCircle,
   Phone,
+  Send,
   Square as SquareIcon,
   Plus,
   RefreshCw,
@@ -1358,12 +1364,546 @@ function AdminOnboardingWizard({
             </Button>
             <Button onClick={() => void handleNext()} disabled={busy}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              {isLast ? "Finish + verify" : "Continue"}
+              {isLast ? "Run the setup" : "Continue"}
             </Button>
           </div>
         </div>
       </div>
     </section>
+  );
+}
+
+type OnboardingSeedingStep = {
+  id: string;
+  label: string;
+  detail: string;
+};
+
+const ONBOARDING_SEEDING_STEPS: OnboardingSeedingStep[] = [
+  { id: "save", label: "Saving your profile", detail: "Persisting realtor, brokerage, and approval policy" },
+  { id: "province", label: "Importing province forms", detail: "Reference pages, checklists, and form pack" },
+  { id: "playbook", label: "Synthesizing your agent playbook", detail: "Province-specific terminology and stage docs" },
+  { id: "connectors", label: "Checking connected systems", detail: "Composio toolkits, source channels, env keys" },
+  { id: "wrap", label: "Wrapping up", detail: "Finalizing setup state and readiness gates" },
+];
+
+function AdminOnboardingSeeding({
+  onMissing,
+  onComplete,
+  runSeed,
+}: {
+  onMissing: () => void;
+  onComplete: () => void;
+  runSeed: () => Promise<{ missing: boolean; error: string | null }>;
+}) {
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [seedDone, setSeedDone] = useState(false);
+  const [seedResult, setSeedResult] = useState<{ missing: boolean; error: string | null } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    runSeed()
+      .then((result) => {
+        if (!cancelled) setSeedResult(result);
+      })
+      .catch((err) => {
+        if (!cancelled) setSeedResult({ missing: true, error: String(err?.message ?? err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runSeed]);
+
+  useEffect(() => {
+    if (activeIdx >= ONBOARDING_SEEDING_STEPS.length) {
+      setSeedDone(true);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setActiveIdx((idx) => idx + 1);
+    }, 1600);
+    return () => window.clearTimeout(id);
+  }, [activeIdx]);
+
+  useEffect(() => {
+    if (!seedDone || !seedResult) return;
+    const finishId = window.setTimeout(() => {
+      if (seedResult.missing) onMissing();
+      else onComplete();
+    }, 500);
+    return () => window.clearTimeout(finishId);
+  }, [seedDone, seedResult, onMissing, onComplete]);
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Setting up Admin"
+      className="onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden"
+    >
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex w-full max-w-lg flex-col px-6">
+        <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Admin · running databases
+        </div>
+        <h2 className="onboarding-rise-delay-1 mt-3 text-[28px] font-medium leading-[1.1] tracking-tight text-foreground">
+          Running databases. This will take a few minutes.
+        </h2>
+        <p className="onboarding-rise-delay-2 mt-2 max-w-md text-[13.5px] leading-6 text-muted-foreground">
+          Importing your province pack, seeding the agent playbook, and checking what's already connected. You can keep chatting with the coach while this runs.
+        </p>
+
+        <ul className="onboarding-rise-delay-3 mt-7 flex flex-col gap-3">
+          {ONBOARDING_SEEDING_STEPS.map((step, idx) => {
+            const done = idx < activeIdx || (seedDone && seedResult);
+            const active = idx === activeIdx && !seedDone;
+            return (
+              <li key={step.id} className="flex items-start gap-3">
+                <span
+                  aria-hidden
+                  className={cn(
+                    "mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border",
+                    done && "onboarding-step-check border-success bg-success/10 text-success",
+                    active && "onboarding-step-pulse border-primary bg-primary/15 text-primary",
+                    !done && !active && "border-border bg-card text-muted-foreground",
+                  )}
+                >
+                  {done ? (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  ) : active ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60" />
+                  )}
+                </span>
+                <div className="min-w-0">
+                  <div
+                    className={cn(
+                      "text-[13.5px] leading-5",
+                      done ? "text-foreground" : active ? "text-foreground" : "text-muted-foreground/80",
+                    )}
+                  >
+                    {step.label}
+                  </div>
+                  <div className="text-[11.5px] leading-4 text-muted-foreground">{step.detail}</div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+
+        {seedResult?.error && (
+          <div className="onboarding-rise-delay-3 mt-6 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+            {seedResult.error}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+type OnboardingConnectorAction =
+  | { kind: "composio"; toolkitSlug: string; label: string }
+  | { kind: "browser-use"; portalKey: "mls" | "compliance" | "showing"; label: string }
+  | { kind: "manual"; helpText: string };
+
+type OnboardingConnectorCard = {
+  key: string;
+  title: string;
+  question: string;
+  helpText: string;
+  icon: typeof Cloud;
+  action: OnboardingConnectorAction;
+};
+
+const ONBOARDING_CONNECTOR_TEMPLATES: Record<string, Omit<OnboardingConnectorCard, "key">> = {
+  drive: {
+    title: "Cloud drive",
+    question: "Where do your active deal folders live today?",
+    helpText: "Google Drive, Dropbox, or SharePoint — pick the one that holds your listing folders.",
+    icon: Cloud,
+    action: { kind: "composio", toolkitSlug: "googledrive", label: "Connect Google Drive" },
+  },
+  email: {
+    title: "Email",
+    question: "Which inbox handles your client and broker email?",
+    helpText: "We'll connect your Gmail or Outlook so Admin can read attachments and draft replies.",
+    icon: Mail,
+    action: { kind: "composio", toolkitSlug: "gmail", label: "Connect Gmail" },
+  },
+  calendar: {
+    title: "Calendar",
+    question: "Which calendar holds showings and consults?",
+    helpText: "Google Calendar or Outlook — we'll pull events and schedule new ones.",
+    icon: CalendarClock,
+    action: { kind: "composio", toolkitSlug: "googlecalendar", label: "Connect Google Calendar" },
+  },
+  crm: {
+    title: "CRM",
+    question: "Where do your leads live right now? A spreadsheet works too.",
+    helpText: "Lofty, kvCORE, BoldTrail, or a Sheet path — tell the coach and we'll import.",
+    icon: DatabaseIcon,
+    action: { kind: "manual", helpText: "Tell the onboarding coach where your leads live and it'll set up the right sync." },
+  },
+  mls: {
+    title: "MLS / board portal",
+    question: "What's your MLS login URL? We'll log in and scan your dashboard.",
+    helpText: "Save the URL + credential ref under Browser-use, then hit Connect & analyze to launch the browser session.",
+    icon: Globe,
+    action: { kind: "browser-use", portalKey: "mls", label: "Connect & analyze MLS" },
+  },
+  compliance_platform: {
+    title: "Compliance platform",
+    question: "Where does compliance review happen?",
+    helpText: "SkySlope, Lone Wolf, or similar — same flow: URL + credential ref → analyze.",
+    icon: ShieldCheck,
+    action: { kind: "browser-use", portalKey: "compliance", label: "Connect & analyze compliance" },
+  },
+  showing_platform: {
+    title: "Showing platform",
+    question: "Which platform schedules your showings?",
+    helpText: "ShowingTime, BrokerBay, or similar — analyze to capture feedback flow.",
+    icon: KeyRound,
+    action: { kind: "browser-use", portalKey: "showing", label: "Connect & analyze showings" },
+  },
+};
+
+const ONBOARDING_CONNECTOR_KEY_ORDER = [
+  "drive",
+  "email",
+  "calendar",
+  "crm",
+  "mls",
+  "compliance_platform",
+  "showing_platform",
+];
+
+function buildOnboardingConnectorCards(setup: AdminSetupSnapshot): OnboardingConnectorCard[] {
+  const itemByKey = new Map(setup.items.map((it) => [it.key, it]));
+  const cards: OnboardingConnectorCard[] = [];
+  for (const key of ONBOARDING_CONNECTOR_KEY_ORDER) {
+    const tpl = ONBOARDING_CONNECTOR_TEMPLATES[key];
+    if (!tpl) continue;
+    const item = itemByKey.get(key);
+    const status = item?.status ?? "missing";
+    if (status === "configured" || status === "connected") continue;
+    cards.push({ key, ...tpl });
+  }
+  return cards;
+}
+
+function AdminOnboardingConnectors({
+  setup,
+  onContinue,
+  onChatMention,
+}: {
+  setup: AdminSetupSnapshot;
+  onContinue: () => void;
+  onChatMention: (key: string) => void;
+}) {
+  const cards = useMemo(() => buildOnboardingConnectorCards(setup), [setup]);
+  const [pendingBrowserKey, setPendingBrowserKey] = useState<string | null>(null);
+  const [pendingComposioKey, setPendingComposioKey] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, { ok: boolean; message: string; runUrl?: string | null }>>({});
+
+  const runComposio = useCallback(async (cardKey: string, toolkitSlug: string) => {
+    setPendingComposioKey(cardKey);
+    try {
+      const resp = await api.initiateComposioConnection({ toolkitSlug });
+      if (!resp.ok) {
+        setResults((r) => ({ ...r, [cardKey]: { ok: false, message: resp.error ?? "Connection failed" } }));
+        return;
+      }
+      const redirect = (resp.data as { redirect_url?: string; url?: string } | undefined)?.redirect_url
+        ?? (resp.data as { url?: string } | undefined)?.url;
+      if (redirect) {
+        window.open(redirect, "_blank", "noopener,noreferrer");
+        setResults((r) => ({ ...r, [cardKey]: { ok: true, message: "Approve the connection in the new tab, then come back." } }));
+      } else {
+        setResults((r) => ({ ...r, [cardKey]: { ok: true, message: "Connection initiated. Check Tools → Composio." } }));
+      }
+    } catch (err) {
+      setResults((r) => ({ ...r, [cardKey]: { ok: false, message: String((err as Error)?.message ?? err) } }));
+    } finally {
+      setPendingComposioKey(null);
+    }
+  }, []);
+
+  const runBrowserUse = useCallback(async (cardKey: string, portalKey: "mls" | "compliance" | "showing") => {
+    setPendingBrowserKey(cardKey);
+    try {
+      const resp = await api.launchAdminOnboardingBrowserUse(portalKey);
+      if (!resp.ok) {
+        setResults((r) => ({ ...r, [cardKey]: { ok: false, message: resp.error ?? "Launch failed" } }));
+        return;
+      }
+      setResults((r) => ({
+        ...r,
+        [cardKey]: {
+          ok: true,
+          message: resp.taskId ? `Launched browser-use task ${resp.taskId}` : "Launched browser-use task.",
+          runUrl: resp.runUrl ?? null,
+        },
+      }));
+    } catch (err) {
+      setResults((r) => ({ ...r, [cardKey]: { ok: false, message: String((err as Error)?.message ?? err) } }));
+    } finally {
+      setPendingBrowserKey(null);
+    }
+  }, []);
+
+  if (cards.length === 0) {
+    return (
+      <section className="border-t border-border pt-6">
+        <div className="mx-auto flex max-w-2xl flex-col items-start">
+          <div className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Admin · connectors
+          </div>
+          <h2 className="mt-3 text-[24px] font-medium leading-tight tracking-tight text-foreground">
+            Everything's connected.
+          </h2>
+          <p className="mt-2 text-[13.5px] leading-6 text-muted-foreground">
+            No outstanding connectors. Admin is ready to run.
+          </p>
+          <Button className="mt-6" onClick={onContinue}>
+            Open Admin
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="border-t border-border pt-6">
+      <div className="mx-auto flex max-w-3xl flex-col">
+        <div className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Admin · connectors
+        </div>
+        <h2 className="mt-3 text-[24px] font-medium leading-tight tracking-tight text-foreground">
+          Connect your systems
+        </h2>
+        <p className="mt-2 max-w-2xl text-[13.5px] leading-6 text-muted-foreground">
+          The coach on the right will walk you through each one. For browser-based portals, save the URL + credential ref first, then hit Connect & analyze — Admin launches browser-use and scans the dashboard.
+        </p>
+
+        <div className="mt-7 flex flex-col gap-3">
+          {cards.map((card) => {
+            const Icon = card.icon;
+            const result = results[card.key];
+            const composioBusy = pendingComposioKey === card.key;
+            const browserBusy = pendingBrowserKey === card.key;
+            const busy = composioBusy || browserBusy;
+            return (
+              <div
+                key={card.key}
+                className="flex flex-col gap-3 rounded-md border border-border bg-card/70 p-4 md:flex-row md:items-start"
+              >
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted/30 text-muted-foreground">
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <div className="text-[14px] font-medium text-foreground">{card.title}</div>
+                    <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+                      missing
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[13px] leading-5 text-foreground/80">{card.question}</p>
+                  <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{card.helpText}</p>
+
+                  {result && (
+                    <div
+                      className={cn(
+                        "mt-3 rounded-md border px-3 py-2 text-[12px]",
+                        result.ok
+                          ? "border-success/40 bg-success/10 text-success"
+                          : "border-destructive/40 bg-destructive/10 text-destructive",
+                      )}
+                    >
+                      {result.message}
+                      {result.runUrl && (
+                        <a
+                          href={result.runUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="ml-2 inline-flex items-center gap-1 underline underline-offset-2"
+                        >
+                          Open task <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="flex shrink-0 flex-col items-stretch gap-2 md:items-end">
+                  {card.action.kind === "composio" && (
+                    <Button
+                      size="sm"
+                      onClick={() => void runComposio(card.key, card.action.kind === "composio" ? card.action.toolkitSlug : "")}
+                      disabled={busy}
+                    >
+                      {composioBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      {card.action.label}
+                    </Button>
+                  )}
+                  {card.action.kind === "browser-use" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void runBrowserUse(card.key, card.action.kind === "browser-use" ? card.action.portalKey : "mls")}
+                      disabled={busy}
+                    >
+                      {browserBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      {card.action.label}
+                    </Button>
+                  )}
+                  {card.action.kind === "manual" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onChatMention(card.key)}
+                    >
+                      <MessageCircle className="h-3.5 w-3.5" />
+                      Ask the coach
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="mt-8 flex items-center justify-between border-t border-border pt-5">
+          <button
+            type="button"
+            onClick={onContinue}
+            className="text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Finish later — open Admin anyway
+          </button>
+          <Button onClick={onContinue}>Done — open Admin</Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+type CoachMessage = { role: "user" | "assistant"; content: string };
+
+function AdminOnboardingCoach({
+  initialQuestion,
+  onClose,
+  externalMention,
+}: {
+  initialQuestion: string;
+  onClose: () => void;
+  externalMention: string | null;
+}) {
+  const [messages, setMessages] = useState<CoachMessage[]>([
+    { role: "assistant", content: initialQuestion },
+  ]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    if (!externalMention) return;
+    setInput((prev) => (prev ? prev : `Help me set up ${externalMention.replace(/_/g, " ")}.`));
+  }, [externalMention]);
+
+  const send = useCallback(async () => {
+    const trimmed = input.trim();
+    if (!trimmed || sending) return;
+    const next = [...messages, { role: "user" as const, content: trimmed }];
+    setMessages(next);
+    setInput("");
+    setSending(true);
+    setError(null);
+    try {
+      const resp = await api.postAdminOnboardingChat(next);
+      const reply = resp.reply?.trim() || "(no reply)";
+      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+    } catch (err) {
+      setError(String((err as Error)?.message ?? err));
+    } finally {
+      setSending(false);
+    }
+  }, [input, messages, sending]);
+
+  return createPortal(
+    <aside
+      role="complementary"
+      aria-label="Onboarding coach"
+      className="onboarding-coach fixed bottom-6 right-6 z-[110] flex w-[360px] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl"
+    >
+      <header className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <MessageCircle className="h-3.5 w-3.5 text-primary" />
+          <div className="text-[12.5px] font-medium text-foreground">Onboarding coach</div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close onboarding coach"
+          className="rounded-md p-1 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+        >
+          <CloseIcon className="h-3.5 w-3.5" />
+        </button>
+      </header>
+
+      <div ref={scrollRef} className="flex max-h-[360px] min-h-[180px] flex-col gap-2 overflow-y-auto px-3 py-3">
+        {messages.map((msg, idx) => (
+          <div
+            key={idx}
+            className={cn(
+              "max-w-[88%] rounded-md px-3 py-2 text-[12.5px] leading-5",
+              msg.role === "assistant"
+                ? "self-start bg-muted/40 text-foreground"
+                : "self-end bg-primary/15 text-foreground",
+            )}
+          >
+            {msg.content}
+          </div>
+        ))}
+        {sending && (
+          <div className="self-start rounded-md bg-muted/40 px-3 py-2 text-[12.5px] text-muted-foreground">
+            <Loader2 className="inline-block h-3 w-3 animate-spin" /> Thinking…
+          </div>
+        )}
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+            {error}
+          </div>
+        )}
+      </div>
+
+      <footer className="flex items-end gap-2 border-t border-border bg-background px-3 py-2.5">
+        <textarea
+          rows={2}
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              void send();
+            }
+          }}
+          placeholder="Type — ⌘↩ to send"
+          className="min-h-9 max-h-32 flex-1 resize-none rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] leading-5 text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+        />
+        <Button size="sm" onClick={() => void send()} disabled={sending || !input.trim()}>
+          <Send className="h-3.5 w-3.5" />
+        </Button>
+      </footer>
+    </aside>,
+    document.body,
   );
 }
 
@@ -1468,9 +2008,11 @@ function AdminSetupLaunch({
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
   const [provinceUnlocked, setProvinceUnlocked] = useState(false);
-  const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "form">(() =>
+  const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "seeding" | "connectors" | "form">(() =>
     isBrandNewAdminSetup(setup) ? "gate" : "form",
   );
+  const [coachOpen, setCoachOpen] = useState(true);
+  const [coachMention, setCoachMention] = useState<string | null>(null);
 
   const savedProvinceCode = (setup.profile?.province || "").trim().toUpperCase();
 
@@ -1563,6 +2105,39 @@ function AdminSetupLaunch({
     }
   }, [draft, onSetupUpdated]);
 
+  const handleWizardFinish = useCallback(async () => {
+    setError(null);
+    setSavedMessage(null);
+    try {
+      await api.updateAdminSetup(adminSetupPayloadFromDraft(draft));
+    } catch (err) {
+      setError(errorMessage(err, "Save admin setup failed"));
+      return;
+    }
+    setPhase("seeding");
+  }, [draft]);
+
+  const runSeedAndVerify = useCallback(async (): Promise<{ missing: boolean; error: string | null }> => {
+    try {
+      const verified = await api.verifyAdminSetup();
+      if (verified.missingRequiredKeys.length === 0) {
+        const completed = await api.completeAdminSetup();
+        onSetupUpdated(completed);
+        return { missing: false, error: null };
+      }
+      onSetupUpdated(verified);
+      return { missing: true, error: null };
+    } catch (err) {
+      return { missing: true, error: errorMessage(err, "Verify admin setup failed") };
+    }
+  }, [onSetupUpdated]);
+
+  const initialCoachQuestion = useMemo(() => {
+    const province = (setup.profile?.province || "").toUpperCase();
+    const provincePrefix = province ? ` Got ${province} loaded.` : "";
+    return `Running your databases now —${provincePrefix} this takes a couple minutes. While that's going: where do your active deals live right now? Spreadsheet, Lofty, kvCORE, BoldTrail, or somewhere else?`;
+  }, [setup.profile?.province]);
+
   const missingLabels = useMemo(() => {
     const labels = new Map(setup.items.map((item) => [item.key, item.label]));
     return setup.missingRequiredKeys.map((key) => labels.get(key) ?? key);
@@ -1592,7 +2167,7 @@ function AdminSetupLaunch({
         draft={draft}
         updateDraft={updateDraft}
         onAdvanceSave={submit}
-        onFinish={verify}
+        onFinish={handleWizardFinish}
         saving={saving}
         verifying={verifying}
         error={error}
@@ -1601,6 +2176,56 @@ function AdminSetupLaunch({
         savedProvinceCode={savedProvinceCode}
         onSkipToForm={() => setPhase("form")}
       />
+    );
+  }
+
+  if (phase === "seeding") {
+    return (
+      <>
+        <AdminOnboardingSeeding
+          runSeed={runSeedAndVerify}
+          onMissing={() => setPhase("connectors")}
+          onComplete={() => setPhase("form")}
+        />
+        {coachOpen && (
+          <AdminOnboardingCoach
+            initialQuestion={initialCoachQuestion}
+            onClose={() => setCoachOpen(false)}
+            externalMention={coachMention}
+          />
+        )}
+      </>
+    );
+  }
+
+  if (phase === "connectors") {
+    return (
+      <>
+        <AdminOnboardingConnectors
+          setup={setup}
+          onContinue={() => setPhase("form")}
+          onChatMention={(key) => {
+            setCoachOpen(true);
+            setCoachMention(key);
+          }}
+        />
+        {coachOpen ? (
+          <AdminOnboardingCoach
+            initialQuestion={initialCoachQuestion}
+            onClose={() => setCoachOpen(false)}
+            externalMention={coachMention}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setCoachOpen(true)}
+            className="fixed bottom-6 right-6 z-[110] inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-[12.5px] text-foreground shadow-md hover:border-primary"
+          >
+            <MessageCircle className="h-3.5 w-3.5 text-primary" />
+            Ask the coach
+          </button>
+        )}
+      </>
     );
   }
 

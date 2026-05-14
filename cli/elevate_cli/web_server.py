@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -3077,6 +3078,20 @@ class _PackOnboardingUpdateBody(BaseModel):
     items: List[_PackOnboardingItemBody] = []
 
 
+class _OnboardingChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class _OnboardingChatBody(BaseModel):
+    messages: List[_OnboardingChatMessage] = []
+
+
+class _OnboardingBrowserUseBody(BaseModel):
+    portalKey: str  # mls | compliance | showing
+    taskHint: Optional[str] = None
+
+
 class _DealMoveBody(BaseModel):
     toStage: int
     force: bool = False
@@ -3675,6 +3690,216 @@ async def post_admin_setup_verify_endpoint():
     except Exception as exc:
         _log.exception("POST /api/admin/setup/verify failed")
         raise HTTPException(status_code=500, detail=f"Verify admin setup failed: {exc}")
+
+
+_ONBOARDING_CHAT_SYSTEM = (
+    "You are Elevate's onboarding coach for a Canadian real estate agent. "
+    "The user just finished a 9-step setup wizard. You see a live snapshot of "
+    "their admin_setup_items: which keys are still missing, which province "
+    "they picked, and which connectors are already attached. "
+    "Your job: ask one short, friendly question at a time to fill in the gaps. "
+    "Priorities, in order: (1) where deals currently live (spreadsheet, Lofty, "
+    "kvCORE, BoldTrail, paper); (2) cloud drive (Google Drive vs Dropbox vs "
+    "SharePoint); (3) MLS / compliance / showing portal login URLs; "
+    "(4) any spreadsheets to import. "
+    "Keep replies to 1-3 sentences. No bullet lists unless the user asks. "
+    "When a connector needs OAuth (Google Drive, Gmail, etc.) tell them to "
+    "click the matching button in the connectors panel — don't paste URLs. "
+    "When a portal needs browser-use analysis, tell them to enter login URL + "
+    "credential ref into the portal card, then hit 'Connect & analyze'."
+)
+
+
+def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
+    """Compact snapshot context appended to the system prompt."""
+    profile = setup.get("profile") or {}
+    items = setup.get("items") or []
+    missing = setup.get("missingRequiredKeys") or []
+    by_key = {it["key"]: it for it in items if isinstance(it, dict) and it.get("key")}
+    lines = [
+        "--- CURRENT SETUP SNAPSHOT ---",
+        f"Realtor: {profile.get('realtorLegalName') or '(unset)'} @ {profile.get('brokerageName') or '(unset)'}",
+        f"Province: {profile.get('province') or '(unset)'} · Market: {profile.get('market') or '(unset)'}",
+        f"Completion: {setup.get('completionPct') or 0}% ({setup.get('completedRequiredCount') or 0}/{setup.get('requiredCount') or 0})",
+    ]
+    if missing:
+        labels = [by_key.get(k, {}).get("label") or k for k in missing]
+        lines.append(f"Still missing: {', '.join(labels)}")
+    else:
+        lines.append("All required items present.")
+    for key in ("drive", "crm", "mls", "compliance", "showing"):
+        item = by_key.get(key)
+        if item:
+            provider = item.get("provider") or "(none)"
+            lines.append(f"{key}: {provider} [{item.get('status') or 'missing'}]")
+    return "\n".join(lines)
+
+
+def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, Any]) -> str:
+    """Deterministic guidance when no LLM is configured."""
+    missing = setup.get("missingRequiredKeys") or []
+    profile = setup.get("profile") or {}
+    has_drive = bool(profile.get("driveProvider"))
+    has_crm = bool(profile.get("crmProvider"))
+    last = (messages[-1].get("content") if messages else "") or ""
+    last_lower = last.lower()
+    if not has_drive:
+        return "Where do your active deal folders live today — Google Drive, Dropbox, or SharePoint? I'll get the right connector ready."
+    if not has_crm:
+        return "Where do your leads live right now? CRM name (Lofty, kvCORE, BoldTrail) or a spreadsheet path works."
+    if missing:
+        return f"Still missing: {', '.join(missing[:3])}. Want to walk through the first one?"
+    if "spreadsheet" in last_lower or "sheet" in last_lower:
+        return "Got it. Drop the Google Sheet URL into your drive folder and I'll pick it up on the next sync."
+    return "Looks good. Anything else you want me to set up before we go live?"
+
+
+@app.post("/api/admin/onboarding/chat")
+async def post_admin_onboarding_chat(body: _OnboardingChatBody):
+    """LLM-backed onboarding coach. Falls back to deterministic guidance when no auxiliary client is configured."""
+    try:
+        from elevate_cli.data import connect, get_admin_setup
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Onboarding chat unavailable: {exc}")
+
+    try:
+        with connect() as conn:
+            setup = get_admin_setup(conn)
+    except Exception as exc:
+        _log.exception("onboarding chat: failed to read admin_setup snapshot")
+        setup = {}
+
+    messages = [m.dict() for m in body.messages if m.content.strip()]
+    context = _onboarding_chat_context(setup)
+    system_prompt = _ONBOARDING_CHAT_SYSTEM + "\n\n" + context
+
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client("onboarding_chat")
+    except Exception as exc:
+        _log.info("onboarding chat: auxiliary client unavailable (%s) — falling back", exc)
+        return {"ok": True, "reply": _onboarding_fallback_reply(messages, setup), "model": None}
+
+    if client is None or not model:
+        return {"ok": True, "reply": _onboarding_fallback_reply(messages, setup), "model": None}
+
+    payload_messages = [{"role": "system", "content": system_prompt}, *messages]
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=payload_messages,
+            temperature=0.4,
+            max_tokens=400,
+            timeout=20,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        _log.info("onboarding chat: LLM call failed (%s) — falling back", exc)
+        return {"ok": True, "reply": _onboarding_fallback_reply(messages, setup), "model": model, "warning": str(exc)}
+
+    if not text:
+        text = _onboarding_fallback_reply(messages, setup)
+    return {"ok": True, "reply": text, "model": model}
+
+
+def _browser_use_api_key() -> Optional[str]:
+    """Pull a direct browser-use API key from env or YAML config."""
+    for env_key in ("BROWSER_USE_API_KEY", "BROWSERUSE_API_KEY"):
+        value = os.environ.get(env_key)
+        if value:
+            return value.strip()
+    try:
+        cfg = load_config() or {}
+    except Exception:
+        return None
+    browser_cfg = (cfg.get("browser") or {}) if isinstance(cfg, dict) else {}
+    candidate = browser_cfg.get("api_key") if isinstance(browser_cfg, dict) else None
+    return str(candidate).strip() if candidate else None
+
+
+@app.post("/api/admin/onboarding/browser-use/launch")
+async def post_admin_onboarding_browser_use_launch(body: _OnboardingBrowserUseBody):
+    """Fire a browser-use cloud task against a portal saved in admin_setup."""
+    portal_key = (body.portalKey or "").strip().lower()
+    if portal_key not in {"mls", "compliance", "showing"}:
+        raise HTTPException(status_code=400, detail="portalKey must be one of mls | compliance | showing")
+
+    try:
+        from elevate_cli.data import connect, get_admin_setup
+
+        with connect() as conn:
+            setup = get_admin_setup(conn)
+    except Exception as exc:
+        _log.exception("browser-use launch: snapshot read failed")
+        raise HTTPException(status_code=500, detail=f"Read setup failed: {exc}")
+
+    items = setup.get("items") or []
+    browser_item = next(
+        (it for it in items if isinstance(it, dict) and it.get("key") == "browser_workflows"),
+        None,
+    )
+    playbooks = (((browser_item or {}).get("value") or {}).get("playbooks") or {}) if browser_item else {}
+    playbook = playbooks.get(portal_key) or {}
+    login_url = (playbook.get("loginUrl") or "").strip()
+    credential_ref = (playbook.get("credentialRef") or "").strip()
+    provider = (playbook.get("provider") or "").strip()
+    notes = (playbook.get("notes") or "").strip()
+    if not login_url:
+        return {"ok": False, "error": f"No login URL saved for {portal_key} portal yet. Add it in the connectors card first."}
+
+    api_key = _browser_use_api_key()
+    if not api_key:
+        return {
+            "ok": False,
+            "error": "BROWSER_USE_API_KEY not configured. Add it under Tools → Browser Use.",
+            "portal": {"loginUrl": login_url, "provider": provider, "credentialRef": credential_ref},
+        }
+
+    province = (setup.get("profile") or {}).get("province") or ""
+    task = body.taskHint or (
+        f"Sign in to {provider or portal_key} at {login_url} using credentials referenced "
+        f"by '{credential_ref or '(unspecified — ask the agent)'}'. "
+        f"This is a {province or 'Canadian'} real-estate agent's {portal_key} portal. "
+        "Once logged in, scan the dashboard and summarize: current active listings, pending "
+        "transactions, any compliance alerts, and the structure of the main navigation. "
+        "Report back as plain text — do not modify any data."
+    )
+    if notes:
+        task += f"\n\nAgent notes about this portal:\n{notes}"
+
+    request_body = json.dumps({"task": task, "save_browser_data": True}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.browser-use.com/api/v1/run-task",
+        data=request_body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        _log.warning("browser-use launch: HTTP %s — %s", exc.code, err_body[:400])
+        return {"ok": False, "error": f"browser-use returned {exc.code}: {err_body[:200] or exc.reason}"}
+    except Exception as exc:
+        _log.exception("browser-use launch: request failed")
+        return {"ok": False, "error": f"browser-use call failed: {exc}"}
+
+    task_id = data.get("id") or data.get("task_id") or data.get("uuid")
+    return {
+        "ok": True,
+        "taskId": task_id,
+        "runUrl": data.get("live_url") or (f"https://cloud.browser-use.com/tasks/{task_id}" if task_id else None),
+        "raw": data,
+    }
 
 
 @app.get("/api/pack-onboarding")

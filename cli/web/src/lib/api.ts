@@ -49,6 +49,7 @@ import type {
   ComposioToolkitDetails,
   ThreadContextResponse,
   SourceInboxResponse,
+  SourceInboxProfileStatus,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
   IntegrationTestResponse,
@@ -717,6 +718,27 @@ export const api = {
     fetchJSON<AdminSetupSnapshot>("/api/admin/setup/complete", {
       method: "POST",
     }),
+  postAdminOnboardingChat: (messages: Array<{ role: string; content: string }>) =>
+    fetchJSON<{ ok: boolean; reply: string; model?: string | null; warning?: string }>(
+      "/api/admin/onboarding/chat",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages }),
+      },
+    ),
+  launchAdminOnboardingBrowserUse: (portalKey: "mls" | "compliance" | "showing", taskHint?: string) =>
+    fetchJSON<{
+      ok: boolean;
+      taskId?: string;
+      runUrl?: string | null;
+      error?: string;
+      portal?: { loginUrl?: string; provider?: string; credentialRef?: string };
+    }>("/api/admin/onboarding/browser-use/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ portalKey, taskHint }),
+    }),
   getPackOnboarding: () => fetchJSON<PackOnboardingSnapshot>("/api/pack-onboarding"),
   updatePackOnboarding: (packId: string, body: PackOnboardingUpdateRequest) =>
     fetchJSON<PackOnboardingSnapshot>(`/api/pack-onboarding/${encodeURIComponent(packId)}`, {
@@ -915,6 +937,12 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceId, taskId, action, draftText }),
+    }),
+  updateSourceInboxProfile: (profileId: string, status: SourceInboxProfileStatus | null) =>
+    fetchJSON<SourceInboxResponse>("/api/source-inbox/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profileId, status }),
     }),
   scaffoldSourceConnector: (sourceId: string) =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {
