@@ -2166,7 +2166,7 @@ function AdminDealContextSection({
             </div>
           )}
 
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)]">
             <div className="rounded-sm border border-border bg-card px-3 py-2">
               <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 <Users className="h-3 w-3" />
@@ -2175,7 +2175,7 @@ function AdminDealContextSection({
               {coContacts.length > 0 ? (
                 <div className="mt-1.5 space-y-1">
                   {coContacts.slice(0, 3).map((item) => (
-                    <div key={item.id} className="min-w-0 text-[0.74rem]">
+                    <div key={item.id} className="min-w-0 text-xs leading-5">
                       <span className="font-medium text-foreground">{item.role}</span>
                       <span className="text-muted-foreground"> · </span>
                       <span className="text-muted-foreground">{item.contact?.displayName ?? item.contactId}</span>
@@ -2183,7 +2183,7 @@ function AdminDealContextSection({
                   ))}
                 </div>
               ) : (
-                <div className="mt-1.5 text-[0.74rem] text-muted-foreground">None linked</div>
+                <div className="mt-1.5 text-xs text-muted-foreground">None linked</div>
               )}
             </div>
             <div className="rounded-sm border border-border bg-card px-3 py-2">
@@ -2192,16 +2192,20 @@ function AdminDealContextSection({
                 Documents
               </div>
               {attachments.length > 0 ? (
-                <div className="mt-1.5 space-y-1">
+                <div className="mt-1.5 space-y-1.5">
                   {attachments.slice(0, 3).map((item) => (
-                    <div key={item.id} className="min-w-0 text-[0.74rem]" title={item.filePath}>
+                    <div
+                      key={item.id}
+                      className="min-w-0 text-xs leading-5 line-clamp-3"
+                      title={item.summary || item.filePath}
+                    >
                       <span className="font-medium text-foreground">{item.kind}</span>
                       {item.summary && <span className="text-muted-foreground"> · {item.summary}</span>}
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="mt-1.5 text-[0.74rem] text-muted-foreground">No docs attached</div>
+                <div className="mt-1.5 text-xs text-muted-foreground">No docs attached</div>
               )}
             </div>
             <div className="rounded-sm border border-border bg-card px-3 py-2">
@@ -2213,7 +2217,7 @@ function AdminDealContextSection({
                 <div className="mt-1.5 space-y-1.5">
                   {priorRuns.slice(0, 3).map((run) => (
                     <div key={run.id} className="min-w-0">
-                      <div className="truncate text-[0.74rem] font-medium text-foreground">
+                      <div className="truncate text-xs font-medium leading-5 text-foreground">
                         {run.registryName ?? run.skill ?? "Admin run"}
                       </div>
                       <div className="mt-0.5 flex items-center gap-1.5">
@@ -2224,7 +2228,7 @@ function AdminDealContextSection({
                   ))}
                 </div>
               ) : (
-                <div className="mt-1.5 text-[0.74rem] text-muted-foreground">No runs yet</div>
+                <div className="mt-1.5 text-xs text-muted-foreground">No runs yet</div>
               )}
             </div>
           </div>
@@ -2539,7 +2543,7 @@ function AdminCardDetailPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative z-10 flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-full sm:w-full sm:max-w-[36rem] sm:rounded-md sm:border sm:border-border"
+        className="relative z-10 flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-full sm:w-full sm:max-w-[42rem] sm:rounded-md sm:border sm:border-border md:max-w-[48rem] lg:max-w-[56rem]"
       >
         <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
