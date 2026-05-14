@@ -2252,7 +2252,9 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (text) {
-          setStatusText("Working...");
+          setStatusText("Thinking...");
+          ensureAssistant();
+          addActivityTrace("thinking", text);
         }
       }),
     );
@@ -2261,7 +2263,9 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (text) {
-          setStatusText("Working...");
+          setStatusText("Reasoning...");
+          ensureAssistant();
+          addActivityTrace("reasoning", text);
         }
       }),
     );
@@ -3161,6 +3165,13 @@ export default function ChatPage() {
                 subagents={subagents}
                 tools={tools}
               />
+              <WorkingStatusPill
+                busy={busy}
+                onInterrupt={interruptCurrentTurn}
+                statusText={statusText}
+                subagents={subagents}
+                tools={tools}
+              />
               <QueuedInputStrip
                 busy={busy}
                 onRemove={removeQueuedInput}
@@ -3419,6 +3430,43 @@ function QueuedInputStrip({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function WorkingStatusPill({
+  busy,
+  onInterrupt,
+  statusText,
+  subagents,
+  tools,
+}: {
+  busy: boolean;
+  onInterrupt(): void;
+  statusText: string;
+  subagents: SubagentEntry[];
+  tools: ToolEntry[];
+}) {
+  if (!busy) return null;
+  const runningTools = tools.filter((tool) => tool.status === "running");
+  const runningSubagents = subagents.filter((s) => s.status === "running");
+  if (runningTools.length > 0 || runningSubagents.length > 0) return null;
+
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded-md bg-[var(--chat-surface-soft)] px-3 py-2 text-[0.78rem] text-[var(--chat-muted-strong)]">
+      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--chat-accent)]" />
+      <span className="min-w-0 flex-1 truncate">
+        {displayStatusText(statusText || "Working...")}
+      </span>
+      <button
+        aria-label="Stop the current response"
+        type="button"
+        onClick={onInterrupt}
+        title="Stop the current response"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface)] hover:text-[var(--chat-text)]"
+      >
+        <span className="h-2 w-2 rounded-[0.15rem] bg-current" />
+      </button>
     </div>
   );
 }
