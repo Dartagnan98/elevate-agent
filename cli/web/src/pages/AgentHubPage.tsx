@@ -490,10 +490,22 @@ function AgentCard({
         <div className="text-xs text-muted-foreground">{agent.description || agent.role}</div>
       </div>
       <div className="mt-2 space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          <MiniMetric label="Sessions" value={agent.session_count} />
-          <MiniMetric label="Active" value={agent.active_session_count} />
-        </div>
+        {(agent.active_session_count > 0 || agent.session_count > 0) && (
+          <div className="flex items-baseline gap-3 text-xs text-muted-foreground">
+            {agent.active_session_count > 0 && (
+              <span className="inline-flex items-baseline gap-1 text-success">
+                <span className="font-medium tabular-nums">{agent.active_session_count}</span>
+                <span>active now</span>
+              </span>
+            )}
+            {agent.session_count > 0 && (
+              <span className="inline-flex items-baseline gap-1">
+                <span className="tabular-nums">{agent.session_count}</span>
+                <span>{agent.session_count === 1 ? "session" : "sessions"} total</span>
+              </span>
+            )}
+          </div>
+        )}
         <ChipRow icon={Terminal} items={agent.platforms} empty="No platforms" />
         <ChipRow icon={Wrench} items={agent.toolsets} empty="Global tools" />
         {agent.skills.length > 0 && (
@@ -531,6 +543,11 @@ function AgentCard({
               </span>
             </summary>
             <div className="grid gap-2 px-2.5 pb-2.5 pt-1">
+              {!telegramLaneReady && (
+                <p className="text-[0.72rem] leading-5 text-muted-foreground">
+                  Both fields required. Get a bot token from @BotFather, then paste your chat ID (or chat:topic) from the agent's Telegram conversation.
+                </p>
+              )}
               <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
                 <label className="grid gap-1 text-xs font-medium text-muted-foreground">
                   <span>Bot token</span>
@@ -829,10 +846,27 @@ function HandoffBusCard({
   const wake = worker.wake;
   const workerHealthy = worker.enabled && worker.state !== "error" && worker.state !== "disabled" && loopRunning;
 
+  const primaryAction: { label: string; onClick: () => void } = (() => {
+    if (!worker.enabled || worker.state === "disabled") {
+      return { label: "Run worker", onClick: onRunWorker };
+    }
+    if (!loopRunning) {
+      return { label: "Wake loop", onClick: onWakeWorker };
+    }
+    if (handoffs.queued > 0 || handoffs.waitingHuman > 0) {
+      return { label: "Run worker now", onClick: onRunWorker };
+    }
+    return { label: "Run worker", onClick: onRunWorker };
+  })();
+  const secondaryAction =
+    primaryAction.label === "Wake loop"
+      ? { label: "Run worker", onClick: onRunWorker }
+      : { label: "Wake loop", onClick: onWakeWorker };
+
   return (
     <div className="px-1">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">Agent handoffs</span>
             <span className="text-xs text-muted-foreground">· {active} open</span>
@@ -850,32 +884,33 @@ function HandoffBusCard({
             <div className="mt-1 text-xs text-warning">{handoffs.error}</div>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5">
             <Button
               size="sm"
-              variant="outline"
-              onClick={onRunWorker}
+              onClick={primaryAction.onClick}
               disabled={busy}
             >
               {busy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : primaryAction.label === "Wake loop" ? (
+                <Play className="h-3.5 w-3.5" />
               ) : (
                 <RefreshCw className="h-3.5 w-3.5" />
               )}
-              Run worker
+              {primaryAction.label}
             </Button>
             <Button
               size="sm"
               variant="outline"
-              onClick={onWakeWorker}
+              onClick={secondaryAction.onClick}
               disabled={busy}
             >
-              {busy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
+              {secondaryAction.label === "Wake loop" ? (
                 <Play className="h-3.5 w-3.5" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
               )}
-              Wake loop
+              {secondaryAction.label}
             </Button>
           </div>
         </div>
@@ -1393,12 +1428,10 @@ export default function AgentHubPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <MiniMetric label="Agent team" value={activeAgents.length} />
             <MiniMetric label="Live chats" value={liveSessions.length} />
             <MiniMetric label="Open handoffs" value={snapshot.handoffs.open} />
-            <MiniMetric label="Memory queue" value={snapshot.memory.journal.pending} />
-            <MiniMetric label="Toolsets" value={snapshot.toolsets.enabled.length} />
             <MiniMetric label="Skills" value={`${snapshot.skills.enabled}/${snapshot.skills.total}`} />
           </div>
         </div>
