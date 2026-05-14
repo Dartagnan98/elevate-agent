@@ -472,6 +472,7 @@ export default function CronPage() {
   const [name, setName] = useState("");
   const [deliver, setDeliver] = useState("local");
   const [creating, setCreating] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
   const schedule = useMemo(
     () =>
       buildSchedule({
@@ -518,6 +519,7 @@ export default function CronPage() {
       setCustomSchedule("0 9 * * *");
       setName("");
       setDeliver("local");
+      setShowCreate(false);
       loadJobs();
     } catch (e) {
       showToast(`${t.config.failedToSave}: ${e}`, "error");
@@ -610,7 +612,36 @@ export default function CronPage() {
         loading={jobDelete.isDeleting}
       />
 
-      {/* Create new job form */}
+      {/* Jobs list header + new job toggle */}
+      <div className="flex items-center justify-between gap-3">
+        <H2
+          variant="sm"
+          className="flex items-center gap-2 text-muted-foreground"
+        >
+          <Clock className="h-4 w-4" />
+          {t.cron.scheduledJobs} ({jobs.length})
+        </H2>
+        <Button
+          size="sm"
+          variant={showCreate ? "outline" : "default"}
+          onClick={() => setShowCreate((v) => !v)}
+        >
+          {showCreate ? (
+            <>
+              <X className="h-3.5 w-3.5" />
+              Cancel
+            </>
+          ) : (
+            <>
+              <Plus className="h-3.5 w-3.5" />
+              {t.cron.newJob}
+            </>
+          )}
+        </Button>
+      </div>
+
+      {/* Create new job form (collapsed by default) */}
+      {showCreate && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -695,17 +726,10 @@ export default function CronPage() {
           </div>
         </CardContent>
       </Card>
+      )}
 
       {/* Jobs list */}
       <div className="flex flex-col gap-3">
-        <H2
-          variant="sm"
-          className="flex items-center gap-2 text-muted-foreground"
-        >
-          <Clock className="h-4 w-4" />
-          {t.cron.scheduledJobs} ({jobs.length})
-        </H2>
-
         {jobs.length === 0 && (
           <Card>
             <CardContent className="py-8 text-center text-sm text-muted-foreground">
@@ -740,13 +764,15 @@ export default function CronPage() {
                       {job.prompt.length > 100 ? "..." : ""}
                     </p>
                   )}
-                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                    <span className="font-mono">{job.schedule_display}</span>
-                    <span>
-                      {t.cron.last}: {formatTime(job.last_run_at)}
-                    </span>
-                    <span>
-                      {t.cron.next}: {formatTime(job.next_run_at)}
+                  <div className="flex flex-col gap-1 text-xs text-muted-foreground lg:flex-row lg:flex-wrap lg:items-center lg:gap-x-4">
+                    <span className="font-mono truncate">{job.schedule_display}</span>
+                    <span className="flex flex-wrap gap-x-4 gap-y-1">
+                      <span>
+                        {t.cron.last}: {formatTime(job.last_run_at)}
+                      </span>
+                      <span>
+                        {t.cron.next}: {formatTime(job.next_run_at)}
+                      </span>
                     </span>
                   </div>
                   {job.last_error && (
