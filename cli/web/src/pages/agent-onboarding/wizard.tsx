@@ -19,8 +19,8 @@ import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
   playOnboardingClick,
+  playOnboardingRiser,
   playOnboardingSwell,
-  playOnboardingWhoosh,
 } from "@/lib/onboarding-sounds";
 import {
   buildItemUpdates,
@@ -98,8 +98,8 @@ export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void 
   const [exiting, setExiting] = useState(false);
 
   const handleStart = useCallback(() => {
-    playOnboardingWhoosh();
     playOnboardingSwell();
+    playOnboardingRiser(1.6);
     setExiting(true);
   }, []);
 
@@ -226,15 +226,18 @@ export function AgentOnboardingWizard({
   const handleFinish = useCallback(async () => {
     setError(null);
     setCompleting(true);
+    const riser = playOnboardingRiser(2.4);
     try {
       await api.updateAgentSetup(buildItemUpdates(draft));
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
     } catch (err) {
+      riser.stop();
       setError(errorMessage(err, "Could not complete onboarding"));
       setCompleting(false);
       return;
     }
+    riser.stop();
     playOnboardingChime();
     setCompleting(false);
     onFinish();
@@ -270,10 +273,11 @@ export function AgentOnboardingWizard({
       role="dialog"
       aria-modal="true"
       aria-label="Agent onboarding wizard"
-      className="onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto px-6 py-10"
+      className="onboarding-overlay fixed inset-0 z-[100] overflow-y-auto"
     >
-      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
-      <div className="relative flex w-full max-w-3xl flex-col">
+      <div className="onboarding-aurora-bg pointer-events-none fixed inset-0" aria-hidden />
+      <div className="relative flex min-h-full items-center justify-center px-6 py-10">
+       <div className="relative flex w-full max-w-3xl flex-col">
         <div className="mb-7 flex items-center gap-1.5">
           {AGENT_WIZARD_STEPS.map((s, idx) => (
             <span
@@ -726,6 +730,7 @@ export function AgentOnboardingWizard({
             </Button>
           </div>
         </div>
+       </div>
       </div>
     </div>,
     document.body,
