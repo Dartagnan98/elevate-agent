@@ -1116,6 +1116,7 @@ def _agent_cbs(sid: str) -> dict:
         status_callback=lambda kind, text=None: _status_update(
             sid, str(kind), None if text is None else str(text)
         ),
+        error_callback=lambda text: _emit("error", sid, {"message": str(text)}),
         clarify_callback=lambda q, c: _block(
             "clarify.request", sid, {"question": q, "choices": c}
         ),

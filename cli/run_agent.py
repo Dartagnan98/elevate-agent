@@ -818,6 +818,7 @@ class AIAgent:
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
         status_callback: callable = None,
+        error_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -1023,6 +1024,7 @@ class AIAgent:
         self.stream_delta_callback = stream_delta_callback
         self.interim_assistant_callback = interim_assistant_callback
         self.status_callback = status_callback
+        self.error_callback = error_callback
         self.tool_gen_callback = tool_gen_callback
 
         
@@ -2274,6 +2276,23 @@ class AIAgent:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    def _emit_error(self, message: str) -> None:
+        """Emit a terminal error to the gateway as a persistent transcript message.
+
+        Unlike _emit_status (which only flashes through the bottom status pill
+        and ephemeral activity-trace), this routes through error_callback so
+        the gateway can publish a `ws error` event. The frontend renders it as
+        a system-role error in the transcript that survives refresh.
+
+        Only call this from branches that abort the turn — retry-exhausted,
+        non-retryable auth/4xx, fallback failed.
+        """
+        if self.error_callback:
+            try:
+                self.error_callback(message)
+            except Exception:
+                logger.debug("error_callback error in _emit_error", exc_info=True)
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
@@ -11245,10 +11264,14 @@ class AIAgent:
                             self._dump_api_request_debug(
                                 api_kwargs, reason="non_retryable_client_error", error=api_error,
                             )
+                        _nr_summary = self._summarize_api_error(api_error)
                         self._emit_status(
-                            f"❌ Non-retryable error (HTTP {status_code}): "
-                            f"{self._summarize_api_error(api_error)}"
+                            f"❌ Non-retryable error (HTTP {status_code}): {_nr_summary}"
                         )
+                        _nr_error_msg = f"API call failed (HTTP {status_code}): {_nr_summary}"
+                        if _provider == "openai-codex" and status_code == 401:
+                            _nr_error_msg += "\n\nRun `elevate auth` to reconnect Codex."
+                        self._emit_error(_nr_error_msg)
                         self._vprint(f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
                         self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
                         self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
@@ -11311,8 +11334,19 @@ class AIAgent:
                         _final_summary = self._summarize_api_error(api_error)
                         if is_rate_limited:
                             self._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
+                            self._emit_error(
+                                f"Rate limited after {max_retries} retries: {_final_summary}"
+                            )
                         else:
                             self._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
+                            _err_msg = f"API call failed after {max_retries} retries: {_final_summary}"
+                            _err_lc = _final_summary.lower()
+                            if "connection error" in _err_lc or "timeout" in _err_lc or "network" in _err_lc:
+                                _err_msg += (
+                                    "\n\nProvider connection keeps failing. "
+                                    "If you're on Codex, run `elevate auth` to refresh credentials."
+                                )
+                            self._emit_error(_err_msg)
                         self._vprint(f"{self.log_prefix}   💀 Final error: {_final_summary}", force=True)
 
                         # Detect SSE stream-drop pattern (e.g. "Network
