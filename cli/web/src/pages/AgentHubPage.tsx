@@ -933,13 +933,10 @@ function HandoffBusCard({
           </div>
         </div>
       <div className="space-y-3">
-        <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
+        <div className="grid grid-cols-3 gap-2">
           <MiniMetric label="Queued" value={handoffs.queued} />
           <MiniMetric label="Running" value={handoffs.running} />
           <MiniMetric label="Human" value={handoffs.waitingHuman} />
-          <MiniMetric label="Last handoffs" value={worker.drained.handoffs} />
-          <MiniMetric label="Last admin" value={worker.drained.adminRuns} />
-          <MiniMetric label="Wakes" value={wake?.count ?? 0} />
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
@@ -955,9 +952,24 @@ function HandoffBusCard({
             heartbeat {heartbeat?.intervalSeconds ?? "off"}s
           </span>
           {wake?.pending && <span className="text-warning">wake pending</span>}
-          <span>handoff cap {worker.limits.handoffs}</span>
-          <span>admin cap {worker.limits.adminRuns}</span>
         </div>
+        <details className="group text-xs">
+          <summary className="cursor-pointer list-none text-muted-foreground hover:text-foreground">
+            <span className="group-open:hidden">Show drain history</span>
+            <span className="hidden group-open:inline">Hide drain history</span>
+          </summary>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+            <span>Last handoffs {worker.drained.handoffs}</span>
+            <span>·</span>
+            <span>Last admin {worker.drained.adminRuns}</span>
+            <span>·</span>
+            <span>Wakes {wake?.count ?? 0}</span>
+            <span>·</span>
+            <span>Handoff cap {worker.limits.handoffs}</span>
+            <span>·</span>
+            <span>Admin cap {worker.limits.adminRuns}</span>
+          </div>
+        </details>
         {handoffs.byAgent.length > 0 && (
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
             {handoffs.byAgent.slice(0, 8).map((agent) => (
