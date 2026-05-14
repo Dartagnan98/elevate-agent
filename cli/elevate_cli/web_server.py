@@ -3713,13 +3713,48 @@ _ONBOARDING_CHAT_SYSTEM = (
     "'great question' / 'happy to help'. "
     "(6) OAuth connectors (Google Drive, Gmail, Calendar): say 'click Connect "
     "on the X card'. Portal logins (MLS, compliance, showing): say 'enter URL "
-    "+ email + password on the X card, then hit Connect & analyze'. "
+    "+ email + password on the X card, then hit Connect & analyze'. When the "
+    "snapshot lists a saved portal login URL or provider home page for the "
+    "missing item, paste that URL verbatim in the reply so the user can click "
+    "through directly. Plain https URLs render as clickable links in the chat "
+    "bubble — do not wrap them in markdown. "
     "(7) If the user asks 'where are we at' or similar status questions, "
     "restate: province, completion %, connected items with providers, missing "
     "items with the next action to close the first one. "
     "(8) If everything required is in, say so in one sentence and ask if "
     "anything else needs tightening up. Do not invent tasks."
 )
+
+
+_PROVIDER_HOMEPAGE = {
+    "google calendar": "https://calendar.google.com",
+    "google drive": "https://drive.google.com",
+    "gmail": "https://mail.google.com",
+    "outlook": "https://outlook.live.com",
+    "microsoft 365": "https://outlook.office.com",
+    "lofty": "https://app.lofty.com",
+    "follow up boss": "https://app.followupboss.com",
+    "kvcore": "https://www.kvcore.com",
+    "boldtrail": "https://www.boldtrail.com",
+    "matrix": "https://matrix.realtor.ca",
+    "paragon": "https://paragonconnect.com",
+    "stellar mls": "https://www.stellarmls.com",
+    "broker bay": "https://brokerbay.com",
+    "showingtime": "https://www.showingtime.com",
+    "showami": "https://www.showami.com",
+    "webforms": "https://wf.crea.ca",
+    "transactiondesk": "https://www.transactiondesk.com",
+    "dotloop": "https://www.dotloop.com",
+    "skyslope": "https://www.skyslope.com",
+    "docusign": "https://www.docusign.com",
+    "authentisign": "https://www.authentisign.com",
+}
+
+
+def _provider_home_url(provider: str) -> str:
+    if not provider:
+        return ""
+    return _PROVIDER_HOMEPAGE.get(provider.strip().lower(), "")
 
 
 def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
@@ -3744,6 +3779,33 @@ def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
         if item:
             provider = item.get("provider") or "(none)"
             lines.append(f"{key}: {provider} [{item.get('status') or 'missing'}]")
+
+    browser_item = by_key.get("browser_workflows") or {}
+    browser_value = browser_item.get("value") if isinstance(browser_item.get("value"), dict) else {}
+    playbooks = browser_value.get("playbooks") if isinstance(browser_value.get("playbooks"), dict) else {}
+    portal_urls: List[str] = []
+    for portal_key, label in (("mls", "MLS"), ("compliance", "Compliance"), ("showing", "Showing")):
+        pb = playbooks.get(portal_key) if isinstance(playbooks.get(portal_key), dict) else {}
+        url = (pb.get("loginUrl") or "").strip()
+        if url:
+            portal_urls.append(f"{label} login URL: {url}")
+    if portal_urls:
+        lines.append("--- SAVED PORTAL LOGINS ---")
+        lines.extend(portal_urls)
+
+    home_lines: List[str] = []
+    for key in ("calendar", "email", "drive", "crm", "mls", "compliance", "showing"):
+        item = by_key.get(key) or {}
+        if item.get("status") in ("connected", "configured"):
+            continue
+        provider = (item.get("provider") or "").strip()
+        home = _provider_home_url(provider)
+        if home:
+            home_lines.append(f"{key} ({provider}): {home}")
+    if home_lines:
+        lines.append("--- PROVIDER HOMEPAGES FOR PENDING ITEMS ---")
+        lines.extend(home_lines)
+
     return "\n".join(lines)
 
 
@@ -3777,6 +3839,35 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
     last = (messages[-1].get("content") if messages else "") or ""
     last_lower = last.lower()
 
+    browser_item = by_key.get("browser_workflows") or {}
+    browser_value = browser_item.get("value") if isinstance(browser_item.get("value"), dict) else {}
+    playbooks = browser_value.get("playbooks") if isinstance(browser_value.get("playbooks"), dict) else {}
+
+    def _portal_url(portal_key: str) -> str:
+        pb = playbooks.get(portal_key) if isinstance(playbooks.get(portal_key), dict) else {}
+        return (pb.get("loginUrl") or "").strip()
+
+    def _next_action_with_url(missing_key: str) -> str:
+        base = _CONNECTOR_NEXT_ACTION.get(missing_key, "")
+        if missing_key == "mls":
+            url = _portal_url("mls")
+            if url:
+                return f"{base} ({url})"
+        if missing_key == "compliance_platform":
+            url = _portal_url("compliance")
+            if url:
+                return f"{base} ({url})"
+        if missing_key == "showing_platform":
+            url = _portal_url("showing")
+            if url:
+                return f"{base} ({url})"
+        item = by_key.get(missing_key) or {}
+        provider = (item.get("provider") or "").strip()
+        home = _provider_home_url(provider)
+        if home and base:
+            return f"{base} Sign-in: {home}"
+        return base
+
     connected_bits: List[str] = []
     for it in items:
         if not isinstance(it, dict):
@@ -3790,7 +3881,7 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
         connected_bits.append(f"{label} ({provider})" if provider else label)
 
     missing_labels = [by_key.get(k, {}).get("label") or k for k in missing]
-    next_action = _CONNECTOR_NEXT_ACTION.get(missing[0]) if missing else None
+    next_action = _next_action_with_url(missing[0]) if missing else None
 
     status_re_ask = any(
         token in last_lower

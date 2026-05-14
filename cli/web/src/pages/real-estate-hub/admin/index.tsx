@@ -1,4 +1,4 @@
-import {
+import React, {
   memo,
   useCallback,
   useEffect,
@@ -1917,6 +1917,33 @@ function AdminOnboardingConnectors({
 
 type CoachMessage = { role: "user" | "assistant"; content: string };
 
+const COACH_URL_REGEX = /(https?:\/\/[^\s<>"')]+)/g;
+
+function renderCoachContent(text: string): React.ReactNode {
+  if (!text.includes("http")) return text;
+  const parts = text.split(COACH_URL_REGEX);
+  return parts.map((part, idx) => {
+    if (idx % 2 === 1) {
+      const cleaned = part.replace(/[.,;:!?]+$/, "");
+      const trailing = part.slice(cleaned.length);
+      return (
+        <React.Fragment key={idx}>
+          <a
+            href={cleaned}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-primary underline underline-offset-2 break-all hover:text-primary/80"
+          >
+            {cleaned}
+          </a>
+          {trailing}
+        </React.Fragment>
+      );
+    }
+    return <React.Fragment key={idx}>{part}</React.Fragment>;
+  });
+}
+
 function AdminOnboardingCoach({
   initialQuestion,
   onClose,
@@ -2010,13 +2037,13 @@ function AdminOnboardingCoach({
           <div
             key={idx}
             className={cn(
-              "max-w-[88%] rounded-md px-3 py-2 text-[12.5px] leading-5",
+              "max-w-[88%] whitespace-pre-wrap rounded-md px-3 py-2 text-[12.5px] leading-5",
               msg.role === "assistant"
                 ? "self-start bg-muted/40 text-foreground"
                 : "self-end bg-primary/15 text-foreground",
             )}
           >
-            {msg.content}
+            {msg.role === "assistant" ? renderCoachContent(msg.content) : msg.content}
           </div>
         ))}
         {sending && (
