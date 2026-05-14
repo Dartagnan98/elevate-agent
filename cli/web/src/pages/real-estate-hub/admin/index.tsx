@@ -2130,11 +2130,15 @@ function AdminSetupLaunch({
   onSetupUpdated,
   forceOnboarding = false,
   onForceOnboardingDone,
+  openCoach,
+  setCoachMention,
 }: {
   setup: AdminSetupSnapshot;
   onSetupUpdated: (setup: AdminSetupSnapshot) => void;
   forceOnboarding?: boolean;
   onForceOnboardingDone?: () => void;
+  openCoach: () => void;
+  setCoachMention: (key: string | null) => void;
 }) {
   const [draft, setDraft] = useState<AdminSetupDraft>(() => adminSetupDraftFromSnapshot(setup));
   const [saving, setSaving] = useState(false);
@@ -2146,15 +2150,18 @@ function AdminSetupLaunch({
   const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "seeding" | "connectors" | "form">(() =>
     forceOnboarding ? "welcome" : isBrandNewAdminSetup(setup) ? "gate" : "form",
   );
-  const [coachOpen, setCoachOpen] = useState(true);
-  const [coachMention, setCoachMention] = useState<string | null>(null);
-  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
 
   useEffect(() => {
     if (forceOnboarding && phase === "form") {
       onForceOnboardingDone?.();
     }
   }, [forceOnboarding, phase, onForceOnboardingDone]);
+
+  useEffect(() => {
+    if (phase === "seeding" || phase === "connectors") {
+      openCoach();
+    }
+  }, [phase, openCoach]);
 
   const savedProvinceCode = (setup.profile?.province || "").trim().toUpperCase();
 
@@ -2274,12 +2281,6 @@ function AdminSetupLaunch({
     }
   }, [onSetupUpdated]);
 
-  const initialCoachQuestion = useMemo(() => {
-    const province = (setup.profile?.province || "").toUpperCase();
-    const provincePrefix = province ? ` Got ${province} loaded.` : "";
-    return `Running your databases now —${provincePrefix} this takes a couple minutes. While that's going: where do your active deals live right now? Spreadsheet, Lofty, kvCORE, BoldTrail, or somewhere else?`;
-  }, [setup.profile?.province]);
-
   const missingLabels = useMemo(() => {
     const labels = new Map(setup.items.map((item) => [item.key, item.label]));
     return setup.missingRequiredKeys.map((key) => labels.get(key) ?? key);
@@ -2322,69 +2323,38 @@ function AdminSetupLaunch({
 
   if (phase === "seeding") {
     return (
-      <>
-        <AdminOnboardingSeeding
-          runSeed={runSeedAndVerify}
-          onMissing={() => setPhase("connectors")}
-          onComplete={() => {
-            playOnboardingChime();
-            setPhase("form");
-          }}
-        />
-        {coachOpen && (
-          <AdminOnboardingCoach
-            initialQuestion={initialCoachQuestion}
-            onClose={() => setCoachOpen(false)}
-            externalMention={coachMention}
-            messages={coachMessages}
-            setMessages={setCoachMessages}
-          />
-        )}
-      </>
+      <AdminOnboardingSeeding
+        runSeed={runSeedAndVerify}
+        onMissing={() => setPhase("connectors")}
+        onComplete={() => {
+          playOnboardingChime();
+          setPhase("form");
+        }}
+      />
     );
   }
 
   if (phase === "connectors") {
     return (
-      <>
-        <AdminOnboardingConnectors
-          setup={setup}
-          onContinue={() => {
-            playOnboardingChime();
-            setPhase("form");
-          }}
-          onChatMention={(key) => {
-            setCoachOpen(true);
-            setCoachMention(key);
-          }}
-          onRefreshSetup={async () => {
-            try {
-              const fresh = await api.getAdminSetup();
-              onSetupUpdated(fresh);
-            } catch {
-              /* swallow — keep showing existing state */
-            }
-          }}
-        />
-        {coachOpen ? (
-          <AdminOnboardingCoach
-            initialQuestion={initialCoachQuestion}
-            onClose={() => setCoachOpen(false)}
-            externalMention={coachMention}
-            messages={coachMessages}
-            setMessages={setCoachMessages}
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setCoachOpen(true)}
-            className="fixed bottom-6 right-6 z-[110] inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-[12.5px] text-foreground shadow-md hover:border-primary"
-          >
-            <MessageCircle className="h-3.5 w-3.5 text-primary" />
-            Ask the coach
-          </button>
-        )}
-      </>
+      <AdminOnboardingConnectors
+        setup={setup}
+        onContinue={() => {
+          playOnboardingChime();
+          setPhase("form");
+        }}
+        onChatMention={(key) => {
+          openCoach();
+          setCoachMention(key);
+        }}
+        onRefreshSetup={async () => {
+          try {
+            const fresh = await api.getAdminSetup();
+            onSetupUpdated(fresh);
+          } catch {
+            /* swallow — keep showing existing state */
+          }
+        }}
+      />
     );
   }
 
@@ -5067,6 +5037,15 @@ export function RealEstateAdminPage() {
   const data = useRealEstateHubData();
   const adminSetup = useAdminSetup();
   const [forceOnboarding, setForceOnboarding] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
+  const [coachMention, setCoachMention] = useState<string | null>(null);
+  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
+  const openCoach = useCallback(() => setCoachOpen(true), []);
+  const initialCoachQuestion = useMemo(() => {
+    const province = (adminSetup.setup?.profile?.province || "").toUpperCase();
+    const provincePrefix = province ? ` Got ${province} loaded.` : "";
+    return `Running your databases now —${provincePrefix} this takes a couple minutes. While that's going: where do your active deals live right now? Spreadsheet, Lofty, kvCORE, BoldTrail, or somewhere else?`;
+  }, [adminSetup.setup?.profile?.province]);
   useHubHeader("Admin", data);
   useEffect(() => {
     if (!adminSetup.setup?.complete) return;
@@ -5154,6 +5133,8 @@ export function RealEstateAdminPage() {
           onSetupUpdated={adminSetup.setSetup}
           forceOnboarding={forceOnboarding}
           onForceOnboardingDone={() => setForceOnboarding(false)}
+          openCoach={openCoach}
+          setCoachMention={setCoachMention}
         />
       )}
       {!adminSetup.loading && adminSetup.setup && !adminSetup.setup.complete && (
@@ -5176,6 +5157,14 @@ export function RealEstateAdminPage() {
           <Sparkles className="h-3.5 w-3.5" />
           Re-run onboarding
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={openCoach}
+        >
+          <MessageCircle className="h-3.5 w-3.5" />
+          Ask the coach
+        </Button>
       </div>
       <AdminKanbanBoard />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
@@ -5192,6 +5181,25 @@ export function RealEstateAdminPage() {
         empty="No admin-specific sessions found yet. CMA, seller updates, listing contract, signing packages, WebForms, and listing/deal cron work will land here."
       />
         </>
+      )}
+      {coachOpen ? (
+        <AdminOnboardingCoach
+          initialQuestion={initialCoachQuestion}
+          onClose={() => setCoachOpen(false)}
+          externalMention={coachMention}
+          messages={coachMessages}
+          setMessages={setCoachMessages}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={openCoach}
+          aria-label="Open onboarding coach"
+          className="fixed bottom-6 right-6 z-[110] inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-[12.5px] text-foreground shadow-md hover:border-primary"
+        >
+          <MessageCircle className="h-3.5 w-3.5 text-primary" />
+          Ask the coach
+        </button>
       )}
     </HubShell>
   );
