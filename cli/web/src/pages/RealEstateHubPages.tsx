@@ -2083,18 +2083,30 @@ function OutreachLanesGrid({
   }, []);
 
   return (
-    <div className="divide-y divide-border">
-      {AGENT_LANES.map((lane) => (
-        <AgentLaneStripRow
-          key={lane.id}
-          lane={lane}
-          job={laneCronJob(lane, cronJobs)}
-          onChanged={onChanged}
-        />
-      ))}
+    <div className="rounded-md border border-border bg-card">
+      <div className="flex flex-col divide-y divide-border">
+        {AGENT_LANES.map((lane) => (
+          <AgentLaneStripRow
+            key={lane.id}
+            lane={lane}
+            job={laneCronJob(lane, cronJobs)}
+            onChanged={onChanged}
+          />
+        ))}
+      </div>
     </div>
   );
 }
+
+const LANE_STATUS_VARIANT: Record<
+  ReturnType<typeof laneStatus>["tone"],
+  "success" | "warning" | "destructive" | "secondary"
+> = {
+  success: "success",
+  warning: "warning",
+  destructive: "destructive",
+  muted: "secondary",
+};
 
 function AgentLaneStripRow({
   lane,
@@ -2151,69 +2163,35 @@ function AgentLaneStripRow({
   };
 
   return (
-    <div className="grid grid-cols-1 items-center gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1.4fr)_auto]">
-      <div className="flex items-center gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-card border border-border text-primary">
-          <Icon className="h-4 w-4" />
-        </span>
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold text-foreground">{lane.name}</span>
-            <span
-              className={cn(
-                "font-mono-ui inline-flex items-center rounded-sm px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em]",
-                status.tone === "success" && "bg-card border border-border text-success",
-                status.tone === "warning" && "bg-card border border-border text-warning",
-                status.tone === "destructive" && "bg-card border border-border text-destructive",
-                status.tone === "muted" && "bg-card text-muted-foreground ring-1 ring-border",
-              )}
-            >
-              {status.label}
-            </span>
-          </div>
-          <p className="mt-0.5 line-clamp-1 text-[0.72rem] text-muted-foreground">{lane.tagline}</p>
+    <div className="flex items-center gap-4 px-4 py-4">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center gap-2">
+          <Icon className="h-3.5 w-3.5 shrink-0 text-primary" />
+          <span className="truncate text-sm font-medium text-foreground">{lane.name}</span>
+          <Badge variant={LANE_STATUS_VARIANT[status.tone]}>{status.label}</Badge>
         </div>
-      </div>
-
-      <div className="font-mono-ui flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.7rem] tabular-nums text-foreground/70">
-        <span>
-          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/80">sched</span>{" "}
-          <span className="text-foreground">{job?.schedule_display || lane.scheduleLabel}</span>
-        </span>
-        <span className="text-foreground/35">·</span>
-        <span>
-          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/80">last</span>{" "}
-          <span className="text-foreground">{job?.last_run_at ? isoTimeAgo(job.last_run_at) : "—"}</span>
-        </span>
-        <span className="text-foreground/35">·</span>
-        <span>
-          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/80">next</span>{" "}
-          <span className="text-foreground">
-            {job?.next_run_at ? isoTimeAgo(job.next_run_at) : job ? "queued" : "—"}
+        <p className="mb-1 truncate text-xs text-muted-foreground">{lane.tagline}</p>
+        <div className="flex flex-col gap-1 text-xs text-muted-foreground lg:flex-row lg:flex-wrap lg:items-center lg:gap-x-4">
+          <span className="font-mono truncate">{job?.schedule_display || lane.scheduleLabel}</span>
+          <span className="flex flex-wrap gap-x-4 gap-y-1">
+            <span>last: {job?.last_run_at ? isoTimeAgo(job.last_run_at) : "—"}</span>
+            <span>next: {job?.next_run_at ? isoTimeAgo(job.next_run_at) : job ? "queued" : "—"}</span>
           </span>
-        </span>
+        </div>
+        {job?.last_error && (
+          <p className="mt-1 text-xs text-destructive">{job.last_error}</p>
+        )}
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
+      <div className="flex shrink-0 items-center gap-1">
         {job ? (
           <>
             <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void trigger()}
-              disabled={busy !== null}
-              className="h-11 px-3 text-xs sm:h-9"
-              aria-label={`Run ${lane.name} now`}
-            >
-              <Zap className="h-3.5 w-3.5" />
-              Run
-            </Button>
-            <Button
-              size="sm"
               variant="ghost"
+              size="icon"
               onClick={() => void toggle()}
               disabled={busy !== null}
-              className="h-11 px-3 text-xs sm:h-9"
+              title={job.state === "paused" || !job.enabled ? "Resume" : "Pause"}
               aria-label={
                 job.state === "paused" || !job.enabled
                   ? `Resume ${lane.name}`
@@ -2221,46 +2199,46 @@ function AgentLaneStripRow({
               }
             >
               {job.state === "paused" || !job.enabled ? (
-                <>
-                  <Play className="h-3.5 w-3.5" />
-                  Resume
-                </>
+                <Play className="h-4 w-4 text-success" />
               ) : (
-                <>
-                  <Pause className="h-3.5 w-3.5" />
-                  Pause
-                </>
+                <Pause className="h-4 w-4 text-warning" />
               )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => void trigger()}
+              disabled={busy !== null}
+              title="Run now"
+              aria-label={`Run ${lane.name} now`}
+            >
+              <Zap className="h-4 w-4" />
             </Button>
             <Link
               to={`/cron?edit=${job.id}`}
               aria-label={`Edit ${lane.name} schedule`}
+              title="Edit"
               className={cn(
-                buttonVariants({ variant: "ghost", size: "sm" }),
-                "h-11 px-3 text-xs text-foreground/70 hover:text-foreground sm:h-9",
+                buttonVariants({ variant: "ghost", size: "icon" }),
+                "text-foreground/70 hover:text-foreground",
               )}
             >
-              <PencilLine className="h-3.5 w-3.5" />
-              Edit
+              <PencilLine className="h-4 w-4" />
             </Link>
           </>
         ) : (
           <Button
-            size="sm"
+            variant="ghost"
+            size="icon"
             onClick={() => void start()}
             disabled={busy !== null}
-            className="h-11 px-3 text-xs sm:h-9"
+            title={`Start ${lane.name}`}
+            aria-label={`Start ${lane.name}`}
           >
-            <Plus className="h-3.5 w-3.5" />
-            {busy === "start" ? "Starting…" : `Start ${lane.name}`}
+            <Plus className="h-4 w-4 text-primary" />
           </Button>
         )}
       </div>
-      {job?.last_error && (
-        <div className="col-span-full rounded-md border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-[0.72rem] leading-5 text-destructive">
-          {job.last_error}
-        </div>
-      )}
     </div>
   );
 }
@@ -3431,8 +3409,8 @@ export function RealEstateLeadsPage() {
                 </CollapsibleSection>
 
                 <CollapsibleSection
-                  title="Outreach lanes"
-                  description="New Outreach, Hot Leads Watcher, Follow-ups, Private Searches."
+                  title="Outreach automations"
+                  description="Scheduled lanes: outreach, hot leads, follow-ups, PCS. Edit any from /cron."
                 >
                   <OutreachLanesGrid cronJobs={data.cronJobs} onChanged={refresh} />
                 </CollapsibleSection>
@@ -3450,9 +3428,9 @@ export function RealEstateLeadsPage() {
                 </CollapsibleSection>
 
                 <CollapsibleSection
-                  title="All scheduled jobs"
+                  title="Other automations"
                   count={followUpJobs.length}
-                  description="Every lead-related cron the agent is running."
+                  description="Other lead-related schedules from /cron, beyond the outreach lanes above."
                 >
                   <TimedTasks
                     jobs={followUpJobs}
