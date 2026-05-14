@@ -2532,14 +2532,14 @@ function AdminCardDetailPanel({
         type="button"
         aria-label="Close detail"
         onClick={onClose}
-        className="absolute inset-0 bg-background/80"
+        className="absolute inset-0 z-0 bg-background/80"
       />
       <aside
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-full sm:w-full sm:max-w-[36rem] sm:rounded-md sm:border sm:border-border"
+        className="relative z-10 flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-full sm:w-full sm:max-w-[36rem] sm:rounded-md sm:border sm:border-border"
       >
         <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
@@ -2922,14 +2922,14 @@ function NewDealDialog({
         type="button"
         aria-label="Close new deal"
         onClick={onClose}
-        className="absolute inset-0 bg-background/80"
+        className="absolute inset-0 z-0 bg-background/80"
       />
       <aside
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-[calc(100vh-3rem)] sm:w-full sm:max-w-[34rem] sm:rounded-md sm:border sm:border-border"
+        className="relative z-10 flex h-full w-full flex-col bg-card sm:h-auto sm:max-h-[calc(100vh-3rem)] sm:w-full sm:max-w-[34rem] sm:rounded-md sm:border sm:border-border"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
