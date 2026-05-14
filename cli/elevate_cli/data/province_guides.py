@@ -60,6 +60,7 @@ _PREFIX_TO_PROVINCE = {
     "qc": "QC",
     "sk": "SK",
     "yk": "YK",
+    "yt": "YK",
 }
 _PROVINCE_ALIASES = {
     **{code.lower(): code for code in PROVINCE_LABELS},
@@ -491,15 +492,23 @@ def import_exp_agent_centre(
             page_count += 1
             provinces.add(province)
 
-    guide_root = base / "transaction-guide-bc"
-    if guide_root.exists() and (not target_set or "BC" in target_set):
-        provinces.add("BC")
+    for guide_root in sorted(base.glob("transaction-guide-*")):
+        if not guide_root.is_dir():
+            continue
+        suffix = guide_root.name[len("transaction-guide-"):].lower()
+        guide_province = _PREFIX_TO_PROVINCE.get(suffix)
+        if not guide_province:
+            continue
+        if target_set and guide_province not in target_set:
+            continue
+        provinces.add(guide_province)
+
         for path in sorted(guide_root.glob("*.md")):
             raw = path.read_text(encoding="utf-8")
             meta, body = _split_frontmatter(raw)
             _upsert_checklist(
                 conn,
-                province="BC",
+                province=guide_province,
                 slug=path.stem,
                 title=meta.get("title") or _title_from_markdown(body, path.stem),
                 source_url=meta.get("url"),
@@ -516,7 +525,7 @@ def import_exp_agent_centre(
                 meta, body = _split_frontmatter(raw)
                 _upsert_reference_page(
                     conn,
-                    province="BC",
+                    province=guide_province,
                     slug=f"best-practices/{path.stem}",
                     page_type="best_practice",
                     title=meta.get("title") or _title_from_markdown(body, path.stem),
@@ -536,7 +545,7 @@ def import_exp_agent_centre(
                         continue
                     _upsert_form(
                         conn,
-                        province="BC",
+                        province=guide_province,
                         code=str(code),
                         form=form,
                         local_image_paths=_form_local_images(inventory.parent, str(code)),
@@ -545,6 +554,7 @@ def import_exp_agent_centre(
                     )
                     form_count += 1
 
+    if not target_set or "BC" in target_set:
         for item in _DEFAULT_CONDITIONAL_DOCS:
             _upsert_conditional_doc(conn, now=now, **item)
             conditional_count += 1
