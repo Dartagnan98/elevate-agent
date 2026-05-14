@@ -1,10 +1,8 @@
 import { lazy, Suspense } from "react";
 import {
-  AlertTriangle,
   Brain,
   CheckCircle2,
   Clock,
-  MessageSquare,
   Network,
 } from "lucide-react";
 import type { AgentHubMemoryNode } from "@/lib/api";
@@ -12,7 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { isoTimeAgo } from "@/lib/utils";
 import {
-  HubMetric,
   HubShell,
   useHubHeader,
   useRealEstateHubData,
@@ -60,7 +57,7 @@ export function RealEstateMemoryPage() {
 
   const pending = memory?.journal.pending ?? 0;
   const failed = memory?.journal.failed ?? 0;
-  const processed = memory?.journal.processed ?? 0;
+  const activeSessionCount = memory?.journal.active_session_count ?? 0;
   const pipelineState =
     failed > 0
       ? { tone: "warn" as const, label: `${failed} failed` }
@@ -126,14 +123,12 @@ export function RealEstateMemoryPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Pipeline</CardTitle>
+            <CardTitle>Recent ingest</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <HubMetric icon={Clock} label="Pending" value={pending} />
-              <HubMetric icon={CheckCircle2} label="Processed" value={processed} />
-              <HubMetric icon={AlertTriangle} label="Failed" value={failed} />
-              <HubMetric icon={MessageSquare} label="Active sessions" value={memory?.journal.active_session_count ?? 0} />
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="text-muted-foreground">Active sessions</span>
+              <span className="font-medium text-foreground tabular-nums">{activeSessionCount}</span>
             </div>
             <div className="rounded-md border border-border bg-card p-3 text-xs leading-5 text-muted-foreground">
               <div className="font-medium text-foreground">
@@ -141,10 +136,10 @@ export function RealEstateMemoryPage() {
               </div>
               <div className="mt-1 truncate">{memory?.db_path ?? "No memory database path yet."}</div>
             </div>
-            {recentSessions.length > 0 && (
+            {recentSessions.length > 0 ? (
               <div className="space-y-1.5">
-                <div className="font-mono-ui px-1 text-[0.68rem] uppercase tracking-wider text-muted-foreground">
-                  Recent sessions
+                <div className="px-1 text-xs text-muted-foreground">
+                  Sessions
                 </div>
                 <div className="space-y-1">
                   {recentSessions.slice(0, 6).map((session) => (
@@ -163,6 +158,10 @@ export function RealEstateMemoryPage() {
                   ))}
                 </div>
               </div>
+            ) : (
+              <p className="px-1 text-xs text-muted-foreground/80">
+                No recent ingest sessions.
+              </p>
             )}
           </CardContent>
         </Card>
