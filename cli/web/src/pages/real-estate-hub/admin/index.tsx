@@ -1098,17 +1098,10 @@ function AdminSetupLaunch({
           <AdminSetupField label="Brokerage" value={draft.brokerageName} onChange={(v) => updateDraft("brokerageName", v)} />
           <AdminSetupField label="Team / PREC" value={draft.teamName} onChange={(v) => updateDraft("teamName", v)} />
           <label className="block min-w-0">
-            <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">Country</span>
-            <select
-              value="CA"
-              disabled
-              className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30 disabled:opacity-80"
-            >
-              <option value="CA">Canada</option>
-            </select>
-          </label>
-          <label className="block min-w-0">
-            <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">Province / territory</span>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="block text-[12px] font-medium text-muted-foreground">Province / territory</span>
+              <span className="font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground/80">CA · Canada</span>
+            </div>
             <select
               value={draft.province.trim().toUpperCase()}
               onChange={(event) => updateDraft("province", event.target.value)}
