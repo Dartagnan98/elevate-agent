@@ -344,7 +344,7 @@ export function OAuthLoginModal({
           {/* ── error ──────────────────────────────────────── */}
           {phase === "error" && (
             <>
-              <div className="border-l-2 border-destructive bg-muted p-3 text-sm text-destructive">
+              <div className="rounded-md border border-border bg-card p-3 text-sm text-destructive">
                 {errorMsg || t.oauth.loginFailed}
               </div>
               <div className="flex justify-end gap-2">

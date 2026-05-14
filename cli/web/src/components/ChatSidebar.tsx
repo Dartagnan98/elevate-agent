@@ -329,7 +329,7 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
       </Card>
 
       {banner && (
-        <Card className="flex items-start gap-2 border-l-2 border-l-destructive bg-card px-3 py-2 text-xs">
+        <Card className="flex items-start gap-2 bg-card px-3 py-2 text-xs">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
 
           <div className="min-w-0 flex-1">

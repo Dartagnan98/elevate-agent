@@ -296,7 +296,7 @@ export function LoginCard({ onAuthChange }: Props) {
           )}
 
           {error && (
-            <p className="rounded-sm border-l-2 border-destructive bg-card px-3 py-2 text-xs font-medium text-destructive">
+            <p className="rounded-sm border border-border bg-card px-3 py-2 text-xs font-medium text-destructive">
               {error}
             </p>
           )}

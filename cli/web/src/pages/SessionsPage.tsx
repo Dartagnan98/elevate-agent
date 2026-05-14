@@ -464,7 +464,7 @@ function LinkedSessionPanel({
   }, [sessionId]);
 
   return (
-    <Card className="border-border border-l-2 border-l-primary">
+    <Card className="border-primary">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -771,7 +771,7 @@ export default function SessionsPage() {
       />
 
       {alerts.length > 0 && (
-        <div className="border border-border border-l-2 border-l-destructive bg-card p-4">
+        <div className="rounded-md border border-border bg-card p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             <div className="flex flex-col gap-2 min-w-0">

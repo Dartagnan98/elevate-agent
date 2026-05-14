@@ -954,7 +954,7 @@ const PlatformTab = forwardRef<HTMLButtonElement, {
       className={cn(
         "inline-flex min-h-[44px] items-center gap-1.5 rounded-sm border px-3 py-2 font-mono-ui text-[0.75rem] uppercase tracking-wider transition focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring",
         active
-          ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+          ? "border-primary bg-muted text-foreground"
           : "border-border bg-card text-muted-foreground hover:border-ring hover:text-foreground",
       )}
     >
@@ -1312,7 +1312,7 @@ export function RealVideoCard({
         className={cn(
           "relative overflow-hidden rounded-md bg-card border transition",
           aspectClass,
-          highlight ? "border-l-2 border-l-primary border-border" : "border-border group-hover:border-ring",
+          highlight ? "border-primary" : "border-border group-hover:border-ring",
         )}
       >
         {thumb ? (

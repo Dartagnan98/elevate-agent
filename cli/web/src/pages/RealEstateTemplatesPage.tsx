@@ -617,7 +617,7 @@ export default function RealEstateTemplatesPage() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-md border border-border border-l-2 border-l-destructive bg-card px-4 py-3 text-sm text-destructive">
+        <div className="flex items-start gap-2 rounded-md border border-border bg-card px-4 py-3 text-sm text-destructive">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{error}</span>
         </div>

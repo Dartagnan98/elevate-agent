@@ -36,9 +36,9 @@ export interface ToolEntry {
 }
 
 const STATUS_TONE: Record<ToolEntry["status"], string> = {
-  running: "border-l-2 border-l-primary border-border bg-card",
+  running: "border-border bg-card",
   done: "border-border bg-card",
-  error: "border-l-2 border-l-destructive border-border bg-card",
+  error: "border-border bg-card",
 };
 
 const BULLET_TONE: Record<ToolEntry["status"], string> = {

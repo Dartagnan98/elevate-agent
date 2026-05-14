@@ -283,10 +283,10 @@ function ProviderColumn({
             key={p.slug}
             type="button"
             onClick={() => onSelect(p.slug)}
-            className={`w-full text-left px-3 py-2 text-xs border-l-2 transition-colors cursor-pointer flex items-start gap-2 ${
+            className={`w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-start gap-2 ${
               active
-                ? "bg-muted border-l-primary text-foreground"
-                : "border-l-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
             }`}
           >
             <div className="flex-1 min-w-0">
@@ -366,7 +366,7 @@ function ModelColumn({
               onDoubleClick={() => onConfirm(m)}
               className={`w-full text-left px-3 py-1.5 text-xs font-mono transition-colors cursor-pointer flex items-center gap-2 ${
                 active
-                  ? "bg-muted text-foreground border-l-2 border-l-primary"
+                  ? "bg-muted text-foreground"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
               }`}
             >
