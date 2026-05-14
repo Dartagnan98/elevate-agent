@@ -772,7 +772,7 @@ function ComposioPanel() {
                 );
               })}
               {customAuthState.error && (
-                <div className="rounded-md border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-destructive">
+                <div className="rounded-md border border-border bg-card px-3 py-2 text-xs text-destructive">
                   {customAuthState.error}
                 </div>
               )}
@@ -1288,7 +1288,7 @@ function CrmIntegrationSettingsPanel() {
                   <span className="text-base font-semibold text-foreground">{selectedPreset.label}</span>
                 </div>
                 {selectedPreset.notice && (
-                  <div className="rounded-md border border-border border-l-2 border-l-warning bg-card px-3 py-2 text-sm leading-6 text-warning">
+                  <div className="rounded-md border border-border bg-card px-3 py-2 text-sm leading-6 text-warning">
                     <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" aria-hidden="true" />
                     {selectedPreset.notice}
                   </div>
@@ -1315,7 +1315,7 @@ function CrmIntegrationSettingsPanel() {
                   </a>
                 </div>
                 {testResult && (
-                  <div className={`rounded-md border px-3 py-2 text-sm ${testResult.success ? "border-border border-l-2 border-l-success bg-card text-success" : "border-border border-l-2 border-l-warning bg-card text-warning"}`} role="status">
+                  <div className={`rounded-md border border-border bg-card px-3 py-2 text-sm ${testResult.success ? "text-success" : "text-warning"}`} role="status">
                     {testResult.message ?? testResult.error ?? "Test finished"}
                   </div>
                 )}
@@ -1387,7 +1387,7 @@ function CrmIntegrationSettingsPanel() {
                   <div>Secrets: <code className="bg-transparent p-0 font-mono">{data?.secretsPath}</code></div>
                 </div>
                 {testResult && (
-                  <div className={`rounded-md border px-3 py-2 text-sm ${testResult.success ? "border-border border-l-2 border-l-success bg-card text-success" : "border-border border-l-2 border-l-warning bg-card text-warning"}`} role="status">
+                  <div className={`rounded-md border border-border bg-card px-3 py-2 text-sm ${testResult.success ? "text-success" : "text-warning"}`} role="status">
                     {testResult.message ?? testResult.error ?? "Test finished"}
                   </div>
                 )}
@@ -1513,19 +1513,17 @@ function PluginsPanel({ config, setConfig }: PluginsPanelProps) {
       </header>
 
       {error && (
-        <div className="rounded-md border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-sm text-destructive">
+        <div className="rounded-md border border-border bg-card px-3 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
 
       {discovered === null ? (
-        <div className="flex items-center justify-center py-8">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
-        </div>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading plugins…</p>
       ) : discovered.length === 0 ? (
-        <div className="rounded-md border border-border/50 px-4 py-6 text-center text-sm text-muted-foreground">
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
           No plugins discovered. Drop a plugin directory under <code className="bg-transparent p-0 font-mono text-xs">~/.elevate/plugins/</code> and click Rescan.
-        </div>
+        </p>
       ) : (
         <ul className="divide-y divide-border/50 border-y border-border/50">
           {discovered.map((plugin) => {
@@ -1536,7 +1534,7 @@ function PluginsPanel({ config, setConfig }: PluginsPanelProps) {
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="truncate text-sm font-semibold text-foreground">{plugin.label}</span>
-                      <Badge variant="outline" className="font-mono text-[0.65rem] uppercase tracking-wide">
+                      <Badge variant="outline" className="text-[0.7rem]">
                         {plugin.source}
                       </Badge>
                       <span className="font-mono text-[0.7rem] text-foreground/60">v{plugin.version}</span>
@@ -1811,9 +1809,7 @@ export default function ConfigPage() {
   /* ---- Loading ---- */
   if (!config || !schema) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      </div>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading config…</p>
     );
   }
 
@@ -2145,9 +2141,7 @@ export default function ConfigPage() {
                   </div>
                   <div className="mt-4 rounded-md border border-border overflow-hidden">
                     {yamlLoading ? (
-                      <div className="flex items-center justify-center py-12">
-                        <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-                      </div>
+                      <p className="px-3 py-3 text-xs text-muted-foreground/80">Loading YAML…</p>
                     ) : (
                       <textarea
                         className="flex min-h-[600px] w-full bg-transparent px-4 py-3 text-sm font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none"
