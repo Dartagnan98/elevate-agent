@@ -793,6 +793,12 @@ export interface AdminSetupSnapshot {
     synced?: boolean;
     bytes?: number;
   };
+  playbook?: {
+    path?: string;
+    bytes?: number;
+    province?: string | null;
+    hasProvinceGuide?: boolean;
+  };
   verificationWarnings?: string[];
 }
 

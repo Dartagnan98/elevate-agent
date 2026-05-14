@@ -27,11 +27,13 @@ from elevate_cli.data.paths import (
 from elevate_cli.data.contacts import (
     add_contact_note,
     classify_contact,
+    close_to_admin,
     find_contacts,
     get_contact,
     park_contact,
     unpark_contact,
     update_contact_stage,
+    update_flags,
     upsert_contact,
 )
 from elevate_cli.data.identities import (
@@ -181,9 +183,11 @@ from elevate_cli.data.province_guides import (
 from elevate_cli.data.admin_setup import (
     admin_setup_memory_summary,
     admin_setup_ready,
+    build_admin_province_playbook,
     complete_admin_setup,
     get_admin_setup,
     require_admin_setup_ready,
+    sync_admin_province_playbook,
     sync_admin_setup_memory,
     sync_admin_setup_runtime,
     update_admin_setup,
@@ -204,8 +208,9 @@ __all__ = [
     "operational_db_path", "data_root", "payloads_root",
     "backups_root", "parity_root",
     # contacts
-    "add_contact_note", "classify_contact", "find_contacts", "get_contact",
-    "park_contact", "unpark_contact", "update_contact_stage", "upsert_contact",
+    "add_contact_note", "classify_contact", "close_to_admin", "find_contacts",
+    "get_contact", "park_contact", "unpark_contact", "update_contact_stage",
+    "update_flags", "upsert_contact",
     # identities
     "add_identity", "list_open_conflicts", "merge_contacts",
     "record_identity_conflict", "resolve_identity",
@@ -269,8 +274,10 @@ __all__ = [
     "list_province_reference_pages", "province_agent_memory", "province_coverage",
     "province_guide_summary", "province_stage_documents",
     # Admin setup readiness gate
-    "admin_setup_memory_summary", "admin_setup_ready", "complete_admin_setup",
-    "get_admin_setup", "require_admin_setup_ready", "sync_admin_setup_memory",
+    "admin_setup_memory_summary", "admin_setup_ready",
+    "build_admin_province_playbook", "complete_admin_setup",
+    "get_admin_setup", "require_admin_setup_ready",
+    "sync_admin_province_playbook", "sync_admin_setup_memory",
     "sync_admin_setup_runtime", "update_admin_setup",
     # paid pack onboarding
     "complete_pack_onboarding", "get_pack_onboarding",

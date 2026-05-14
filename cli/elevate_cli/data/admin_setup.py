@@ -31,6 +31,179 @@ VERIFICATION_REQUIRED_KEYS = {
 }
 BROWSER_WORKFLOW_REQUIRED_KEYS = ("mls", "compliance", "showing")
 ADMIN_ONBOARDING_MEMORY_FILE = "ADMIN_ONBOARDING.md"
+ADMIN_PROVINCE_PLAYBOOK_FILE = "ADMIN_PROVINCE_PLAYBOOK.md"
+
+PROVINCE_TERMINOLOGY: dict[str, dict[str, str]] = {
+    "BC": {
+        "label": "British Columbia",
+        "regulator": "BC Financial Services Authority (BCFSA)",
+        "listingContract": "Multiple Listing Contract (MLC)",
+        "buyerContract": "Exclusive Buyer Agency Agreement (EBA)",
+        "offer": "Contract of Purchase and Sale (CPS)",
+        "disclosure": "Property Disclosure Statement (PDS)",
+        "conditionTerm": "subjects",
+        "conditionRemoval": "Subject Removal / Notice to Remove Subjects",
+        "lawyerRole": "lawyer or notary",
+        "depositRule": "deposit due within 24 hours of subject removal unless the CPS states otherwise",
+        "complianceBoard": "DLC / paragon-style local board portal",
+    },
+    "AB": {
+        "label": "Alberta",
+        "regulator": "Real Estate Council of Alberta (RECA)",
+        "listingContract": "Exclusive Seller Representation Agreement",
+        "buyerContract": "Exclusive Buyer Representation Agreement",
+        "offer": "Residential Real Estate Purchase Contract",
+        "disclosure": "Real Property Report (RPR) + Compliance",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Condition Removal / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit timing per contract — confirm trust deposit with brokerage",
+        "complianceBoard": "Pillar 9 / local board portal",
+    },
+    "SK": {
+        "label": "Saskatchewan",
+        "regulator": "Saskatchewan Real Estate Commission (SREC)",
+        "listingContract": "Exclusive Seller Representation Agreement",
+        "buyerContract": "Exclusive Buyer Representation Agreement",
+        "offer": "Contract of Purchase and Sale",
+        "disclosure": "Property Condition Disclosure Statement (PCDS)",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per contract; confirm brokerage trust schedule",
+        "complianceBoard": "Saskatoon Region / Regina MLS portal",
+    },
+    "MB": {
+        "label": "Manitoba",
+        "regulator": "Manitoba Securities Commission (Real Estate Division)",
+        "listingContract": "Exclusive Listing Contract",
+        "buyerContract": "Buyer Brokerage Agreement",
+        "offer": "Offer to Purchase",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per offer; confirm brokerage trust schedule",
+        "complianceBoard": "WinnipegREALTORS portal",
+    },
+    "ON": {
+        "label": "Ontario",
+        "regulator": "Real Estate Council of Ontario (RECO)",
+        "listingContract": "Listing Agreement (OREA Form 200)",
+        "buyerContract": "Buyer Representation Agreement (OREA Form 300)",
+        "offer": "Agreement of Purchase and Sale (OREA Form 100)",
+        "disclosure": "Seller Property Information Statement (SPIS, optional)",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit due upon acceptance (or per APS); confirm brokerage trust schedule",
+        "complianceBoard": "TRREB / local board MLS",
+    },
+    "QC": {
+        "label": "Québec",
+        "regulator": "Organisme d'autoréglementation du courtage immobilier du Québec (OACIQ)",
+        "listingContract": "Brokerage Contract — Sale (OACIQ form)",
+        "buyerContract": "Brokerage Contract — Purchase (OACIQ form)",
+        "offer": "Promise to Purchase",
+        "disclosure": "Declarations of the Seller (DR / SD)",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Fulfilment of conditions / withdrawal",
+        "lawyerRole": "notary",
+        "depositRule": "deposit per Promise; OACIQ trust account rules apply",
+        "complianceBoard": "Centris MLS portal",
+    },
+    "NB": {
+        "label": "New Brunswick",
+        "regulator": "Financial and Consumer Services Commission (FCNB)",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Agency Agreement",
+        "offer": "Standard Form Agreement of Purchase and Sale",
+        "disclosure": "Property Condition Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "NBREA MLS portal",
+    },
+    "NS": {
+        "label": "Nova Scotia",
+        "regulator": "Nova Scotia Real Estate Commission (NSREC)",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Designated Brokerage Agreement",
+        "offer": "Agreement of Purchase and Sale",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "NSAR MLS portal",
+    },
+    "PE": {
+        "label": "Prince Edward Island",
+        "regulator": "PEI Real Estate Commission",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Brokerage Agreement",
+        "offer": "Agreement of Purchase and Sale",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "PEI Real Estate Association portal",
+    },
+    "NL": {
+        "label": "Newfoundland and Labrador",
+        "regulator": "Newfoundland and Labrador Association of Realtors",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Brokerage Agreement",
+        "offer": "Agreement of Purchase and Sale",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "NLAR MLS portal",
+    },
+    "YT": {
+        "label": "Yukon",
+        "regulator": "Yukon Real Estate Council",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Agency Agreement",
+        "offer": "Agreement of Purchase and Sale",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "Yukon REALTORS Association portal",
+    },
+    "NT": {
+        "label": "Northwest Territories",
+        "regulator": "NWT Real Estate Agents Licensing Board",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Agency Agreement",
+        "offer": "Agreement of Purchase and Sale",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "NWT Association of REALTORS portal",
+    },
+    "NU": {
+        "label": "Nunavut",
+        "regulator": "Government of Nunavut (Consumer Affairs)",
+        "listingContract": "Listing Agreement",
+        "buyerContract": "Buyer Agency Agreement",
+        "offer": "Agreement of Purchase and Sale",
+        "disclosure": "Property Disclosure Statement",
+        "conditionTerm": "conditions",
+        "conditionRemoval": "Notice of Fulfilment / Waiver",
+        "lawyerRole": "lawyer",
+        "depositRule": "deposit per APS; confirm brokerage trust schedule",
+        "complianceBoard": "Local MLS portal",
+    },
+}
 
 _DEFAULT_ITEMS = [
     {
@@ -503,6 +676,241 @@ def _admin_setup_memory_path() -> Path:
     return get_elevate_home() / "memories" / ADMIN_ONBOARDING_MEMORY_FILE
 
 
+def _admin_province_playbook_path() -> Path:
+    return get_elevate_home() / "memories" / ADMIN_PROVINCE_PLAYBOOK_FILE
+
+
+def _atomic_write(path: Path, content: str) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".admin_pb_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return len(content.encode("utf-8"))
+
+
+def build_admin_province_playbook(
+    snapshot: Mapping[str, Any],
+    province_memory: Mapping[str, Any] | None,
+) -> str:
+    """Render the province-specialized Admin operating playbook.
+
+    Combines the realtor's saved profile + provider stack with the chosen
+    province's regulator, contract names, condition vocabulary, and the
+    forms/checklists imported into SQLite from the eXp Agent Centre scrape.
+    This is the prompt the Admin agent loads as its province-aware source
+    of truth.
+    """
+    profile = snapshot.get("profile") if isinstance(snapshot.get("profile"), Mapping) else {}
+    items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+    by_key = {item.get("key"): item for item in items if isinstance(item, Mapping)}
+
+    def provider_for(key: str, fallback: str = "") -> str:
+        item = by_key.get(key) or {}
+        raw = item.get("provider") if isinstance(item, Mapping) else None
+        return _redact_memory_text(raw or fallback) or "not recorded"
+
+    province_code = str(profile.get("province") or "").strip().upper() or "UNKNOWN"
+    province_lookup = PROVINCE_TERMINOLOGY.get(province_code, {})
+    province_label = province_lookup.get("label", province_code)
+    regulator = province_lookup.get("regulator", "the provincial real estate regulator")
+    listing_contract = province_lookup.get("listingContract", "the listing contract")
+    buyer_contract = province_lookup.get("buyerContract", "the buyer representation agreement")
+    offer_doc = province_lookup.get("offer", "the offer document")
+    disclosure_doc = province_lookup.get("disclosure", "the seller's property disclosure")
+    condition_term = province_lookup.get("conditionTerm", "conditions")
+    condition_removal = province_lookup.get("conditionRemoval", "Notice of Fulfilment / Waiver")
+    lawyer_role = province_lookup.get("lawyerRole", "lawyer")
+    deposit_rule = province_lookup.get("depositRule", "deposit timing per the offer document")
+
+    realtor_name = _redact_memory_text(profile.get("realtorLegalName")) or "the realtor"
+    brokerage = _redact_memory_text(profile.get("brokerageName")) or "the brokerage"
+    market = _redact_memory_text(profile.get("market")) or province_label
+    boards = [
+        _redact_memory_text(item)
+        for item in (profile.get("boardMemberships") or [])
+        if _redact_memory_text(item)
+    ]
+
+    lines: list[str] = []
+    lines.append(f"# Admin operating playbook — {province_label}")
+    lines.append("")
+    lines.append(
+        "This file is the Admin agent's province-specialized source of truth. "
+        "It is regenerated whenever onboarding is finished + verified. "
+        "Treat the realtor profile and the provincial vocabulary below as "
+        "authoritative; pull deeper detail from `province_guides` in SQLite "
+        "when a specific form, checklist, or reference page is needed."
+    )
+    lines.append("")
+
+    lines.append(f"## Operator profile")
+    lines.append(f"- Realtor: {realtor_name}")
+    lines.append(f"- Brokerage: {brokerage}")
+    lines.append(f"- Province: {province_label} ({province_code})")
+    lines.append(f"- Primary market: {market}")
+    if boards:
+        lines.append(f"- Board memberships: {', '.join(boards)}")
+    approval_channel = _redact_memory_text(profile.get("approvalChannel")) or provider_for("approval_channel")
+    lines.append(f"- Approval lane: {approval_channel}")
+    managing_broker = _redact_memory_text(profile.get("managingBrokerEmail"))
+    if managing_broker:
+        lines.append(f"- Managing broker / admin email: {managing_broker}")
+    lines.append("")
+
+    lines.append("## Provincial vocabulary (use these terms, not generic English)")
+    lines.append(f"- Regulator: {regulator}")
+    lines.append(f"- Listing contract: {listing_contract}")
+    lines.append(f"- Buyer representation: {buyer_contract}")
+    lines.append(f"- Offer document: {offer_doc}")
+    lines.append(f"- Seller disclosure: {disclosure_doc}")
+    lines.append(f"- Pre-firm clauses are called **{condition_term}** in {province_label}.")
+    lines.append(f"- Removing those clauses uses: **{condition_removal}**.")
+    lines.append(f"- Closing is handled by a **{lawyer_role}**.")
+    lines.append(f"- Deposit rule: {deposit_rule}.")
+    lines.append("")
+
+    lines.append("## Active provider stack")
+    lines.append(f"- Email: {provider_for('email', profile.get('emailProvider') or '')}")
+    lines.append(f"- Calendar: {provider_for('calendar', profile.get('calendarProvider') or '')}")
+    lines.append(f"- Cloud storage: {provider_for('drive', profile.get('driveProvider') or '')}")
+    lines.append(f"- CRM: {provider_for('crm', profile.get('crmProvider') or '')}")
+    lines.append(f"- MLS / board portal: {provider_for('mls', profile.get('mlsProvider') or '')}")
+    lines.append(f"- Forms: {provider_for('forms_provider', profile.get('formsProvider') or '')}")
+    lines.append(f"- Signing: {provider_for('signing_provider', profile.get('signingProvider') or '')}")
+    lines.append(f"- Compliance: {provider_for('compliance_platform', profile.get('complianceProvider') or '')}")
+    lines.append(f"- Showings: {provider_for('showing_platform', profile.get('showingProvider') or '')}")
+    lines.append(f"- Photo processing: {provider_for('photo_processing', profile.get('photoProcessingProvider') or '')}")
+    lines.append(f"- FINTRAC / ID workflow: {provider_for('fintrac_workflow', profile.get('fintracProvider') or '')}")
+    lines.append("")
+
+    if isinstance(province_memory, Mapping):
+        coverage = province_memory.get("coverage") if isinstance(province_memory.get("coverage"), Mapping) else {}
+        lines.append("## Province forms + reference material (imported from eXp Agent Centre)")
+        ref_pages = int(coverage.get("referencePages") or 0)
+        checklists = int(coverage.get("checklists") or 0)
+        forms = int(coverage.get("forms") or 0)
+        lines.append(
+            f"- Coverage: {ref_pages} reference pages, {checklists} checklists, {forms} forms."
+        )
+        lines.append(
+            "- Full corpus lives in SQLite `province_guides`; pull deeper excerpts on demand."
+        )
+        lines.append("")
+        form_rows = province_memory.get("forms") if isinstance(province_memory.get("forms"), list) else []
+        if form_rows:
+            lines.append("### Key forms")
+            for row in form_rows[:20]:
+                if not isinstance(row, Mapping):
+                    continue
+                code = _redact_memory_text(row.get("code")) or "(no code)"
+                name = _redact_memory_text(row.get("name")) or "(unnamed form)"
+                category = _redact_memory_text(row.get("category"))
+                suffix = f" — {category}" if category else ""
+                lines.append(f"- **{code}**: {name}{suffix}")
+            if len(form_rows) > 20:
+                lines.append(f"- (+{len(form_rows) - 20} more forms in SQLite)")
+            lines.append("")
+        checklist_rows = province_memory.get("checklists") if isinstance(province_memory.get("checklists"), list) else []
+        if checklist_rows:
+            lines.append("### Checklists")
+            for row in checklist_rows[:8]:
+                if not isinstance(row, Mapping):
+                    continue
+                title = _redact_memory_text(row.get("title")) or "(untitled)"
+                slug = _redact_memory_text(row.get("slug")) or ""
+                lines.append(f"- {title} (`{slug}`)")
+            if len(checklist_rows) > 8:
+                lines.append(f"- (+{len(checklist_rows) - 8} more checklists in SQLite)")
+            lines.append("")
+        ref_rows = province_memory.get("referencePages") if isinstance(province_memory.get("referencePages"), list) else []
+        if ref_rows:
+            lines.append("### Reference pages")
+            for row in ref_rows[:6]:
+                if not isinstance(row, Mapping):
+                    continue
+                title = _redact_memory_text(row.get("title")) or "(untitled)"
+                page_type = _redact_memory_text(row.get("pageType")) or ""
+                suffix = f" [{page_type}]" if page_type else ""
+                lines.append(f"- {title}{suffix}")
+            lines.append("")
+    else:
+        lines.append("## Province forms + reference material")
+        lines.append(
+            f"- No imported guide for {province_label} yet. Fall back to "
+            "manual references and ask the realtor when a form is unclear."
+        )
+        lines.append("")
+
+    regional_memory = profile.get("regionalMemory") if isinstance(profile.get("regionalMemory"), Mapping) else {}
+    regional_notes = _redact_memory_text(regional_memory.get("notes"))
+    approval_policy = profile.get("approvalPolicy") if isinstance(profile.get("approvalPolicy"), Mapping) else {}
+    approval_notes = _redact_memory_text(approval_policy.get("notes"))
+    lines.append("## Operating notes")
+    lines.append(f"- Regional memory: {regional_notes or 'not recorded'}")
+    lines.append(
+        f"- Approval policy: {approval_notes or 'Ask through the Admin approval lane before any external send, signature, MLS change, or client-visible message.'}"
+    )
+    lines.append("- Folder pattern: " + (_redact_memory_text(profile.get("defaultFolderPattern")) or "Address - Client - Deal Type"))
+    commission = _redact_memory_text(profile.get("commissionNotes"))
+    if commission:
+        lines.append(f"- Commission / service notes: {commission}")
+    lines.append("")
+
+    lines.append("## How to operate")
+    lines.append(
+        f"- Run the {province_label} stage flow exactly as configured in the Admin kanban; "
+        f"never use generic terminology where the provincial vocabulary above applies."
+    )
+    lines.append(
+        f"- When proposing a document, prefer the {province_label} form code listed above; "
+        "if a form is missing from SQLite, surface the gap and pause."
+    )
+    lines.append(
+        "- Treat browser portal credentials as references only — open the saved browser profile "
+        "for the chosen provider rather than asking the realtor for passwords."
+    )
+    lines.append(
+        "- Do not re-ask the realtor for anything captured in this file; if data has gone stale "
+        "or a portal login no longer works, surface that explicitly through the approval lane."
+    )
+    lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def sync_admin_province_playbook(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Render + write the province-specialized Admin playbook file."""
+    from elevate_cli.data.province_guides import province_agent_memory
+
+    snapshot = get_admin_setup(conn)
+    province = str((snapshot.get("profile") or {}).get("province") or "").strip().upper()
+    province_memory: dict[str, Any] | None = None
+    if province:
+        try:
+            province_memory = province_agent_memory(conn, province)
+        except Exception:
+            province_memory = None
+    content = build_admin_province_playbook(snapshot, province_memory)
+    path = _admin_province_playbook_path()
+    bytes_written = _atomic_write(path, content)
+    return {
+        "path": str(path),
+        "bytes": bytes_written,
+        "province": province or None,
+        "hasProvinceGuide": bool(province_memory and province_memory.get("coverage", {}).get("hasTransactionGuide")),
+    }
+
+
 def admin_setup_memory_summary(snapshot: Mapping[str, Any]) -> str:
     """Return the sanitized Admin onboarding memory injected into future agents."""
     profile = snapshot.get("profile") if isinstance(snapshot.get("profile"), Mapping) else {}
@@ -945,8 +1353,19 @@ def sync_admin_setup_runtime(
     if not updates:
         memory = sync_admin_setup_memory(snapshot)
         snapshot["memory"] = {**snapshot.get("memory", {}), **memory, "synced": True}
+        try:
+            playbook = sync_admin_province_playbook(conn)
+            snapshot["playbook"] = playbook
+        except Exception:
+            pass
         return snapshot
-    return update_admin_setup(conn, items=updates, actor=actor)
+    updated = update_admin_setup(conn, items=updates, actor=actor)
+    try:
+        playbook = sync_admin_province_playbook(conn)
+        updated["playbook"] = playbook
+    except Exception:
+        pass
+    return updated
 
 
 def complete_admin_setup(
@@ -973,6 +1392,11 @@ def complete_admin_setup(
     snapshot = get_admin_setup(conn)
     memory = sync_admin_setup_memory(snapshot)
     snapshot["memory"] = {**snapshot.get("memory", {}), **memory, "synced": True}
+    try:
+        playbook = sync_admin_province_playbook(conn)
+        snapshot["playbook"] = playbook
+    except Exception:
+        pass
     return snapshot
 
 

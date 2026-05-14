@@ -1541,7 +1541,17 @@ function AdminSetupLaunch({
       if (verified.missingRequiredKeys.length === 0) {
         const completed = await api.completeAdminSetup();
         onSetupUpdated(completed);
-        setSavedMessage("Admin setup is verified and ready.");
+        const playbookProvince = completed.playbook?.province;
+        const playbookHasGuide = completed.playbook?.hasProvinceGuide;
+        if (playbookProvince) {
+          setSavedMessage(
+            playbookHasGuide
+              ? `Admin is verified. ${playbookProvince} playbook seeded as your source of truth.`
+              : `Admin is verified. ${playbookProvince} playbook seeded (no provincial form pack imported yet — agent will fall back to manual references).`,
+          );
+        } else {
+          setSavedMessage("Admin setup is verified and ready.");
+        }
       } else {
         onSetupUpdated(verified);
         setSavedMessage("Checked live connectors. Finish the missing setup items before Admin can start.");
