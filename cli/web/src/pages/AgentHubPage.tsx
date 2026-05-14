@@ -933,11 +933,13 @@ function HandoffBusCard({
           </div>
         </div>
       <div className="space-y-3">
-        <div className="grid grid-cols-3 gap-2">
-          <MiniMetric label="Queued" value={handoffs.queued} />
-          <MiniMetric label="Running" value={handoffs.running} />
-          <MiniMetric label="Human" value={handoffs.waitingHuman} />
-        </div>
+        {(handoffs.queued > 0 || handoffs.running > 0) && (
+          <div className="grid grid-cols-3 gap-2">
+            <MiniMetric label="Queued" value={handoffs.queued} />
+            <MiniMetric label="Running" value={handoffs.running} />
+            <MiniMetric label="Human" value={handoffs.waitingHuman} />
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
             <span className={cn("inline-block h-1.5 w-1.5 rounded-full", workerHealthy ? "bg-success" : "bg-warning")} />
@@ -970,13 +972,16 @@ function HandoffBusCard({
             <span>Admin cap {worker.limits.adminRuns}</span>
           </div>
         </details>
-        {handoffs.byAgent.length > 0 && (
+        {handoffs.byAgent.some((a) => a.queued > 0 || a.running > 0) && (
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            {handoffs.byAgent.slice(0, 8).map((agent) => (
-              <span key={agent.agentId} className={agent.queued || agent.running ? "text-warning" : ""}>
-                {agent.agentId} {agent.queued + agent.running + agent.waitingHuman}/{agent.total}
-              </span>
-            ))}
+            {handoffs.byAgent
+              .filter((a) => a.queued > 0 || a.running > 0)
+              .slice(0, 8)
+              .map((agent) => (
+                <span key={agent.agentId} className="text-warning">
+                  {agent.agentId} {agent.queued + agent.running}/{agent.total}
+                </span>
+              ))}
           </div>
         )}
         <div className="space-y-0.5">
@@ -993,17 +998,13 @@ function HandoffBusCard({
                   {handoff.status.replace("_", " ")}
                 </span>
               </div>
-              <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span>{handoff.fromAgentId}</span>
-                <span>→</span>
-                <span>{handoff.toAgentId}</span>
-                <span>·</span>
-                <span>{isoTimeAgo(handoff.updatedAt)}</span>
+              <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                {handoff.fromAgentId} → {handoff.toAgentId} · {isoTimeAgo(handoff.updatedAt)}
               </div>
             </div>
           ))}
           {!handoffs.recent.length && (
-            <div className="py-4 text-sm text-muted-foreground">No handoffs yet</div>
+            <div className="py-1 text-xs text-muted-foreground/80">No handoffs yet</div>
           )}
         </div>
       </div>
