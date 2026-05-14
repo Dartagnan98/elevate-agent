@@ -1594,7 +1594,7 @@ function AdminTop25Strip({
 }) {
   const pinned = cards.filter((c) => c.pinnedTop25);
   return (
-    <section className="rounded-md border border-l-2 border-l-warning border-border bg-card p-3">
+    <section className="rounded-md border border-border bg-card p-3">
       <div className="flex items-baseline justify-between gap-2">
         <div className="flex items-center gap-2">
           <Flame className="h-4 w-4 text-warning" />
@@ -1664,7 +1664,7 @@ function AdminCardStageSection({
     <div
       className={cn(
         "rounded-md border bg-card",
-        isCurrent ? "border-border border-l-2 border-l-primary" : "border-border",
+        isCurrent ? "border-primary" : "border-border",
       )}
     >
       <button
@@ -2015,7 +2015,7 @@ function AdminDealContextSection({
       </div>
 
       {!loading && error && (
-        <div className="mt-2 rounded-sm border border-l-2 border-l-warning border-border bg-card px-3 py-2 text-[0.78rem] text-warning">
+        <div className="mt-2 rounded-sm border border-border bg-card px-3 py-2 text-[0.78rem] text-warning">
           {error}
         </div>
       )}
@@ -2613,7 +2613,7 @@ function AdminCardDetailPanel({
         </header>
 
         {showAdvancePrompt && nextStage != null && nextLabel && (
-          <div className="border-b border-border border-l-2 border-l-primary bg-muted px-4 py-2.5">
+          <div className="border-b border-border bg-muted px-4 py-2.5">
             <div className="flex items-center gap-2 text-[0.78rem]">
               <CheckCircle2 className="h-4 w-4 text-primary" />
               <span className="text-foreground">
@@ -2982,7 +2982,7 @@ function NewDealDialog({
                     className={cn(
                       "flex min-h-11 items-center justify-center gap-2 rounded-sm border px-3 py-2 text-[0.86rem] font-medium transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                       active
-                        ? "border-border border-l-2 border-l-primary bg-muted text-foreground"
+                        ? "border-primary bg-muted text-foreground"
                         : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
                     )}
                   >
@@ -3039,7 +3039,7 @@ function NewDealDialog({
               Contact (optional)
             </label>
             {selectedContact ? (
-              <div className="mt-1.5 rounded-sm border border-l-2 border-l-primary border-border bg-card px-3 py-2.5">
+              <div className="mt-1.5 rounded-sm border border-border bg-card px-3 py-2.5">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[0.92rem] font-semibold text-foreground">
@@ -3307,7 +3307,7 @@ function NewDealDialog({
           </div>
 
           {submitError && (
-            <div className="rounded-sm border border-l-2 border-l-destructive border-border bg-card px-3 py-2 text-[0.78rem] text-destructive">
+            <div className="rounded-sm border border-border bg-card px-3 py-2 text-[0.78rem] text-destructive">
               {submitError}
             </div>
           )}
@@ -3603,7 +3603,7 @@ export function RealEstateAdminPage() {
         </div>
       )}
       {adminSetup.error && (
-        <div className="rounded-md border border-l-2 border-l-warning border-border bg-card px-4 py-3 text-[0.84rem] text-warning">
+        <div className="rounded-md border border-border bg-card px-4 py-3 text-[0.84rem] text-warning">
           {adminSetup.error}
         </div>
       )}
