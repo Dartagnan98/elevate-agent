@@ -1336,9 +1336,6 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
       }}
       className="group relative w-full text-left border border-border bg-card px-3 py-2.5 hover:border-foreground/40 focus:outline-none focus-visible:border-primary transition-colors cursor-grab active:cursor-grabbing rounded-sm"
     >
-      {card.pinnedTop25 && (
-        <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-warning" aria-hidden />
-      )}
       <div className="flex items-baseline justify-between gap-2">
         <span className="truncate text-[13.5px] font-medium leading-tight text-foreground">
           {card.client}
@@ -1514,11 +1511,9 @@ function AdminKanbanColumn(props: {
       </div>
       <div className="flex flex-col gap-1.5 p-2">
         {cards.length === 0 ? (
-          <div className="px-3 py-6 text-center">
-            <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground/60">
-              {label.subtitle}
-            </div>
-          </div>
+          <p className="px-3 py-3 text-xs text-muted-foreground/70">
+            {label.subtitle}
+          </p>
         ) : (
           cards.map((card) => (
             <AdminKanbanCard
@@ -2360,7 +2355,7 @@ function AdminDealContextSection({
             <div className="grid gap-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-warning">
+                  <div className="text-[12px] font-semibold text-warning">
                     Pending approvals
                   </div>
                   <div className="mt-1 text-[0.76rem] leading-5 text-muted-foreground">
@@ -2625,7 +2620,7 @@ function AdminCardDetailPanel({
                   if (phaseGate) void handleAdvancePhase(false);
                   else onMoveToNext();
                 }}
-                className="ml-auto inline-flex min-h-11 items-center gap-1 rounded-sm border border-border bg-card px-3 py-2 font-mono-ui text-[0.66rem] uppercase tracking-wider text-primary hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="ml-auto inline-flex min-h-11 items-center gap-1 rounded-sm border border-border bg-card px-3 py-2 text-[0.8rem] font-medium text-primary hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 Move card →
               </button>
