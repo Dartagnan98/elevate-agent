@@ -242,7 +242,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S1",
     stageLabel: "Intake",
     labels: {
-      listing: { title: "Listing Intake", subtitle: "Collect info for MLC" },
+      listing: { title: "Listing Intake", subtitle: "Collect info for listing contract" },
       buyer: { title: "Search Setup", subtitle: "Criteria + MLS" },
     },
   },
@@ -251,7 +251,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S2",
     stageLabel: "Docs",
     labels: {
-      listing: { title: "MLC / Documents", subtitle: "Create docs + signing" },
+      listing: { title: "Listing Contract / Documents", subtitle: "Create docs + signing" },
       buyer: { title: "Tours", subtitle: "Route + notes" },
     },
   },
@@ -337,7 +337,7 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
     2: {
       agents: ["mlc", "signing-package", "skyslope-sync"],
       background: ["gmail-doc-router"],
-      moveSignal: "signed MLC + docs verified",
+      moveSignal: "signed listing contract + docs verified",
       approvalGate: "approve signing/docs",
     },
     3: {
@@ -367,14 +367,14 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
     7: {
       agents: ["subject-removal", "signing-package"],
       background: ["gmail-doc-router"],
-      moveSignal: "subjects removed + deposit verified",
-      approvalGate: "confirm subject removal",
+      moveSignal: "conditions removed + deposit verified",
+      approvalGate: "confirm condition removal",
     },
     8: {
       agents: ["closing-admin"],
       background: ["gmail-doc-router"],
       moveSignal: "closing package complete",
-      approvalGate: "confirm conveyance package",
+      approvalGate: "confirm closing package",
     },
     9: {
       agents: ["skyslope-sync", "marketing"],
@@ -391,7 +391,7 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
     4: { agents: [], background: [], moveSignal: "offer package ready" },
     5: { agents: [], background: [], moveSignal: "accepted-offer checklist complete" },
     6: { agents: [], background: [], moveSignal: "conditions tracked" },
-    7: { agents: [], background: [], moveSignal: "subjects removed" },
+    7: { agents: [], background: [], moveSignal: "conditions removed" },
     8: { agents: [], background: [], moveSignal: "closing checklist complete" },
     9: { agents: [], background: [], moveSignal: "possession follow-up queued" },
   },
@@ -3830,14 +3830,14 @@ export function RealEstateAdminPage() {
         <ActionBoard
           actions={actions}
           title="Admin action board"
-          empty="No admin actions are waiting yet. CMA, seller-update, MLC, signing, and listing/deal sessions will appear here."
+          empty="No admin actions are waiting yet. CMA, seller-update, listing contract, signing, and listing/deal sessions will appear here."
         />
         <TimedTasks jobs={jobs} empty="No admin/document schedules yet." title="Admin automations" />
       </div>
       <RecentSessions
         title="Admin work"
         sessions={sessions}
-        empty="No admin-specific sessions found yet. CMA, seller updates, MLC, signing packages, WebForms, and listing/deal cron work will land here."
+        empty="No admin-specific sessions found yet. CMA, seller updates, listing contract, signing packages, WebForms, and listing/deal cron work will land here."
       />
         </>
       )}
