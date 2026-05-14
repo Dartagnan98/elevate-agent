@@ -59,6 +59,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn, isoTimeAgo } from "@/lib/utils";
 import {
+  playOnboardingChime,
+  playOnboardingClick,
+  playOnboardingSwell,
+} from "@/lib/onboarding-sounds";
+import {
   adminSetupDraftFromSnapshot,
   adminSetupPayloadFromDraft,
   type AdminSetupDraft,
@@ -1155,7 +1160,10 @@ function AdminOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip:
 function AdminOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
   const [exiting, setExiting] = useState(false);
 
-  const handleStart = useCallback(() => setExiting(true), []);
+  const handleStart = useCallback(() => {
+    playOnboardingSwell();
+    setExiting(true);
+  }, []);
 
   const handleAnimationEnd = useCallback(
     (event: React.AnimationEvent<HTMLDivElement>) => {
@@ -1240,8 +1248,10 @@ function AdminOnboardingWizard({
 
   const handleNext = useCallback(async () => {
     if (busy) return;
+    playOnboardingClick();
     await onAdvanceSave();
     if (isLast) {
+      playOnboardingSwell();
       await onFinish();
       return;
     }
@@ -1250,89 +1260,94 @@ function AdminOnboardingWizard({
 
   const handleBack = useCallback(() => {
     if (busy) return;
+    playOnboardingClick();
     setStepIdx((idx) => Math.max(idx - 1, 0));
   }, [busy]);
 
-  return (
-    <section className="border-t border-border pt-6">
-      <div className="mx-auto flex max-w-3xl flex-col">
-        <div className="mb-6 flex items-center gap-1.5">
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Admin onboarding wizard"
+      className="onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto px-6 py-10"
+    >
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex w-full max-w-2xl flex-col">
+        <div className="mb-7 flex items-center gap-1.5">
           {WIZARD_STEPS.map((s, idx) => (
             <span
               key={s.id}
               aria-hidden
               className={cn(
-                "h-1 flex-1 rounded-sm transition-colors",
-                idx < stepIdx
-                  ? "bg-primary"
-                  : idx === stepIdx
-                    ? "bg-primary"
-                    : "bg-border",
+                "h-1 flex-1 rounded-sm transition-colors duration-300",
+                idx <= stepIdx ? "bg-primary" : "bg-border/60",
               )}
             />
           ))}
         </div>
 
-        <div className="font-mono-ui text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-          {step.eyebrow}
-        </div>
-        <h2 className="mt-2 text-[26px] font-medium leading-tight tracking-tight text-foreground">
-          {step.title}
-        </h2>
-        <p className="mt-2 max-w-2xl text-[13.5px] leading-6 text-muted-foreground">
-          {step.subtitle}
-        </p>
-
-        {step.banner && (
-          <div className="mt-5 flex items-start gap-3 rounded-md border border-border bg-muted/30 px-4 py-3">
-            <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <p className="text-[12.5px] leading-5 text-muted-foreground">
-              {step.banner.text}
-            </p>
+        <div key={stepIdx} className="flex flex-col">
+          <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            {step.eyebrow}
           </div>
-        )}
+          <h2 className="onboarding-rise-delay-1 mt-3 text-[34px] font-medium leading-[1.05] tracking-tight text-foreground">
+            {step.title}
+          </h2>
+          <p className="onboarding-rise-delay-2 mt-3 max-w-xl text-[14px] leading-7 text-muted-foreground">
+            {step.subtitle}
+          </p>
 
-        <div className="mt-7 grid gap-4 md:grid-cols-2">
-          {step.fields.map((field) => {
-            if (field.type === "province") {
+          {step.banner && (
+            <div className="onboarding-rise-delay-2 mt-6 flex items-start gap-3 rounded-md border border-border bg-card/60 px-4 py-3 backdrop-blur-sm">
+              <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <p className="text-[12.5px] leading-5 text-muted-foreground">
+                {step.banner.text}
+              </p>
+            </div>
+          )}
+
+          <div className="onboarding-rise-delay-3 mt-8 grid gap-4 md:grid-cols-2">
+            {step.fields.map((field) => {
+              if (field.type === "province") {
+                return (
+                  <OnboardingProvinceField
+                    key={field.key}
+                    draft={draft}
+                    updateDraft={updateDraft}
+                    provinceCoverageByCode={provinceCoverageByCode}
+                    selectedProvinceCoverage={selectedProvinceCoverage}
+                    savedProvinceCode={savedProvinceCode}
+                  />
+                );
+              }
+              if (field.type === "textarea") {
+                return (
+                  <label key={field.key} className="block min-w-0 md:col-span-2">
+                    <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
+                      {field.label}
+                    </span>
+                    <textarea
+                      value={draft[field.key]}
+                      onChange={(event) => updateDraft(field.key, event.target.value)}
+                      placeholder={field.placeholder}
+                      className="min-h-28 w-full rounded-md border border-border bg-card/60 px-3 py-2 text-[13px] leading-5 text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
+                    />
+                  </label>
+                );
+              }
               return (
-                <OnboardingProvinceField
+                <AdminSetupField
                   key={field.key}
-                  draft={draft}
-                  updateDraft={updateDraft}
-                  provinceCoverageByCode={provinceCoverageByCode}
-                  selectedProvinceCoverage={selectedProvinceCoverage}
-                  savedProvinceCode={savedProvinceCode}
+                  label={field.label}
+                  placeholder={field.placeholder}
+                  value={draft[field.key]}
+                  onChange={(value) => updateDraft(field.key, value)}
+                  suggestions={field.suggestions}
+                  listId={field.listId}
                 />
               );
-            }
-            if (field.type === "textarea") {
-              return (
-                <label key={field.key} className="block min-w-0 md:col-span-2">
-                  <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
-                    {field.label}
-                  </span>
-                  <textarea
-                    value={draft[field.key]}
-                    onChange={(event) => updateDraft(field.key, event.target.value)}
-                    placeholder={field.placeholder}
-                    className="min-h-28 w-full rounded-md border border-border bg-background px-3 py-2 text-[13px] leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
-                  />
-                </label>
-              );
-            }
-            return (
-              <AdminSetupField
-                key={field.key}
-                label={field.label}
-                placeholder={field.placeholder}
-                value={draft[field.key]}
-                onChange={(value) => updateDraft(field.key, value)}
-                suggestions={field.suggestions}
-                listId={field.listId}
-              />
-            );
-          })}
+            })}
+          </div>
         </div>
 
         {(error || savedMessage) && (
@@ -1350,7 +1365,7 @@ function AdminOnboardingWizard({
           </div>
         )}
 
-        <div className="mt-8 flex items-center justify-between border-t border-border pt-5">
+        <div className="mt-9 flex items-center justify-between border-t border-border/60 pt-5">
           <button
             type="button"
             onClick={onSkipToForm}
@@ -1362,14 +1377,15 @@ function AdminOnboardingWizard({
             <Button variant="outline" onClick={handleBack} disabled={busy || isFirst}>
               Back
             </Button>
-            <Button onClick={() => void handleNext()} disabled={busy}>
+            <Button onClick={() => void handleNext()} disabled={busy} className="min-w-[140px]">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
               {isLast ? "Run the setup" : "Continue"}
             </Button>
           </div>
         </div>
       </div>
-    </section>
+    </div>,
+    document.body,
   );
 }
 
@@ -2046,9 +2062,13 @@ function OnboardingProvinceField({
 function AdminSetupLaunch({
   setup,
   onSetupUpdated,
+  forceOnboarding = false,
+  onForceOnboardingDone,
 }: {
   setup: AdminSetupSnapshot;
   onSetupUpdated: (setup: AdminSetupSnapshot) => void;
+  forceOnboarding?: boolean;
+  onForceOnboardingDone?: () => void;
 }) {
   const [draft, setDraft] = useState<AdminSetupDraft>(() => adminSetupDraftFromSnapshot(setup));
   const [saving, setSaving] = useState(false);
@@ -2058,11 +2078,17 @@ function AdminSetupLaunch({
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
   const [provinceUnlocked, setProvinceUnlocked] = useState(false);
   const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "seeding" | "connectors" | "form">(() =>
-    isBrandNewAdminSetup(setup) ? "gate" : "form",
+    forceOnboarding ? "welcome" : isBrandNewAdminSetup(setup) ? "gate" : "form",
   );
   const [coachOpen, setCoachOpen] = useState(true);
   const [coachMention, setCoachMention] = useState<string | null>(null);
   const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
+
+  useEffect(() => {
+    if (forceOnboarding && phase === "form") {
+      onForceOnboardingDone?.();
+    }
+  }, [forceOnboarding, phase, onForceOnboardingDone]);
 
   const savedProvinceCode = (setup.profile?.province || "").trim().toUpperCase();
 
@@ -2235,7 +2261,10 @@ function AdminSetupLaunch({
         <AdminOnboardingSeeding
           runSeed={runSeedAndVerify}
           onMissing={() => setPhase("connectors")}
-          onComplete={() => setPhase("form")}
+          onComplete={() => {
+            playOnboardingChime();
+            setPhase("form");
+          }}
         />
         {coachOpen && (
           <AdminOnboardingCoach
@@ -2255,7 +2284,10 @@ function AdminSetupLaunch({
       <>
         <AdminOnboardingConnectors
           setup={setup}
-          onContinue={() => setPhase("form")}
+          onContinue={() => {
+            playOnboardingChime();
+            setPhase("form");
+          }}
           onChatMention={(key) => {
             setCoachOpen(true);
             setCoachMention(key);
@@ -2305,17 +2337,26 @@ function AdminSetupLaunch({
             Admin automations stay paused until the realtor profile, province package, accounts, providers, approval lane, and regional memory are configured.
           </p>
         </div>
-        <div className="min-w-[180px]">
-          <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground">
-            Readiness
+        <div className="flex flex-col items-end gap-3 min-w-[180px]">
+          <div className="w-full">
+            <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground">
+              Readiness
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className="font-mono-ui text-[28px] leading-none font-medium text-foreground tabular-nums">{setup.completionPct}</span>
+              <span className="font-mono-ui text-[13px] text-muted-foreground">%</span>
+            </div>
+            <div className="mt-3 h-px bg-border">
+              <div className="h-full bg-primary" style={{ width: `${setup.completionPct}%` }} />
+            </div>
           </div>
-          <div className="mt-1.5 flex items-baseline gap-2">
-            <span className="font-mono-ui text-[28px] leading-none font-medium text-foreground tabular-nums">{setup.completionPct}</span>
-            <span className="font-mono-ui text-[13px] text-muted-foreground">%</span>
-          </div>
-          <div className="mt-3 h-px bg-border">
-            <div className="h-full bg-primary" style={{ width: `${setup.completionPct}%` }} />
-          </div>
+          <button
+            type="button"
+            onClick={() => setPhase("welcome")}
+            className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Re-run onboarding
+          </button>
         </div>
       </div>
 
@@ -4935,6 +4976,7 @@ function AdminKanbanBoard() {
 export function RealEstateAdminPage() {
   const data = useRealEstateHubData();
   const adminSetup = useAdminSetup();
+  const [forceOnboarding, setForceOnboarding] = useState(false);
   useHubHeader("Admin", data);
   useEffect(() => {
     if (!adminSetup.setup?.complete) return;
@@ -5016,13 +5058,18 @@ export function RealEstateAdminPage() {
           {adminSetup.error}
         </div>
       )}
-      {!adminSetup.loading && adminSetup.setup && !adminSetup.setup.complete && (
-        <AdminSetupLaunch setup={adminSetup.setup} onSetupUpdated={adminSetup.setSetup} />
+      {!adminSetup.loading && adminSetup.setup && (!adminSetup.setup.complete || forceOnboarding) && (
+        <AdminSetupLaunch
+          setup={adminSetup.setup}
+          onSetupUpdated={adminSetup.setSetup}
+          forceOnboarding={forceOnboarding}
+          onForceOnboardingDone={() => setForceOnboarding(false)}
+        />
       )}
       {!adminSetup.loading && adminSetup.setup && !adminSetup.setup.complete && (
         <TimedTasks jobs={jobs} empty="No admin/document schedules are installed yet." title="Admin automations" />
       )}
-      {!adminSetup.loading && adminSetup.setup?.complete && (
+      {!adminSetup.loading && adminSetup.setup?.complete && !forceOnboarding && (
         <>
       <div className="flex flex-wrap items-center gap-2">
         <Link to="/admin/templates" className="inline-flex">
@@ -5031,6 +5078,14 @@ export function RealEstateAdminPage() {
             Templates
           </Button>
         </Link>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setForceOnboarding(true)}
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          Re-run onboarding
+        </Button>
       </div>
       <AdminKanbanBoard />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
