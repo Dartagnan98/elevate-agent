@@ -1984,22 +1984,22 @@ function AutomationsSection({
               )}
               </div>
               {isExpanded && recentRuns.length > 0 && (
-                <div className="ml-3.5 mt-0.5 mb-1 space-y-0 border-l border-[var(--sidebar-border)]/60 pl-2">
+                <div className="ml-3.5 mt-0.5 mb-1 space-y-0.5 border-l border-[var(--sidebar-border)]/60 pl-1.5 lg:mt-0.5 lg:space-y-0">
                   {recentRuns.map((session) => (
                     <button
                       key={session.id}
                       type="button"
                       onClick={() => onOpenSession(session)}
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[0.78rem] leading-5 transition-colors lg:text-[0.8rem]",
-                        "text-[var(--sidebar-text-muted)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
+                        "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                        "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                       )}
                       title={`Run ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
                     >
-                      <span className="min-w-0 flex-1 truncate">
+                      <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
                         {sessionTitle(session)}
                       </span>
-                      <span className="shrink-0 text-[var(--sidebar-text-muted)]/70 tabular-nums">
+                      <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem]">
                         {compactSessionAge(session.last_active ?? 0)}
                       </span>
                     </button>

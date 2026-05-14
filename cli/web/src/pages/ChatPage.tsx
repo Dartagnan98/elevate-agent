@@ -2513,7 +2513,7 @@ export default function ChatPage() {
             }
             pendingAfterResume = hasPendingTurn(merged);
           }
-        } else {
+        } else if (!resumeId && !historyHydratedRef.current) {
           setMessages([]);
         }
         if (!pendingAfterResume) {
