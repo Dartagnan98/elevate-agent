@@ -1520,7 +1520,14 @@ export default function ChatPage() {
     let cancelled = false;
 
     api
-      .getAgentHub()
+      .getAgentHub({
+        lite: true,
+        includeMemoryGraph: false,
+        includeOrchestration: false,
+        includeSkills: false,
+        includeToolsets: false,
+        includeHarness: false,
+      })
       .then((snapshot) => {
         if (cancelled) return;
         const agents = snapshot.agents

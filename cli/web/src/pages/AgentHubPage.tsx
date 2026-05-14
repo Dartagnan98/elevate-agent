@@ -9,6 +9,7 @@ import {
   RefreshCw,
   RotateCw,
   Save,
+  Settings,
   Sparkles,
   Terminal,
   Users,
@@ -24,6 +25,7 @@ import type {
 import { cn, isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -69,8 +71,293 @@ function looksLikeTelegramBotToken(value: string) {
   return /^\d{6,}:[A-Za-z0-9_-]{20,}$/.test(text);
 }
 
+type AgentEditPatch = {
+  enabled?: boolean;
+  prompt?: string;
+  description?: string;
+  skills?: string[];
+  toolsets?: string[];
+  platforms?: string[];
+};
+
+type SkillEntry = { name: string; category: string; description: string };
+type ToolsetEntry = { name: string; label: string; description: string };
+
+function arraysEqual(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((value, index) => value === sortedB[index]);
+}
+
+function MultiSelectGrid({
+  options,
+  selected,
+  onToggle,
+  empty,
+  getLabel,
+  getDescription,
+}: {
+  options: Array<{ name: string }>;
+  selected: string[];
+  onToggle: (name: string) => void;
+  empty: string;
+  getLabel?: (name: string) => string;
+  getDescription?: (name: string) => string;
+}) {
+  if (options.length === 0) {
+    return <div className="text-xs text-muted-foreground">{empty}</div>;
+  }
+  const selectedSet = new Set(selected);
+  return (
+    <div className="grid max-h-44 gap-1 overflow-y-auto pr-1 sm:grid-cols-2">
+      {options.map((option) => {
+        const isOn = selectedSet.has(option.name);
+        const description = getDescription?.(option.name);
+        return (
+          <label
+            key={option.name}
+            className={cn(
+              "flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 text-xs transition-colors",
+              isOn
+                ? "border-primary/40 bg-primary/5 text-foreground"
+                : "border-border/60 bg-background/40 text-muted-foreground hover:text-foreground",
+            )}
+            title={description || option.name}
+          >
+            <input
+              type="checkbox"
+              checked={isOn}
+              onChange={() => onToggle(option.name)}
+              className="mt-0.5 h-3 w-3 cursor-pointer accent-[--color-primary]"
+            />
+            <span className="min-w-0 flex-1 truncate font-medium">
+              {getLabel?.(option.name) ?? option.name}
+            </span>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function AgentConfigEditor({
+  agent,
+  availableSkills,
+  availableToolsets,
+  availablePlatforms,
+  saving,
+  onSave,
+}: {
+  agent: AgentHubAgent;
+  availableSkills: SkillEntry[];
+  availableToolsets: ToolsetEntry[];
+  availablePlatforms: string[];
+  saving: boolean;
+  onSave: (patch: AgentEditPatch) => Promise<void>;
+}) {
+  const [enabled, setEnabled] = useState(agent.enabled);
+  const [description, setDescription] = useState(agent.description ?? "");
+  const [prompt, setPrompt] = useState<string>("");
+  const [promptLoaded, setPromptLoaded] = useState(false);
+  const [skills, setSkills] = useState<string[]>(agent.skills);
+  const [toolsets, setToolsets] = useState<string[]>(agent.toolsets);
+  const [platforms, setPlatforms] = useState<string[]>(agent.platforms);
+
+  useEffect(() => {
+    setEnabled(agent.enabled);
+    setDescription(agent.description ?? "");
+    setSkills(agent.skills);
+    setToolsets(agent.toolsets);
+    setPlatforms(agent.platforms);
+    setPromptLoaded(false);
+    setPrompt("");
+  }, [
+    agent.id,
+    agent.enabled,
+    agent.description,
+    agent.skills,
+    agent.toolsets,
+    agent.platforms,
+  ]);
+
+  const togglePlatform = (name: string) =>
+    setPlatforms((prev) =>
+      prev.includes(name) ? prev.filter((p) => p !== name) : [...prev, name],
+    );
+  const toggleSkill = (name: string) =>
+    setSkills((prev) =>
+      prev.includes(name) ? prev.filter((p) => p !== name) : [...prev, name],
+    );
+  const toggleToolset = (name: string) =>
+    setToolsets((prev) =>
+      prev.includes(name) ? prev.filter((p) => p !== name) : [...prev, name],
+    );
+
+  const dirty =
+    enabled !== agent.enabled ||
+    description !== (agent.description ?? "") ||
+    (promptLoaded && prompt !== "") ||
+    !arraysEqual(skills, agent.skills) ||
+    !arraysEqual(toolsets, agent.toolsets) ||
+    !arraysEqual(platforms, agent.platforms);
+
+  const handleSave = () => {
+    const patch: AgentEditPatch = {};
+    if (enabled !== agent.enabled) patch.enabled = enabled;
+    if (description !== (agent.description ?? "")) patch.description = description;
+    if (promptLoaded && prompt.trim()) patch.prompt = prompt;
+    if (!arraysEqual(skills, agent.skills)) patch.skills = skills;
+    if (!arraysEqual(toolsets, agent.toolsets)) patch.toolsets = toolsets;
+    if (!arraysEqual(platforms, agent.platforms)) patch.platforms = platforms;
+    if (Object.keys(patch).length === 0) return;
+    void onSave(patch);
+  };
+
+  const skillOptions = useMemo(() => availableSkills.map((s) => ({ name: s.name })), [availableSkills]);
+  const toolsetOptions = useMemo(
+    () => availableToolsets.map((t) => ({ name: t.name })),
+    [availableToolsets],
+  );
+  const platformOptions = useMemo(
+    () => availablePlatforms.map((name) => ({ name })),
+    [availablePlatforms],
+  );
+
+  const skillDescription = (name: string) =>
+    availableSkills.find((s) => s.name === name)?.description ?? "";
+  const toolsetLabel = (name: string) =>
+    availableToolsets.find((t) => t.name === name)?.label ?? name;
+  const toolsetDescription = (name: string) =>
+    availableToolsets.find((t) => t.name === name)?.description ?? "";
+
+  return (
+    <details className="group/config rounded-md border border-border/60 bg-background/40">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <span className="flex items-center gap-2">
+          <Settings className="h-3.5 w-3.5" />
+          <span>Configure</span>
+        </span>
+        <span className="text-xs text-muted-foreground">
+          {agent.skills.length} skills · {agent.toolsets.length} tools
+        </span>
+      </summary>
+      <div className="grid gap-3 px-2.5 pb-3 pt-2">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col">
+            <span className="text-xs font-medium text-foreground">Enabled</span>
+            <span className="text-xs text-muted-foreground">
+              Disabled agents won't take work or handoffs.
+            </span>
+          </div>
+          <Switch checked={enabled} onCheckedChange={setEnabled} />
+        </div>
+
+        <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+          <span>Description</span>
+          <Input
+            value={description}
+            placeholder="One-line role description"
+            onChange={(event) => setDescription(event.target.value)}
+          />
+        </label>
+
+        <div className="grid gap-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">System prompt / rules</span>
+            <span className="text-xs text-muted-foreground">
+              {agent.has_prompt ? "Custom prompt set" : "Using default"}
+            </span>
+          </div>
+          {promptLoaded ? (
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              rows={5}
+              className="w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-xs leading-5 text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70"
+              placeholder="Define this agent's responsibilities, voice, and handoff rules…"
+            />
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setPromptLoaded(true);
+                setPrompt("");
+              }}
+            >
+              Edit prompt
+            </Button>
+          )}
+          {promptLoaded && (
+            <span className="text-xs text-muted-foreground">
+              Leave empty to keep the existing prompt. Anything typed here replaces it.
+            </span>
+          )}
+        </div>
+
+        <div className="grid gap-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Platforms ({platforms.length})
+          </span>
+          <MultiSelectGrid
+            options={platformOptions}
+            selected={platforms}
+            onToggle={togglePlatform}
+            empty="No platforms available"
+          />
+        </div>
+
+        <div className="grid gap-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Skills ({skills.length})
+          </span>
+          <MultiSelectGrid
+            options={skillOptions}
+            selected={skills}
+            onToggle={toggleSkill}
+            empty="No skills installed"
+            getDescription={skillDescription}
+          />
+        </div>
+
+        <div className="grid gap-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Toolsets ({toolsets.length})
+          </span>
+          <MultiSelectGrid
+            options={toolsetOptions}
+            selected={toolsets}
+            onToggle={toggleToolset}
+            empty="No toolsets registered"
+            getLabel={toolsetLabel}
+            getDescription={toolsetDescription}
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <Button size="sm" onClick={handleSave} disabled={!dirty || saving}>
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5" />
+            )}
+            Save changes
+          </Button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function AgentCard({
   agent,
+  availableSkills,
+  availableToolsets,
+  availablePlatforms,
+  savingConfig,
+  onConfigSave,
   telegramBotTokenPlaceholder,
   telegramBotTokenValue,
   telegramLanePlaceholder,
@@ -81,6 +368,11 @@ function AgentCard({
   savingTelegram,
 }: {
   agent: AgentHubAgent;
+  availableSkills: SkillEntry[];
+  availableToolsets: ToolsetEntry[];
+  availablePlatforms: string[];
+  savingConfig: boolean;
+  onConfigSave: (patch: AgentEditPatch) => Promise<void>;
   telegramBotTokenPlaceholder?: string;
   telegramBotTokenValue?: string;
   telegramLanePlaceholder?: string;
@@ -140,6 +432,14 @@ function AgentCard({
         {agent.skills.length > 0 && (
           <ChipRow icon={Sparkles} items={agent.skills} empty="No skills" />
         )}
+        <AgentConfigEditor
+          agent={agent}
+          availableSkills={availableSkills}
+          availableToolsets={availableToolsets}
+          availablePlatforms={availablePlatforms}
+          saving={savingConfig}
+          onSave={onConfigSave}
+        />
         {onTelegramLaneChange && (
           <details className="group/telegram rounded-md border border-border/60 bg-background/40">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
@@ -709,6 +1009,7 @@ export default function AgentHubPage() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [savingTelegram, setSavingTelegram] = useState(false);
+  const [savingAgentId, setSavingAgentId] = useState<string | null>(null);
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramHome, setTelegramHome] = useState("");
   const [telegramLanes, setTelegramLanes] = useState<Record<string, string>>({});
@@ -792,6 +1093,23 @@ export default function AgentHubPage() {
   );
   const activeAgents = snapshot?.agents.filter((agent) => agent.enabled) ?? [];
   const liveSessions = snapshot?.sessions.recent.filter((session) => session.is_active) ?? [];
+  const availableSkills = useMemo<SkillEntry[]>(
+    () => snapshot?.skills.available ?? [],
+    [snapshot?.skills.available],
+  );
+  const availableToolsets = useMemo<ToolsetEntry[]>(
+    () =>
+      (snapshot?.toolsets.known ?? []).map((toolset) => ({
+        name: toolset.name,
+        label: toolset.label,
+        description: toolset.description,
+      })),
+    [snapshot?.toolsets.known],
+  );
+  const availablePlatforms = useMemo<string[]>(
+    () => snapshot?.platforms.map((platform) => platform.name) ?? [],
+    [snapshot?.platforms],
+  );
   const telegramPlatform = snapshot?.platforms.find(
     (platform) => platform.name.toLowerCase() === "telegram",
   );
@@ -923,6 +1241,22 @@ export default function AgentHubPage() {
     }
   };
 
+  const saveAgentConfig = useCallback(
+    async (agentId: string, patch: AgentEditPatch) => {
+      setSavingAgentId(agentId);
+      try {
+        await api.updateAgent(agentId, patch);
+        await load();
+        showToast("Agent saved. Restart gateway to apply changes.", "success");
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : "Agent save failed", "error");
+      } finally {
+        setSavingAgentId(null);
+      }
+    },
+    [load, showToast],
+  );
+
   if (loading && !snapshot) {
     return (
       <div className="flex items-center justify-center py-24">
@@ -1033,6 +1367,11 @@ export default function AgentHubPage() {
                     <AgentCard
                       key={agent.id}
                       agent={agent}
+                      availableSkills={availableSkills}
+                      availableToolsets={availableToolsets}
+                      availablePlatforms={availablePlatforms}
+                      savingConfig={savingAgentId === agent.id}
+                      onConfigSave={(patch) => saveAgentConfig(agent.id, patch)}
                       telegramBotTokenPlaceholder={
                         telegramField
                           ? envPlaceholder(envVars, telegramField.tokenKey, `${agent.name} bot token`)

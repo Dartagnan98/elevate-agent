@@ -1613,6 +1613,7 @@ export interface AgentHubSnapshot {
     enabled: number;
     disabled: number;
     categories: Record<string, number>;
+    available?: Array<{ name: string; category: string; description: string }>;
     error: string;
   };
   toolsets: {

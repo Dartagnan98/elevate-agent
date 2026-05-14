@@ -63,6 +63,17 @@ def create_agent_hub_router(
         actor: str = "human:web"
 
 
+    class AgentConfigPatch(BaseModel):
+        enabled: Optional[bool] = None
+        role: Optional[str] = None
+        description: Optional[str] = None
+        prompt: Optional[str] = None
+        skills: Optional[list[str]] = None
+        toolsets: Optional[list[str]] = None
+        platforms: Optional[list[str]] = None
+        session_sources: Optional[list[str]] = None
+
+
     @router.get("/api/agent-hub")
     async def get_agent_hub(
         lite: bool = False,
@@ -90,6 +101,25 @@ def create_agent_hub_router(
         except Exception as exc:
             _log.exception("GET /api/agent-hub failed")
             raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")
+
+
+    @router.patch("/api/agent-hub/agents/{agent_id}")
+    async def patch_agent_hub_agent(agent_id: str, body: AgentConfigPatch):
+        """Update an Agent Hub agent's config (skills, toolsets, prompt, enabled, etc)."""
+        patch = body.model_dump(exclude_unset=True, exclude_none=False)
+        if not patch:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        try:
+            from elevate_cli.agent_hub import update_agent_config
+
+            return update_agent_config(agent_id, patch)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("PATCH /api/agent-hub/agents/%s failed", agent_id)
+            raise HTTPException(status_code=500, detail=f"Agent update failed: {exc}")
 
 
     @router.get("/api/agent-handoffs")

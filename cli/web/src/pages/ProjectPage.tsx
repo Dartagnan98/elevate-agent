@@ -74,7 +74,15 @@ export default function ProjectPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextStatus, nextHub] = await Promise.all([api.getStatus(), api.getAgentHub()]);
+      const [nextStatus, nextHub] = await Promise.all([
+        api.getStatus(),
+        api.getAgentHub({
+          includeMemoryGraph: false,
+          includeSessionTotal: false,
+          includeOrchestration: false,
+          includeHarness: false,
+        }),
+      ]);
       setStatus(nextStatus);
       setHub(nextHub);
     } catch (error) {

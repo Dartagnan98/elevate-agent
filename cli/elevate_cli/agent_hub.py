@@ -161,6 +161,88 @@ def _model_summary(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_AGENT_EDITABLE_FIELDS: tuple[str, ...] = (
+    "enabled",
+    "role",
+    "description",
+    "prompt",
+    "skills",
+    "toolsets",
+    "platforms",
+    "session_sources",
+)
+
+
+def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply an in-place patch to a single agent in the saved config.
+
+    Raises LookupError if the agent_id is not present and not in defaults.
+    Returns the merged agent dict (post-write).
+    """
+    from elevate_cli.config import save_config
+
+    target_id = _slug(str(agent_id or ""))
+    if not target_id:
+        raise ValueError("agent id is required")
+
+    config = load_config()
+    hub_cfg = config.get("agent_hub")
+    if not isinstance(hub_cfg, dict):
+        hub_cfg = {}
+        config["agent_hub"] = hub_cfg
+
+    raw_agents = hub_cfg.get("agents")
+    if not isinstance(raw_agents, list):
+        raw_agents = []
+
+    existing_ids = {
+        _slug(str(item.get("id") or item.get("slug") or item.get("name") or ""))
+        for item in raw_agents
+        if isinstance(item, dict)
+    }
+    if target_id not in existing_ids:
+        default = next(
+            (
+                copy.deepcopy(agent)
+                for agent in DEFAULT_AGENT_DEFS
+                if _slug(str(agent.get("id") or "")) == target_id
+            ),
+            None,
+        )
+        if default is None:
+            raise LookupError(f"Agent '{agent_id}' not found")
+        raw_agents.append(default)
+
+    updated: dict[str, Any] | None = None
+    for index, raw in enumerate(raw_agents):
+        if not isinstance(raw, dict):
+            continue
+        raw_id = _slug(str(raw.get("id") or raw.get("slug") or raw.get("name") or ""))
+        if raw_id != target_id:
+            continue
+        raw.setdefault("id", target_id)
+        for field in _AGENT_EDITABLE_FIELDS:
+            if field not in patch:
+                continue
+            value = patch[field]
+            if field == "enabled":
+                raw[field] = bool(value)
+            elif field in {"role", "description", "prompt"}:
+                raw[field] = str(value or "").strip()
+            else:
+                raw[field] = sorted(
+                    {str(item).strip() for item in _as_list(value) if str(item).strip()}
+                )
+        raw_agents[index] = raw
+        updated = raw
+        break
+
+    hub_cfg["agents"] = raw_agents
+    config["agent_hub"] = hub_cfg
+    save_config(config)
+    return updated or {}
+
+
 def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
     hub_cfg = config.get("agent_hub")
     if not isinstance(hub_cfg, dict):
@@ -460,20 +542,40 @@ def _skills_summary(config: dict[str, Any]) -> dict[str, Any]:
         disabled = get_disabled_skills(config)
         skills = _find_all_skills(skip_disabled=True)
     except Exception as exc:
-        return {"total": 0, "enabled": 0, "disabled": 0, "categories": {}, "error": str(exc)}
+        return {
+            "total": 0,
+            "enabled": 0,
+            "disabled": 0,
+            "categories": {},
+            "available": [],
+            "error": str(exc),
+        }
 
     categories: dict[str, int] = {}
     enabled = 0
+    available: list[dict[str, str]] = []
     for skill in skills:
-        if skill.get("name") not in disabled:
+        name = str(skill.get("name") or "").strip()
+        if not name:
+            continue
+        if name not in disabled:
             enabled += 1
         category = str(skill.get("category") or "general")
         categories[category] = categories.get(category, 0) + 1
+        available.append(
+            {
+                "name": name,
+                "category": category,
+                "description": str(skill.get("description") or "").strip(),
+            }
+        )
+    available.sort(key=lambda entry: (entry["category"], entry["name"]))
     return {
         "total": len(skills),
         "enabled": enabled,
         "disabled": len(skills) - enabled,
         "categories": dict(sorted(categories.items())),
+        "available": available,
         "error": "",
     }
 
@@ -1105,7 +1207,7 @@ def build_agent_hub_snapshot(
     skills = (
         _skills_summary(config)
         if include_skills
-        else {"total": 0, "enabled": 0, "disabled": 0, "categories": {}, "error": ""}
+        else {"total": 0, "enabled": 0, "disabled": 0, "categories": {}, "available": [], "error": ""}
     )
     toolsets = (
         _toolsets_summary(config)

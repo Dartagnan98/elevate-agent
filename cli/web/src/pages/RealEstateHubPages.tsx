@@ -2492,7 +2492,6 @@ function OutreachLanesGrid({
         );
         if (!cancelled) {
           window.localStorage.setItem(FLAG, "1");
-          await onChanged();
         }
       } catch {
         // Best-effort install — if the endpoint is unavailable, the

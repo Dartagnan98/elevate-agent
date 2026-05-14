@@ -578,6 +578,7 @@ export const api = {
     options?: {
       lite?: boolean;
       includeMemoryGraph?: boolean;
+      includeSessionTotal?: boolean;
       includeOrchestration?: boolean;
       includeSkills?: boolean;
       includeToolsets?: boolean;
@@ -588,6 +589,9 @@ export const api = {
     if (options?.lite) qs.set("lite", "true");
     if (typeof options?.includeMemoryGraph === "boolean") {
       qs.set("include_memory_graph", String(options.includeMemoryGraph));
+    }
+    if (typeof options?.includeSessionTotal === "boolean") {
+      qs.set("include_session_total", String(options.includeSessionTotal));
     }
     if (typeof options?.includeOrchestration === "boolean") {
       qs.set("include_orchestration", String(options.includeOrchestration));
@@ -604,6 +608,24 @@ export const api = {
     const suffix = qs.toString();
     return fetchJSON<AgentHubSnapshot>(`/api/agent-hub${suffix ? `?${suffix}` : ""}`);
   },
+  updateAgent: (
+    agentId: string,
+    patch: {
+      enabled?: boolean;
+      role?: string;
+      description?: string;
+      prompt?: string;
+      skills?: string[];
+      toolsets?: string[];
+      platforms?: string[];
+      session_sources?: string[];
+    },
+  ) =>
+    fetchJSON<Record<string, unknown>>(`/api/agent-hub/agents/${encodeURIComponent(agentId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
   getAgentHandoffs: (
     params: {
       toAgentId?: string;

@@ -85,18 +85,18 @@ import { Toast } from "@/components/Toast";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
-import ConfigPage from "@/pages/ConfigPage";
-import DocsPage from "@/pages/DocsPage";
-import EnvPage from "@/pages/EnvPage";
-import SessionsPage from "@/pages/SessionsPage";
-import LogsPage from "@/pages/LogsPage";
-import AnalyticsPage from "@/pages/AnalyticsPage";
-import CronPage from "@/pages/CronPage";
-import SkillsPage from "@/pages/SkillsPage";
-import ChatPage from "@/pages/ChatPage";
-import AgentHubPage from "@/pages/AgentHubPage";
-import DesktopSetupPage from "@/pages/DesktopSetupPage";
-import ProjectPage from "@/pages/ProjectPage";
+const ConfigPage = lazy(() => import("@/pages/ConfigPage"));
+const DocsPage = lazy(() => import("@/pages/DocsPage"));
+const EnvPage = lazy(() => import("@/pages/EnvPage"));
+const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
+const LogsPage = lazy(() => import("@/pages/LogsPage"));
+const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
+const CronPage = lazy(() => import("@/pages/CronPage"));
+const SkillsPage = lazy(() => import("@/pages/SkillsPage"));
+const ChatPage = lazy(() => import("@/pages/ChatPage"));
+const AgentHubPage = lazy(() => import("@/pages/AgentHubPage"));
+const DesktopSetupPage = lazy(() => import("@/pages/DesktopSetupPage"));
+const ProjectPage = lazy(() => import("@/pages/ProjectPage"));
 const RealEstateAdminPage = lazy(() =>
   import("@/pages/real-estate-hub/admin").then((m) => ({ default: m.RealEstateAdminPage })),
 );
@@ -877,7 +877,7 @@ function DesktopSidebar({
 
   useEffect(() => {
     if (!readyToLoad) return;
-    loadSessions();
+    const initialLoad = window.setTimeout(loadSessions, 120);
     if (typeof document === "undefined") return;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
@@ -892,6 +892,7 @@ function DesktopSidebar({
     start();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      window.clearTimeout(initialLoad);
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
@@ -910,10 +911,11 @@ function DesktopSidebar({
           /* sidebar can render without job names */
         });
     };
-    loadJobs();
+    const initialLoad = window.setTimeout(loadJobs, 500);
     const id = window.setInterval(loadJobs, 30000);
     return () => {
       cancelled = true;
+      window.clearTimeout(initialLoad);
       window.clearInterval(id);
     };
   }, [readyToLoad]);
