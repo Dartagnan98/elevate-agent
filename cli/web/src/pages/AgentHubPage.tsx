@@ -613,11 +613,11 @@ function AgentCard({
 
 function MiniMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="py-1">
-      <div className="text-xs text-muted-foreground">
-        {label}
+    <div className="min-w-0 py-1">
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className="truncate text-sm font-medium" title={String(value)}>
+        {value}
       </div>
-      <div className="text-sm font-medium">{value}</div>
     </div>
   );
 }
