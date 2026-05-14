@@ -263,6 +263,20 @@ function createMenu() {
       ],
     },
     {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "pasteAndMatchStyle" },
+        { role: "delete" },
+        { role: "selectAll" },
+      ],
+    },
+    {
       label: "Navigate",
       submenu: [
         { label: "Chat", accelerator: "CmdOrCtrl+1", click: () => loadAppPath("/chat") },
