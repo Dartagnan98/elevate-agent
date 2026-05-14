@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronUp, LogOut, Settings, User } from "lucide-react";
+import { ChevronUp, LogOut, Settings, Sparkles, User } from "lucide-react";
 import { api } from "@/lib/api";
 import type { LicenseStatusResponse } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
@@ -85,6 +85,18 @@ export function SidebarUserPill() {
             >
               <Settings className="h-4 w-4 text-[var(--sidebar-icon)]" />
               Settings
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { navigate("/agent-onboarding?run=1"); setOpen(false); }}
+              className={cn(
+                "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.86rem]",
+                "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)]",
+              )}
+            >
+              <Sparkles className="h-4 w-4 text-[var(--sidebar-icon)]" />
+              Run onboarding
             </button>
 
             <button

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -16,6 +17,10 @@ import type {
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  AgentOnboardingWelcome,
+  AgentOnboardingWizard,
+} from "./wizard";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -23,7 +28,7 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-type AgentSetupDraft = {
+export type AgentSetupDraft = {
   primaryProvider: string;
   primaryModel: string;
   primaryApiKey: string;
@@ -38,23 +43,40 @@ type AgentSetupDraft = {
   memorySupabaseKey: string;
   composioApiKey: string;
   composioWorkspace: string;
+  cliEnabled: boolean;
   telegramBotToken: string;
   telegramChatId: string;
+  imessageEnabled: boolean;
+  imessageHandle: string;
+  discordBotToken: string;
+  discordChannelId: string;
+  whatsappProvider: string;
+  whatsappToken: string;
+  whatsappPhoneId: string;
   slackWebhookUrl: string;
   slackChannel: string;
+  outboundImessageEnabled: boolean;
+  outboundImessageSenderHandle: string;
   subagentsEnabled: boolean;
   subagentsPack: string;
 };
 
-function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft {
+export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft {
   const byKey = new Map(snapshot.items.map((it) => [it.key, it]));
   const primaryVal = (byKey.get("model_primary")?.value ?? {}) as Record<string, unknown>;
   const embeddingVal = (byKey.get("model_embedding")?.value ?? {}) as Record<string, unknown>;
   const imageVal = (byKey.get("model_image")?.value ?? {}) as Record<string, unknown>;
   const memoryVal = (byKey.get("memory_store")?.value ?? {}) as Record<string, unknown>;
   const composioVal = (byKey.get("composio_workspace")?.value ?? {}) as Record<string, unknown>;
+  const cliItem = byKey.get("operator_channel_cli");
   const tgVal = (byKey.get("operator_channel_telegram")?.value ?? {}) as Record<string, unknown>;
+  const imessageItem = byKey.get("operator_channel_imessage");
+  const imessageVal = (imessageItem?.value ?? {}) as Record<string, unknown>;
+  const discordVal = (byKey.get("operator_channel_discord")?.value ?? {}) as Record<string, unknown>;
+  const whatsappVal = (byKey.get("operator_channel_whatsapp")?.value ?? {}) as Record<string, unknown>;
   const slackVal = (byKey.get("operator_channel_slack")?.value ?? {}) as Record<string, unknown>;
+  const outImessageItem = byKey.get("outbound_imessage");
+  const outImessageVal = (outImessageItem?.value ?? {}) as Record<string, unknown>;
   const subagentsItem = byKey.get("subagents_pack");
   const subagentsVal = (subagentsItem?.value ?? {}) as Record<string, unknown>;
   return {
@@ -72,16 +94,26 @@ function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft {
     memorySupabaseKey: String(memoryVal.supabaseKey ?? ""),
     composioApiKey: String(composioVal.apiKey ?? ""),
     composioWorkspace: String(composioVal.workspace ?? ""),
+    cliEnabled: cliItem ? cliItem.status === "configured" : true,
     telegramBotToken: String(tgVal.botToken ?? ""),
     telegramChatId: String(tgVal.chatId ?? ""),
+    imessageEnabled: imessageItem ? imessageItem.status === "configured" : false,
+    imessageHandle: String(imessageVal.handle ?? ""),
+    discordBotToken: String(discordVal.botToken ?? ""),
+    discordChannelId: String(discordVal.channelId ?? ""),
+    whatsappProvider: String(whatsappVal.provider ?? ""),
+    whatsappToken: String(whatsappVal.token ?? ""),
+    whatsappPhoneId: String(whatsappVal.phoneId ?? ""),
     slackWebhookUrl: String(slackVal.webhookUrl ?? ""),
     slackChannel: String(slackVal.channel ?? ""),
+    outboundImessageEnabled: outImessageItem ? outImessageItem.status === "configured" : false,
+    outboundImessageSenderHandle: String(outImessageVal.senderHandle ?? ""),
     subagentsEnabled: subagentsItem ? subagentsItem.status === "configured" : false,
     subagentsPack: String(subagentsVal.pack ?? "cortextos_default"),
   };
 }
 
-function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
+export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
   const primaryReady = Boolean(
     draft.primaryProvider.trim() && draft.primaryApiKey.trim() && draft.primaryModel.trim(),
   );
@@ -100,7 +132,13 @@ function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
   })();
   const composioReady = Boolean(draft.composioApiKey.trim());
   const telegramReady = Boolean(draft.telegramBotToken.trim() && draft.telegramChatId.trim());
+  const imessageReady = draft.imessageEnabled;
+  const discordReady = Boolean(draft.discordBotToken.trim() && draft.discordChannelId.trim());
+  const whatsappReady = Boolean(
+    draft.whatsappProvider.trim() && draft.whatsappToken.trim(),
+  );
   const slackReady = Boolean(draft.slackWebhookUrl.trim());
+  const outImessageReady = draft.outboundImessageEnabled;
 
   return [
     {
@@ -149,6 +187,12 @@ function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
       },
     },
     {
+      key: "operator_channel_cli",
+      status: (draft.cliEnabled ? "configured" : "skipped") as AdminSetupItemStatus,
+      provider: draft.cliEnabled ? "elevate-cli" : null,
+      value: { enabled: draft.cliEnabled },
+    },
+    {
       key: "operator_channel_telegram",
       status: (telegramReady ? "configured" : "missing") as AdminSetupItemStatus,
       provider: telegramReady ? "telegram" : null,
@@ -158,12 +202,49 @@ function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
       },
     },
     {
+      key: "operator_channel_imessage",
+      status: (imessageReady ? "configured" : "missing") as AdminSetupItemStatus,
+      provider: imessageReady ? "apple-messages" : null,
+      value: {
+        enabled: draft.imessageEnabled,
+        handle: draft.imessageHandle.trim(),
+      },
+    },
+    {
+      key: "operator_channel_discord",
+      status: (discordReady ? "configured" : "missing") as AdminSetupItemStatus,
+      provider: discordReady ? "discord" : null,
+      value: {
+        botToken: draft.discordBotToken,
+        channelId: draft.discordChannelId.trim(),
+      },
+    },
+    {
+      key: "operator_channel_whatsapp",
+      status: (whatsappReady ? "configured" : "missing") as AdminSetupItemStatus,
+      provider: whatsappReady ? draft.whatsappProvider.trim() : null,
+      value: {
+        provider: draft.whatsappProvider.trim(),
+        token: draft.whatsappToken,
+        phoneId: draft.whatsappPhoneId.trim(),
+      },
+    },
+    {
       key: "operator_channel_slack",
       status: (slackReady ? "configured" : "missing") as AdminSetupItemStatus,
       provider: slackReady ? "slack" : null,
       value: {
         webhookUrl: draft.slackWebhookUrl.trim(),
         channel: draft.slackChannel.trim(),
+      },
+    },
+    {
+      key: "outbound_imessage",
+      status: (outImessageReady ? "configured" : "skipped") as AdminSetupItemStatus,
+      provider: outImessageReady ? "apple-messages" : null,
+      value: {
+        enabled: draft.outboundImessageEnabled,
+        senderHandle: draft.outboundImessageSenderHandle.trim(),
       },
     },
     {
@@ -735,11 +816,31 @@ export function useAgentSetup(): {
   return { loading, setup, error, setSetup, refresh };
 }
 
+type WizardPhase = "welcome" | "wizard" | "form";
+
 export function AgentOnboardingPage() {
   const { loading, setup, error, setSetup, refresh } = useAgentSetup();
   const [forceOnboarding, setForceOnboarding] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const runFlag = searchParams.get("run") === "1";
+  const [wizardPhase, setWizardPhase] = useState<WizardPhase>(
+    runFlag ? "welcome" : "form",
+  );
+
+  useEffect(() => {
+    if (runFlag && wizardPhase === "form") {
+      setWizardPhase("welcome");
+    }
+  }, [runFlag, wizardPhase]);
+
+  const clearRunFlag = useCallback(() => {
+    if (!searchParams.has("run")) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("run");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const onReset = useCallback(async () => {
     setResetting(true);
@@ -748,6 +849,7 @@ export function AgentOnboardingPage() {
       const reopened = await api.resetAgentSetup();
       setSetup(reopened);
       setForceOnboarding(true);
+      setWizardPhase("welcome");
     } catch (err) {
       setResetError(errorMessage(err, "Could not re-open onboarding"));
     } finally {
@@ -777,6 +879,25 @@ export function AgentOnboardingPage() {
 
   const showOnboarding = !setup.complete || forceOnboarding;
 
+  if (showOnboarding && wizardPhase === "welcome") {
+    return (
+      <AgentOnboardingWelcome onContinue={() => setWizardPhase("wizard")} />
+    );
+  }
+  if (showOnboarding && wizardPhase === "wizard") {
+    return (
+      <AgentOnboardingWizard
+        setup={setup}
+        onSetupUpdated={setSetup}
+        onFinish={() => {
+          setWizardPhase("form");
+          setForceOnboarding(false);
+          clearRunFlag();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col">
       <div className="border-b border-border bg-background/95 px-4 py-2 backdrop-blur">
@@ -790,7 +911,14 @@ export function AgentOnboardingPage() {
           </div>
           <div className="flex items-center gap-2">
             {setup.complete && !forceOnboarding && (
-              <Button variant="outline" size="sm" onClick={() => setForceOnboarding(true)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setForceOnboarding(true);
+                  setWizardPhase("welcome");
+                }}
+              >
                 Re-run onboarding
               </Button>
             )}
