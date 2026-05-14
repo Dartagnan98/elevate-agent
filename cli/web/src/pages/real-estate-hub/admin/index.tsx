@@ -2021,12 +2021,12 @@ function AdminOnboardingCoach({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               void send();
             }
           }}
-          placeholder="Type — ⌘↩ to send"
+          placeholder="Type — ↩ to send, ⇧↩ for newline"
           className="min-h-9 max-h-32 flex-1 resize-none rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] leading-5 text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
         />
         <Button size="sm" onClick={() => void send()} disabled={sending || !input.trim()}>
