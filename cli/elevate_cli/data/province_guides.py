@@ -817,6 +817,320 @@ def province_guide_summary(conn: sqlite3.Connection, province: str) -> dict[str,
     }
 
 
+# --- Stage-aware document mapping --------------------------------------------
+#
+# The 10-stage admin kanban spine is identical for every deal. What changes by
+# province is the *set of documents* a Realtor must produce inside each stage.
+# We surface that adaptive layer by mapping the structured `province_forms`
+# inventory (code/name/category) to a stage, then layering `conditional_docs`
+# on top based on the card's runtime conditions (tenanted, multiple_offers,
+# strata, etc.).
+#
+# Parsing the free-text `province_checklists` bodies is intentionally avoided
+# here -- scrapes vary widely in markup quality. The forms inventory is clean
+# and durable; checklists stay as reference material the UI links to.
+
+_STAGE_COMMITMENT = 0
+_STAGE_INTAKE = 1
+_STAGE_DOCS = 2
+_STAGE_PHOTOS = 3
+_STAGE_MLS = 4
+_STAGE_LIVE = 5
+_STAGE_CONTRACT = 6
+_STAGE_SUBJECTS = 7
+_STAGE_CLOSING = 8
+_STAGE_CLOSED = 9
+
+
+# Each rule: (regex against lower(code + ' ' + name + ' ' + category), side, stage)
+# `side` of None matches both listing and buyer. Province-specific rules run
+# first; generic rules act as a fallback when no province rule matches.
+_FORM_STAGE_PATTERNS: dict[str, list[tuple[str, str | None, int]]] = {
+    "BC": [
+        (r"\bmlc\b|multiple\s*listing", "listing", _STAGE_INTAKE),
+        (r"\bbaec\b|buyer\s+agency|buyer\s+representation", "buyer", _STAGE_INTAKE),
+        (r"\bpnc\b|privacy\s+notice", None, _STAGE_COMMITMENT),
+        (r"\bpds\b|property\s+disclosure", "listing", _STAGE_DOCS),
+        (r"\bcps\b|contract\s+of\s+purchase", None, _STAGE_CONTRACT),
+        (r"disc(losure)?[-\s]of[-\s]rem|remuneration", None, _STAGE_INTAKE),
+        (r"strata", "listing", _STAGE_DOCS),
+        (r"\brental\b|tenancy", "listing", _STAGE_DOCS),
+        (r"\bfee[-\s]for[-\s]service|fee-service", None, _STAGE_INTAKE),
+        (r"general\s+release|authorization\s+to\s+pay\s+deposit", None, _STAGE_CONTRACT),
+        (r"\bdisclosure\b", None, _STAGE_DOCS),
+    ],
+    "ON": [
+        # Listing / representation
+        (r"\bform\s*200\b|\bform\s*201\b|listing\s+agreement", "listing", _STAGE_INTAKE),
+        (r"\bform\s*240\b|\bform\s*241\b|\bform\s*242\b|individual\s+identification", None, _STAGE_INTAKE),
+        (r"\bform\s*218\b|\bform\s*371\b|\bform\s*372\b|working\s+with\s+a\s+realtor", None, _STAGE_COMMITMENT),
+        (r"\bform\s*299\b|customer\s+service", None, _STAGE_COMMITMENT),
+        (r"\bform\s*271\b|\bform\s*272\b|buyer\s+representation", "buyer", _STAGE_INTAKE),
+        (r"\bform\s*145\b|confirmation\s+of\s+co-?operation", None, _STAGE_INTAKE),
+        # Contract
+        (r"\bform\s*100\b|\bform\s*101\b|\bform\s*500\b|agreement\s+of\s+purchase\s+and\s+sale", None, _STAGE_CONTRACT),
+        (r"\bform\s*110\b|seller\s+property\s+information", "listing", _STAGE_DOCS),
+        (r"\bform\s*400\b|\bform\s*410\b|commercial", None, _STAGE_CONTRACT),
+        # Subjects / amendments / waivers
+        (r"\bform\s*120\b|amendment\s+to\s+agreement", None, _STAGE_SUBJECTS),
+        (r"\bform\s*121\b|\bform\s*124\b|notice\s+of\s+fulfill", None, _STAGE_SUBJECTS),
+        (r"\bform\s*122\b|mutual\s+release", None, _STAGE_SUBJECTS),
+        (r"\bform\s*123\b|waiver", None, _STAGE_SUBJECTS),
+        (r"\bform\s*125\b|\bform\s*126\b|\bform\s*127\b|notice.+(condition|remove)", None, _STAGE_SUBJECTS),
+        # Schedules / disclosures
+        (r"\bform\s*320\b|disclosure", None, _STAGE_DOCS),
+        (r"\bform\s*150\b|\bform\s*170\b", None, _STAGE_INTAKE),
+        # Multiple representation, referral, co-brokerage, seller direction
+        (r"\bform\s*244\b|seller'?s?\s+direction", "listing", _STAGE_CONTRACT),
+        (r"\bform\s*325\b|\bform\s*326\b|multiple\s+representation", None, _STAGE_COMMITMENT),
+        (r"\bform\s*641\b|referral\s+agreement", None, _STAGE_COMMITMENT),
+        (r"\bform\s*650\b|co-?brokerage", None, _STAGE_COMMITMENT),
+    ],
+    "AB": [
+        (r"\besra\b|exclusive\s+seller", "listing", _STAGE_INTAKE),
+        (r"\bebra\b|exclusive\s+buyer", "buyer", _STAGE_INTAKE),
+        (r"residential\s+purchase|\brps\b|rps-?condo", None, _STAGE_CONTRACT),
+        (r"agri-?purchase|agricultural", None, _STAGE_CONTRACT),
+        (r"country-?schedule|^schedule\b|manufactured-?schedule", None, _STAGE_DOCS),
+        (r"dower", None, _STAGE_CONTRACT),
+        (r"notice.+condition|satisfy.+condition|non-?satisfy", None, _STAGE_SUBJECTS),
+        (r"addendum|amendment", None, _STAGE_SUBJECTS),
+        (r"property\s+data\s+sheet|seller\s+property\s+information", "listing", _STAGE_DOCS),
+        (r"fintrac|individual\s+identification", None, _STAGE_INTAKE),
+        # Representation, fee, cooperation, disclosure
+        (r"represent\s+both|both\s+buyer\s+and\s+seller|multiple\s+representation", None, _STAGE_COMMITMENT),
+        (r"customer\s+acknowledgement|cust-?acknowledgement", None, _STAGE_COMMITMENT),
+        (r"fee\s+disclosure", None, _STAGE_INTAKE),
+        (r"realtor\s+cooperation|cooperation\s+policy", None, _STAGE_COMMITMENT),
+        (r"realtor\s+disclosure|disclosure\s+to\s+(an?\s+)?(un)?represented|disclosure\s+to\s+(un)?rep", None, _STAGE_COMMITMENT),
+        (r"ebra-?termination|termination", None, _STAGE_SUBJECTS),
+    ],
+    "MB": [
+        (r"listing\s+contract|mls-?listing", "listing", _STAGE_INTAKE),
+        (r"joint\s+representation|limited\s+representation", None, _STAGE_INTAKE),
+        (r"\bform-?e\b", None, _STAGE_INTAKE),
+        (r"condo.*(pds|disclosure)|pds-?condo", "listing", _STAGE_DOCS),
+        (r"marketing\s+release", None, _STAGE_MLS),
+        (r"direction.+offer", None, _STAGE_CONTRACT),
+        (r"offer\s+to\s+purchase|purchase\s+agreement", None, _STAGE_CONTRACT),
+        (r"working\s+with\s+a\s+realtor|wwar", None, _STAGE_COMMITMENT),
+    ],
+    "YK": [
+        (r"\besra\b|exclusive\s+seller", "listing", _STAGE_INTAKE),
+        (r"\bebra\b|exclusive\s+buyer", "buyer", _STAGE_INTAKE),
+        (r"residential\s+purchase|\brps\b", None, _STAGE_CONTRACT),
+        (r"agri-?purchase|agricultural", None, _STAGE_CONTRACT),
+        (r"^schedule\b|country-?schedule", None, _STAGE_DOCS),
+        (r"notice.+condition|satisfy.+condition", None, _STAGE_SUBJECTS),
+        (r"addendum|amendment", None, _STAGE_SUBJECTS),
+    ],
+}
+
+# Generic fallback rules tried after province-specific rules. These cover the
+# long tail (NB/NL/NS/PEI/QC/SK) that only have the create-deal-sheet form.
+_GENERIC_STAGE_PATTERNS: list[tuple[str, str | None, int]] = [
+    (r"listing\s+(agreement|contract)", "listing", _STAGE_INTAKE),
+    (r"buyer\s+(representation|agency|rep)", "buyer", _STAGE_INTAKE),
+    (r"purchase\s+(agreement|contract|and\s+sale)", None, _STAGE_CONTRACT),
+    (r"deal\s+sheet", None, _STAGE_CONTRACT),
+    (r"\bfintrac\b|identification|kyc\b", None, _STAGE_INTAKE),
+    (r"privacy\s+notice|consent", None, _STAGE_COMMITMENT),
+    (r"property\s+disclosure|seller\s+disclosure", "listing", _STAGE_DOCS),
+    (r"strata|condo(minium)?\s+document", "listing", _STAGE_DOCS),
+    (r"amendment|waiver|notice\s+of\s+fulfill", None, _STAGE_SUBJECTS),
+    (r"mutual\s+release", None, _STAGE_SUBJECTS),
+    (r"deposit|trust\s+account", None, _STAGE_CONTRACT),
+    (r"commission|remuneration", None, _STAGE_INTAKE),
+    (r"closing|conveyance|completion", None, _STAGE_CLOSING),
+    (r"\bmls\b|marketing\s+release", None, _STAGE_MLS),
+]
+
+# Heuristics by category alone, used only if name-level patterns missed.
+_CATEGORY_STAGE_RULES: list[tuple[str, str | None, int]] = [
+    ("listing", "listing", _STAGE_INTAKE),
+    ("buyer", "buyer", _STAGE_INTAKE),
+    ("disclosure", "listing", _STAGE_DOCS),
+    ("rental", "listing", _STAGE_DOCS),
+    ("additional", None, _STAGE_DOCS),
+]
+
+
+def _match_form_stage(
+    form: Mapping[str, Any],
+    province: str,
+    side: str,
+) -> tuple[int | None, str | None, str]:
+    """Return ``(stage, form_side, status)``.
+
+    ``status`` is one of:
+      * ``"matched"`` -- mapped to a stage on this side
+      * ``"other_side"`` -- matched a rule but the rule is for the other side
+      * ``"unmapped"`` -- no rule fired
+    """
+    haystack = " ".join(
+        filter(
+            None,
+            (
+                str(form.get("code") or ""),
+                str(form.get("name") or ""),
+                str(form.get("category") or ""),
+            ),
+        )
+    ).lower()
+    rules = list(_FORM_STAGE_PATTERNS.get(province, ()))
+    rules.extend(_GENERIC_STAGE_PATTERNS)
+    other_side_hit: tuple[int, str | None] | None = None
+    for pattern, form_side, stage in rules:
+        if not re.search(pattern, haystack):
+            continue
+        if form_side and side and form_side != side:
+            if other_side_hit is None:
+                other_side_hit = (stage, form_side)
+            continue
+        return stage, form_side, "matched"
+    category = str(form.get("category") or "").strip().lower()
+    if category:
+        for cat_key, form_side, stage in _CATEGORY_STAGE_RULES:
+            if cat_key not in category:
+                continue
+            if form_side and side and form_side != side:
+                if other_side_hit is None:
+                    other_side_hit = (stage, form_side)
+                continue
+            return stage, form_side, "matched"
+    if other_side_hit is not None:
+        return other_side_hit[0], other_side_hit[1], "other_side"
+    return None, None, "unmapped"
+
+
+def province_stage_documents(
+    conn: sqlite3.Connection,
+    *,
+    province: str,
+    side: str = "listing",
+    conditions: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return per-stage document checklist for a deal.
+
+    Output shape::
+
+        {
+          "province": "BC",
+          "side": "listing",
+          "stages": {
+            "0": [ {code, name, source, side, category, sourcePath, condition?}, ... ],
+            "1": [...],
+            ...
+          },
+          "unmapped": [ {code, name, category}, ... ],
+          "coverage": {"forms": int, "mapped": int, "conditional": int},
+        }
+
+    `source` is one of ``"form"`` (from province_forms inventory) or
+    ``"conditional"`` (from conditional_docs triggered by ``conditions``).
+    The caller's existing hardcoded stage checklist items can still be merged
+    on top of this output.
+    """
+    province = (province or "").upper()
+    side = (side or "").strip().lower() or "listing"
+    if side not in {"listing", "buyer"}:
+        side = "listing"
+    conditions = dict(conditions or {})
+
+    stages: dict[int, list[dict[str, Any]]] = {}
+    unmapped: list[dict[str, Any]] = []
+    other_side: list[dict[str, Any]] = []
+    mapped_count = 0
+    conditional_count = 0
+
+    forms = list_province_forms(conn, province=province)
+    for form in forms:
+        stage, form_side, status = _match_form_stage(form, province=province, side=side)
+        if status == "matched" and stage is not None:
+            stages.setdefault(stage, []).append(
+                {
+                    "code": form.get("code"),
+                    "name": form.get("name") or form.get("code"),
+                    "source": "form",
+                    "side": form_side,
+                    "category": form.get("category"),
+                    "sourcePath": form.get("sourcePath"),
+                    "condition": None,
+                }
+            )
+            mapped_count += 1
+        elif status == "other_side":
+            other_side.append(
+                {
+                    "code": form.get("code"),
+                    "name": form.get("name") or form.get("code"),
+                    "category": form.get("category"),
+                    "side": form_side,
+                }
+            )
+        else:
+            unmapped.append(
+                {
+                    "code": form.get("code"),
+                    "name": form.get("name") or form.get("code"),
+                    "category": form.get("category"),
+                }
+            )
+
+    cond_rows = conn.execute(
+        "SELECT * FROM conditional_docs WHERE province=? ORDER BY stage, doc_code",
+        (province,),
+    ).fetchall()
+    for row in cond_rows:
+        field_key = row["field_key"]
+        expected = str(row["field_value"] or "").strip().lower()
+        actual = str(conditions.get(field_key) or "").strip().lower()
+        if not actual or actual != expected:
+            continue
+        row_side = row["side"] if "side" in row.keys() else None
+        if row_side and row_side != side:
+            continue
+        row_stage = row["stage"] if "stage" in row.keys() else None
+        stage_int = int(row_stage) if row_stage is not None else _STAGE_DOCS
+        stages.setdefault(stage_int, []).append(
+            {
+                "code": row["doc_code"],
+                "name": row["doc_name"],
+                "source": "conditional",
+                "side": row_side,
+                "category": None,
+                "sourcePath": None,
+                "condition": {"field": field_key, "value": row["field_value"]},
+            }
+        )
+        conditional_count += 1
+
+    for stage_int in list(stages.keys()):
+        stages[stage_int].sort(
+            key=lambda item: (
+                0 if item["source"] == "form" else 1,
+                str(item.get("category") or ""),
+                str(item.get("name") or ""),
+                str(item.get("code") or ""),
+            )
+        )
+
+    return {
+        "province": province,
+        "side": side,
+        "stages": {str(k): v for k, v in sorted(stages.items())},
+        "unmapped": unmapped,
+        "otherSide": other_side,
+        "coverage": {
+            "forms": len(forms),
+            "mapped": mapped_count,
+            "conditional": conditional_count,
+            "otherSide": len(other_side),
+            "unmapped": len(unmapped),
+        },
+    }
+
+
 def province_coverage(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
