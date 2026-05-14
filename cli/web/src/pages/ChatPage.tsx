@@ -3271,7 +3271,7 @@ export default function ChatPage() {
             "hidden min-h-0 shrink-0 lg:flex",
             previewArtifact
               ? "flex-col pb-5 pl-0 pr-5 pt-2"
-              : "w-[18rem] flex-col self-start pr-5 pt-2",
+              : "w-[18rem] flex-col self-start pr-5 pt-[3.25rem]",
           )}
           style={
             previewArtifact
