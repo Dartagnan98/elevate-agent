@@ -34,7 +34,7 @@ import {
   Users,
   X as CloseIcon,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
   AdminActionRun,
@@ -1996,13 +1996,13 @@ function AdminDealContextSection({
       </div>
 
       {!loading && error && (
-        <div className="mt-2 rounded-sm border border-border bg-card px-3 py-2 text-[0.78rem] text-warning">
+        <div className="mt-2 rounded-sm border border-border bg-background px-3 py-2 text-[0.78rem] text-warning">
           {error}
         </div>
       )}
 
       {!loading && !error && !context && (
-        <div className="mt-2 rounded-sm border border-dashed border-border bg-card px-3 py-3 text-[0.78rem] text-muted-foreground">
+        <div className="mt-2 rounded-sm border border-dashed border-border bg-background px-3 py-3 text-[0.78rem] text-muted-foreground">
           This preview card is not backed by a saved deal file yet.
         </div>
       )}
@@ -2010,7 +2010,7 @@ function AdminDealContextSection({
       {context && deal && (
         <div className="mt-3 space-y-3">
           {gate && (
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
@@ -2076,7 +2076,7 @@ function AdminDealContextSection({
 	          )}
 
 	          {flow?.backgroundAutomations?.length ? (
-	            <div className="rounded-sm border border-border bg-card px-3 py-2">
+	            <div className="rounded-sm border border-border bg-background px-3 py-2">
 	              <div className="flex flex-wrap items-center justify-between gap-2">
 	                <div>
 	                  <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
@@ -2105,7 +2105,7 @@ function AdminDealContextSection({
 	          ) : null}
 
 	          <div className="grid gap-2 sm:grid-cols-2">
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 Primary contact
               </div>
@@ -2119,7 +2119,7 @@ function AdminDealContextSection({
                 </div>
               )}
             </div>
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 Important dates
               </div>
@@ -2139,7 +2139,7 @@ function AdminDealContextSection({
           </div>
 
           {(moneyRows.length > 0 || deal.mlsNumber || deal.legalDescription) && (
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 File details
               </div>
@@ -2167,7 +2167,7 @@ function AdminDealContextSection({
           )}
 
           <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)]">
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 <Users className="h-3 w-3" />
                 Co-contacts
@@ -2186,7 +2186,7 @@ function AdminDealContextSection({
                 <div className="mt-1.5 text-xs text-muted-foreground">None linked</div>
               )}
             </div>
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 <FileText className="h-3 w-3" />
                 Documents
@@ -2208,7 +2208,7 @@ function AdminDealContextSection({
                 <div className="mt-1.5 text-xs text-muted-foreground">No docs attached</div>
               )}
             </div>
-            <div className="rounded-sm border border-border bg-card px-3 py-2">
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="flex items-center gap-1.5 font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 <Clock className="h-3 w-3" />
                 Prior runs
@@ -2233,7 +2233,7 @@ function AdminDealContextSection({
             </div>
           </div>
 
-          <div className="rounded-sm border border-border bg-card px-3 py-2">
+          <div className="rounded-sm border border-border bg-background px-3 py-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
                 Source actions
@@ -3320,6 +3320,34 @@ function AdminKanbanBoard() {
   const [activeSide, setActiveSide] = useState<AdminSide>("listing");
   const [showNewDeal, setShowNewDeal] = useState(false);
   const draggingIdRef = useRef<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const dealQuery = searchParams.get("deal");
+  const handledDealQueryRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!dealQuery) {
+      handledDealQueryRef.current = null;
+      return;
+    }
+    if (handledDealQueryRef.current === dealQuery) return;
+    const match = cards.find((c) => c.id === dealQuery);
+    if (!match) return;
+    handledDealQueryRef.current = dealQuery;
+    setSelectedCardId(match.id);
+    setActiveSide(match.side);
+  }, [dealQuery, cards]);
+
+  const clearDealQuery = useCallback(() => {
+    if (!searchParams.has("deal")) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("deal");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  const closeDetailPanel = useCallback(() => {
+    setSelectedCardId(null);
+    clearDealQuery();
+  }, [clearDealQuery]);
 
   const handleCreateDeal = useCallback(
     async (placeholder: AdminCard, request: AdminDealCreateRequest) => {
@@ -3487,7 +3515,7 @@ function AdminKanbanBoard() {
       {selectedCard && (
         <AdminCardDetailPanel
           card={selectedCard}
-          onClose={() => setSelectedCardId(null)}
+          onClose={closeDetailPanel}
           onToggleItem={(_stage, itemId, completed) => handleToggleItem(selectedCard.id, itemId, completed)}
           onConditionChange={(field, value) => handleConditionChange(selectedCard.id, field, value)}
           onMoveToNext={() => handleMoveToNext(selectedCard.id)}

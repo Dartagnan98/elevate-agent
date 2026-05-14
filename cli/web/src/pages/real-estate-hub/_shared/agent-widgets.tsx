@@ -351,7 +351,7 @@ export function AdminDealTasks({
                   </Button>
                 )}
                 <Link
-                  to="/admin"
+                  to={`/admin?deal=${encodeURIComponent(task.dealId)}`}
                   className="inline-flex h-9 items-center rounded-md px-2 font-mono-ui text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-primary hover:text-primary/80"
                 >
                   Open deal

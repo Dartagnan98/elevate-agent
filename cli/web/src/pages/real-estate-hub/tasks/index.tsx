@@ -379,7 +379,10 @@ function DealTaskRow({
             Run AI
           </Button>
         )}
-        <Link to="/admin" className={cn(buttonVariants({ size: "sm", variant: "ghost" }))}>
+        <Link
+          to={`/admin?deal=${encodeURIComponent(task.dealId)}`}
+          className={cn(buttonVariants({ size: "sm", variant: "ghost" }))}
+        >
           Open deal
         </Link>
       </div>
