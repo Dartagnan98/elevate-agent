@@ -1234,8 +1234,8 @@ function AdminSetupLaunch({
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <AdminSetupField label="MLS login URL" value={draft.mlsLoginUrl} onChange={(v) => updateDraft("mlsLoginUrl", v)} placeholder="https://..." />
           <AdminSetupField label="MLS credential ref" value={draft.mlsCredentialRef} onChange={(v) => updateDraft("mlsCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
-          <AdminSetupField label="SkySlope login URL" value={draft.complianceLoginUrl} onChange={(v) => updateDraft("complianceLoginUrl", v)} placeholder="https://..." />
-          <AdminSetupField label="SkySlope credential ref" value={draft.complianceCredentialRef} onChange={(v) => updateDraft("complianceCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
+          <AdminSetupField label={`${draft.complianceProvider?.trim() || "Compliance"} login URL`} value={draft.complianceLoginUrl} onChange={(v) => updateDraft("complianceLoginUrl", v)} placeholder="https://..." />
+          <AdminSetupField label={`${draft.complianceProvider?.trim() || "Compliance"} credential ref`} value={draft.complianceCredentialRef} onChange={(v) => updateDraft("complianceCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
           <AdminSetupField label="Showing login URL" value={draft.showingLoginUrl} onChange={(v) => updateDraft("showingLoginUrl", v)} placeholder="https://..." />
           <AdminSetupField label="Showing credential ref" value={draft.showingCredentialRef} onChange={(v) => updateDraft("showingCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
         </div>
