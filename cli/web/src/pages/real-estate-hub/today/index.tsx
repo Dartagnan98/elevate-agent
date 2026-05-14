@@ -26,9 +26,9 @@ export function RealEstateTodayPage() {
   return (
     <HubShell
       data={data}
-      eyebrow="Real Estate Command Center"
+      eyebrow="Operations"
       icon={Home}
-      title="Elevate Agent · Today"
+      title="Today"
     >
       <div className="space-y-4">
         <PulseStrip stats={view.pulse} />

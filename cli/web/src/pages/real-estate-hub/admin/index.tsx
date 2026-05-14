@@ -3573,9 +3573,8 @@ export function RealEstateAdminPage() {
     <HubShell
       data={data}
       eyebrow="Admin Desk"
-      hero="An admin board for listings, deals, CMA work, seller updates, forms, signatures, brokerage checklists, and nightly follow-through."
       icon={BriefcaseBusiness}
-      title="Admin shows the next listing and deal moves."
+      title="Admin"
     >
       <WorkflowStrip
         items={[
