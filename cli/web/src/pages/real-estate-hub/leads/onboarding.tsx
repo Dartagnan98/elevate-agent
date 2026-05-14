@@ -1094,14 +1094,25 @@ export function LeadsSetupLaunch({
               (iMessage / SMS / RCS) are managed in Source Connectors below — Elevate auto-routes by lead device.
             </p>
           </div>
-          <div className="flex flex-col items-end gap-1">
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              {setup.completedRequiredCount}/{setup.requiredCount} required
-            </span>
-            <div className="h-1.5 w-32 overflow-hidden rounded-full bg-muted">
-              <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+          <div className="flex flex-col items-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setPhase("welcome")}
+              className="h-7 gap-1 px-2 text-[11px]"
+            >
+              <Sparkles className="h-3 w-3" />
+              Run guided onboarding
+            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {setup.completedRequiredCount}/{setup.requiredCount} required
+              </span>
+              <div className="h-1.5 w-32 overflow-hidden rounded-full bg-muted">
+                <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+              </div>
+              <span className="text-[10.5px] text-muted-foreground">{pct}%</span>
             </div>
-            <span className="text-[10.5px] text-muted-foreground">{pct}%</span>
           </div>
         </div>
         {forceOnboarding && (
