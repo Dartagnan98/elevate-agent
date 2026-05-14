@@ -52,6 +52,8 @@ import {
   MessageSquare,
   MoreHorizontal,
   Package,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Pin,
   Plus,
@@ -386,6 +388,27 @@ export default function App() {
   const { theme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const closeMobile = useCallback(() => setMobileOpen(false), []);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("elevate.sidebar.collapsed.v1") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(
+          "elevate.sidebar.collapsed.v1",
+          next ? "1" : "0",
+        );
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
@@ -535,7 +558,9 @@ export default function App() {
               "bg-[var(--sidebar-bg)] shadow-[inset_-1px_0_0_var(--sidebar-border)]",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
-              "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
+              sidebarCollapsed
+                ? "lg:hidden"
+                : "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
               isConfigRoute && "lg:hidden",
             )}
           >
@@ -543,9 +568,34 @@ export default function App() {
               embeddedChat={embeddedChat}
               navItems={navItems}
               onNavigate={closeMobile}
+              onToggleSidebar={toggleSidebar}
               realEstatePacks={realEstatePacks}
             />
           </aside>
+
+          {sidebarCollapsed && !isConfigRoute && (
+            <>
+              <div
+                className="hidden lg:block fixed top-0 left-0 right-0 z-30 h-9 bg-transparent"
+                style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+                aria-hidden
+              />
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                aria-label="Show sidebar"
+                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                className={cn(
+                  "hidden lg:inline-flex fixed left-[5.5rem] top-2 z-40",
+                  "h-7 w-7 items-center justify-center rounded-md",
+                  "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                )}
+              >
+                <PanelLeftOpen className="h-4 w-4" />
+              </button>
+            </>
+          )}
 
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
             <div
@@ -567,29 +617,38 @@ export default function App() {
                   (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
                 )}
               >
-                <Suspense
-                  fallback={
-                    <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Loading…
-                    </div>
-                  }
+                <div
+                  key={normalizedPath}
+                  className={cn(
+                    "min-w-0",
+                    (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
+                    !isChatRoute && !isConfigRoute && "elevate-route-transition",
+                  )}
                 >
-                  <Routes>
-                    {routes.map(({ key, path, element }) => (
-                      <Route key={key} path={path} element={element} />
-                    ))}
-                    <Route
-                      path="*"
-                      element={
-                        <Navigate
-                          to={realEstateDashboard ? "/today" : "/hub"}
-                          replace
-                        />
-                      }
-                    />
-                  </Routes>
-                </Suspense>
+                  <Suspense
+                    fallback={
+                      <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Loading…
+                      </div>
+                    }
+                  >
+                    <Routes>
+                      {routes.map(({ key, path, element }) => (
+                        <Route key={key} path={path} element={element} />
+                      ))}
+                      <Route
+                        path="*"
+                        element={
+                          <Navigate
+                            to={realEstateDashboard ? "/today" : "/hub"}
+                            replace
+                          />
+                        }
+                      />
+                    </Routes>
+                  </Suspense>
+                </div>
               </div>
               <PluginSlot name="post-main" />
             </div>
@@ -730,11 +789,13 @@ function DesktopSidebar({
   embeddedChat,
   navItems,
   onNavigate,
+  onToggleSidebar,
   realEstatePacks,
 }: {
   embeddedChat: boolean;
   navItems: NavItem[];
   onNavigate: () => void;
+  onToggleSidebar: () => void;
   realEstatePacks: RealEstatePackAccess;
 }) {
   const { t } = useI18n();
@@ -752,6 +813,25 @@ function DesktopSidebar({
       return false;
     }
   });
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = window.localStorage.getItem("elevate.sidebar.sections.v1");
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const toggleSection = useCallback((key: string) => {
+    setCollapsedSections((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      try {
+        window.localStorage.setItem("elevate.sidebar.sections.v1", JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
   const [query, setQuery] = useState("");
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => readPinnedSessionIds());
   const [unreadIds, setUnreadIds] = useState<string[]>(() => readUnreadSessionIds());
@@ -767,7 +847,7 @@ function DesktopSidebar({
 
   const loadSessions = useCallback(() => {
     api
-      .getSessions(SIDEBAR_SESSION_LIMIT)
+      .getSessions(SIDEBAR_SESSION_LIMIT, 0, { includeTotal: false })
       .then((resp) => {
         setSessions(resp.sessions);
         setSessionError(false);
@@ -781,7 +861,7 @@ function DesktopSidebar({
     if (typeof document === "undefined") return;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      if (!id) id = window.setInterval(loadSessions, 5000);
+      if (!id) id = window.setInterval(loadSessions, 12000);
     };
     const stop = () => {
       if (id) { window.clearInterval(id); id = null; }
@@ -1176,6 +1256,20 @@ function DesktopSidebar({
         >
           <X className="h-4 w-4" />
         </button>
+
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          aria-label="Collapse sidebar"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+          className={cn(
+            "absolute right-2 top-1/2 hidden lg:inline-flex h-7 w-7 -translate-y-1/2 shrink-0 items-center justify-center",
+            "rounded-md text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-text-active)] hover:bg-[var(--sidebar-row-hover)]",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          )}
+        >
+          <PanelLeftClose className="h-4 w-4" />
+        </button>
       </div>
 
       <PluginSlot name="header-left" />
@@ -1223,32 +1317,45 @@ function DesktopSidebar({
 
         {realEstateNavItems.length > 0 && (
           <div className="mt-2.5">
-            <SidebarSectionLabel>Real Estate</SidebarSectionLabel>
-            <div className="space-y-0.5">
-              {realEstateNavItems.map((item) => (
-                <SidebarAction
-                  key={item.path}
-                  icon={item.icon}
-                  label={item.label}
-                  path={item.path}
-                  onNavigate={go}
-                />
-              ))}
-            </div>
+            <SidebarSectionLabel
+              collapsed={collapsedSections.realEstate}
+              onToggle={() => toggleSection("realEstate")}
+            >
+              Real Estate
+            </SidebarSectionLabel>
+            {!collapsedSections.realEstate && (
+              <div className="space-y-0.5">
+                {realEstateNavItems.map((item) => (
+                  <SidebarAction
+                    key={item.path}
+                    icon={item.icon}
+                    label={item.label}
+                    path={item.path}
+                    onNavigate={go}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 
         <div className="mt-2.5">
-          <SidebarSectionLabel>Agent</SidebarSectionLabel>
-          <div className="space-y-0.5">
-            <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
-            <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
-            <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
-            <SidebarAction icon={ShieldCheck} label="Setup" path="/desktop-setup" onNavigate={go} />
-            <SidebarAction icon={Puzzle} label="Skills" path="/skills" onNavigate={go} />
-            <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
-            <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
-          </div>
+          <SidebarSectionLabel
+            collapsed={collapsedSections.agent}
+            onToggle={() => toggleSection("agent")}
+          >
+            Agent
+          </SidebarSectionLabel>
+          {!collapsedSections.agent && (
+            <div className="space-y-0.5">
+              <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
+              <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
+              <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
+              <SidebarAction icon={Puzzle} label="Skills" path="/skills" onNavigate={go} />
+              <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
+              <SidebarAction icon={Folder} label="Project" path="/project" onNavigate={go} />
+            </div>
+          )}
         </div>
 
         {spotlightSessions.length > 0 && (
@@ -1306,18 +1413,25 @@ function DesktopSidebar({
 
         {toolNavItems.length > 0 && (
           <div className="mt-3">
-            <SidebarSectionLabel>Tools</SidebarSectionLabel>
-            <div className="space-y-0.5">
-              {toolNavItems.map((item) => (
-                <SidebarAction
-                  key={item.path}
-                  icon={item.icon}
-                  label={navLabel(item)}
-                  path={item.path}
-                  onNavigate={go}
-                />
-              ))}
-            </div>
+            <SidebarSectionLabel
+              collapsed={collapsedSections.tools}
+              onToggle={() => toggleSection("tools")}
+            >
+              Tools
+            </SidebarSectionLabel>
+            {!collapsedSections.tools && (
+              <div className="space-y-0.5">
+                {toolNavItems.map((item) => (
+                  <SidebarAction
+                    key={item.path}
+                    icon={item.icon}
+                    label={navLabel(item)}
+                    path={item.path}
+                    onNavigate={go}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1331,11 +1445,40 @@ function DesktopSidebar({
   );
 }
 
-function SidebarSectionLabel({ children }: { children: ReactNode }) {
+function SidebarSectionLabel({
+  children,
+  collapsed,
+  onToggle,
+}: {
+  children: ReactNode;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
+  const baseClass =
+    "mb-0.5 mt-3 first:mt-0 px-2 text-[0.62rem] font-semibold uppercase tracking-wider text-[var(--sidebar-text-muted)]/60";
+  if (!onToggle) {
+    return <div className={baseClass}>{children}</div>;
+  }
   return (
-    <div className="mb-0.5 mt-3 first:mt-0 px-2 text-[0.62rem] font-semibold uppercase tracking-wider text-[var(--sidebar-text-muted)]/60">
-      {children}
-    </div>
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={!collapsed}
+      className={cn(
+        baseClass,
+        "group flex w-full items-center justify-between gap-1.5 cursor-pointer",
+        "hover:text-[var(--sidebar-text-muted)] transition-colors",
+        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm",
+      )}
+    >
+      <span>{children}</span>
+      <ChevronDown
+        className={cn(
+          "h-3 w-3 shrink-0 transition-transform duration-150",
+          collapsed && "-rotate-90",
+        )}
+      />
+    </button>
   );
 }
 
@@ -1351,6 +1494,7 @@ function sidebarActionClass(active: boolean, primary = false) {
 }
 
 function SidebarAction({
+  icon: Icon,
   label,
   onNavigate,
   path,
@@ -1370,9 +1514,12 @@ function SidebarAction({
         event.preventDefault();
         onNavigate(path);
       }}
-      className={({ isActive }) => sidebarActionClass(isActive, primary)}
+      className={({ isActive }) =>
+        cn(sidebarActionClass(isActive, primary), "flex items-center gap-2")
+      }
     >
-      <span className="truncate">{label}</span>
+      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 truncate">{label}</span>
     </NavLink>
   );
 }

@@ -618,7 +618,7 @@ export default function SessionsPage() {
     const loadOverview = () => {
       api.getStatus().then(setStatus).catch(() => {});
       api
-        .getSessions(50)
+        .getSessions(50, 0, { includeTotal: false })
         .then((r) => setOverviewSessions(r.sessions))
         .catch(() => {});
     };

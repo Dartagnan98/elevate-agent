@@ -122,6 +122,8 @@
   --sidebar-icon-muted: color-mix(in srgb, var(--midground-base) 66%, transparent);
   --sidebar-logo-bg: color-mix(in srgb, var(--background-base) 72%, var(--midground-base) 28%);
   --sidebar-logo-border: color-mix(in srgb, var(--midground-base) 14%, transparent);
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Theme tokens cascade into the document root so every descendant inherits
@@ -289,6 +291,17 @@ code { font-size: 0.875rem; }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes elevate-route-in {
+  from {
+    opacity: 0.72;
+    transform: translate3d(0, 7px, 0) scale(0.998);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
 @keyframes pack-unlock-rise {
   from { opacity: 0; }
   to   { opacity: 1; }
@@ -347,10 +360,15 @@ code { font-size: 0.875rem; }
   animation: dialog-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.elevate-route-transition {
+  animation: elevate-route-in 180ms var(--ease-out-quart) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pack-unlock-card,
   .pack-unlock-check.is-saved,
-  .pack-step-enter {
+  .pack-step-enter,
+  .elevate-route-transition {
     animation: none !important;
   }
 }

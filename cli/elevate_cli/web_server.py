@@ -1396,20 +1396,59 @@ async def preview_file(path: str):
     )
 
 
+_SESSION_LIST_FIELDS = (
+    "id",
+    "source",
+    "user_id",
+    "model",
+    "parent_session_id",
+    "started_at",
+    "ended_at",
+    "end_reason",
+    "message_count",
+    "tool_call_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "title",
+    "api_call_count",
+    "preview",
+    "last_active",
+    "_lineage_root_id",
+    "is_active",
+)
+
+
+def _session_list_payload(session: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields needed by dashboard session lists."""
+    return {key: session.get(key) for key in _SESSION_LIST_FIELDS if key in session}
+
+
 @app.get("/api/sessions")
-async def get_sessions(limit: int = 20, offset: int = 0):
+async def get_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    include_total: bool = True,
+    include_details: bool = False,
+):
     try:
         from elevate_state import SessionDB
+        limit = max(1, min(int(limit or 20), 200))
+        offset = max(0, int(offset or 0))
         db = SessionDB()
         try:
             sessions = db.list_sessions_rich(limit=limit, offset=offset)
-            total = db.session_count()
+            total = db.session_count() if include_total else offset + len(sessions)
             now = time.time()
             for s in sessions:
                 s["is_active"] = (
                     s.get("ended_at") is None
                     and (now - s.get("last_active", s.get("started_at", 0))) < 300
                 )
+            if not include_details:
+                sessions = [_session_list_payload(s) for s in sessions]
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()

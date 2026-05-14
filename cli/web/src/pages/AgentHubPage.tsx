@@ -768,20 +768,22 @@ export default function AgentHubPage() {
   const { setAfterTitle, setEnd } = usePageHeader();
 
   const load = useCallback(async () => {
-    try {
-      const [nextSnapshot, nextEnvVars] = await Promise.all([
-        api.getAgentHub(),
-        api.getEnvVars().catch(() => null),
-      ]);
-      setSnapshot(nextSnapshot);
-      if (nextEnvVars) {
+    setLoading(true);
+    const envVarsPromise = api
+      .getEnvVars()
+      .then((nextEnvVars) => {
         setEnvVars(nextEnvVars);
-      }
+      })
+      .catch(() => null);
+    try {
+      const nextSnapshot = await api.getAgentHub({ includeMemoryGraph: true });
+      setSnapshot(nextSnapshot);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Agent Hub failed", "error");
     } finally {
       setLoading(false);
     }
+    void envVarsPromise;
   }, [showToast]);
 
   useEffect(() => {

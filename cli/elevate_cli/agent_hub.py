@@ -230,7 +230,7 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
     return agents
 
 
-def _session_summary(limit: int = 100) -> dict[str, Any]:
+def _session_summary(limit: int = 100, *, include_total: bool = True) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "total": 0,
         "active": 0,
@@ -245,7 +245,7 @@ def _session_summary(limit: int = 100) -> dict[str, Any]:
         db = SessionDB()
         try:
             sessions = db.list_sessions_rich(limit=limit, include_children=False)
-            summary["total"] = db.session_count()
+            summary["total"] = db.session_count() if include_total else len(sessions)
         finally:
             db.close()
     except Exception as exc:
@@ -576,7 +576,7 @@ def _clip_label(value: Any, limit: int = 80) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
+def _memory_summary(config: dict[str, Any], *, include_graph: bool = True) -> dict[str, Any]:
     memory_cfg = config.get("memory") if isinstance(config.get("memory"), dict) else {}
     provider = str(memory_cfg.get("provider") or "builtin").strip()
     plugin_cfg = config.get("plugins") if isinstance(config.get("plugins"), dict) else {}
@@ -686,7 +686,8 @@ def _memory_summary(config: dict[str, Any]) -> dict[str, Any]:
             "session_segment_count": len(sessions),
             "sessions": sessions,
         }
-        summary["graph"] = _memory_graph(conn)
+        if include_graph:
+            summary["graph"] = _memory_graph(conn)
     except Exception as exc:
         summary["error"] = str(exc)
     finally:
@@ -943,6 +944,7 @@ def _agent_summaries(
     for agent in agents:
         sources = agent["session_sources"] or agent["platforms"] or ["cli"]
         source_set = set(sources)
+        telegram_lane = _agent_telegram_lane(agent) if "telegram" in agent["platforms"] else None
         session_count = sum(int(by_source.get(source, 0) or 0) for source in source_set)
         active_count = sum(
             1
@@ -953,7 +955,7 @@ def _agent_summaries(
             status = "disabled"
         elif not model.get("configured"):
             status = "needs_model"
-        elif gateway_running and "telegram" in agent["platforms"] and not _agent_telegram_lane(agent).get("configured"):
+        elif gateway_running and telegram_lane is not None and not telegram_lane.get("configured"):
             status = "needs_telegram"
         elif gateway_running and any(platform != "local" for platform in agent["platforms"]):
             status = "online"
@@ -969,17 +971,59 @@ def _agent_summaries(
                 "active_session_count": active_count,
                 "toolsets": agent["toolsets"] or global_toolsets,
                 "has_prompt": bool(agent.get("prompt")),
-                "telegramLane": _agent_telegram_lane(agent) if "telegram" in agent["platforms"] else None,
+                "telegramLane": telegram_lane,
             }
         )
     return result
 
 
-def _orchestration_summary() -> dict[str, Any]:
+_ORCHESTRATION_RUN_FIELDS = (
+    "run_id",
+    "id",
+    "agent_id",
+    "route_label",
+    "routing_label",
+    "status",
+    "created_at",
+    "updated_at",
+)
+
+
+def _compact_orchestration(snapshot: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(snapshot)
+    compact["runs"] = [
+        {key: run.get(key) for key in _ORCHESTRATION_RUN_FIELDS if key in run}
+        for run in snapshot.get("runs", [])
+        if isinstance(run, dict)
+    ]
+    compact["agents"] = [
+        {
+            key: agent.get(key)
+            for key in ("agent_id", "name", "tier", "status", "active_runs", "queued_runs")
+            if key in agent
+        }
+        for agent in snapshot.get("agents", [])
+        if isinstance(agent, dict)
+    ]
+    compact["recent_events"] = [
+        {
+            "run_id": event.get("run_id"),
+            "type": event.get("type") or event.get("kind"),
+            "message": _clip_label(event.get("message") or event.get("summary") or "", 160),
+            "timestamp": event.get("timestamp") or event.get("created_at"),
+        }
+        for event in (snapshot.get("recent_events", []) or [])[:5]
+        if isinstance(event, dict)
+    ]
+    return compact
+
+
+def _orchestration_summary(*, compact: bool = False) -> dict[str, Any]:
     try:
         from gateway.orchestration import get_orchestration_store
 
-        return get_orchestration_store().snapshot(run_limit=20)
+        snapshot = get_orchestration_store().snapshot(run_limit=20)
+        return _compact_orchestration(snapshot) if compact else snapshot
     except Exception as exc:
         return {
             "agents": [],
@@ -1031,35 +1075,60 @@ def _agent_worker_summary(config: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def build_agent_hub_snapshot(*, include_profiles: bool = True) -> dict[str, Any]:
+def build_agent_hub_snapshot(
+    *,
+    include_profiles: bool = True,
+    include_memory_graph: bool = True,
+    include_session_total: bool = True,
+    include_orchestration: bool = True,
+    include_skills: bool = True,
+    include_toolsets: bool = True,
+    include_harness: bool = True,
+    compact_orchestration: bool = False,
+) -> dict[str, Any]:
     """Return a redacted local snapshot for the dashboard Agent Hub."""
     config = load_config()
     runtime = read_runtime_status()
     gateway_pid = get_running_pid()
     gateway_running = gateway_pid is not None
     model = _model_summary(config)
-    sessions = _session_summary()
+    sessions = _session_summary(include_total=include_session_total)
     access = load_access_config(config)
-    orchestration = _orchestration_summary()
+    orchestration = (
+        _orchestration_summary(compact=compact_orchestration)
+        if include_orchestration
+        else {"agents": [], "runs": [], "active_runs": 0, "error": ""}
+    )
     handoffs = _handoff_summary()
     agent_worker = _agent_worker_summary(config)
-    memory = _memory_summary(config)
-    skills = _skills_summary(config)
-    toolsets = _toolsets_summary(config)
-    try:
-        from elevate_cli.harness import build_harness_snapshot
+    memory = _memory_summary(config, include_graph=include_memory_graph)
+    skills = (
+        _skills_summary(config)
+        if include_skills
+        else {"total": 0, "enabled": 0, "disabled": 0, "categories": {}, "error": ""}
+    )
+    toolsets = (
+        _toolsets_summary(config)
+        if include_toolsets
+        else {"total": 0, "enabled": [], "known": [], "error": ""}
+    )
+    if include_harness:
+        try:
+            from elevate_cli.harness import build_harness_snapshot
 
-        harness = build_harness_snapshot(
-            config=config,
-            sessions=sessions,
-            memory=memory,
-            skills=skills,
-            toolsets=toolsets,
-            orchestration=orchestration,
-            include_profiles=include_profiles,
-        )
-    except Exception as exc:
-        harness = {"error": str(exc), "available": False}
+            harness = build_harness_snapshot(
+                config=config,
+                sessions=sessions,
+                memory=memory,
+                skills=skills,
+                toolsets=toolsets,
+                orchestration=orchestration,
+                include_profiles=include_profiles,
+            )
+        except Exception as exc:
+            harness = {"error": str(exc), "available": False}
+    else:
+        harness = {"available": False, "error": ""}
 
     return {
         "generated_at": time.time(),

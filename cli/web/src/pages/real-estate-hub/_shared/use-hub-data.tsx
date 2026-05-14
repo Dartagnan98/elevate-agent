@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
 import type { HubData } from "./types";
 
 export function useRealEstateHubData(): HubData {
+  const { pathname } = useLocation();
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [sourceInbox, setSourceInbox] = useState<SourceInboxResponse | null>(null);
@@ -26,6 +28,7 @@ export function useRealEstateHubData(): HubData {
   const [actionRuns, setActionRuns] = useState<AdminActionRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const includeMemoryGraph = pathname === "/memory" || pathname.startsWith("/memory/");
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -38,9 +41,13 @@ export function useRealEstateHubData(): HubData {
       dealTasksResult,
       actionRunsResult,
     ] = await Promise.allSettled([
-      api.getAgentHub(),
+      api.getAgentHub({
+        lite: true,
+        includeMemoryGraph,
+        includeOrchestration: true,
+      }),
       api.getStatus(),
-      api.getSessions(36),
+      api.getSessions(36, 0, { includeTotal: false }),
       api.getCronJobs(),
       api.getSourceInbox(200),
       api.getAdminDealTasks({ status: "open", limit: 200 }),
@@ -76,7 +83,7 @@ export function useRealEstateHubData(): HubData {
     if (failed?.status === "rejected") {
       setError(failed.reason instanceof Error ? failed.reason.message : "Some hub data failed");
     }
-  }, []);
+  }, [includeMemoryGraph]);
 
   useEffect(() => {
     let cancelled = false;

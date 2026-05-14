@@ -1,6 +1,5 @@
 """Agent Hub and handoff routes for the Elevate dashboard."""
 
-import inspect
 import logging
 from typing import Any, Callable, Dict, Optional
 
@@ -65,18 +64,29 @@ def create_agent_hub_router(
 
 
     @router.get("/api/agent-hub")
-    async def get_agent_hub():
+    async def get_agent_hub(
+        lite: bool = False,
+        include_memory_graph: Optional[bool] = None,
+        include_session_total: Optional[bool] = None,
+        include_orchestration: Optional[bool] = None,
+        include_skills: Optional[bool] = None,
+        include_toolsets: Optional[bool] = None,
+        include_harness: Optional[bool] = None,
+    ):
         """Return the local Agent Hub snapshot for the dashboard."""
         try:
             from elevate_cli.agent_hub import build_agent_hub_snapshot
-            import inspect
 
-            kwargs = (
-                {"include_profiles": False}
-                if "include_profiles" in inspect.signature(build_agent_hub_snapshot).parameters
-                else {}
+            return build_agent_hub_snapshot(
+                include_profiles=False,
+                include_memory_graph=not lite if include_memory_graph is None else include_memory_graph,
+                include_session_total=not lite if include_session_total is None else include_session_total,
+                include_orchestration=not lite if include_orchestration is None else include_orchestration,
+                include_skills=not lite if include_skills is None else include_skills,
+                include_toolsets=not lite if include_toolsets is None else include_toolsets,
+                include_harness=not lite if include_harness is None else include_harness,
+                compact_orchestration=lite,
             )
-            return build_agent_hub_snapshot(**kwargs)
         except Exception as exc:
             _log.exception("GET /api/agent-hub failed")
             raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")

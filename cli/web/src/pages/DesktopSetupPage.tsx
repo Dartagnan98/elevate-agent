@@ -618,37 +618,54 @@ export default function DesktopSetupPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const [status, access, hub, adminSetup, packOnboarding, oauth, connectors, composio, harness, updateStatus] = await Promise.all([
-        api.getStatus(),
-        api.getAccessStatus().catch(() => null),
-        api.getAgentHub(),
-        api.getAdminSetup().catch(() => null),
-        api.getPackOnboarding().catch(() => null),
-        api.getOAuthProviders().catch(() => null),
-        api.getSourceConnectors().catch(() => null),
-        api.getComposioStatus().catch(() => null),
-        api.getHarness().catch(() => null),
-        api.getUpdateStatus().catch(() => null),
-      ]);
-      setState({
-        access,
-        adminSetup,
-        composio,
-        connectors,
-        harness,
-        hub,
-        oauth,
-        packOnboarding,
-        status,
-        updateStatus,
-      });
-      setUpdatedAt(new Date());
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "Desktop setup failed to load", "error");
-    } finally {
-      setLoading(false);
+    const [statusResult, accessResult, hubResult] = await Promise.allSettled([
+      api.getStatus(),
+      api.getAccessStatus(),
+      api.getAgentHub({ lite: true }),
+    ]);
+
+    setState((prev) => ({
+      ...prev,
+      access: accessResult.status === "fulfilled" ? accessResult.value : prev.access,
+      hub: hubResult.status === "fulfilled" ? hubResult.value : prev.hub,
+      status: statusResult.status === "fulfilled" ? statusResult.value : prev.status,
+    }));
+    if (statusResult.status === "rejected" && hubResult.status === "rejected") {
+      const reason = statusResult.reason instanceof Error ? statusResult.reason.message : "Desktop setup failed to load";
+      showToast(reason, "error");
     }
+    setLoading(false);
+    setUpdatedAt(new Date());
+
+    const [
+      adminSetupResult,
+      packOnboardingResult,
+      oauthResult,
+      connectorsResult,
+      composioResult,
+      harnessResult,
+      updateStatusResult,
+    ] = await Promise.allSettled([
+      api.getAdminSetup(),
+      api.getPackOnboarding(),
+      api.getOAuthProviders(),
+      api.getSourceConnectors(),
+      api.getComposioStatus(),
+      api.getHarness(),
+      api.getUpdateStatus(),
+    ]);
+
+    setState((prev) => ({
+      ...prev,
+      adminSetup: adminSetupResult.status === "fulfilled" ? adminSetupResult.value : prev.adminSetup,
+      composio: composioResult.status === "fulfilled" ? composioResult.value : prev.composio,
+      connectors: connectorsResult.status === "fulfilled" ? connectorsResult.value : prev.connectors,
+      harness: harnessResult.status === "fulfilled" ? harnessResult.value : prev.harness,
+      oauth: oauthResult.status === "fulfilled" ? oauthResult.value : prev.oauth,
+      packOnboarding: packOnboardingResult.status === "fulfilled" ? packOnboardingResult.value : prev.packOnboarding,
+      updateStatus: updateStatusResult.status === "fulfilled" ? updateStatusResult.value : prev.updateStatus,
+    }));
+    setUpdatedAt(new Date());
   }, [showToast]);
 
   useEffect(() => {

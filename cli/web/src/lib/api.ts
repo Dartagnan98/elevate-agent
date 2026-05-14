@@ -161,8 +161,19 @@ export const api = {
     fetchJSON<LicenseLogoutResponse>("/api/license/logout", {
       method: "POST",
     }),
-  getSessions: (limit = 20, offset = 0) =>
-    fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
+  getSessions: (
+    limit = 20,
+    offset = 0,
+    options?: { includeTotal?: boolean; includeDetails?: boolean },
+  ) => {
+    const qs = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    });
+    if (options?.includeTotal === false) qs.set("include_total", "false");
+    if (options?.includeDetails) qs.set("include_details", "true");
+    return fetchJSON<PaginatedSessions>(`/api/sessions?${qs.toString()}`);
+  },
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
   renameSession: (id: string, title: string | null) =>
@@ -562,7 +573,36 @@ export const api = {
     }),
 
   // Agent Hub
-  getAgentHub: () => fetchJSON<AgentHubSnapshot>("/api/agent-hub"),
+  getAgentHub: (
+    options?: {
+      lite?: boolean;
+      includeMemoryGraph?: boolean;
+      includeOrchestration?: boolean;
+      includeSkills?: boolean;
+      includeToolsets?: boolean;
+      includeHarness?: boolean;
+    },
+  ) => {
+    const qs = new URLSearchParams();
+    if (options?.lite) qs.set("lite", "true");
+    if (typeof options?.includeMemoryGraph === "boolean") {
+      qs.set("include_memory_graph", String(options.includeMemoryGraph));
+    }
+    if (typeof options?.includeOrchestration === "boolean") {
+      qs.set("include_orchestration", String(options.includeOrchestration));
+    }
+    if (typeof options?.includeSkills === "boolean") {
+      qs.set("include_skills", String(options.includeSkills));
+    }
+    if (typeof options?.includeToolsets === "boolean") {
+      qs.set("include_toolsets", String(options.includeToolsets));
+    }
+    if (typeof options?.includeHarness === "boolean") {
+      qs.set("include_harness", String(options.includeHarness));
+    }
+    const suffix = qs.toString();
+    return fetchJSON<AgentHubSnapshot>(`/api/agent-hub${suffix ? `?${suffix}` : ""}`);
+  },
   getAgentHandoffs: (
     params: {
       toAgentId?: string;
