@@ -939,10 +939,33 @@ function AdminSetupLaunch({
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
 
   useEffect(() => {
     setDraft(adminSetupDraftFromSnapshot(setup));
   }, [setup]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAdminProvinceGuides()
+      .then((guides) => {
+        if (cancelled) return;
+        if ("items" in guides) setProvinceCoverage(guides.items);
+      })
+      .catch(() => {
+        if (!cancelled) setProvinceCoverage([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const provinceCoverageByCode = useMemo(
+    () => new Map(provinceCoverage.map((item) => [item.province, item])),
+    [provinceCoverage],
+  );
+  const selectedProvinceCoverage = provinceCoverageByCode.get(draft.province.trim().toUpperCase());
 
   const updateDraft = useCallback(
     (field: keyof AdminSetupDraft, value: string) => {
@@ -1074,7 +1097,61 @@ function AdminSetupLaunch({
           <AdminSetupField label="Licensed / public name" value={draft.licenseName} onChange={(v) => updateDraft("licenseName", v)} />
           <AdminSetupField label="Brokerage" value={draft.brokerageName} onChange={(v) => updateDraft("brokerageName", v)} />
           <AdminSetupField label="Team / PREC" value={draft.teamName} onChange={(v) => updateDraft("teamName", v)} />
-          <AdminSetupField label="Province" value={draft.province} onChange={(v) => updateDraft("province", v.toUpperCase())} placeholder="BC, AB, ON..." />
+          <label className="block min-w-0">
+            <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">Country</span>
+            <select
+              value="CA"
+              disabled
+              className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30 disabled:opacity-80"
+            >
+              <option value="CA">Canada</option>
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">Province / territory</span>
+            <select
+              value={draft.province.trim().toUpperCase()}
+              onChange={(event) => updateDraft("province", event.target.value)}
+              className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
+            >
+              <option value="">Select province</option>
+              {CANADIAN_PROVINCES.map(({ code, label }) => {
+                const coverage = provinceCoverageByCode.get(code);
+                const suffix = coverage?.hasTransactionGuide ? " — full guide" : coverage ? " — reference" : "";
+                return (
+                  <option key={code} value={code}>
+                    {label}
+                    {suffix}
+                  </option>
+                );
+              })}
+            </select>
+            {selectedProvinceCoverage && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                  {selectedProvinceCoverage.hasTransactionGuide ? "full guide" : "reference"}
+                </span>
+                <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                  {selectedProvinceCoverage.referencePages} pages
+                </span>
+                {selectedProvinceCoverage.forms > 0 && (
+                  <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                    {selectedProvinceCoverage.forms} forms
+                  </span>
+                )}
+                {selectedProvinceCoverage.checklists > 0 && (
+                  <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                    {selectedProvinceCoverage.checklists} checklists
+                  </span>
+                )}
+              </div>
+            )}
+            {draft.province.trim() && !selectedProvinceCoverage && (
+              <div className="mt-1.5 text-[11px] text-muted-foreground">
+                No local guide for this province yet — fall back to manual references.
+              </div>
+            )}
+          </label>
           <AdminSetupField label="Market" value={draft.market} onChange={(v) => updateDraft("market", v)} placeholder="Kamloops, Calgary..." />
           <AdminSetupField label="Board memberships" value={draft.boardMemberships} onChange={(v) => updateDraft("boardMemberships", v)} placeholder="AOIR, FVREB..." />
           <AdminSetupField label="Managing broker/admin email" value={draft.managingBrokerEmail} onChange={(v) => updateDraft("managingBrokerEmail", v)} />
