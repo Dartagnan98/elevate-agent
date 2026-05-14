@@ -196,9 +196,7 @@ export function RecentSessions({
             </div>
           ))
         ) : (
-          <div className="py-8 text-sm text-muted-foreground">
-            {empty}
-          </div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">{empty}</p>
         )}
       </CardContent>
     </Card>
@@ -266,9 +264,7 @@ export function TimedTasks({
             </div>
           ))
         ) : (
-          <div className="py-8 text-sm text-muted-foreground">
-            {empty}
-          </div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">{empty}</p>
         )}
       </CardContent>
     </Card>
@@ -364,7 +360,7 @@ export function AdminDealTasks({
             </div>
           ))
         ) : (
-          <div className="py-8 text-sm text-muted-foreground">{empty}</div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">{empty}</p>
         )}
       </CardContent>
     </Card>
@@ -431,7 +427,7 @@ export function AdminActionRuns({
             />
           ))
         ) : (
-          <div className="py-8 text-sm text-muted-foreground">{empty}</div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">{empty}</p>
         )}
       </CardContent>
     </Card>
@@ -488,7 +484,7 @@ export function AgentHandoffsCard({
               </div>
             ))
           ) : (
-            <div className="py-8 text-sm text-muted-foreground">No handoffs yet.</div>
+            <p className="px-1 py-1 text-xs text-muted-foreground/80">No handoffs yet.</p>
           )}
         </div>
       </CardContent>

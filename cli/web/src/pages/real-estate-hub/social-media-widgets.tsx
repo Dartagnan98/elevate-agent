@@ -1216,9 +1216,7 @@ export function PostDetailModal({ row, onClose }: { row: SocialMetricRow; onClos
                 </div>
               </div>
             ) : (
-              <div className="rounded-sm border border-dashed border-border bg-card px-3 py-4 text-center text-xs text-muted-foreground">
-                No metrics returned for this post yet.
-              </div>
+              <p className="px-1 py-1 text-xs text-muted-foreground/80">No metrics returned for this post yet.</p>
             )}
           </div>
         </div>

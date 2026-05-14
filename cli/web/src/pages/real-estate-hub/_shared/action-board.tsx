@@ -58,9 +58,7 @@ export function ActionBoard({
             );
           })
         ) : (
-          <div className="py-10 text-sm text-muted-foreground">
-            {empty}
-          </div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">{empty}</p>
         )}
       </CardContent>
     </Card>
