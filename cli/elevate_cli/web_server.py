@@ -55,7 +55,7 @@ from elevate_cli.data.deals import DealPhaseGateBlocked
 from gateway.status import get_running_pid, read_runtime_status
 
 try:
-    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -1393,6 +1393,75 @@ async def preview_file(path: str):
             "X-Elevate-File-Name": target.name,
             "X-Elevate-File-Size": str(target.stat().st_size),
         },
+    )
+
+
+_UPLOAD_MAX_PER_FILE = 25 * 1024 * 1024  # 25 MB per file
+_UPLOAD_DIRNAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_upload_filename(raw: str) -> str:
+    name = (raw or "").strip().split("/")[-1].split("\\")[-1] or "file"
+    clean = _UPLOAD_DIRNAME_SANITIZE.sub("_", name)
+    if clean.startswith("."):
+        clean = "_" + clean.lstrip(".")
+    return clean[:120] or "file"
+
+
+@app.post("/api/uploads/{session_id}")
+async def upload_attachment(session_id: str, file: UploadFile = File(...)):
+    """Accept a chat attachment from the web client and stash it under
+    ~/.elevate/uploads/<sid>/ so the gateway can hand the absolute path to
+    the agent via file.attach / attached_files."""
+    from datetime import datetime
+
+    sid_clean = _sanitize_upload_filename(session_id) or "anon"
+    upload_dir = get_elevate_home() / "uploads" / sid_clean
+    try:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not create upload dir: {exc}")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safe_name = _sanitize_upload_filename(file.filename or "file")
+    dest = upload_dir / f"{ts}_{safe_name}"
+
+    total = 0
+    try:
+        with dest.open("wb") as handle:
+            while True:
+                chunk = await file.read(1 << 20)  # 1 MB
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _UPLOAD_MAX_PER_FILE:
+                    handle.close()
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds {_UPLOAD_MAX_PER_FILE // (1024 * 1024)} MB cap",
+                    )
+                handle.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as exc:  # disk full, permission, etc.
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+    media_type = file.content_type or mimetypes.guess_type(str(dest))[0] or "application/octet-stream"
+    return JSONResponse(
+        {
+            "path": str(dest),
+            "name": safe_name,
+            "size": total,
+            "media_type": media_type,
+        }
     )
 
 

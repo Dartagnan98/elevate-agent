@@ -198,6 +198,25 @@ export const api = {
     }),
   previewFile: (path: string) =>
     fetchBlob(`/api/files/preview?path=${encodeURIComponent(path)}`),
+  uploadChatAttachment: async (
+    sessionId: string,
+    file: File,
+  ): Promise<{ path: string; name: string; size: number; media_type: string }> => {
+    const headers = new Headers();
+    const token = window.__ELEVATE_SESSION_TOKEN__;
+    if (token) setSessionHeader(headers, token);
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const res = await fetch(
+      `${BASE}/api/uploads/${encodeURIComponent(sessionId)}`,
+      { method: "POST", body: form, headers },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    return res.json();
+  },
   getLogs: (params: { file?: string; lines?: number; level?: string; component?: string }) => {
     const qs = new URLSearchParams();
     if (params.file) qs.set("file", params.file);

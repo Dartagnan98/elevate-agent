@@ -1430,6 +1430,93 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
     return text or "What do you see in this image?"
 
 
+# File types we treat as "small enough to inline" — readable as text.
+# Anything else (pdf, video, image-other, archives, binaries) gets the
+# reference-only treatment so the agent can decide whether to read_file
+# or use a dedicated tool.
+_INLINE_TEXT_SUFFIXES = frozenset({
+    ".txt", ".md", ".markdown", ".rst", ".org",
+    ".csv", ".tsv", ".json", ".jsonl", ".ndjson",
+    ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".log",
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".sh", ".bash", ".zsh", ".fish",
+    ".rb", ".go", ".rs", ".java", ".kt", ".swift", ".c", ".cpp", ".h", ".hpp",
+    ".php", ".cs", ".scala", ".lua", ".pl", ".r", ".jl", ".dart", ".sql",
+    ".dockerfile",
+})
+
+_INLINE_TEXT_MAX_BYTES = 200_000  # per-file cap on inlined text
+_INLINE_TEXT_TOTAL_BUDGET = 600_000  # total across all attachments per turn
+
+
+def _enrich_with_attached_files(user_text: str, file_paths: list[str]) -> str:
+    """Prepend non-image attachments to the user message.
+
+    Text-shaped files within the byte budget get inlined as fenced blocks.
+    Everything else gets a one-line reference so the agent can read_file
+    or call a more specialized tool when needed.
+    """
+    if not file_paths:
+        return user_text or ""
+    import mimetypes as _mt
+
+    blocks: list[str] = []
+    budget_remaining = _INLINE_TEXT_TOTAL_BUDGET
+    for raw in file_paths:
+        p = Path(raw)
+        if not p.exists() or not p.is_file():
+            blocks.append(f"[User attached file (missing on disk): {raw}]")
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        suffix = p.suffix.lower()
+        media_type = _mt.guess_type(str(p))[0] or "application/octet-stream"
+        size_h = _format_file_size(size)
+        header = (
+            f"[User attached file: {p.name} · {size_h} · {media_type} · path: {p}]"
+        )
+
+        if suffix in _INLINE_TEXT_SUFFIXES and size <= _INLINE_TEXT_MAX_BYTES and budget_remaining > 0:
+            try:
+                with p.open("r", encoding="utf-8", errors="replace") as handle:
+                    body = handle.read(min(size, budget_remaining, _INLINE_TEXT_MAX_BYTES))
+                budget_remaining -= len(body.encode("utf-8", errors="replace"))
+                truncated = ""
+                if size > len(body.encode("utf-8", errors="replace")):
+                    truncated = (
+                        f"\n…[truncated; full file at {p} — use read_file for the rest]"
+                    )
+                fence_lang = suffix.lstrip(".") if suffix else ""
+                blocks.append(
+                    f"{header}\n```{fence_lang}\n{body}{truncated}\n```"
+                )
+                continue
+            except Exception:
+                pass
+        blocks.append(
+            f"{header}\n[Use read_file (or a more specific tool for this type) "
+            f"to inspect the contents if needed.]"
+        )
+
+    prefix = "\n\n".join(blocks)
+    text = user_text or ""
+    if prefix:
+        return f"{prefix}\n\n{text}" if text else prefix
+    return text
+
+
+def _format_file_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -2276,6 +2363,8 @@ def _(rid, params: dict) -> dict:
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
+        files = list(session.get("attached_files", []))
+        session["attached_files"] = []
     agent = session["agent"]
     _emit("message.start", sid)
 
@@ -2322,6 +2411,7 @@ def _(rid, params: dict) -> dict:
                 prompt = ctx.message
 
             prompt = _enrich_with_attached_images(prompt, images) if images else prompt
+            prompt = _enrich_with_attached_files(prompt, files) if files else prompt
 
             def _stream(delta):
                 payload = {"text": delta}
@@ -2523,6 +2613,90 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5027, str(e))
+
+
+@method("file.attach")
+def _(rid, params: dict) -> dict:
+    """Attach an arbitrary file (any extension) to the active session.
+
+    Web uploads go to ~/.elevate/uploads/<sid>/ via POST /api/uploads, and
+    the path lands here. We also accept already-on-disk paths from the user
+    (e.g. a Finder drag where the renderer extracted file.path). Images
+    route into attached_images so the existing vision-analyze enrichment
+    still fires; everything else lands in attached_files.
+    """
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    raw = str(params.get("path", "") or "").strip()
+    if not raw:
+        return _err(rid, 4015, "path required")
+    try:
+        from cli import _IMAGE_EXTENSIONS, _resolve_attachment_path
+
+        path = _resolve_attachment_path(raw)
+        if path is None:
+            return _err(rid, 4016, f"file not found: {raw}")
+        is_image = path.suffix.lower() in _IMAGE_EXTENSIONS
+        if is_image:
+            session.setdefault("attached_images", []).append(str(path))
+            extra = _image_meta(path)
+        else:
+            session.setdefault("attached_files", []).append(str(path))
+            extra = {}
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        try:
+            import mimetypes as _mt
+            media_type = _mt.guess_type(str(path))[0] or "application/octet-stream"
+        except Exception:
+            media_type = "application/octet-stream"
+        return _ok(
+            rid,
+            {
+                "attached": True,
+                "path": str(path),
+                "name": path.name,
+                "size": size,
+                "media_type": media_type,
+                "is_image": is_image,
+                "count": len(session.get("attached_images", []))
+                + len(session.get("attached_files", [])),
+                **extra,
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5027, str(e))
+
+
+@method("attachments.clear")
+def _(rid, params: dict) -> dict:
+    """Drop everything in attached_images + attached_files for a session.
+
+    Called when the user removes a chip before sending, or by the
+    frontend on submit-cancel. prompt.submit already clears both queues
+    after capture, so this is for explicit user 'remove' actions.
+    """
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    path = str(params.get("path", "") or "").strip()
+    if path:
+        for key in ("attached_images", "attached_files"):
+            queue = session.get(key, [])
+            session[key] = [p for p in queue if p != path]
+    else:
+        session["attached_images"] = []
+        session["attached_files"] = []
+    return _ok(
+        rid,
+        {
+            "count": len(session.get("attached_images", []))
+            + len(session.get("attached_files", [])),
+        },
+    )
 
 
 @method("input.detect_drop")

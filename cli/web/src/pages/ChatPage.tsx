@@ -33,8 +33,11 @@ import {
   FileText,
   Folder,
   GitBranch,
+  Film,
+  Image as ImageIcon,
   Loader2,
   PanelLeftOpen,
+  Paperclip,
   Pin,
   Plug,
   Send,
@@ -161,6 +164,40 @@ interface QueuedInput {
   routedText: string;
   status: "queued" | "error";
   text: string;
+}
+
+interface ChatAttachment {
+  id: string;
+  name: string;
+  size: number;
+  mediaType: string;
+  /** Absolute path on the gateway host once the upload lands. */
+  path?: string;
+  status: "uploading" | "ready" | "error";
+  error?: string;
+}
+
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachmentIconFor(mediaType: string, name: string): LucideIcon {
+  const lower = (mediaType || "").toLowerCase();
+  const ext = name.toLowerCase().split(".").pop() || "";
+  if (lower.startsWith("image/")) return ImageIcon;
+  if (lower.startsWith("video/")) return Film;
+  if (lower.includes("pdf") || ext === "pdf") return FileText;
+  if (ext === "csv" || ext === "tsv" || ext === "xlsx" || ext === "xls") {
+    return FileText;
+  }
+  if (["js", "jsx", "ts", "tsx", "py", "rb", "go", "rs", "java", "c", "cpp", "sh", "json", "yaml", "yml", "toml"].includes(ext)) {
+    return FileCode2;
+  }
+  return FileText;
 }
 
 interface ActivityTrace {
@@ -1565,6 +1602,10 @@ export default function ChatPage() {
   const [caretIndex, setCaretIndex] = useState(0);
   const composerScrollTopRef = useRef(0);
   const richLayerRef = useRef<HTMLDivElement>(null);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
@@ -2555,15 +2596,127 @@ export default function ChatPage() {
     [],
   );
 
+  const removeAttachment = useCallback(
+    (attachmentId: string) => {
+      setAttachments((prev) => {
+        const target = prev.find((item) => item.id === attachmentId);
+        if (target?.path && sessionId) {
+          void gw
+            .request("attachments.clear", { session_id: sessionId, path: target.path })
+            .catch(() => {});
+        }
+        return prev.filter((item) => item.id !== attachmentId);
+      });
+    },
+    [gw, sessionId],
+  );
+
+  const uploadAttachment = useCallback(
+    (file: File) => {
+      if (!sessionId) {
+        setBanner("Connect to a session before attaching files.");
+        return;
+      }
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        setBanner(
+          `${file.name}: ${formatAttachmentSize(file.size)} exceeds the 25 MB attachment cap.`,
+        );
+        return;
+      }
+      const localId = id("attach");
+      const placeholder: ChatAttachment = {
+        id: localId,
+        name: file.name || "file",
+        size: file.size,
+        mediaType: file.type || "application/octet-stream",
+        status: "uploading",
+      };
+      setAttachments((prev) => [...prev, placeholder]);
+
+      void api
+        .uploadChatAttachment(sessionId, file)
+        .then((response) => {
+          setAttachments((prev) =>
+            prev.map((item) =>
+              item.id === localId
+                ? {
+                    ...item,
+                    name: response.name || item.name,
+                    size: response.size ?? item.size,
+                    mediaType: response.media_type || item.mediaType,
+                    path: response.path,
+                    status: "ready" as const,
+                  }
+                : item,
+            ),
+          );
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setAttachments((prev) =>
+            prev.map((item) =>
+              item.id === localId
+                ? { ...item, status: "error" as const, error: message }
+                : item,
+            ),
+          );
+          setBanner(`Upload failed (${file.name}): ${message}`);
+        });
+    },
+    [sessionId],
+  );
+
+  const uploadAttachments = useCallback(
+    (files: FileList | File[]) => {
+      const list = Array.from(files);
+      list.forEach(uploadAttachment);
+    },
+    [uploadAttachment],
+  );
+
+  const onPaperclipClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const onFileInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      if (event.target.files && event.target.files.length > 0) {
+        uploadAttachments(event.target.files);
+      }
+      event.target.value = "";
+    },
+    [uploadAttachments],
+  );
+
   const submitGatewayPrompt = useCallback(
     async (text: string, routedText: string, status = "Sending...") => {
       if (!sessionId) return;
+
+      const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
+      const stillUploading = attachments.some((item) => item.status === "uploading");
+      if (stillUploading) {
+        setBanner("Wait for attachments to finish uploading before sending.");
+        return;
+      }
 
       appendMessage("user", text);
       setBusy(true);
       setStatusText(status);
 
       try {
+        for (const att of readyAttachments) {
+          if (!att.path) continue;
+          try {
+            await gw.request("file.attach", {
+              session_id: sessionId,
+              path: att.path,
+            });
+          } catch (attachError) {
+            const m = attachError instanceof Error ? attachError.message : String(attachError);
+            appendMessage("system", `Failed to attach ${att.name}: ${m}`, { status: "error" });
+          }
+        }
+
         const payload: Record<string, unknown> = {
           session_id: sessionId,
           text: routedText,
@@ -2573,6 +2726,7 @@ export default function ChatPage() {
         }
 
         await gw.request("prompt.submit", payload);
+        setAttachments([]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         appendMessage("system", message, { status: "error" });
@@ -2580,7 +2734,7 @@ export default function ChatPage() {
         setStatusText("Error");
       }
     },
-    [appendMessage, gw, sessionId],
+    [appendMessage, attachments, gw, sessionId],
   );
 
   const interruptCurrentTurn = useCallback(() => {
@@ -3166,9 +3320,45 @@ export default function ChatPage() {
           </div>
 
           <form
-            className="bg-[linear-gradient(180deg,transparent,var(--chat-bg)_18%)] px-4 pb-5 pt-3 sm:px-6"
+            className="relative bg-[linear-gradient(180deg,transparent,var(--chat-bg)_18%)] px-4 pb-5 pt-3 sm:px-6"
             onSubmit={onSubmit}
+            onDragEnter={(event) => {
+              if (!event.dataTransfer?.types?.includes("Files")) return;
+              event.preventDefault();
+              dragCounterRef.current += 1;
+              setDragOver(true);
+            }}
+            onDragOver={(event) => {
+              if (!event.dataTransfer?.types?.includes("Files")) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+            }}
+            onDragLeave={(event) => {
+              if (!event.dataTransfer?.types?.includes("Files")) return;
+              event.preventDefault();
+              dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+              if (dragCounterRef.current === 0) setDragOver(false);
+            }}
+            onDrop={(event) => {
+              if (!event.dataTransfer?.files?.length) return;
+              event.preventDefault();
+              dragCounterRef.current = 0;
+              setDragOver(false);
+              uploadAttachments(event.dataTransfer.files);
+            }}
           >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={onFileInputChange}
+            />
+            {dragOver && (
+              <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-lg border border-dashed border-[var(--chat-accent)] bg-[color-mix(in_srgb,var(--chat-accent)_12%,var(--chat-bg))] text-xs font-medium text-[var(--chat-accent)]">
+                Drop to attach
+              </div>
+            )}
             <div className="mx-auto w-full max-w-[52rem]">
               <RunningWorkStrip
                 busy={busy}
@@ -3191,6 +3381,10 @@ export default function ChatPage() {
               />
 
               <div className="relative rounded-lg bg-[var(--chat-bg)] p-2.5 shadow-[inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-accent)]">
+                <AttachmentChipStrip
+                  attachments={attachments}
+                  onRemove={removeAttachment}
+                />
                 <SlashPopover
                   ref={commandPopoverRef}
                   agents={activeComposerAgents}
@@ -3233,6 +3427,21 @@ export default function ChatPage() {
                     onKeyUp={(event) =>
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
                     }
+                    onPaste={(event) => {
+                      const items = event.clipboardData?.items;
+                      if (!items || items.length === 0) return;
+                      const files: File[] = [];
+                      for (const item of items) {
+                        if (item.kind === "file") {
+                          const file = item.getAsFile();
+                          if (file) files.push(file);
+                        }
+                      }
+                      if (files.length > 0) {
+                        event.preventDefault();
+                        uploadAttachments(files);
+                      }
+                    }}
                     onScroll={(event) => {
                       const top = event.currentTarget.scrollTop;
                       composerScrollTopRef.current = top;
@@ -3259,6 +3468,7 @@ export default function ChatPage() {
                   canPickModel={canPickModel}
                   canSend={canSend}
                   info={info}
+                  onAttach={onPaperclipClick}
                   onOpenModel={() => setModelOpen(true)}
                   onInterrupt={interruptCurrentTurn}
                   onSelectAgent={selectComposerAgent}
@@ -3441,6 +3651,51 @@ function QueuedInputStrip({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function AttachmentChipStrip({
+  attachments,
+  onRemove,
+}: {
+  attachments: ChatAttachment[];
+  onRemove: (id: string) => void;
+}) {
+  if (!attachments.length) return null;
+  return (
+    <div className="mb-2 flex flex-wrap gap-1.5">
+      {attachments.map((item) => {
+        const Icon = attachmentIconFor(item.mediaType, item.name);
+        const isError = item.status === "error";
+        const isUploading = item.status === "uploading";
+        return (
+          <div
+            key={item.id}
+            className={cn(
+              "group flex items-center gap-1.5 rounded-md px-2 py-1 text-[0.68rem]",
+              isError
+                ? "bg-[color-mix(in_srgb,var(--chat-danger)_14%,var(--chat-bg))] text-[var(--chat-danger)]"
+                : "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
+            )}
+            title={item.error || `${item.name} · ${formatAttachmentSize(item.size)}`}
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <span className="max-w-[14rem] truncate font-medium">{item.name}</span>
+            <span className="text-[0.62rem] text-[var(--chat-muted)]">
+              {isUploading ? "uploading..." : isError ? "failed" : formatAttachmentSize(item.size)}
+            </span>
+            <button
+              type="button"
+              onClick={() => onRemove(item.id)}
+              aria-label={`Remove ${item.name}`}
+              className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-bg)] hover:text-[var(--chat-text)]"
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3738,6 +3993,7 @@ function ComposerActionBar({
   canPickModel,
   canSend,
   info,
+  onAttach,
   onOpenModel,
   onInterrupt,
   onSelectAgent,
@@ -3755,6 +4011,7 @@ function ComposerActionBar({
   canPickModel: boolean;
   canSend: boolean;
   info: SessionInfo;
+  onAttach(): void;
   onOpenModel(): void;
   onInterrupt(): void;
   onSelectAgent(agent: ComposerAgent): void;
@@ -3769,6 +4026,16 @@ function ComposerActionBar({
   return (
     <div className="mt-2 flex items-center justify-between gap-2 px-2 text-[0.68rem] text-[var(--chat-muted)]">
       <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto scrollbar-none">
+        <button
+          type="button"
+          onClick={onAttach}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+          title="Attach files"
+          aria-label="Attach files"
+        >
+          <Paperclip className="h-3.5 w-3.5" />
+        </button>
+
         <div className="relative">
           <button
             type="button"
@@ -4445,11 +4712,83 @@ function ArtifactPreviewPane({
   );
 }
 
+function ArtifactsSection({
+  artifacts,
+  onOpenArtifact,
+}: {
+  artifacts: ArtifactEntry[];
+  onOpenArtifact(artifact: ArtifactEntry): void;
+}) {
+  const grouped = useMemo(() => {
+    const byKey = new Map<string, { artifact: ArtifactEntry; count: number }>();
+    for (const artifact of artifacts) {
+      const dedupeKey = artifact.path || `${artifact.kind}:${artifact.title}`;
+      const existing = byKey.get(dedupeKey);
+      if (!existing) {
+        byKey.set(dedupeKey, { artifact, count: 1 });
+        continue;
+      }
+      existing.count += 1;
+      if (artifact.createdAt >= existing.artifact.createdAt) {
+        existing.artifact = artifact;
+      }
+    }
+    return Array.from(byKey.values()).sort(
+      (a, b) => b.artifact.createdAt - a.artifact.createdAt,
+    );
+  }, [artifacts]);
+
+  const totalCount = artifacts.length;
+  const uniqueCount = grouped.length;
+  const hasDuplicates = totalCount > uniqueCount;
+
+  return (
+    <section className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="text-[0.82rem] font-medium leading-5 text-[var(--chat-muted-strong)]">
+            Artifacts
+          </span>
+          {uniqueCount > 0 && (
+            <span
+              className="text-[0.66rem] text-[var(--chat-muted)]"
+              title={
+                hasDuplicates
+                  ? `${uniqueCount} unique · ${totalCount} total writes`
+                  : `${uniqueCount} file${uniqueCount === 1 ? "" : "s"}`
+              }
+            >
+              {uniqueCount}
+            </span>
+          )}
+        </div>
+        <Pin className="h-3.5 w-3.5 shrink-0 rotate-45 text-[var(--chat-muted)] opacity-70" />
+      </div>
+      {grouped.length === 0 ? (
+        <PortalEmpty>Files and outputs will land here</PortalEmpty>
+      ) : (
+        <div className="flex max-h-[36vh] flex-col gap-0.5 overflow-y-auto pr-0.5">
+          {grouped.map(({ artifact, count }) => (
+            <ArtifactCard
+              key={artifact.id}
+              artifact={artifact}
+              count={count}
+              onOpenArtifact={onOpenArtifact}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ArtifactCard({
   artifact,
+  count = 1,
   onOpenArtifact,
 }: {
   artifact: ArtifactEntry;
+  count?: number;
   onOpenArtifact(artifact: ArtifactEntry): void;
 }) {
   const [open, setOpen] = useState(false);
@@ -4479,11 +4818,19 @@ function ArtifactCard({
               setOpen((value) => !value);
             }
           }}
-          title={artifact.title}
+          title={count > 1 ? `${artifact.title} · ${count} writes` : artifact.title}
           type="button"
         >
           {artifact.title}
         </button>
+        {count > 1 && (
+          <span
+            className="shrink-0 text-[0.62rem] text-[var(--chat-muted)]"
+            aria-label={`${count} writes to this file`}
+          >
+            ×{count}
+          </span>
+        )}
 
         <button
           aria-label="Copy artifact"
@@ -4724,30 +5071,10 @@ function ActivityPanel({
       )}
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-0.5">
-        <section className="space-y-1.5">
-          <div className="flex items-center justify-between gap-2 px-1">
-            <span className="text-[0.82rem] font-medium leading-5 text-[var(--chat-muted-strong)]">
-              Artifacts
-            </span>
-            <Pin className="h-3.5 w-3.5 shrink-0 rotate-45 text-[var(--chat-muted)] opacity-70" />
-          </div>
-          {artifacts.length === 0 ? (
-            <PortalEmpty>Files and outputs will land here</PortalEmpty>
-          ) : (
-            <div className="flex flex-col gap-0.5">
-              {artifacts
-                .slice()
-                .reverse()
-                .map((artifact) => (
-                  <ArtifactCard
-                    key={artifact.id}
-                    artifact={artifact}
-                    onOpenArtifact={onOpenArtifact}
-                  />
-                ))}
-            </div>
-          )}
-        </section>
+        <ArtifactsSection
+          artifacts={artifacts}
+          onOpenArtifact={onOpenArtifact}
+        />
 
         {hasProgress && (
           <section className="space-y-1.5 border-t border-[color-mix(in_srgb,var(--chat-border)_48%,transparent)] pt-3">
