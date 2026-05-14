@@ -370,21 +370,16 @@ export default function SkillsPage() {
       <Toast toast={toast} />
 
       <section className="rounded-md border border-border bg-card p-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-              <Route className="h-3.5 w-3.5 text-primary" />
-              Real estate workflow skills
-            </div>
-            <h2 className="mt-1 text-lg font-semibold text-foreground">
-              Skills live here; dashboards show connectors.
-            </h2>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <Route className="h-3.5 w-3.5 text-primary" />
+            Real estate workflows
           </div>
           <Badge variant="outline">
             {enabledCount}/{skills.length} enabled
           </Badge>
         </div>
-        <div className="mt-4 grid gap-3 lg:grid-cols-4">
+        <div className="mt-3 grid gap-3 lg:grid-cols-4">
           {REAL_ESTATE_WORKFLOWS.map((workflow) => (
             <WorkflowSkillCard
               key={workflow.key}
@@ -513,7 +508,7 @@ export default function SkillsPage() {
               </CardHeader>
               <CardContent className="px-4 pb-4">
                 {searchMatchedSkills.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-8">
+                  <p className="px-1 py-1 text-xs text-muted-foreground/80">
                     {t.skills.noSkillsMatch}
                   </p>
                 ) : (
@@ -554,7 +549,7 @@ export default function SkillsPage() {
               </CardHeader>
               <CardContent className="px-4 pb-4">
                 {activeSkills.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-8">
+                  <p className="px-1 py-1 text-xs text-muted-foreground/80">
                     {skills.length === 0
                       ? t.skills.noSkills
                       : t.skills.noSkillsMatch}
@@ -578,11 +573,9 @@ export default function SkillsPage() {
             /* Toolsets grid */
             <>
               {filteredToolsets.length === 0 ? (
-                <Card>
-                  <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                    {t.skills.noToolsetsMatch}
-                  </CardContent>
-                </Card>
+                <p className="px-1 py-1 text-xs text-muted-foreground/80">
+                  {t.skills.noToolsetsMatch}
+                </p>
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {filteredToolsets.map((ts) => {
