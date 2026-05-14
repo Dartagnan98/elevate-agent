@@ -337,9 +337,9 @@ export function LeadsSetupLaunch({
           <div>
             <h2 className="text-[14px] font-semibold text-foreground">Leads onboarding</h2>
             <p className="mt-1 text-[12px] text-muted-foreground">
-              CRM is inherited from Admin setup. Wire at least one lead source (Meta / Google / Website webhook),
-              pick at least one outreach channel (iMessage / SMS / Twilio / RCS), and set your auto-reply policy.
-              Once those are in, hit Mark complete to unlock the Leads workspace.
+              CRM is inherited from Admin setup and counts as an outreach lane on its own. Wire at least one
+              lead source (Meta / Google / Website webhook) and set your auto-reply policy. Direct channels
+              (iMessage / SMS / Twilio / RCS) are optional extras.
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
@@ -478,10 +478,11 @@ export function LeadsSetupLaunch({
       </ItemCard>
 
       <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11.5px] text-muted-foreground">
-        <span className="font-medium text-foreground">Outreach channels.</span> Pick how you actually message leads.
-        At least one needs to be enabled.{" "}
+        <span className="font-medium text-foreground">Outreach channels.</span> If your CRM does messaging
+        (Lofty / GHL / kvCore / BoldTrail all do), that already counts — these are direct-channel alternatives
+        on top.{" "}
         {outreachReady ? (
-          <span className="text-success">Ready.</span>
+          <span className="text-success">Ready{crmStatus === "connected" ? ` (via ${crmProvider})` : ""}.</span>
         ) : (
           <span className="text-warning">No channel picked yet.</span>
         )}

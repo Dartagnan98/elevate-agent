@@ -10,10 +10,11 @@ required-keys completion check) but scoped to inbound lead capture:
   inbound lead sources. At least one must be ``connected``/``configured``
   for the gate to lift (enforced by the ``lead_sources_quorum`` synthetic
   check).
-- ``outreach_imessage``, ``outreach_sms``, ``outreach_rcs`` — outbound
-  channels the agent uses to message leads. At least one must be ready
-  (``outreach_quorum`` synthetic check). The agent picks whichever
-  combination they actually use day-to-day.
+- ``outreach_imessage``, ``outreach_sms``, ``outreach_rcs`` — direct
+  outbound channels. Optional alternatives to CRM-native messaging.
+  ``outreach_quorum`` is satisfied by ANY of: a connected CRM (since
+  Lofty / GHL / kvCore / BoldTrail all have built-in messaging) OR any
+  of the direct channels above.
 - ``auto_reply_policy`` — initial-touch behaviour (enabled flag + template +
   follow-up cadence days).
 
@@ -212,9 +213,14 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
     any_lead_source_ready = any(
         by_key.get(k) and _item_counts_ready(by_key[k]) for k in lead_source_keys
     )
-    any_outreach_ready = any(
+    # The CRM is itself an outreach lane — Lofty / GHL / kvCore / BoldTrail all
+    # have built-in messaging. If the CRM is connected, that satisfies the
+    # outreach quorum without forcing iMessage/SMS/RCS on top.
+    crm_outreach_ready = bool(by_key.get("crm") and _item_counts_ready(by_key["crm"]))
+    any_direct_outreach_ready = any(
         by_key.get(k) and _item_counts_ready(by_key[k]) for k in outreach_keys
     )
+    any_outreach_ready = crm_outreach_ready or any_direct_outreach_ready
 
     required = [item for item in items if item["required"]]
     complete_required = [item for item in required if _item_counts_ready(item)]
