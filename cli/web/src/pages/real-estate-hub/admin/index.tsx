@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -6,10 +7,10 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import {
-  Bot,
   BriefcaseBusiness,
   Building2,
   CalendarClock,
@@ -28,7 +29,6 @@ import {
   Square as SquareIcon,
   Plus,
   RefreshCw,
-  Repeat,
   ShieldCheck,
   Target,
   Users,
@@ -1399,66 +1399,57 @@ function AdminPhaseSummary({
   phase: AdminPhaseAutomationInfo;
   dense?: boolean;
 }) {
-  const agentLimit = dense ? 2 : 3;
-  const backgroundLimit = dense ? 1 : 2;
-  const agents = phase.agents.slice(0, agentLimit);
-  const background = phase.background.slice(0, backgroundLimit);
-  const hiddenCount = Math.max(0, phase.agents.length - agents.length) + Math.max(0, phase.background.length - background.length);
+  const agentNames = phase.agents.join(", ");
+  const backgroundNames = phase.background.join(", ");
+  const summaryTitle = [
+    phase.agents.length ? `Stage skills: ${agentNames}` : "No stage-entry skill wired",
+    phase.background.length ? `Background: ${backgroundNames}` : null,
+    phase.approvalGate ? `Approval gate: ${phase.approvalGate}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const segments: ReactNode[] = [];
+  if (phase.agents.length > 0) {
+    segments.push(
+      <span key="agents" className="truncate text-foreground/75">
+        {agentNames}
+      </span>,
+    );
+  } else {
+    segments.push(
+      <span key="agents-empty" className="truncate text-muted-foreground/70">
+        task list
+      </span>,
+    );
+  }
+  if (phase.background.length > 0) {
+    segments.push(
+      <span key="background" className="truncate text-muted-foreground">
+        bg · {backgroundNames}
+      </span>,
+    );
+  }
+  if (phase.approvalGate) {
+    segments.push(
+      <span key="approval" className="shrink-0 text-warning">
+        approval
+      </span>,
+    );
+  }
 
   return (
-    <div className={cn("flex flex-col gap-1.5", dense ? "mt-1.5" : "mt-2")}>
-      <div className="flex flex-wrap gap-1">
-        {agents.length > 0 ? (
-          agents.map((agent) => (
-            <span
-              key={`agent-${agent}`}
-              title={`Stage-entry skill: ${agent}`}
-              className="inline-flex max-w-full items-center gap-1 rounded-sm border border-border bg-transparent px-1.5 py-0.5 text-[0.62rem] text-primary"
-            >
-              <Bot className="h-2.5 w-2.5 shrink-0" />
-              <span className="truncate">{agent}</span>
-            </span>
-          ))
-        ) : (
-          <span
-            title="No stage-entry skill is wired for this phase yet"
-            className="inline-flex items-center gap-1 rounded-sm border border-border bg-transparent px-1.5 py-0.5 text-[0.62rem] text-muted-foreground"
-          >
-            <CheckSquare className="h-2.5 w-2.5 shrink-0" />
-            task list
-          </span>
-        )}
-        {background.map((skill) => (
-          <span
-            key={`background-${skill}`}
-            title={`Background cron skill: ${skill}`}
-            className="inline-flex max-w-full items-center gap-1 rounded-sm border border-border bg-transparent px-1.5 py-0.5 text-[0.62rem] text-success"
-          >
-            <Repeat className="h-2.5 w-2.5 shrink-0" />
-            <span className="truncate">{skill}</span>
-          </span>
+    <div className={cn("flex flex-col gap-0.5", dense ? "mt-1" : "mt-1.5")} title={summaryTitle}>
+      <div className="flex min-w-0 items-center gap-1.5 text-[0.7rem] leading-tight">
+        {segments.map((segment, idx) => (
+          <Fragment key={idx}>
+            {idx > 0 && <span className="shrink-0 text-muted-foreground/45">·</span>}
+            {segment}
+          </Fragment>
         ))}
-        {phase.approvalGate && (
-          <span
-            title={`Approval gate: ${phase.approvalGate}`}
-            className="inline-flex max-w-full items-center gap-1 rounded-sm border border-border bg-transparent px-1.5 py-0.5 text-[0.62rem] text-warning"
-          >
-            <ShieldCheck className="h-2.5 w-2.5 shrink-0" />
-            <span className="truncate">approval</span>
-          </span>
-        )}
-        {hiddenCount > 0 && (
-          <span className="inline-flex items-center rounded-sm border border-border bg-transparent px-1.5 py-0.5 font-mono-ui text-[0.6rem] text-muted-foreground">
-            +{hiddenCount}
-          </span>
-        )}
       </div>
-      <div
-        title={`Move signal: ${phase.moveSignal}`}
-        className="flex min-w-0 items-center gap-1.5 text-[0.66rem] leading-tight text-muted-foreground"
-      >
-        <Target className="h-3 w-3 shrink-0 text-muted-foreground/80" />
-        <span className="truncate">Moves on {phase.moveSignal}</span>
+      <div className="truncate text-[0.66rem] leading-tight text-muted-foreground/85">
+        Moves on {phase.moveSignal}
       </div>
     </div>
   );
