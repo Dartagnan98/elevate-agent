@@ -489,15 +489,13 @@ function LinkedSessionPanel({
       </CardHeader>
       <CardContent>
         {loading && (
-          <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          </div>
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading…</p>
         )}
         {error && (
-          <p className="text-sm text-destructive py-4 text-center">{error}</p>
+          <p className="px-1 py-1 text-xs text-destructive">{error}</p>
         )}
         {messages && messages.length === 0 && (
-          <p className="text-sm text-muted-foreground py-4 text-center">
+          <p className="px-1 py-1 text-xs text-muted-foreground/80">
             {t.sessions.noMessages}
           </p>
         )}
@@ -924,17 +922,11 @@ export default function SessionsPage() {
       )}
 
       {filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-          <Clock className="h-8 w-8 mb-3 opacity-40" />
-          <p className="text-sm font-medium">
-            {search ? t.sessions.noMatch : t.sessions.noSessions}
-          </p>
-          {!search && (
-            <p className="text-xs mt-1 text-muted-foreground/60">
-              {t.sessions.startConversation}
-            </p>
-          )}
-        </div>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
+          {search
+            ? t.sessions.noMatch
+            : `${t.sessions.noSessions} — ${t.sessions.startConversation}`}
+        </p>
       ) : (
         <>
           <div className="flex flex-col gap-1.5">
