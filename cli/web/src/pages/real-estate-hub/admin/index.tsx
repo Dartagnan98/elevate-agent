@@ -1599,14 +1599,9 @@ function AdminTop25Strip({
         </span>
       </div>
       {pinned.length === 0 ? (
-        <div className="mt-2 rounded-md border border-dashed border-border bg-card px-3 py-4 text-center text-[0.72rem] text-muted-foreground">
-          No clients pinned. Pin from any card to add to TOP 25.
-          {devFallback && (
-            <span className="ml-2 rounded-sm border border-border bg-transparent px-1.5 py-0.5 font-mono-ui text-[0.58rem] uppercase tracking-wider text-warning">
-              dev-fallback
-            </span>
-          )}
-        </div>
+        <p className="mt-2 px-1 py-1 text-xs text-muted-foreground/80">
+          No clients pinned — pin from any card to add to TOP 25.
+        </p>
       ) : (
         <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
           {pinned.map((card) => (
@@ -3439,16 +3434,9 @@ function AdminKanbanBoard() {
         onCardDragStart={handleCardDragStart}
       />
       {!adminDeals.loading && !adminDeals.error && cards.length === 0 && (
-        <div className="rounded-md border border-dashed border-border bg-card px-4 py-6 text-center">
-          <div className="text-[0.95rem] font-semibold text-foreground">No saved transaction files yet</div>
-          <div className="mx-auto mt-1 max-w-xl text-[0.78rem] leading-5 text-muted-foreground">
-            Create a real deal or push a qualified profile from Leads. The Admin board will stay empty until a saved source-of-truth deal exists.
-          </div>
-          <Button className="mt-3" size="sm" onClick={() => setShowNewDeal(true)}>
-            <Plus className="h-3.5 w-3.5" />
-            New deal
-          </Button>
-        </div>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
+          No saved transaction files yet — use New deal above, or push a qualified profile from Leads.
+        </p>
       )}
       <div role="tablist" aria-label="Deal side" className="flex items-center gap-1 border-b border-border">
         {(["listing", "buyer"] as AdminSide[]).map((side) => {
