@@ -132,7 +132,14 @@ interface SessionResumeResponse extends SessionCreateResponse {
 
 type ChatRole = "assistant" | "system" | "tool" | "user";
 
+interface ChatMessageAttachment {
+  name: string;
+  size: number;
+  mediaType: string;
+}
+
 interface ChatMessage {
+  attachments?: ChatMessageAttachment[];
   content: string;
   createdAt: number;
   id: string;
@@ -2699,7 +2706,14 @@ export default function ChatPage() {
         return;
       }
 
-      appendMessage("user", text);
+      const messageAttachments: ChatMessageAttachment[] = readyAttachments.map(
+        (att) => ({ name: att.name, size: att.size, mediaType: att.mediaType }),
+      );
+      appendMessage(
+        "user",
+        text,
+        messageAttachments.length ? { attachments: messageAttachments } : {},
+      );
       setBusy(true);
       setStatusText(status);
 
@@ -4241,9 +4255,31 @@ function MessageRow({
               </div>
             ) : null
           ) : (
-            <div className="whitespace-pre-wrap break-words">
-              {message.content}
-            </div>
+            <>
+              {isUser && message.attachments && message.attachments.length > 0 ? (
+                <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+                  {message.attachments.map((att, idx) => {
+                    const Icon = attachmentIconFor(att.mediaType, att.name);
+                    return (
+                      <span
+                        key={`${message.id}-att-${idx}`}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-2 py-1 text-[0.7rem] text-[var(--chat-muted)]"
+                        title={`${att.name} · ${formatAttachmentSize(att.size)}`}
+                      >
+                        <Icon className="h-3 w-3 shrink-0" />
+                        <span className="max-w-[16ch] truncate">{att.name}</span>
+                        <span className="opacity-60">{formatAttachmentSize(att.size)}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {message.content ? (
+                <div className="whitespace-pre-wrap break-words">
+                  {message.content}
+                </div>
+              ) : null}
+            </>
           )}
           {message.warning && (
             <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_12%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-text)]">
