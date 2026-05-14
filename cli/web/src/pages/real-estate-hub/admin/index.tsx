@@ -1068,7 +1068,7 @@ function AdminSetupLaunch({
       )}
 
       <div className="pt-6 pb-2">
-        <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground mb-3">Realtor profile</div>
+        <div className="mb-3 text-[12px] font-semibold text-muted-foreground">Realtor profile</div>
         <div className="grid gap-4 lg:grid-cols-3">
           <AdminSetupField label="Realtor legal name" value={draft.realtorLegalName} onChange={(v) => updateDraft("realtorLegalName", v)} />
           <AdminSetupField label="Licensed / public name" value={draft.licenseName} onChange={(v) => updateDraft("licenseName", v)} />
@@ -1083,7 +1083,7 @@ function AdminSetupLaunch({
       </div>
 
       <div className="pt-6 pb-2 border-t border-border">
-        <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground mb-3">Providers</div>
+        <div className="mb-3 text-[12px] font-semibold text-muted-foreground">Providers</div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <AdminSetupField label="Email" value={draft.emailProvider} onChange={(v) => updateDraft("emailProvider", v)} placeholder="Gmail / Outlook account" />
           <AdminSetupField label="Calendar" value={draft.calendarProvider} onChange={(v) => updateDraft("calendarProvider", v)} placeholder="Google Calendar / Outlook" />
@@ -1102,7 +1102,7 @@ function AdminSetupLaunch({
       </div>
 
       <div className="pt-6 pb-2 border-t border-border">
-        <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground mb-3">Credentials</div>
+        <div className="mb-3 text-[12px] font-semibold text-muted-foreground">Credentials</div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <AdminSetupField label="MLS login URL" value={draft.mlsLoginUrl} onChange={(v) => updateDraft("mlsLoginUrl", v)} placeholder="https://..." />
           <AdminSetupField label="MLS credential ref" value={draft.mlsCredentialRef} onChange={(v) => updateDraft("mlsCredentialRef", v)} placeholder="Saved browser / keychain / 1Password" />
@@ -1114,7 +1114,7 @@ function AdminSetupLaunch({
       </div>
 
       <div className="pt-6 pb-2 border-t border-border">
-        <div className="font-mono-ui text-[10px] uppercase tracking-wider text-muted-foreground mb-3">Workflow notes</div>
+        <div className="mb-3 text-[12px] font-semibold text-muted-foreground">Workflow notes</div>
         <div className="grid gap-4 lg:grid-cols-2">
           <label className="block min-w-0">
             <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">Browser-use notes</span>
@@ -2965,7 +2965,7 @@ function NewDealDialog({
         </div>
         <form onSubmit={handleSubmit} className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
           <div>
-            <label className="font-mono-ui block text-[0.62rem] uppercase tracking-wider text-muted-foreground" htmlFor={`${titleId}-side`}>
+            <label className="mb-1.5 block text-[12px] font-medium text-muted-foreground" htmlFor={`${titleId}-side`}>
               Side
             </label>
             <div id={`${titleId}-side`} role="radiogroup" className="mt-1.5 grid grid-cols-2 gap-2">
@@ -2995,7 +2995,7 @@ function NewDealDialog({
           </div>
 
           <div>
-            <label htmlFor={`${titleId}-province`} className="font-mono-ui block text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+            <label htmlFor={`${titleId}-province`} className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
               Province / territory <span className="text-destructive">*</span>
             </label>
             <select
@@ -3035,7 +3035,7 @@ function NewDealDialog({
           </div>
 
           <div>
-            <label htmlFor={`${titleId}-contact`} className="font-mono-ui block text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+            <label htmlFor={`${titleId}-contact`} className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
               Contact (optional)
             </label>
             {selectedContact ? (
@@ -3147,7 +3147,7 @@ function NewDealDialog({
           </div>
 
           <div>
-            <label htmlFor={`${titleId}-title`} className="font-mono-ui block text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+            <label htmlFor={`${titleId}-title`} className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
               Title <span className="text-destructive">*</span>
             </label>
             <input
@@ -3162,7 +3162,7 @@ function NewDealDialog({
           </div>
 
           <div>
-            <label htmlFor={`${titleId}-stage`} className="font-mono-ui block text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+            <label htmlFor={`${titleId}-stage`} className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
               Starting stage
             </label>
             <select
@@ -3183,7 +3183,7 @@ function NewDealDialog({
           </div>
 
           <div className="space-y-3 rounded-sm border border-border bg-card px-3 py-3">
-            <div className="font-mono-ui text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+            <div className="text-[12px] font-semibold text-muted-foreground">
               {side === "listing" ? "Property" : "Search"}
             </div>
             {side === "listing" && (
@@ -3284,11 +3284,11 @@ function NewDealDialog({
 
           <div>
             <div className="flex items-center justify-between">
-              <label htmlFor={`${titleId}-notes`} className="font-mono-ui block text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+              <label htmlFor={`${titleId}-notes`} className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
                 Notes
               </label>
               {notesAutoFilled && (
-                <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-primary">
+                <span className="text-[0.7rem] text-primary">
                   auto-filled from contact
                 </span>
               )}
