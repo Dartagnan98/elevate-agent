@@ -2616,6 +2616,7 @@ export default function ChatPage() {
             setStatusText("Steer rejected");
             return;
           }
+          appendMessage("user", item.text);
           setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
           setStatusText("Steer delivered");
         })
@@ -2629,7 +2630,7 @@ export default function ChatPage() {
           setBanner(`Steer failed: ${message}`);
         });
     },
-    [gw, queuedInputs, sessionId, state],
+    [appendMessage, gw, queuedInputs, sessionId, state],
   );
 
   useEffect(() => {
