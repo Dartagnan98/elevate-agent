@@ -135,6 +135,8 @@ const CANADIAN_PROVINCES: Array<{ code: string; label: string }> = [
   { code: "YK", label: "Yukon" },
 ];
 
+const PROVINCE_LABEL_BY_CODE = new Map(CANADIAN_PROVINCES.map(({ code, label }) => [code, label]));
+
 type AdminStageLabel = {
   title: string;
   subtitle: string;
@@ -967,10 +969,18 @@ function AdminSetupLaunch({
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
+  const [provinceUnlocked, setProvinceUnlocked] = useState(false);
+
+  const savedProvinceCode = (setup.profile?.province || "").trim().toUpperCase();
 
   useEffect(() => {
     setDraft(adminSetupDraftFromSnapshot(setup));
   }, [setup]);
+
+  useEffect(() => {
+    // Re-lock province when setup snapshot saves a new value.
+    setProvinceUnlocked(false);
+  }, [savedProvinceCode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1127,25 +1137,45 @@ function AdminSetupLaunch({
           <label className="block min-w-0">
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="block text-[12px] font-medium text-muted-foreground">Province / territory</span>
-              <span className="font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground/80">CA · Canada</span>
+              <div className="flex items-center gap-2">
+                {savedProvinceCode && !provinceUnlocked && (
+                  <button
+                    type="button"
+                    onClick={() => setProvinceUnlocked(true)}
+                    className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    Change
+                  </button>
+                )}
+                <span className="font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground/80">CA · Canada</span>
+              </div>
             </div>
-            <select
-              value={draft.province.trim().toUpperCase()}
-              onChange={(event) => updateDraft("province", event.target.value)}
-              className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
-            >
-              <option value="">Select province</option>
-              {CANADIAN_PROVINCES.map(({ code, label }) => {
-                const coverage = provinceCoverageByCode.get(code);
-                const suffix = coverage?.hasTransactionGuide ? " — full guide" : coverage ? " — reference" : "";
-                return (
-                  <option key={code} value={code}>
-                    {label}
-                    {suffix}
-                  </option>
-                );
-              })}
-            </select>
+            {savedProvinceCode && !provinceUnlocked ? (
+              <div className="flex h-9 w-full items-center rounded-md border border-border bg-muted/40 px-3 text-[13px] text-foreground">
+                <span>{PROVINCE_LABEL_BY_CODE.get(savedProvinceCode) ?? savedProvinceCode}</span>
+                <span className="ml-2 font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                  saved
+                </span>
+              </div>
+            ) : (
+              <select
+                value={draft.province.trim().toUpperCase()}
+                onChange={(event) => updateDraft("province", event.target.value)}
+                className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
+              >
+                <option value="">Select province</option>
+                {CANADIAN_PROVINCES.map(({ code, label }) => {
+                  const coverage = provinceCoverageByCode.get(code);
+                  const suffix = coverage?.hasTransactionGuide ? " — full guide" : coverage ? " — reference" : "";
+                  return (
+                    <option key={code} value={code}>
+                      {label}
+                      {suffix}
+                    </option>
+                  );
+                })}
+              </select>
+            )}
             {selectedProvinceCoverage && (
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
@@ -2790,6 +2820,8 @@ function NewDealDialog({
   const [side, setSide] = useState<AdminSide>("listing");
   const [stage, setStage] = useState<AdminStageNumber>(0);
   const [province, setProvince] = useState("");
+  const [setupProvince, setSetupProvince] = useState("");
+  const [provinceOverride, setProvinceOverride] = useState(false);
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
   const [contactId, setContactId] = useState<string | null>(null);
   const [contactQuery, setContactQuery] = useState("");
@@ -2852,7 +2884,9 @@ function NewDealDialog({
       .getAdminJurisdiction()
       .then((jurisdiction) => {
         if (cancelled) return;
-        setProvince(jurisdiction.province || "");
+        const code = (jurisdiction.province || "").trim().toUpperCase();
+        setProvince(code);
+        setSetupProvince(code);
       })
       .catch(() => {});
     api
@@ -3077,28 +3111,63 @@ function NewDealDialog({
           </div>
 
           <div>
-            <label htmlFor={`${titleId}-province`} className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
-              Province / territory <span className="text-destructive">*</span>
-            </label>
-            <select
-              id={`${titleId}-province`}
-              value={province}
-              onChange={(e) => setProvince(e.target.value)}
-              required
-              className="mt-1.5 h-11 w-full rounded-sm border border-border bg-background px-3 text-[0.88rem] text-foreground focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <option value="">Select province</option>
-              {CANADIAN_PROVINCES.map(({ code, label }) => {
-                const coverage = provinceCoverageByCode.get(code);
-                const suffix = coverage?.hasTransactionGuide ? " - full guide" : coverage ? " - reference" : "";
-                return (
-                  <option key={code} value={code}>
-                    {label}
-                    {suffix}
-                  </option>
-                );
-              })}
-            </select>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label htmlFor={`${titleId}-province`} className="block text-[12px] font-medium text-muted-foreground">
+                Province / territory <span className="text-destructive">*</span>
+              </label>
+              {setupProvince && !provinceOverride && (
+                <button
+                  type="button"
+                  onClick={() => setProvinceOverride(true)}
+                  className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  Change for this deal
+                </button>
+              )}
+              {setupProvince && provinceOverride && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProvinceOverride(false);
+                    setProvince(setupProvince);
+                  }}
+                  className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  Reset to setup ({setupProvince})
+                </button>
+              )}
+            </div>
+            {setupProvince && !provinceOverride ? (
+              <div
+                id={`${titleId}-province`}
+                className="mt-1.5 flex h-11 w-full items-center rounded-sm border border-border bg-muted/40 px-3 text-[0.88rem] text-foreground"
+              >
+                <span>{PROVINCE_LABEL_BY_CODE.get(setupProvince) ?? setupProvince}</span>
+                <span className="ml-2 font-mono-ui text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                  from setup
+                </span>
+              </div>
+            ) : (
+              <select
+                id={`${titleId}-province`}
+                value={province}
+                onChange={(e) => setProvince(e.target.value)}
+                required
+                className="mt-1.5 h-11 w-full rounded-sm border border-border bg-background px-3 text-[0.88rem] text-foreground focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="">Select province</option>
+                {CANADIAN_PROVINCES.map(({ code, label }) => {
+                  const coverage = provinceCoverageByCode.get(code);
+                  const suffix = coverage?.hasTransactionGuide ? " - full guide" : coverage ? " - reference" : "";
+                  return (
+                    <option key={code} value={code}>
+                      {label}
+                      {suffix}
+                    </option>
+                  );
+                })}
+              </select>
+            )}
             {selectedProvinceCoverage && (
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
