@@ -385,7 +385,7 @@ function RetiredRow({ template }: { template: Template }) {
           {template.body}
         </p>
         {template.rationale && (
-          <p className="border-l border-border/60 pl-3 text-xs italic text-muted-foreground">
+          <p className="text-xs italic text-muted-foreground/85">
             {template.rationale}
           </p>
         )}
@@ -402,12 +402,9 @@ function RetiredRow({ template }: { template: Template }) {
 
 function EmptyState({ title, hint }: { title: string; hint: string }) {
   return (
-    <div className="flex min-h-[16rem] flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-card px-6 py-10 text-center">
-      <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
-        {title}
-      </span>
-      <p className="max-w-md text-sm text-muted-foreground/85">{hint}</p>
-    </div>
+    <p className="px-1 py-1 text-xs text-muted-foreground/80">
+      {title}. {hint}
+    </p>
   );
 }
 
