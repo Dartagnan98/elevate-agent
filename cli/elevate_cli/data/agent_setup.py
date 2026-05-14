@@ -60,7 +60,7 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "key": "model_image",
         "category": "model",
         "label": "Image generation (Nano Banana)",
-        "description": "Optional. Add a Nano Banana / OpenAI Images / Replicate key if you want the agent generating visuals.",
+        "description": "Optional. The Nano Banana Gemini-CLI extension ships pre-installed — just drop in a Gemini API key from AI Studio and the /generate, /edit, /restore, /icon, /pattern, /story, /diagram commands light up.",
         "required": False,
         "sort_order": 30,
     },

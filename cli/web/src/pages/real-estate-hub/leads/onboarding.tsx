@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles } from "lucide-react";
+import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon } from "lucide-react";
+import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
   AdminSetupItemStatus,
   LeadsSetupItem,
   LeadsSetupItemUpdate,
   LeadsSetupSnapshot,
+  OutreachConnectorRef,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -18,22 +20,17 @@ function errorMessage(err: unknown, fallback: string): string {
 
 type LeadsSetupDraft = {
   metaProvider: string;
+  metaAuthMethod: string;
+  metaMcpEndpoint: string;
+  metaMcpToken: string;
   metaAdAccountId: string;
   metaPageId: string;
   metaFormIds: string;
   googleProvider: string;
+  googleDeveloperToken: string;
   googleCustomerId: string;
-  googleCampaignIds: string;
   webhookUrl: string;
   webhookSecret: string;
-  imessageEnabled: boolean;
-  imessageHandle: string;
-  smsProvider: string;
-  smsFromNumber: string;
-  smsTwilioAccountSid: string;
-  smsTwilioAuthToken: string;
-  rcsProvider: string;
-  rcsFromNumber: string;
   autoReplyEnabled: boolean;
   autoReplyTemplate: string;
   followUpCadenceDays: string;
@@ -44,31 +41,20 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
   const metaVal = (byKey.get("meta_lead_ads")?.value ?? {}) as Record<string, unknown>;
   const googleVal = (byKey.get("google_lead_forms")?.value ?? {}) as Record<string, unknown>;
   const webhookVal = (byKey.get("website_form_webhook")?.value ?? {}) as Record<string, unknown>;
-  const imessageItem = byKey.get("outreach_imessage");
-  const imessageVal = (imessageItem?.value ?? {}) as Record<string, unknown>;
-  const smsItem = byKey.get("outreach_sms");
-  const smsVal = (smsItem?.value ?? {}) as Record<string, unknown>;
-  const rcsItem = byKey.get("outreach_rcs");
-  const rcsVal = (rcsItem?.value ?? {}) as Record<string, unknown>;
   const policyVal = (byKey.get("auto_reply_policy")?.value ?? {}) as Record<string, unknown>;
   return {
     metaProvider: String(byKey.get("meta_lead_ads")?.provider ?? "") || "",
+    metaAuthMethod: String(metaVal.authMethod ?? (metaVal.mcpEndpoint ? "mcp" : "webhook")),
+    metaMcpEndpoint: String(metaVal.mcpEndpoint ?? ""),
+    metaMcpToken: String(metaVal.mcpToken ?? ""),
     metaAdAccountId: String(metaVal.adAccountId ?? ""),
     metaPageId: String(metaVal.pageId ?? ""),
     metaFormIds: Array.isArray(metaVal.formIds) ? (metaVal.formIds as string[]).join(", ") : String(metaVal.formIds ?? ""),
     googleProvider: String(byKey.get("google_lead_forms")?.provider ?? "") || "",
+    googleDeveloperToken: String(googleVal.developerToken ?? ""),
     googleCustomerId: String(googleVal.customerId ?? ""),
-    googleCampaignIds: Array.isArray(googleVal.campaignIds) ? (googleVal.campaignIds as string[]).join(", ") : String(googleVal.campaignIds ?? ""),
     webhookUrl: String(webhookVal.url ?? ""),
     webhookSecret: String(webhookVal.secret ?? ""),
-    imessageEnabled: imessageItem ? imessageItem.status !== "missing" : Boolean(imessageVal.enabled),
-    imessageHandle: String(imessageVal.handle ?? ""),
-    smsProvider: String(smsItem?.provider ?? "") || "",
-    smsFromNumber: String(smsVal.fromNumber ?? ""),
-    smsTwilioAccountSid: String(smsVal.accountSid ?? ""),
-    smsTwilioAuthToken: String(smsVal.authToken ?? ""),
-    rcsProvider: String(rcsItem?.provider ?? "") || "",
-    rcsFromNumber: String(rcsVal.fromNumber ?? ""),
     autoReplyEnabled: Boolean(policyVal.enabled ?? false),
     autoReplyTemplate: String(policyVal.initialMessageTemplate ?? ""),
     followUpCadenceDays: String(policyVal.followUpCadenceDays ?? "2"),
@@ -83,20 +69,32 @@ function splitList(value: string): string[] {
 }
 
 function buildItemUpdates(draft: LeadsSetupDraft): LeadsSetupItemUpdate[] {
-  const metaReady =
-    draft.metaProvider.trim() &&
-    (draft.metaAdAccountId.trim() || draft.metaPageId.trim() || draft.metaFormIds.trim());
-  const googleReady =
-    draft.googleProvider.trim() &&
-    (draft.googleCustomerId.trim() || draft.googleCampaignIds.trim());
+  const metaReady = ((): boolean => {
+    if (draft.metaAuthMethod === "mcp") {
+      return Boolean(draft.metaMcpEndpoint.trim() && draft.metaMcpToken.trim());
+    }
+    return Boolean(
+      draft.metaProvider.trim() &&
+        (draft.metaAdAccountId.trim() || draft.metaPageId.trim() || draft.metaFormIds.trim()),
+    );
+  })();
+  const googleReady = Boolean(
+    draft.googleProvider.trim() && draft.googleDeveloperToken.trim() && draft.googleCustomerId.trim(),
+  );
   const webhookReady = draft.webhookUrl.trim();
   const policyReady = Boolean(draft.autoReplyTemplate.trim()) || !draft.autoReplyEnabled;
   return [
     {
       key: "meta_lead_ads",
       status: (metaReady ? "configured" : "missing") as AdminSetupItemStatus,
-      provider: draft.metaProvider.trim() || null,
+      provider:
+        draft.metaAuthMethod === "mcp"
+          ? "meta_ads_mcp"
+          : draft.metaProvider.trim() || null,
       value: {
+        authMethod: draft.metaAuthMethod,
+        mcpEndpoint: draft.metaMcpEndpoint.trim(),
+        mcpToken: draft.metaMcpToken,
         adAccountId: draft.metaAdAccountId.trim(),
         pageId: draft.metaPageId.trim(),
         formIds: splitList(draft.metaFormIds),
@@ -107,8 +105,8 @@ function buildItemUpdates(draft: LeadsSetupDraft): LeadsSetupItemUpdate[] {
       status: (googleReady ? "configured" : "missing") as AdminSetupItemStatus,
       provider: draft.googleProvider.trim() || null,
       value: {
+        developerToken: draft.googleDeveloperToken,
         customerId: draft.googleCustomerId.trim(),
-        campaignIds: splitList(draft.googleCampaignIds),
       },
     },
     {
@@ -118,46 +116,6 @@ function buildItemUpdates(draft: LeadsSetupDraft): LeadsSetupItemUpdate[] {
       value: {
         url: draft.webhookUrl.trim(),
         secret: draft.webhookSecret,
-      },
-    },
-    {
-      key: "outreach_imessage",
-      status: (draft.imessageEnabled ? "configured" : "missing") as AdminSetupItemStatus,
-      provider: draft.imessageEnabled ? "apple_messages" : null,
-      value: {
-        enabled: draft.imessageEnabled,
-        handle: draft.imessageHandle.trim(),
-      },
-    },
-    {
-      key: "outreach_sms",
-      status: ((): AdminSetupItemStatus => {
-        const provider = draft.smsProvider.trim();
-        if (!provider) return "missing";
-        if (provider === "twilio") {
-          return draft.smsTwilioAccountSid.trim() && draft.smsTwilioAuthToken.trim() && draft.smsFromNumber.trim()
-            ? "configured"
-            : "missing";
-        }
-        return draft.smsFromNumber.trim() ? "configured" : "missing";
-      })(),
-      provider: draft.smsProvider.trim() || null,
-      value: {
-        fromNumber: draft.smsFromNumber.trim(),
-        accountSid: draft.smsTwilioAccountSid.trim(),
-        authToken: draft.smsTwilioAuthToken,
-      },
-    },
-    {
-      key: "outreach_rcs",
-      status: ((): AdminSetupItemStatus => {
-        const provider = draft.rcsProvider.trim();
-        if (!provider) return "missing";
-        return draft.rcsFromNumber.trim() ? "configured" : "missing";
-      })(),
-      provider: draft.rcsProvider.trim() || null,
-      value: {
-        fromNumber: draft.rcsFromNumber.trim(),
       },
     },
     {
@@ -254,6 +212,152 @@ function FieldRow({
   );
 }
 
+const OUTREACH_HINTS: Record<
+  OutreachConnectorRef["id"],
+  { tagline: string; routes: string }
+> = {
+  "apple-messages": {
+    tagline: "iMessage from your Mac. Auto-picks blue-bubble route for iPhone leads.",
+    routes: "Pairs with Messages.app via the existing local bridge — already syncing 237k+ records on this Mac.",
+  },
+  "sms-provider": {
+    tagline: "Business SMS line (Twilio, Sinch, MessageBird, etc.) for non-iPhone leads.",
+    routes: "Two-way SMS over a webhook/API. Use for green-bubble Android leads.",
+  },
+  "android-device": {
+    tagline: "Personal Android device SMS via export or helper.",
+    routes: "Backup/export route — does not claim live sync unless a helper is wired.",
+  },
+  "rcs": {
+    tagline: "Rich messaging (read receipts, media, typing) for Android leads.",
+    routes: "Business RCS provider or Twilio RCS. Personal-device RCS is import-only.",
+  },
+};
+
+function ConnectorStatusBadge({ connector }: { connector: OutreachConnectorRef }) {
+  if (connector.connected) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md bg-success/15 px-1.5 py-0.5 text-[10.5px] font-medium text-success">
+        <CheckCircle2 className="h-3 w-3" /> Connected
+      </span>
+    );
+  }
+  if (connector.importOnly) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10.5px] font-medium text-muted-foreground">
+        <CheckCircle2 className="h-3 w-3" /> Import only
+      </span>
+    );
+  }
+  if (connector.blocked) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[10.5px] font-medium text-destructive">
+        <AlertTriangle className="h-3 w-3" /> Blocked
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10.5px] font-medium text-warning">
+      <Circle className="h-3 w-3" /> Not configured
+    </span>
+  );
+}
+
+function OutreachConnectorsCard({
+  connectors,
+  outreachReady,
+  crmStatus,
+  crmProvider,
+}: {
+  connectors: OutreachConnectorRef[];
+  outreachReady: boolean;
+  crmStatus: AdminSetupItemStatus;
+  crmProvider: string;
+}) {
+  return (
+    <section className="rounded-md border border-border bg-card p-4">
+      <header className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-[13px] font-semibold text-foreground">Outreach channels</h3>
+          <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+            iMessage, SMS, and RCS aren't configured here — they live as Source Connectors so the same wiring
+            powers ingestion (read-only message index) and outbound. Elevate auto-routes: iPhone leads get
+            iMessage, Android leads fall through to SMS / RCS.
+          </p>
+        </div>
+        {outreachReady ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-success/15 px-1.5 py-0.5 text-[10.5px] font-medium text-success">
+            <CheckCircle2 className="h-3 w-3" /> Ready
+            {crmStatus === "connected" && crmProvider ? ` (via ${crmProvider})` : ""}
+          </span>
+        ) : (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10.5px] font-medium text-warning">
+            <Circle className="h-3 w-3" /> None active
+          </span>
+        )}
+      </header>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Link
+          to="/config#connectors"
+          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11.5px] font-medium text-foreground hover:bg-muted"
+        >
+          <LinkIcon className="h-3 w-3" />
+          Open Source Connectors
+        </Link>
+        <span className="text-[10.5px] text-muted-foreground">
+          Config → Source connectors. Each row below opens its setup task.
+        </span>
+      </div>
+
+      <div className="space-y-1.5">
+        {connectors.length === 0 ? (
+          <p className="text-[11.5px] text-muted-foreground">
+            Loading connector state…
+          </p>
+        ) : (
+          connectors.map((connector) => {
+            const hint = OUTREACH_HINTS[connector.id];
+            return (
+              <div
+                key={connector.id}
+                className="flex items-start justify-between gap-3 rounded-md border border-border/60 bg-muted/15 px-3 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[12.5px] font-medium text-foreground">{connector.label}</span>
+                    <ConnectorStatusBadge connector={connector} />
+                    {connector.totalRecords > 0 && (
+                      <span className="text-[10.5px] text-muted-foreground">
+                        {connector.totalRecords.toLocaleString()} records
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{hint?.tagline}</p>
+                  {connector.nextOperatorStep && !connector.connected && (
+                    <p className="mt-1 text-[10.5px] text-muted-foreground/80">
+                      Next: {connector.nextOperatorStep}
+                    </p>
+                  )}
+                  {connector.lastError && (
+                    <p className="mt-1 text-[10.5px] text-destructive/80">{connector.lastError}</p>
+                  )}
+                </div>
+                <Link
+                  to="/config#connectors"
+                  className="inline-flex shrink-0 items-center gap-1 text-[11px] text-primary underline-offset-2 hover:underline"
+                >
+                  Configure <ExternalLink className="h-3 w-3" />
+                </Link>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function LeadsSetupLaunch({
   setup,
   onSetupUpdated,
@@ -326,9 +430,7 @@ export function LeadsSetupLaunch({
   const crmProvider = (crmItem?.provider || "").trim();
   const leadSourcesReady = setup.leadSourcesReady;
   const outreachReady = setup.outreachReady;
-  const imessageItem = byKey.get("outreach_imessage");
-  const smsItem = byKey.get("outreach_sms");
-  const rcsItem = byKey.get("outreach_rcs");
+  const outreachConnectors = setup.outreachConnectors ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -337,9 +439,9 @@ export function LeadsSetupLaunch({
           <div>
             <h2 className="text-[14px] font-semibold text-foreground">Leads onboarding</h2>
             <p className="mt-1 text-[12px] text-muted-foreground">
-              CRM is inherited from Admin setup and counts as an outreach lane on its own. Wire at least one
-              lead source (Meta / Google / Website webhook) and set your auto-reply policy. Direct channels
-              (iMessage / SMS / Twilio / RCS) are optional extras.
+              CRM is inherited from Admin setup and already counts as an outreach lane. Wire at least one
+              lead source (Meta / Google / Website webhook) and set your auto-reply policy. Texting channels
+              (iMessage / SMS / RCS) are managed in Source Connectors below — Elevate auto-routes by lead device.
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
@@ -386,47 +488,86 @@ export function LeadsSetupLaunch({
       </ItemCard>
 
       <ItemCard
-        title="Meta Lead Ads"
-        description="Facebook / Instagram lead-form ads. Forms post directly into Elevate via the Meta webhook."
+        title="Meta Lead Ads (optional)"
+        description="Skip if you don't run Facebook / Instagram lead-form ads. Auth via the official Meta Ads MCP (recommended — one token, no webhook plumbing) or the legacy page-token webhook."
         status={metaItem?.status ?? "missing"}
       >
-        <FieldRow
-          label="Provider name (free text — e.g. Meta Business Manager)"
-          value={draft.metaProvider}
-          onChange={(v) => updateField("metaProvider", v)}
-          placeholder="Meta Business Manager"
-        />
-        <FieldRow
-          label="Ad account ID"
-          value={draft.metaAdAccountId}
-          onChange={(v) => updateField("metaAdAccountId", v)}
-          placeholder="act_1234567890"
-        />
-        <FieldRow
-          label="Page ID"
-          value={draft.metaPageId}
-          onChange={(v) => updateField("metaPageId", v)}
-          placeholder="987654321"
-        />
-        <FieldRow
-          label="Lead form IDs (comma separated)"
-          value={draft.metaFormIds}
-          onChange={(v) => updateField("metaFormIds", v)}
-          placeholder="form_001, form_002"
-        />
-        <a
-          href="https://business.facebook.com/leadgen_central"
-          target="_blank"
-          rel="noreferrer noopener"
-          className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
-        >
-          Open Meta Lead Ads Manager <ExternalLink className="h-3 w-3" />
-        </a>
+        <label className="block text-[11.5px] text-muted-foreground">
+          <span className="mb-0.5 block">Auth method</span>
+          <select
+            value={draft.metaAuthMethod}
+            onChange={(e) => updateField("metaAuthMethod", e.target.value)}
+            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+          >
+            <option value="mcp">Meta Ads MCP (recommended)</option>
+            <option value="webhook">Page-token webhook (legacy)</option>
+          </select>
+        </label>
+        {draft.metaAuthMethod === "mcp" ? (
+          <>
+            <FieldRow
+              label="MCP endpoint URL"
+              value={draft.metaMcpEndpoint}
+              onChange={(v) => updateField("metaMcpEndpoint", v)}
+              placeholder="https://mcp.meta.com/ads  (or self-hosted)"
+            />
+            <FieldRow
+              label="MCP access token"
+              value={draft.metaMcpToken}
+              onChange={(v) => updateField("metaMcpToken", v)}
+              placeholder="••••••••"
+              type="password"
+            />
+            <a
+              href="https://github.com/pipeboard-co/meta-ads-mcp"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
+            >
+              Meta Ads MCP install guide <ExternalLink className="h-3 w-3" />
+            </a>
+          </>
+        ) : (
+          <>
+            <FieldRow
+              label="Provider name (free text)"
+              value={draft.metaProvider}
+              onChange={(v) => updateField("metaProvider", v)}
+              placeholder="Meta Business Manager"
+            />
+            <FieldRow
+              label="Ad account ID"
+              value={draft.metaAdAccountId}
+              onChange={(v) => updateField("metaAdAccountId", v)}
+              placeholder="act_1234567890"
+            />
+            <FieldRow
+              label="Page ID"
+              value={draft.metaPageId}
+              onChange={(v) => updateField("metaPageId", v)}
+              placeholder="987654321"
+            />
+            <FieldRow
+              label="Lead form IDs (comma separated)"
+              value={draft.metaFormIds}
+              onChange={(v) => updateField("metaFormIds", v)}
+              placeholder="form_001, form_002"
+            />
+            <a
+              href="https://business.facebook.com/leadgen_central"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
+            >
+              Open Meta Lead Ads Manager <ExternalLink className="h-3 w-3" />
+            </a>
+          </>
+        )}
       </ItemCard>
 
       <ItemCard
-        title="Google Lead Form Ads"
-        description="Lead-form extensions on Google Ads search/display campaigns."
+        title="Google Lead Form Ads (optional)"
+        description="Skip if you don't run Google Ads. Developer token + customer ID is enough — Elevate auto-discovers your campaigns."
         status={googleItem?.status ?? "missing"}
       >
         <FieldRow
@@ -436,24 +577,25 @@ export function LeadsSetupLaunch({
           placeholder="Google Ads"
         />
         <FieldRow
+          label="Developer token"
+          value={draft.googleDeveloperToken}
+          onChange={(v) => updateField("googleDeveloperToken", v)}
+          placeholder="abcDEF123-xyz"
+          type="password"
+        />
+        <FieldRow
           label="Customer ID"
           value={draft.googleCustomerId}
           onChange={(v) => updateField("googleCustomerId", v)}
           placeholder="123-456-7890"
         />
-        <FieldRow
-          label="Campaign IDs (comma separated)"
-          value={draft.googleCampaignIds}
-          onChange={(v) => updateField("googleCampaignIds", v)}
-          placeholder="11111111, 22222222"
-        />
         <a
-          href="https://ads.google.com"
+          href="https://developers.google.com/google-ads/api/docs/get-started/dev-token"
           target="_blank"
           rel="noreferrer noopener"
           className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
         >
-          Open Google Ads <ExternalLink className="h-3 w-3" />
+          How to get a Google Ads developer token <ExternalLink className="h-3 w-3" />
         </a>
       </ItemCard>
 
@@ -477,117 +619,12 @@ export function LeadsSetupLaunch({
         />
       </ItemCard>
 
-      <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11.5px] text-muted-foreground">
-        <span className="font-medium text-foreground">Outreach channels.</span> If your CRM does messaging
-        (Lofty / GHL / kvCore / BoldTrail all do), that already counts — these are direct-channel alternatives
-        on top.{" "}
-        {outreachReady ? (
-          <span className="text-success">Ready{crmStatus === "connected" ? ` (via ${crmProvider})` : ""}.</span>
-        ) : (
-          <span className="text-warning">No channel picked yet.</span>
-        )}
-      </div>
-
-      <ItemCard
-        title="Apple Messages (iMessage)"
-        description="Send and receive via iMessage from your Mac. Best when leads are iPhone users — keeps blue-bubble UX."
-        status={imessageItem?.status ?? "missing"}
-      >
-        <label className="flex items-center gap-2 text-[12px] text-foreground">
-          <input
-            type="checkbox"
-            checked={draft.imessageEnabled}
-            onChange={(e) => updateField("imessageEnabled", e.target.checked)}
-            className="h-3.5 w-3.5 rounded border-border accent-primary"
-          />
-          Use iMessage for outbound replies
-        </label>
-        <FieldRow
-          label="iMessage handle (your Apple ID email or phone number)"
-          value={draft.imessageHandle}
-          onChange={(v) => updateField("imessageHandle", v)}
-          placeholder="you@icloud.com  or  +12505551234"
-        />
-        <p className="text-[10.5px] text-muted-foreground">
-          Requires Messages.app signed in on this Mac. Elevate sends via AppleScript from the local runtime.
-        </p>
-      </ItemCard>
-
-      <ItemCard
-        title="SMS / Twilio"
-        description="Plain text messaging. Use Twilio for a dedicated business line, otherwise your phone's native SMS."
-        status={smsItem?.status ?? "missing"}
-      >
-        <label className="block text-[11.5px] text-muted-foreground">
-          <span className="mb-0.5 block">Provider</span>
-          <select
-            value={draft.smsProvider}
-            onChange={(e) => updateField("smsProvider", e.target.value)}
-            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
-          >
-            <option value="">— pick one —</option>
-            <option value="twilio">Twilio</option>
-            <option value="native_sms">Native SMS (Mac Messages / phone modem)</option>
-            <option value="google_voice">Google Voice</option>
-          </select>
-        </label>
-        <FieldRow
-          label="From number (E.164 format)"
-          value={draft.smsFromNumber}
-          onChange={(v) => updateField("smsFromNumber", v)}
-          placeholder="+12505551234"
-        />
-        {draft.smsProvider === "twilio" && (
-          <>
-            <FieldRow
-              label="Twilio Account SID"
-              value={draft.smsTwilioAccountSid}
-              onChange={(v) => updateField("smsTwilioAccountSid", v)}
-              placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-            />
-            <FieldRow
-              label="Twilio Auth Token"
-              value={draft.smsTwilioAuthToken}
-              onChange={(v) => updateField("smsTwilioAuthToken", v)}
-              placeholder="••••••••"
-              type="password"
-            />
-            <a
-              href="https://console.twilio.com/"
-              target="_blank"
-              rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
-            >
-              Open Twilio Console <ExternalLink className="h-3 w-3" />
-            </a>
-          </>
-        )}
-      </ItemCard>
-
-      <ItemCard
-        title="RCS"
-        description="Rich messaging for Android leads (read receipts, typing indicators, media). Falls back to SMS automatically."
-        status={rcsItem?.status ?? "missing"}
-      >
-        <label className="block text-[11.5px] text-muted-foreground">
-          <span className="mb-0.5 block">Provider</span>
-          <select
-            value={draft.rcsProvider}
-            onChange={(e) => updateField("rcsProvider", e.target.value)}
-            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
-          >
-            <option value="">— pick one —</option>
-            <option value="google_rcs">Google Business Messages / RCS</option>
-            <option value="twilio_rcs">Twilio RCS</option>
-          </select>
-        </label>
-        <FieldRow
-          label="Sender phone number (E.164 format)"
-          value={draft.rcsFromNumber}
-          onChange={(v) => updateField("rcsFromNumber", v)}
-          placeholder="+12505551234"
-        />
-      </ItemCard>
+      <OutreachConnectorsCard
+        connectors={outreachConnectors}
+        outreachReady={outreachReady}
+        crmStatus={crmStatus}
+        crmProvider={crmProvider}
+      />
 
       <ItemCard
         title="Auto-reply policy"

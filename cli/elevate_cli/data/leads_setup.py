@@ -10,11 +10,13 @@ required-keys completion check) but scoped to inbound lead capture:
   inbound lead sources. At least one must be ``connected``/``configured``
   for the gate to lift (enforced by the ``lead_sources_quorum`` synthetic
   check).
-- ``outreach_imessage``, ``outreach_sms``, ``outreach_rcs`` — direct
-  outbound channels. Optional alternatives to CRM-native messaging.
-  ``outreach_quorum`` is satisfied by ANY of: a connected CRM (since
-  Lofty / GHL / kvCore / BoldTrail all have built-in messaging) OR any
-  of the direct channels above.
+- Outreach channels (Apple Messages, SMS Provider, Android Device SMS,
+  RCS) are NOT stored here. They live as canonical Source Connectors
+  under ``data/sources/<id>`` and are surfaced read-only inside the
+  snapshot as ``outreachConnectors`` so the leads UI can render status +
+  deep-link to ``/config#connectors``. ``outreach_quorum`` is satisfied
+  by ANY of: a connected CRM (Lofty / GHL / kvCore / BoldTrail all have
+  built-in messaging) OR any connected outreach source connector.
 - ``auto_reply_policy`` — initial-touch behaviour (enabled flag + template +
   follow-up cadence days).
 
@@ -48,16 +50,16 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
     {
         "key": "meta_lead_ads",
         "category": "lead_source",
-        "label": "Meta Lead Ads",
-        "description": "Facebook/Instagram lead-form ads. Forms land directly in Elevate via webhook.",
+        "label": "Meta Lead Ads (optional)",
+        "description": "Facebook/Instagram lead-form ads. Skip if you don't run them — your CRM and website webhook cover the basics. Auth via the Meta Ads MCP (recommended) or page-token webhook.",
         "required": False,
         "sort_order": 20,
     },
     {
         "key": "google_lead_forms",
         "category": "lead_source",
-        "label": "Google Lead Form Ads",
-        "description": "Paid-search lead-form extensions piped into the inbound queue.",
+        "label": "Google Lead Form Ads (optional)",
+        "description": "Paid-search lead-form extensions. Skip if you don't run them. Requires a Google Ads developer token + customer ID — campaign IDs are auto-discovered.",
         "required": False,
         "sort_order": 30,
     },
@@ -68,30 +70,6 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "description": "Catch-all webhook URL for landing-page and website contact forms.",
         "required": False,
         "sort_order": 40,
-    },
-    {
-        "key": "outreach_imessage",
-        "category": "outreach",
-        "label": "Apple Messages (iMessage)",
-        "description": "Send replies and follow-ups via iMessage from your Mac. Best for iPhone leads.",
-        "required": False,
-        "sort_order": 60,
-    },
-    {
-        "key": "outreach_sms",
-        "category": "outreach",
-        "label": "SMS / Twilio",
-        "description": "Plain SMS for any phone. Use Twilio for a dedicated business line, otherwise your phone's number.",
-        "required": False,
-        "sort_order": 70,
-    },
-    {
-        "key": "outreach_rcs",
-        "category": "outreach",
-        "label": "RCS",
-        "description": "Rich messaging on Android. Richer than SMS, less common than iMessage.",
-        "required": False,
-        "sort_order": 80,
     },
     {
         "key": "auto_reply_policy",
@@ -200,6 +178,62 @@ def _item_counts_ready(item: Mapping[str, Any]) -> bool:
     return status in READY_STATUSES
 
 
+OUTREACH_CONNECTOR_IDS: tuple[str, ...] = (
+    "apple-messages",
+    "sms-provider",
+    "android-device",
+    "rcs",
+)
+
+
+def _outreach_connectors_snapshot() -> list[dict[str, Any]]:
+    """Read live state of the four outreach Source Connectors.
+
+    Source Connectors are the canonical config surface (lives at
+    ``data/sources/<id>``). The leads gate mirrors their state read-only
+    so the UI can show status and deep-link to ``/config#connectors``
+    instead of duplicating the configuration form.
+    """
+    try:
+        # Local import to avoid pulling source_connectors at module import time
+        # (it imports load_config which touches the filesystem).
+        from elevate_cli.source_connectors import build_source_connectors_response
+    except Exception:
+        return []
+    try:
+        resp = build_source_connectors_response()
+    except Exception:
+        return []
+    connectors = resp.get("connectors") if isinstance(resp, dict) else None
+    if not isinstance(connectors, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for conn_view in connectors:
+        if not isinstance(conn_view, dict):
+            continue
+        cid = str(conn_view.get("id") or "").strip()
+        if cid not in OUTREACH_CONNECTOR_IDS:
+            continue
+        record_counts = conn_view.get("recordCounts") if isinstance(conn_view.get("recordCounts"), dict) else {}
+        total_records = sum(int(v or 0) for v in record_counts.values() if isinstance(v, (int, float)))
+        out.append({
+            "id": cid,
+            "label": conn_view.get("label") or cid,
+            "state": conn_view.get("state") or "not_configured",
+            "connected": bool(conn_view.get("connected") or conn_view.get("state") == "connected"),
+            "importOnly": bool(conn_view.get("importOnly")),
+            "blocked": bool(conn_view.get("blocked")),
+            "nextOperatorStep": conn_view.get("nextOperatorStep"),
+            "lastError": conn_view.get("lastError"),
+            "ownerAgent": conn_view.get("ownerAgent") or "Outreach",
+            "totalRecords": total_records,
+        })
+    # Stable ordering matching OUTREACH_CONNECTOR_IDS
+    order = {cid: idx for idx, cid in enumerate(OUTREACH_CONNECTOR_IDS)}
+    out.sort(key=lambda c: order.get(c["id"], 99))
+    return out
+
+
 def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str, Any]:
     crm_provider, crm_status = _resolve_crm_from_admin(conn)
     for item in items:
@@ -209,16 +243,16 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
 
     by_key = {it["key"]: it for it in items}
     lead_source_keys = ("meta_lead_ads", "google_lead_forms", "website_form_webhook")
-    outreach_keys = ("outreach_imessage", "outreach_sms", "outreach_rcs")
     any_lead_source_ready = any(
         by_key.get(k) and _item_counts_ready(by_key[k]) for k in lead_source_keys
     )
     # The CRM is itself an outreach lane — Lofty / GHL / kvCore / BoldTrail all
     # have built-in messaging. If the CRM is connected, that satisfies the
-    # outreach quorum without forcing iMessage/SMS/RCS on top.
+    # outreach quorum without forcing any direct channel.
     crm_outreach_ready = bool(by_key.get("crm") and _item_counts_ready(by_key["crm"]))
+    outreach_connectors = _outreach_connectors_snapshot()
     any_direct_outreach_ready = any(
-        by_key.get(k) and _item_counts_ready(by_key[k]) for k in outreach_keys
+        c.get("connected") or c.get("importOnly") for c in outreach_connectors
     )
     any_outreach_ready = crm_outreach_ready or any_direct_outreach_ready
 
@@ -255,7 +289,11 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
         "launchRequired": not complete,
         "leadSourcesReady": any_lead_source_ready,
         "outreachReady": any_outreach_ready,
+        "outreachConnectors": outreach_connectors,
     }
+
+
+_DEPRECATED_KEYS = frozenset({"outreach_imessage", "outreach_sms", "outreach_rcs"})
 
 
 def get_leads_setup(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -263,7 +301,7 @@ def get_leads_setup(conn: sqlite3.Connection) -> dict[str, Any]:
     rows = conn.execute(
         "SELECT * FROM leads_setup_items ORDER BY sort_order ASC, key ASC"
     ).fetchall()
-    items = [_row_to_item(row) for row in rows]
+    items = [_row_to_item(row) for row in rows if row["key"] not in _DEPRECATED_KEYS]
     return _snapshot(conn, items)
 
 
@@ -281,6 +319,10 @@ def update_leads_setup(
                 raise ValueError("leads setup item key is required")
             if key == "crm":
                 # CRM is a mirror — do not write here; admin_setup owns it.
+                continue
+            if key in _DEPRECATED_KEYS:
+                # Outreach channels moved to Source Connectors. Silently
+                # ignore any stale UI writes targeting the legacy keys.
                 continue
             row = conn.execute(
                 "SELECT key FROM leads_setup_items WHERE key=?", (key,)

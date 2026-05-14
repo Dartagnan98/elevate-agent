@@ -725,6 +725,44 @@ else
 fi
 
 # ============================================================================
+# Optional: Nano Banana Gemini-CLI extension (image generation)
+# ============================================================================
+#
+# The Nano Banana extension wraps Google's Gemini image model so the
+# /generate, /edit, /restore, /icon, /pattern, /story, /diagram commands
+# light up inside the Gemini CLI. Elevate's agent_setup gate exposes the
+# matching image-gen item — the user just drops a Gemini API key in.
+#
+# We install it eagerly here (non-fatal) so the agent onboarding card can
+# default to "extension installed, just add a key" instead of asking the
+# user to also run a one-line gemini command.
+
+if is_termux; then
+    : # gemini-cli is unsupported on Termux today; skip silently.
+elif [ "${ELEVATE_SKIP_NANOBANANA:-0}" = "1" ]; then
+    echo -e "${YELLOW}⚠${NC} ELEVATE_SKIP_NANOBANANA=1 — skipping Nano Banana extension"
+elif command -v gemini &> /dev/null; then
+    echo -e "${CYAN}→${NC} Checking Nano Banana Gemini-CLI extension..."
+    NANOBANANA_INSTALLED=0
+    if gemini extensions list 2>/dev/null | grep -qi "nanobanana"; then
+        NANOBANANA_INSTALLED=1
+    fi
+    if [ "$NANOBANANA_INSTALLED" = "1" ]; then
+        echo -e "${GREEN}✓${NC} Nano Banana already installed"
+    else
+        if gemini extensions install https://github.com/gemini-cli-extensions/nanobanana 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} Nano Banana extension installed — drop NANOBANANA_API_KEY into the env file to enable image gen"
+        else
+            echo -e "${YELLOW}⚠${NC} Nano Banana install failed (optional — run later: gemini extensions install https://github.com/gemini-cli-extensions/nanobanana)"
+        fi
+    fi
+else
+    echo -e "${YELLOW}⚠${NC} gemini CLI not found — skipping Nano Banana extension"
+    echo -e "    Install gemini-cli first, then run:"
+    echo -e "    gemini extensions install https://github.com/gemini-cli-extensions/nanobanana"
+fi
+
+# ============================================================================
 # Environment file
 # ============================================================================
 

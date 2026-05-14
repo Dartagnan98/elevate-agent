@@ -533,7 +533,7 @@ export function AgentSetupLaunch({
 
       <ItemCard
         title="Image generation (Nano Banana)"
-        description="Optional. Add a Nano Banana / OpenAI Images / Replicate key for visual generation. Skip if you don't need it."
+        description="Optional. The Nano Banana Gemini-CLI extension ships pre-installed — drop in a Gemini API key from AI Studio and /generate, /edit, /restore, /icon, /pattern, /story, /diagram light up. Other providers (OpenAI Images, Replicate) also supported."
         status={imageItem?.status ?? "missing"}
       >
         <SelectRow
@@ -541,18 +541,34 @@ export function AgentSetupLaunch({
           value={draft.imageProvider}
           onChange={(v) => updateField("imageProvider", v)}
           options={[
-            { value: "nano_banana", label: "Nano Banana" },
+            { value: "nano_banana", label: "Nano Banana (Gemini CLI extension)" },
             { value: "openai_images", label: "OpenAI Images (DALL-E)" },
             { value: "replicate", label: "Replicate" },
           ]}
         />
         <FieldRow
-          label="API key"
+          label={
+            draft.imageProvider === "nano_banana"
+              ? "Gemini API key (NANOBANANA_API_KEY)"
+              : "API key"
+          }
           value={draft.imageApiKey}
           onChange={(v) => updateField("imageApiKey", v)}
-          placeholder="sk-…"
+          placeholder={
+            draft.imageProvider === "nano_banana" ? "AIzaSy…  (from AI Studio)" : "sk-…"
+          }
           type="password"
         />
+        {draft.imageProvider === "nano_banana" && (
+          <a
+            href="https://aistudio.google.com/apikey"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
+          >
+            Get a Gemini API key from AI Studio <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
       </ItemCard>
 
       <ItemCard
@@ -720,8 +736,24 @@ export function useAgentSetup(): {
 }
 
 export function AgentOnboardingPage() {
-  const { loading, setup, error, setSetup } = useAgentSetup();
+  const { loading, setup, error, setSetup, refresh } = useAgentSetup();
   const [forceOnboarding, setForceOnboarding] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+
+  const onReset = useCallback(async () => {
+    setResetting(true);
+    setResetError(null);
+    try {
+      const reopened = await api.resetAgentSetup();
+      setSetup(reopened);
+      setForceOnboarding(true);
+    } catch (err) {
+      setResetError(errorMessage(err, "Could not re-open onboarding"));
+    } finally {
+      setResetting(false);
+    }
+  }, [setSetup]);
 
   if (loading) {
     return (
@@ -735,41 +767,74 @@ export function AgentOnboardingPage() {
       <div className="m-4 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[12px] text-warning">
         <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
         {error}
+        <Button variant="outline" size="sm" className="ml-3" onClick={() => void refresh()}>
+          Retry
+        </Button>
       </div>
     );
   }
   if (!setup) return null;
 
   const showOnboarding = !setup.complete || forceOnboarding;
-  if (!showOnboarding) {
-    return (
-      <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-6">
-        <div className="rounded-md border border-border bg-card p-4">
-          <h2 className="text-[14px] font-semibold text-foreground">Agent runtime is up</h2>
-          <p className="mt-1 text-[12px] text-muted-foreground">
-            Completed{" "}
-            {setup.completedAt ? new Date(setup.completedAt).toLocaleString() : "earlier"}. All
-            required items connected. Re-run onboarding to add optional connectors or rotate keys.
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={() => setForceOnboarding(true)}
-          >
-            Re-run onboarding
-          </Button>
-        </div>
-      </div>
-    );
-  }
+
   return (
-    <AgentSetupLaunch
-      setup={setup}
-      onSetupUpdated={setSetup}
-      forceOnboarding={forceOnboarding}
-      onForceOnboardingDone={() => setForceOnboarding(false)}
-    />
+    <div className="flex flex-col">
+      <div className="border-b border-border bg-background/95 px-4 py-2 backdrop-blur">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-2">
+          <div className="text-[12px] text-muted-foreground">
+            {setup.complete
+              ? `Agent runtime up. Completed ${
+                  setup.completedAt ? new Date(setup.completedAt).toLocaleString() : "earlier"
+                }.`
+              : `${setup.completedRequiredCount}/${setup.requiredCount} required items connected.`}
+          </div>
+          <div className="flex items-center gap-2">
+            {setup.complete && !forceOnboarding && (
+              <Button variant="outline" size="sm" onClick={() => setForceOnboarding(true)}>
+                Re-run onboarding
+              </Button>
+            )}
+            {(setup.complete || forceOnboarding) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void onReset()}
+                disabled={resetting}
+              >
+                {resetting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                Re-open gate
+              </Button>
+            )}
+          </div>
+        </div>
+        {resetError && (
+          <div className="mx-auto mt-2 max-w-3xl rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-[11.5px] text-warning">
+            <AlertTriangle className="mr-1 inline h-3 w-3" />
+            {resetError}
+          </div>
+        )}
+      </div>
+
+      {showOnboarding ? (
+        <AgentSetupLaunch
+          setup={setup}
+          onSetupUpdated={setSetup}
+          forceOnboarding={forceOnboarding}
+          onForceOnboardingDone={() => setForceOnboarding(false)}
+        />
+      ) : (
+        <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-6">
+          <div className="rounded-md border border-border bg-card p-4">
+            <h2 className="text-[14px] font-semibold text-foreground">Agent runtime is up</h2>
+            <p className="mt-1 text-[12px] text-muted-foreground">
+              All required items connected. Re-run onboarding to add optional connectors or rotate
+              keys. Re-open gate forces the runtime to block again until you mark complete (useful
+              if you swapped infra).
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

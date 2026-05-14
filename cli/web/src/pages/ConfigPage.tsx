@@ -1625,6 +1625,20 @@ export default function ConfigPage() {
     if (!location.hash) return;
     const id = location.hash.replace("#", "");
     if (!id) return;
+    // Map hash to its containing pane so deep-links from outside (e.g.
+    // /config#connectors from the leads onboarding card) actually reveal
+    // the pane that hosts the section before scroll-into-view tries to
+    // resolve the anchor.
+    const PANE_BY_HASH: Record<string, typeof activePane> = {
+      connectors: "connectors",
+      composio: "composio",
+      crm: "crm",
+      setup: "setup",
+    };
+    const targetPane = PANE_BY_HASH[id];
+    if (targetPane && targetPane !== activePane) {
+      setActivePane(targetPane);
+    }
     const tryScroll = (attempt = 0) => {
       const el = document.getElementById(id);
       if (el) {
@@ -1634,7 +1648,7 @@ export default function ConfigPage() {
       if (attempt < 10) window.setTimeout(() => tryScroll(attempt + 1), 100);
     };
     tryScroll();
-  }, [location.hash]);
+  }, [location.hash, activePane]);
 
   useLayoutEffect(() => {
     setEnd(null);

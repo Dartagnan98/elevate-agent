@@ -895,6 +895,19 @@ export interface LeadsSetupItem {
   updatedAt: string | null;
 }
 
+export interface OutreachConnectorRef {
+  id: "apple-messages" | "sms-provider" | "android-device" | "rcs";
+  label: string;
+  state: "connected" | "import_only" | "blocked" | "needs_operator" | "not_configured";
+  connected: boolean;
+  importOnly: boolean;
+  blocked: boolean;
+  nextOperatorStep: string | null;
+  lastError: string | null;
+  ownerAgent: string;
+  totalRecords: number;
+}
+
 export interface LeadsSetupSnapshot {
   items: LeadsSetupItem[];
   requiredCount: number;
@@ -906,6 +919,7 @@ export interface LeadsSetupSnapshot {
   launchRequired: boolean;
   leadSourcesReady: boolean;
   outreachReady: boolean;
+  outreachConnectors: OutreachConnectorRef[];
 }
 
 export interface LeadsSetupItemUpdate {
