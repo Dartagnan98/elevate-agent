@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Lock } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
@@ -11,6 +12,11 @@ import type {
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  playOnboardingChime,
+  playOnboardingClick,
+  playOnboardingSwell,
+} from "@/lib/onboarding-sounds";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -44,8 +50,8 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
   const policyVal = (byKey.get("auto_reply_policy")?.value ?? {}) as Record<string, unknown>;
   return {
     metaProvider: String(byKey.get("meta_lead_ads")?.provider ?? "") || "",
-    metaAuthMethod: String(metaVal.authMethod ?? (metaVal.mcpEndpoint ? "mcp" : "webhook")),
-    metaMcpEndpoint: String(metaVal.mcpEndpoint ?? ""),
+    metaAuthMethod: String(metaVal.authMethod ?? "mcp"),
+    metaMcpEndpoint: String(metaVal.mcpEndpoint ?? "https://mcp.pipeboard.co/meta-ads-mcp"),
     metaMcpToken: String(metaVal.mcpToken ?? ""),
     metaAdAccountId: String(metaVal.adAccountId ?? ""),
     metaPageId: String(metaVal.pageId ?? ""),
@@ -157,6 +163,599 @@ function StatusBadge({ status }: { status: AdminSetupItemStatus }) {
     <span className="inline-flex items-center gap-1 rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10.5px] font-medium text-warning">
       <Circle className="h-3 w-3" /> Missing
     </span>
+  );
+}
+
+function isBrandNewLeadsSetup(setup: LeadsSetupSnapshot): boolean {
+  if (setup.completionPct && setup.completionPct > 0) return false;
+  if (setup.complete) return false;
+  for (const item of setup.items) {
+    if (item.status && item.status !== "missing") return false;
+    if (item.provider && item.provider.trim()) return false;
+    const value = item.value as Record<string, unknown> | null | undefined;
+    if (value && Object.values(value).some((v) => v != null && String(v).trim() !== "")) return false;
+  }
+  return true;
+}
+
+function LeadsOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
+  return (
+    <section className="onboarding-overlay relative -mx-6 -my-6 flex min-h-[calc(100vh-9rem)] items-center justify-center overflow-hidden px-6 py-10">
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex max-w-md flex-col items-center text-center">
+        <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Leads · first run
+        </div>
+        <h1 className="onboarding-rise-delay-1 mt-3 text-[34px] font-medium leading-[1.05] tracking-tight text-foreground">
+          Wire up Elevate Leads
+        </h1>
+        <p className="onboarding-rise-delay-2 mt-3 max-w-sm text-[13.5px] leading-6 text-muted-foreground">
+          A short guided run sets your lead sources, outreach channels, and auto-reply policy. Two minutes, end-to-end.
+        </p>
+        <Button
+          size="lg"
+          onClick={onStart}
+          className="onboarding-rise-delay-3 mt-7 h-12 min-w-[220px] px-6 text-[14px]"
+        >
+          <Sparkles className="h-4 w-4" />
+          Run onboarding
+        </Button>
+        <button
+          type="button"
+          onClick={onSkip}
+          className="onboarding-rise-delay-3 mt-4 text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+        >
+          or skip to the full setup form
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
+  const [exiting, setExiting] = useState(false);
+
+  const handleStart = useCallback(() => {
+    playOnboardingSwell();
+    setExiting(true);
+  }, []);
+
+  const handleAnimationEnd = useCallback(
+    (event: React.AnimationEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) return;
+      if (exiting) onContinue();
+    },
+    [exiting, onContinue],
+  );
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Welcome to Elevate Leads"
+      className={cn(
+        "onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden",
+        exiting && "onboarding-exit",
+      )}
+      onAnimationEnd={handleAnimationEnd}
+    >
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex max-w-xl flex-col items-center px-6 text-center">
+        <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+          Elevate · Leads
+        </div>
+        <h1 className="onboarding-rise-delay-1 mt-4 text-[52px] font-medium leading-[1.02] tracking-tight text-foreground">
+          Welcome to Elevate Leads.
+        </h1>
+        <p className="onboarding-rise-delay-2 mt-4 max-w-lg text-[15px] leading-7 text-muted-foreground">
+          A few quick questions and Leads starts catching, routing, and drafting replies the moment a lead lands.
+        </p>
+        <Button
+          size="lg"
+          onClick={handleStart}
+          disabled={exiting}
+          className="onboarding-rise-delay-3 mt-9 h-12 min-w-[240px] px-7 text-[14px]"
+        >
+          Let's get started
+        </Button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+type LeadsWizardStepId = "meta" | "google" | "webhook" | "outreach" | "policy";
+
+type LeadsWizardStep = {
+  id: LeadsWizardStepId;
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+};
+
+const LEADS_WIZARD_STEPS: LeadsWizardStep[] = [
+  {
+    id: "meta",
+    eyebrow: "Step 1 of 5",
+    title: "Meta Lead Ads",
+    subtitle:
+      "Skip if you don't run Facebook / Instagram lead-form ads. Pipeboard MCP wraps Meta's Marketing API — one token, no Facebook App registration.",
+  },
+  {
+    id: "google",
+    eyebrow: "Step 2 of 5",
+    title: "Google Lead Forms",
+    subtitle:
+      "Skip if you don't run Google Ads. Developer token + customer ID is enough — Leads auto-discovers your campaigns.",
+  },
+  {
+    id: "webhook",
+    eyebrow: "Step 3 of 5",
+    title: "Website form webhook",
+    subtitle:
+      "Optional catch-all POST endpoint for landing-page and contact-us forms. Wire any form provider that can POST JSON.",
+  },
+  {
+    id: "outreach",
+    eyebrow: "Step 4 of 5",
+    title: "Outreach channels",
+    subtitle:
+      "iMessage, SMS, RCS, and CRM live as Source Connectors so the same wiring powers ingestion and outbound. Configure in Config → Source connectors.",
+  },
+  {
+    id: "policy",
+    eyebrow: "Step 5 of 5",
+    title: "Auto-reply policy",
+    subtitle:
+      "Tell Elevate how aggressive to be on the first touch. You can change the cadence per lane after onboarding.",
+  },
+];
+
+function LeadsOnboardingWizard({
+  draft,
+  updateField,
+  onAdvanceSave,
+  onFinish,
+  saving,
+  completing,
+  error,
+  savedMessage,
+  outreachConnectors,
+}: {
+  draft: LeadsSetupDraft;
+  updateField: <K extends keyof LeadsSetupDraft>(key: K, value: LeadsSetupDraft[K]) => void;
+  onAdvanceSave: () => Promise<void>;
+  onFinish: () => Promise<void>;
+  saving: boolean;
+  completing: boolean;
+  error: string | null;
+  savedMessage: string | null;
+  outreachConnectors: OutreachConnectorRef[];
+}) {
+  const [stepIdx, setStepIdx] = useState(0);
+  const [showMissing, setShowMissing] = useState(false);
+  const step = LEADS_WIZARD_STEPS[stepIdx];
+  const isLast = stepIdx === LEADS_WIZARD_STEPS.length - 1;
+  const isFirst = stepIdx === 0;
+  const busy = saving || completing;
+
+  const missingMessage = useMemo(() => {
+    if (step.id !== "policy") return null;
+    if (draft.autoReplyEnabled && !draft.autoReplyTemplate.trim()) {
+      return 'Fill in "Initial reply template" before continuing — or turn auto-reply off.';
+    }
+    return null;
+  }, [step.id, draft.autoReplyEnabled, draft.autoReplyTemplate]);
+  const canAdvance = missingMessage == null;
+  useEffect(() => {
+    setShowMissing(false);
+  }, [stepIdx]);
+
+  const handleNext = useCallback(async () => {
+    if (busy) return;
+    if (!canAdvance) {
+      setShowMissing(true);
+      return;
+    }
+    playOnboardingClick();
+    await onAdvanceSave();
+    if (isLast) {
+      playOnboardingSwell();
+      await onFinish();
+      return;
+    }
+    setStepIdx((idx) => Math.min(idx + 1, LEADS_WIZARD_STEPS.length - 1));
+  }, [busy, canAdvance, isLast, onAdvanceSave, onFinish]);
+
+  const handleBack = useCallback(() => {
+    if (busy) return;
+    playOnboardingClick();
+    setStepIdx((idx) => Math.max(idx - 1, 0));
+  }, [busy]);
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Leads onboarding wizard"
+      className="onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto px-6 py-10"
+    >
+      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex w-full max-w-2xl flex-col">
+        <div className="mb-7 flex items-center gap-1.5">
+          {LEADS_WIZARD_STEPS.map((s, idx) => (
+            <span
+              key={s.id}
+              aria-hidden
+              className={cn(
+                "h-1 flex-1 rounded-sm transition-colors duration-300",
+                idx <= stepIdx ? "bg-primary" : "bg-border/60",
+              )}
+            />
+          ))}
+        </div>
+
+        <div key={stepIdx} className="flex flex-col">
+          <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            {step.eyebrow}
+          </div>
+          <h2 className="onboarding-rise-delay-1 mt-3 text-[34px] font-medium leading-[1.05] tracking-tight text-foreground">
+            {step.title}
+          </h2>
+          <p className="onboarding-rise-delay-2 mt-3 max-w-xl text-[14px] leading-7 text-muted-foreground">
+            {step.subtitle}
+          </p>
+
+          <div className="onboarding-rise-delay-3 mt-8 flex flex-col gap-4">
+            {step.id === "meta" && (
+              <>
+                <WizardSelect
+                  label="Auth method"
+                  value={draft.metaAuthMethod}
+                  onChange={(v) => updateField("metaAuthMethod", v)}
+                  options={[
+                    { value: "mcp", label: "Pipeboard Meta Ads MCP (recommended)" },
+                    { value: "webhook", label: "Page-token webhook (legacy)" },
+                  ]}
+                />
+                {draft.metaAuthMethod === "mcp" ? (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <WizardField
+                      label="MCP endpoint URL"
+                      value={draft.metaMcpEndpoint}
+                      onChange={(v) => updateField("metaMcpEndpoint", v)}
+                      placeholder="https://mcp.pipeboard.co/meta-ads-mcp"
+                      fullWidth
+                      helper="Pre-filled with Pipeboard's hosted MCP. They handle the Facebook OAuth + Marketing API plumbing — you just paste a token."
+                    />
+                    <WizardField
+                      label="Pipeboard API token"
+                      value={draft.metaMcpToken}
+                      onChange={(v) => updateField("metaMcpToken", v)}
+                      placeholder="••••••••"
+                      type="password"
+                      fullWidth
+                      helper={
+                        <>
+                          Get one at{" "}
+                          <a
+                            href="https://pipeboard.co/api-tokens"
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="text-primary underline-offset-2 hover:underline"
+                          >
+                            pipeboard.co/api-tokens
+                          </a>{" "}
+                          (OAuth Facebook there once, copy token back).
+                        </>
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <WizardField
+                      label="Provider name"
+                      value={draft.metaProvider}
+                      onChange={(v) => updateField("metaProvider", v)}
+                      placeholder="Meta Business Manager"
+                    />
+                    <WizardField
+                      label="Ad account ID"
+                      value={draft.metaAdAccountId}
+                      onChange={(v) => updateField("metaAdAccountId", v)}
+                      placeholder="act_1234567890"
+                    />
+                    <WizardField
+                      label="Page ID"
+                      value={draft.metaPageId}
+                      onChange={(v) => updateField("metaPageId", v)}
+                      placeholder="987654321"
+                    />
+                    <WizardField
+                      label="Lead form IDs (comma-separated)"
+                      value={draft.metaFormIds}
+                      onChange={(v) => updateField("metaFormIds", v)}
+                      placeholder="form_001, form_002"
+                    />
+                    <div className="md:col-span-2 flex items-start gap-3 rounded-md border border-border bg-card/60 px-4 py-3 backdrop-blur-sm">
+                      <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <p className="text-[12.5px] leading-5 text-muted-foreground">
+                        Direct path: register your own Facebook App, grant via Lead Access Manager, and stand up a webhook endpoint.{" "}
+                        <a
+                          href="https://www.facebook.com/business/help/1456422242197840"
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="text-primary underline-offset-2 hover:underline"
+                        >
+                          Meta's guide →
+                        </a>
+                      </p>
+                    </div>
+                  </div>
+                )}
+                <p className="text-[11.5px] text-muted-foreground/80">
+                  All fields optional — skip Meta entirely if you don't run lead-form ads.
+                </p>
+              </>
+            )}
+
+            {step.id === "google" && (
+              <div className="grid gap-4 md:grid-cols-2">
+                <WizardField
+                  label="Provider name"
+                  value={draft.googleProvider}
+                  onChange={(v) => updateField("googleProvider", v)}
+                  placeholder="Google Ads"
+                />
+                <WizardField
+                  label="Customer ID"
+                  value={draft.googleCustomerId}
+                  onChange={(v) => updateField("googleCustomerId", v)}
+                  placeholder="123-456-7890"
+                />
+                <WizardField
+                  label="Developer token"
+                  value={draft.googleDeveloperToken}
+                  onChange={(v) => updateField("googleDeveloperToken", v)}
+                  placeholder="abcDEF123-xyz"
+                  type="password"
+                  fullWidth
+                  helper={
+                    <>
+                      Generate one at{" "}
+                      <a
+                        href="https://developers.google.com/google-ads/api/docs/get-started/dev-token"
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="text-primary underline-offset-2 hover:underline"
+                      >
+                        Google Ads → Tools → API Center
+                      </a>
+                      .
+                    </>
+                  }
+                />
+                <p className="md:col-span-2 text-[11.5px] text-muted-foreground/80">
+                  All fields optional — skip Google entirely if you don't run lead-form ads.
+                </p>
+              </div>
+            )}
+
+            {step.id === "webhook" && (
+              <div className="grid gap-4 md:grid-cols-2">
+                <WizardField
+                  label="Webhook URL"
+                  value={draft.webhookUrl}
+                  onChange={(v) => updateField("webhookUrl", v)}
+                  placeholder="https://elevate.yourdomain.com/api/leads/inbound"
+                  fullWidth
+                  helper="POST endpoint your form provider (Webflow, Framer, custom) hits when someone submits."
+                />
+                <WizardField
+                  label="Shared secret"
+                  value={draft.webhookSecret}
+                  onChange={(v) => updateField("webhookSecret", v)}
+                  placeholder="optional"
+                  type="password"
+                  fullWidth
+                  helper="Optional. If set, Elevate verifies HMAC signature on each incoming submission."
+                />
+              </div>
+            )}
+
+            {step.id === "outreach" && (
+              <div className="flex flex-col gap-3">
+                <Link
+                  to="/config#connectors"
+                  className="inline-flex w-fit items-center gap-1 rounded-md border border-border bg-card/60 px-3 py-1.5 text-[12.5px] font-medium text-foreground backdrop-blur-sm hover:bg-muted"
+                >
+                  <LinkIcon className="h-3.5 w-3.5" />
+                  Open Source Connectors
+                </Link>
+                <div className="space-y-1.5">
+                  {outreachConnectors.length === 0 ? (
+                    <p className="text-[12px] text-muted-foreground">Loading connector state…</p>
+                  ) : (
+                    outreachConnectors.map((connector) => {
+                      const hint = OUTREACH_HINTS[connector.id];
+                      return (
+                        <div
+                          key={connector.id}
+                          className="flex items-start justify-between gap-3 rounded-md border border-border/60 bg-card/40 px-3 py-2 backdrop-blur-sm"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12.5px] font-medium text-foreground">{connector.label}</span>
+                              <ConnectorStatusBadge connector={connector} />
+                              {connector.totalRecords > 0 && (
+                                <span className="text-[10.5px] text-muted-foreground">
+                                  {connector.totalRecords.toLocaleString()} records
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{hint?.tagline}</p>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                <p className="text-[11.5px] text-muted-foreground/80">
+                  Nothing to fill here — outreach channels are managed in <code className="rounded bg-muted/40 px-1 py-0.5 text-[10.5px]">/config#connectors</code>. Elevate auto-routes by lead device.
+                </p>
+              </div>
+            )}
+
+            {step.id === "policy" && (
+              <div className="flex flex-col gap-4">
+                <label className="flex items-start gap-3 rounded-md border border-border bg-card/60 px-4 py-3 backdrop-blur-sm">
+                  <input
+                    type="checkbox"
+                    checked={draft.autoReplyEnabled}
+                    onChange={(e) => updateField("autoReplyEnabled", e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-border accent-primary"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-foreground">
+                      Send an automated first reply when a lead lands
+                    </div>
+                    <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+                      Off by default — Elevate drafts and queues a reply for your approval instead.
+                    </p>
+                  </div>
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
+                    Initial reply template {draft.autoReplyEnabled && <span className="text-destructive">*</span>}
+                  </span>
+                  <textarea
+                    value={draft.autoReplyTemplate}
+                    onChange={(e) => updateField("autoReplyTemplate", e.target.value)}
+                    rows={4}
+                    placeholder="Hey {{firstName}} — thanks for reaching out. What's the property address or area you're looking at?"
+                    className="min-h-28 w-full resize-y rounded-md border border-border bg-card/60 px-3 py-2 text-[13px] leading-5 text-foreground outline-none backdrop-blur-sm placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
+                  />
+                  <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">
+                    Used both as the auto-send template (if enabled) and the default draft otherwise.
+                  </span>
+                </label>
+                <WizardField
+                  label="Follow-up cadence (days between nudges)"
+                  value={draft.followUpCadenceDays}
+                  onChange={(v) => updateField("followUpCadenceDays", v)}
+                  placeholder="2"
+                  type="number"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {(error || savedMessage) && (
+          <div
+            className={cn(
+              "mt-6 flex items-baseline gap-3 border-t py-3 text-[13px]",
+              error ? "border-destructive" : "border-success",
+            )}
+          >
+            <span
+              className={cn(
+                "shrink-0 font-mono-ui text-[10px] uppercase tracking-wider",
+                error ? "text-destructive" : "text-success",
+              )}
+            >
+              {error ? "Error" : "Saved"}
+            </span>
+            <span className="text-foreground">{error || savedMessage}</span>
+          </div>
+        )}
+
+        <div className="mt-9 flex items-center justify-between gap-3 border-t border-border/60 pt-5">
+          <div className="min-h-[18px] flex-1 text-[12px] leading-5 text-muted-foreground/80">
+            {showMissing && missingMessage && <span className="text-destructive">{missingMessage}</span>}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button variant="outline" onClick={handleBack} disabled={busy || isFirst}>
+              Back
+            </Button>
+            <Button
+              onClick={() => void handleNext()}
+              disabled={busy || !canAdvance}
+              className="min-w-[140px]"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              {isLast ? "Finish setup" : "Continue"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function WizardField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = "text",
+  fullWidth = false,
+  helper,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+  fullWidth?: boolean;
+  helper?: React.ReactNode;
+}) {
+  return (
+    <label className={cn("block min-w-0", fullWidth && "md:col-span-2")}>
+      <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete={type === "password" ? "new-password" : "off"}
+        spellCheck={type === "password" || type === "email" ? false : undefined}
+        className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30"
+      />
+      {helper && (
+        <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">{helper}</span>
+      )}
+    </label>
+  );
+}
+
+function WizardSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+}) {
+  return (
+    <label className="block min-w-0 md:col-span-2">
+      <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
+      >
+        {options.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -374,6 +973,15 @@ export function LeadsSetupLaunch({
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "form">(() =>
+    forceOnboarding ? "welcome" : isBrandNewLeadsSetup(setup) ? "gate" : "form",
+  );
+
+  useEffect(() => {
+    if (forceOnboarding && phase === "form") {
+      onForceOnboardingDone?.();
+    }
+  }, [forceOnboarding, phase, onForceOnboardingDone]);
 
   useEffect(() => {
     setDraft(leadsDraftFromSnapshot(setup));
@@ -432,6 +1040,48 @@ export function LeadsSetupLaunch({
   const outreachReady = setup.outreachReady;
   const outreachConnectors = setup.outreachConnectors ?? [];
 
+  const handleWizardFinish = useCallback(async () => {
+    setError(null);
+    setSavedMessage(null);
+    try {
+      await api.updateLeadsSetup(buildItemUpdates(draft));
+    } catch (err) {
+      setError(errorMessage(err, "Save failed"));
+      return;
+    }
+    playOnboardingChime();
+    setPhase("form");
+  }, [draft]);
+
+  if (phase === "gate") {
+    return (
+      <LeadsOnboardingGate
+        onStart={() => setPhase("welcome")}
+        onSkip={() => setPhase("form")}
+      />
+    );
+  }
+
+  if (phase === "welcome") {
+    return <LeadsOnboardingWelcome onContinue={() => setPhase("wizard")} />;
+  }
+
+  if (phase === "wizard") {
+    return (
+      <LeadsOnboardingWizard
+        draft={draft}
+        updateField={updateField}
+        onAdvanceSave={save}
+        onFinish={handleWizardFinish}
+        saving={saving}
+        completing={completing}
+        error={error}
+        savedMessage={savedMessage}
+        outreachConnectors={outreachConnectors}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-md border border-border bg-card p-4">
@@ -489,7 +1139,7 @@ export function LeadsSetupLaunch({
 
       <ItemCard
         title="Meta Lead Ads (optional)"
-        description="Skip if you don't run Facebook / Instagram lead-form ads. Auth via the official Meta Ads MCP (recommended — one token, no webhook plumbing) or the legacy page-token webhook."
+        description="Skip if you don't run Facebook / Instagram lead-form ads. Auth via Pipeboard Meta Ads MCP (recommended — one token, no webhook plumbing) or the legacy page-token webhook."
         status={metaItem?.status ?? "missing"}
       >
         <label className="block text-[11.5px] text-muted-foreground">
@@ -499,7 +1149,7 @@ export function LeadsSetupLaunch({
             onChange={(e) => updateField("metaAuthMethod", e.target.value)}
             className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
           >
-            <option value="mcp">Meta Ads MCP (recommended)</option>
+            <option value="mcp">Pipeboard Meta Ads MCP (recommended)</option>
             <option value="webhook">Page-token webhook (legacy)</option>
           </select>
         </label>
@@ -509,23 +1159,33 @@ export function LeadsSetupLaunch({
               label="MCP endpoint URL"
               value={draft.metaMcpEndpoint}
               onChange={(v) => updateField("metaMcpEndpoint", v)}
-              placeholder="https://mcp.meta.com/ads  (or self-hosted)"
+              placeholder="https://mcp.pipeboard.co/meta-ads-mcp"
             />
             <FieldRow
-              label="MCP access token"
+              label="Pipeboard API token"
               value={draft.metaMcpToken}
               onChange={(v) => updateField("metaMcpToken", v)}
               placeholder="••••••••"
               type="password"
             />
-            <a
-              href="https://github.com/pipeboard-co/meta-ads-mcp"
-              target="_blank"
-              rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
-            >
-              Meta Ads MCP install guide <ExternalLink className="h-3 w-3" />
-            </a>
+            <div className="flex flex-wrap items-center gap-3 text-[11.5px]">
+              <a
+                href="https://pipeboard.co/api-tokens"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
+              >
+                Get Pipeboard token (OAuth Facebook) <ExternalLink className="h-3 w-3" />
+              </a>
+              <a
+                href="https://github.com/pipeboard-co/meta-ads-mcp"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 text-muted-foreground underline-offset-2 hover:underline hover:text-foreground"
+              >
+                Install guide <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
           </>
         ) : (
           <>
