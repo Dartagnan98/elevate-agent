@@ -172,7 +172,7 @@ function ThreadDrawer({
       <div
         role="dialog"
         aria-modal="true"
-        className="relative z-10 flex h-full w-full flex-col bg-card shadow-[0_24px_90px_rgba(0,0,0,0.32)] sm:h-auto sm:max-h-full sm:w-full sm:max-w-[56rem] sm:rounded-md sm:border sm:border-border lg:max-w-[68rem] xl:max-w-[80rem]"
+        className="relative z-10 flex h-full w-full flex-col bg-card shadow-[0_24px_90px_rgba(0,0,0,0.32)] sm:h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-3rem)] sm:min-h-[640px] sm:w-full sm:max-w-[56rem] sm:rounded-md sm:border sm:border-border lg:max-w-[68rem] xl:max-w-[80rem]"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div className="flex min-w-0 flex-col gap-1.5">
