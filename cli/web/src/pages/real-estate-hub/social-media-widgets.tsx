@@ -461,9 +461,9 @@ export function YouTubeTabView({
       )}
 
       {videos.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border bg-card px-4 py-10 text-sm text-muted-foreground text-center">
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">
           No YouTube videos pulled yet. Click "refresh from platforms" above to pull the channel.
-        </div>
+        </p>
       ) : (
         <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
           {videos
@@ -530,9 +530,7 @@ function RankPanel({
         {title}
       </div>
       {rows.length === 0 ? (
-        <div className="rounded-sm border border-dashed border-border bg-card px-2 py-3 text-center text-[0.75rem] text-muted-foreground">
-          No data yet
-        </div>
+        <p className="px-1 py-1 text-xs text-muted-foreground/80">No data yet</p>
       ) : (
         <ol className="space-y-1.5">
           {rows.map((row, idx) => (

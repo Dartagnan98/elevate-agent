@@ -95,12 +95,12 @@ export function ModelInfoCard({ currentModel, refreshKey = 0 }: ModelInfoCardPro
             </span>
           )}
           {caps.supports_vision && (
-            <span className="inline-flex items-center gap-1 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+            <span className="inline-flex items-center gap-1 bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
               <Eye className="h-2.5 w-2.5" /> Vision
             </span>
           )}
           {caps.supports_reasoning && (
-            <span className="inline-flex items-center gap-1 bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-600 dark:text-purple-400">
+            <span className="inline-flex items-center gap-1 bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
               <Brain className="h-2.5 w-2.5" /> Reasoning
             </span>
           )}
