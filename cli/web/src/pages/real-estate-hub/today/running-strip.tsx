@@ -139,7 +139,7 @@ function Card({
         </div>
         <Link
           to={to}
-          className="font-mono-ui text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground"
+          className="text-xs text-muted-foreground hover:text-foreground"
         >
           Open
         </Link>
@@ -150,5 +150,5 @@ function Card({
 }
 
 function EmptyRow({ message }: { message: string }) {
-  return <div className="px-3 py-4 text-center text-[0.8rem] text-muted-foreground">{message}</div>;
+  return <p className="px-3 py-2 text-xs text-muted-foreground/80">{message}</p>;
 }

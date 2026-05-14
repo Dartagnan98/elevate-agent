@@ -11,7 +11,7 @@ export function PulseStrip({ stats }: { stats: PulseStat[] }) {
           <h2 className="text-[1.05rem] font-semibold leading-tight tracking-[-0.005em] text-foreground">
             {greeting}
           </h2>
-          <p className="font-mono-ui text-[0.66rem] uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground">
             Today at a glance
           </p>
         </div>

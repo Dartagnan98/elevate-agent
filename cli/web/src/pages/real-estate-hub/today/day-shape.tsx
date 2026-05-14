@@ -38,7 +38,7 @@ function TodayHourly({ buckets }: { buckets: HourBucket[] }) {
           <h3 className="text-[0.9rem] font-semibold leading-tight tracking-[-0.005em] text-foreground">
             Today, hour by hour
           </h3>
-          <p className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground">
             Inbound vs outbound
           </p>
         </div>
@@ -127,7 +127,7 @@ function WeekRollup({ buckets }: { buckets: DayBucket[] }) {
           <h3 className="text-[0.9rem] font-semibold leading-tight tracking-[-0.005em] text-foreground">
             Last 7 days
           </h3>
-          <p className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground">
             Leads · replies · deals advanced
           </p>
         </div>
@@ -218,7 +218,7 @@ function Legend({ swatch, label }: { swatch: string; label: string }) {
         className="inline-block h-2 w-2 rounded-sm"
         style={{ backgroundColor: swatch }}
       />
-      <span className="font-mono-ui text-[0.62rem] uppercase tracking-[0.12em]">{label}</span>
+      <span className="text-[0.7rem] tabular-nums">{label}</span>
     </span>
   );
 }

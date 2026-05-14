@@ -28,22 +28,22 @@ export function PriorityQueue({ items }: { items: UrgentItem[] }) {
           <h2 className="text-[0.95rem] font-semibold leading-tight tracking-[-0.005em] text-foreground">
             Needs you now
           </h2>
-          <p className="font-mono-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground">
             {items.length === 0 ? "Inbox is clear" : `${items.length} waiting`}
           </p>
         </div>
         <Link
           to="/leads"
-          className="font-mono-ui inline-flex items-center gap-1 text-[0.66rem] uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
         >
           Open leads
           <ArrowUpRight className="h-3 w-3" />
         </Link>
       </header>
       {items.length === 0 ? (
-        <div className="px-3.5 py-6 text-center text-sm text-muted-foreground">
+        <p className="px-3.5 py-3 text-xs text-muted-foreground/80">
           Nothing waiting on you. Drafts auto-approve when nothing is flagged.
-        </div>
+        </p>
       ) : (
         <ul className="divide-y divide-border">
           {items.map((item) => (
