@@ -47,6 +47,7 @@ const IMAGE_CACHE_DIR = path.join(process.env.HOME || '~', '.elevate', 'image_ca
 const DOCUMENT_CACHE_DIR = path.join(process.env.HOME || '~', '.elevate', 'document_cache');
 const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.elevate', 'audio_cache');
 const PAIR_ONLY = args.includes('--pair-only');
+const QR_JSON = args.includes('--qr-json');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const DEFAULT_REPLY_PREFIX = '▲ *Elevate*\n────────────\n';
@@ -147,9 +148,15 @@ async function startSocket() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\nWaiting for scan...\n');
+      if (QR_JSON) {
+        // Emit raw QR string so an external consumer (web UI) can render
+        // a real QR image instead of parsing ASCII.
+        process.stdout.write(JSON.stringify({ event: 'qr', qr }) + '\n');
+      } else {
+        console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
+        qrcode.generate(qr, { small: true });
+        console.log('\nWaiting for scan...\n');
+      }
     }
 
     if (connection === 'close') {
@@ -170,9 +177,17 @@ async function startSocket() {
       }
     } else if (connection === 'open') {
       connectionState = 'connected';
-      console.log('✅ WhatsApp connected!');
+      if (QR_JSON) {
+        process.stdout.write(JSON.stringify({ event: 'connected' }) + '\n');
+      } else {
+        console.log('✅ WhatsApp connected!');
+      }
       if (PAIR_ONLY) {
-        console.log('✅ Pairing complete. Credentials saved.');
+        if (QR_JSON) {
+          process.stdout.write(JSON.stringify({ event: 'paired' }) + '\n');
+        } else {
+          console.log('✅ Pairing complete. Credentials saved.');
+        }
         // Give Baileys a moment to flush creds, then exit cleanly
         setTimeout(() => process.exit(0), 2000);
       }

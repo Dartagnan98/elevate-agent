@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,7 +59,7 @@ from gateway.status import get_running_pid, read_runtime_status
 try:
     from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
 except ImportError:
@@ -1252,6 +1253,344 @@ async def approve_telegram_pairing(request: Request):
         "user_id": user_id,
         "user_name": user_name,
     }
+
+
+# ────────────────────────────────────────────────────────────────────
+# Channel configure endpoints. Each mirrors a CLI ``_setup_*`` flow
+# from ``elevate_cli/setup.py`` so the web wizard writes to the same
+# env vars the gateway reads at startup. Without these, the wizard's
+# "configured" state is cosmetic — the gateway sees nothing.
+# ────────────────────────────────────────────────────────────────────
+
+
+def _strip(v: Any) -> str:
+    return str(v or "").strip()
+
+
+def _token_preview(token: str) -> str:
+    """Mask all but the last 4 chars of a secret for safe display."""
+    s = str(token or "")
+    if len(s) <= 4:
+        return "•" * len(s)
+    return "•" * (len(s) - 4) + s[-4:]
+
+
+@app.post("/api/channels/discord/configure")
+async def configure_discord(request: Request):
+    """Mirror ``setup._setup_discord``. Saves DISCORD_BOT_TOKEN,
+    DISCORD_ALLOWED_USERS, DISCORD_HOME_CHANNEL, DISCORD_CHANNEL_ID
+    (the legacy key the agent-setup overlay checks)."""
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    bot_token = _strip(body.get("bot_token"))
+    allowed = _strip(body.get("allowed_users"))
+    home_channel = _strip(body.get("home_channel"))
+    if not bot_token and not get_env_value("DISCORD_BOT_TOKEN"):
+        raise HTTPException(status_code=400, detail="bot_token is required")
+
+    if bot_token:
+        save_env_value("DISCORD_BOT_TOKEN", bot_token)
+    if allowed:
+        cleaned = []
+        for uid in allowed.replace(" ", "").split(","):
+            uid = uid.strip()
+            if uid.startswith("<@") and uid.endswith(">"):
+                uid = uid.lstrip("<@!").rstrip(">")
+            if uid.lower().startswith("user:"):
+                uid = uid[5:]
+            if uid:
+                cleaned.append(uid)
+        save_env_value("DISCORD_ALLOWED_USERS", ",".join(cleaned))
+    if home_channel:
+        save_env_value("DISCORD_HOME_CHANNEL", home_channel)
+        # Legacy alias the agent-setup overlay reads
+        save_env_value("DISCORD_CHANNEL_ID", home_channel)
+
+    return {
+        "ok": True,
+        "tokenPreview": _token_preview(bot_token or get_env_value("DISCORD_BOT_TOKEN") or ""),
+        "allowedUsers": get_env_value("DISCORD_ALLOWED_USERS") or "",
+        "homeChannel": get_env_value("DISCORD_HOME_CHANNEL") or "",
+    }
+
+
+@app.post("/api/channels/slack/configure")
+async def configure_slack(request: Request):
+    """Mirror ``setup._setup_slack``. Saves SLACK_BOT_TOKEN (Socket Mode),
+    SLACK_APP_TOKEN, SLACK_ALLOWED_USERS."""
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    bot_token = _strip(body.get("bot_token"))
+    app_token = _strip(body.get("app_token"))
+    allowed = _strip(body.get("allowed_users"))
+    if not bot_token and not get_env_value("SLACK_BOT_TOKEN"):
+        raise HTTPException(status_code=400, detail="bot_token (xoxb-…) is required")
+
+    if bot_token:
+        save_env_value("SLACK_BOT_TOKEN", bot_token)
+    if app_token:
+        save_env_value("SLACK_APP_TOKEN", app_token)
+    if allowed:
+        save_env_value("SLACK_ALLOWED_USERS", allowed.replace(" ", ""))
+
+    return {
+        "ok": True,
+        "botTokenPreview": _token_preview(bot_token or get_env_value("SLACK_BOT_TOKEN") or ""),
+        "appTokenPreview": _token_preview(app_token or get_env_value("SLACK_APP_TOKEN") or ""),
+        "allowedUsers": get_env_value("SLACK_ALLOWED_USERS") or "",
+    }
+
+
+@app.post("/api/channels/imessage/bluebubbles/configure")
+async def configure_bluebubbles(request: Request):
+    """Mirror ``setup._setup_bluebubbles``. Saves BLUEBUBBLES_SERVER_URL,
+    BLUEBUBBLES_PASSWORD, BLUEBUBBLES_ALLOWED_USERS, BLUEBUBBLES_HOME_CHANNEL."""
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    server_url = _strip(body.get("server_url")).rstrip("/")
+    password = _strip(body.get("password"))
+    allowed = _strip(body.get("allowed_users"))
+    home = _strip(body.get("home_channel"))
+
+    if server_url:
+        save_env_value("BLUEBUBBLES_SERVER_URL", server_url)
+    if password:
+        save_env_value("BLUEBUBBLES_PASSWORD", password)
+    if allowed:
+        save_env_value("BLUEBUBBLES_ALLOWED_USERS", allowed.replace(" ", ""))
+    if home:
+        save_env_value("BLUEBUBBLES_HOME_CHANNEL", home)
+
+    if not get_env_value("BLUEBUBBLES_SERVER_URL") or not get_env_value("BLUEBUBBLES_PASSWORD"):
+        raise HTTPException(
+            status_code=400,
+            detail="BlueBubbles server URL + password are required",
+        )
+
+    return {
+        "ok": True,
+        "serverUrl": get_env_value("BLUEBUBBLES_SERVER_URL") or "",
+        "passwordSet": bool(get_env_value("BLUEBUBBLES_PASSWORD")),
+        "allowedUsers": get_env_value("BLUEBUBBLES_ALLOWED_USERS") or "",
+        "homeChannel": get_env_value("BLUEBUBBLES_HOME_CHANNEL") or "",
+    }
+
+
+@app.post("/api/channels/whatsapp/configure")
+async def configure_whatsapp(request: Request):
+    """Save WhatsApp mode + allowlist (matches cmd_whatsapp steps 1-3).
+    Pairing is a separate endpoint that streams the QR."""
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mode = _strip(body.get("mode"))  # "bot" or "self-chat"
+    allowed = _strip(body.get("allowed_users"))
+    if mode and mode not in {"bot", "self-chat"}:
+        raise HTTPException(status_code=400, detail="mode must be 'bot' or 'self-chat'")
+    if mode:
+        save_env_value("WHATSAPP_MODE", mode)
+        save_env_value("WHATSAPP_ENABLED", "true")
+    if allowed:
+        save_env_value("WHATSAPP_ALLOWED_USERS", allowed.replace(" ", ""))
+
+    bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+    has_node_modules = (bridge_dir / "node_modules").exists()
+    bridge_present = (bridge_dir / "bridge.js").exists()
+    session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
+    paired = (session_dir / "creds.json").exists()
+
+    return {
+        "ok": True,
+        "mode": get_env_value("WHATSAPP_MODE") or "",
+        "enabled": (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true",
+        "allowedUsers": get_env_value("WHATSAPP_ALLOWED_USERS") or "",
+        "bridgePresent": bridge_present,
+        "bridgeInstalled": has_node_modules,
+        "paired": paired,
+    }
+
+
+def _elevate_repo_root() -> Path:
+    """Locate the repo root that holds ``scripts/whatsapp-bridge``."""
+    # web_server.py lives at <repo>/cli/elevate_cli/web_server.py
+    return Path(__file__).resolve().parents[1]
+
+
+@app.post("/api/channels/whatsapp/install")
+async def install_whatsapp_bridge(request: Request):
+    """Run ``npm install`` inside the WhatsApp bridge directory.
+    Mirrors the auto-install step inside ``cmd_whatsapp``."""
+    _require_token(request)
+    bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+    if not (bridge_dir / "bridge.js").exists():
+        raise HTTPException(status_code=404, detail=f"bridge.js not found at {bridge_dir}")
+
+    npm = shutil.which("npm")
+    if not npm:
+        raise HTTPException(
+            status_code=400,
+            detail="npm not on PATH — install Node.js first (https://nodejs.org/)",
+        )
+
+    try:
+        proc = subprocess.run(
+            [npm, "install", "--no-fund", "--no-audit", "--progress=false"],
+            cwd=str(bridge_dir),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="npm install timed out after 10 minutes")
+
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stderr or "").strip().splitlines()[-30:]) or "(no output)"
+        raise HTTPException(status_code=500, detail=f"npm install failed:\n{tail}")
+
+    return {
+        "ok": True,
+        "installed": (bridge_dir / "node_modules").exists(),
+    }
+
+
+@app.get("/api/channels/whatsapp/status")
+async def whatsapp_status():
+    """Lightweight status: is bridge installed, has session been paired."""
+    bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+    session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
+    return {
+        "bridgePresent": (bridge_dir / "bridge.js").exists(),
+        "bridgeInstalled": (bridge_dir / "node_modules").exists(),
+        "mode": get_env_value("WHATSAPP_MODE") or "",
+        "enabled": (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true",
+        "paired": (session_dir / "creds.json").exists(),
+        "allowedUsers": get_env_value("WHATSAPP_ALLOWED_USERS") or "",
+    }
+
+
+@app.get("/api/channels/whatsapp/pair/stream")
+async def whatsapp_pair_stream(request: Request):
+    """Server-Sent Events stream of WhatsApp pairing progress.
+
+    Spawns ``node bridge.js --pair-only --qr-json`` and emits JSON
+    events as the bridge produces them: ``qr`` (raw QR string for the
+    browser to render), ``connected``, ``paired``, ``error``, ``exit``.
+    """
+    _require_token(request)
+    bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+    bridge_script = bridge_dir / "bridge.js"
+    if not bridge_script.exists():
+        raise HTTPException(status_code=404, detail="bridge.js not found")
+    if not (bridge_dir / "node_modules").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="WhatsApp bridge dependencies not installed — call /api/channels/whatsapp/install first",
+        )
+    node = shutil.which("node")
+    if not node:
+        raise HTTPException(status_code=400, detail="node not on PATH")
+
+    session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # Re-pairing: clear stale session so Baileys emits a fresh QR.
+    creds = session_dir / "creds.json"
+    if creds.exists():
+        try:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    async def event_stream():
+        import asyncio
+        proc = await asyncio.create_subprocess_exec(
+            node,
+            str(bridge_script),
+            "--pair-only",
+            "--qr-json",
+            "--session",
+            str(session_dir),
+            cwd=str(bridge_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        async def kill_if_disconnected():
+            while True:
+                if await request.is_disconnected():
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+                await asyncio.sleep(1.0)
+
+        watcher = asyncio.create_task(kill_if_disconnected())
+        try:
+            assert proc.stdout is not None
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                # Only forward our JSON lines; ignore Baileys chatter.
+                if text.startswith("{") and text.endswith("}"):
+                    try:
+                        payload = json.loads(text)
+                    except Exception:
+                        yield f"data: {text}\n\n"
+                        continue
+                    # When the bridge sends a raw QR string, render it to
+                    # a data URL server-side so the browser can drop it
+                    # into an <img> tag without a JS QR library.
+                    if payload.get("event") == "qr" and payload.get("qr"):
+                        try:
+                            import base64
+                            import io
+                            import qrcode  # type: ignore[import-not-found]
+                            img = qrcode.make(payload["qr"], box_size=6, border=2)
+                            buf = io.BytesIO()
+                            img.save(buf, format="PNG")
+                            payload["dataUrl"] = (
+                                "data:image/png;base64,"
+                                + base64.b64encode(buf.getvalue()).decode("ascii")
+                            )
+                        except Exception:
+                            # Browser can still render the raw QR with its
+                            # own library if it ever wants to.
+                            pass
+                    yield f"data: {json.dumps(payload)}\n\n"
+            rc = await proc.wait()
+            yield f"data: {json.dumps({'event': 'exit', 'code': rc})}\n\n"
+        finally:
+            watcher.cancel()
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/elevate/update")

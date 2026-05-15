@@ -739,19 +739,17 @@ export function AgentOnboardingWizard({
                 <ChannelToggle
                   enabled={
                     configuredChannelKeys.has("operator_channel_imessage") ||
-                    draft.imessageEnabled
+                    draft.imessageEnabled ||
+                    expandedChannels.imessage === true
                   }
-                  onToggle={(v) => updateField("imessageEnabled", v)}
+                  onToggle={(v) => {
+                    setChannelExpanded("imessage", v);
+                    updateField("imessageEnabled", v);
+                  }}
                   title="iMessage"
-                  hint="Read inbound iMessage threads from the local Messages database on this Mac. Requires Full Disk Access for Terminal/Elevate."
+                  hint="Local Mac Messages.db, or BlueBubbles to bridge from another Mac. Pick one."
                 >
-                  <WizardField
-                    label="Your iMessage handle (optional)"
-                    value={draft.imessageHandle}
-                    onChange={(v) => updateField("imessageHandle", v)}
-                    placeholder="+15551234567  or  you@icloud.com"
-                    fullWidth
-                  />
+                  <IMessageSetupPanel draft={draft} updateField={updateField} />
                 </ChannelToggle>
 
                 <ChannelToggle
@@ -768,27 +766,13 @@ export function AgentOnboardingWizard({
                     }
                   }}
                   title="Discord"
-                  hint="Bot token + channel id. DMs and channel pings route to the agent."
+                  hint="Bot token + allowlist + home channel. Mirrors `elevate gateway setup discord`."
                   link={{
                     href: "https://discord.com/developers/applications",
                     label: "Discord developer portal",
                   }}
                 >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="Bot token"
-                      value={draft.discordBotToken}
-                      onChange={(v) => updateField("discordBotToken", v)}
-                      placeholder="MTI…"
-                      type="password"
-                    />
-                    <WizardField
-                      label="Channel id"
-                      value={draft.discordChannelId}
-                      onChange={(v) => updateField("discordChannelId", v)}
-                      placeholder="123456789012345678"
-                    />
-                  </div>
+                  <DiscordSetupPanel draft={draft} updateField={updateField} />
                 </ChannelToggle>
 
                 <ChannelToggle
@@ -806,35 +790,9 @@ export function AgentOnboardingWizard({
                     }
                   }}
                   title="WhatsApp"
-                  hint="WhatsApp Business API or a Composio-managed gateway."
+                  hint="Free local bridge with QR pairing (recommended), or a paid cloud API."
                 >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardSelect
-                      label="Gateway"
-                      value={draft.whatsappProvider}
-                      onChange={(v) => updateField("whatsappProvider", v)}
-                      options={[
-                        { value: "", label: "— pick one —" },
-                        { value: "meta_cloud_api", label: "Meta Cloud API" },
-                        { value: "composio", label: "Composio managed gateway" },
-                        { value: "twilio", label: "Twilio WhatsApp Business" },
-                      ]}
-                    />
-                    <WizardField
-                      label="Access token"
-                      value={draft.whatsappToken}
-                      onChange={(v) => updateField("whatsappToken", v)}
-                      placeholder="EAA…  or  csk_…"
-                      type="password"
-                    />
-                    <WizardField
-                      label="Phone number id (Cloud API)"
-                      value={draft.whatsappPhoneId}
-                      onChange={(v) => updateField("whatsappPhoneId", v)}
-                      placeholder="1234567890"
-                      fullWidth
-                    />
-                  </div>
+                  <WhatsAppSetupPanel draft={draft} updateField={updateField} />
                 </ChannelToggle>
 
                 <ChannelToggle
@@ -851,28 +809,13 @@ export function AgentOnboardingWizard({
                     }
                   }}
                   title="Slack"
-                  hint="Incoming webhook URL + optional target channel."
+                  hint="Socket Mode app (recommended) for full inbound + outbound, or a one-way webhook for posting only."
+                  link={{
+                    href: "https://api.slack.com/apps",
+                    label: "Slack app dashboard",
+                  }}
                 >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="Incoming webhook URL"
-                      value={draft.slackWebhookUrl}
-                      onChange={(v) => updateField("slackWebhookUrl", v)}
-                      placeholder="https://hooks.slack.com/services/T…/B…/…"
-                      fullWidth
-                    />
-                    <WizardField
-                      label="Channel (optional)"
-                      value={draft.slackChannel}
-                      onChange={(v) => updateField("slackChannel", v)}
-                      placeholder="#elevate-ops"
-                      fullWidth
-                    />
-                  </div>
-                  <SlackTestButton
-                    webhookUrl={draft.slackWebhookUrl}
-                    channel={draft.slackChannel}
-                  />
+                  <SlackSetupPanel draft={draft} updateField={updateField} />
                 </ChannelToggle>
 
                 <ConnectedAgentsRail oauthProviders={oauthProviders ?? []} />
@@ -2395,6 +2338,846 @@ function TelegramPairingPanel({
         <p className="text-[11.5px] leading-5 text-muted-foreground">
           {statusNote}
         </p>
+      )}
+      {errorMsg && (
+        <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>
+      )}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Discord setup panel — mirrors setup._setup_discord. Saves
+// DISCORD_BOT_TOKEN, DISCORD_ALLOWED_USERS, DISCORD_HOME_CHANNEL
+// to the env file the gateway reads.
+// ─────────────────────────────────────────────────────────────────────
+function DiscordSetupPanel({
+  draft,
+  updateField,
+}: {
+  draft: AgentSetupDraft;
+  updateField: <K extends keyof AgentSetupDraft>(
+    key: K,
+    value: AgentSetupDraft[K],
+  ) => void;
+}) {
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [homeChannel, setHomeChannel] = useState(draft.discordChannelId);
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    const token = draft.discordBotToken.trim();
+    if (!token) {
+      setErrorMsg("Paste your Discord bot token first.");
+      return;
+    }
+    setBusy(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const resp = await api.configureDiscord({
+        bot_token: token,
+        allowed_users: allowedUsers.trim() || undefined,
+        home_channel: homeChannel.trim() || undefined,
+      });
+      // Stash the home channel back into the draft so item state survives.
+      updateField("discordChannelId", homeChannel.trim());
+      updateField("discordBotToken", ""); // clear plaintext from memory
+      setSuccessMsg(`Saved. Token: ${resp.tokenPreview || "(set)"}.`);
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not save Discord config"));
+    } finally {
+      setBusy(false);
+    }
+  }, [draft.discordBotToken, allowedUsers, homeChannel, updateField]);
+
+  return (
+    <div className="space-y-3">
+      <ol className="ml-4 list-decimal space-y-1 text-[11.5px] leading-5 text-muted-foreground">
+        <li>
+          Open the{" "}
+          <a
+            href="https://discord.com/developers/applications"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-primary underline-offset-2 hover:underline"
+          >
+            Discord developer portal
+          </a>
+          , create an application, then in the Bot tab click <em>Reset Token</em>.
+        </li>
+        <li>
+          To find a user or channel ID: Discord → Settings → Advanced → enable
+          Developer Mode → right-click name/channel → Copy ID.
+        </li>
+        <li>
+          Invite the bot to your server with{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+            applications.commands
+          </code>{" "}
+          +{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[11px]">bot</code>{" "}
+          scopes.
+        </li>
+      </ol>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <WizardField
+          label="Bot token"
+          value={draft.discordBotToken}
+          onChange={(v) => updateField("discordBotToken", v)}
+          placeholder="MTI…"
+          type="password"
+          fullWidth
+        />
+        <WizardField
+          label="Allowed user IDs (comma-separated)"
+          value={allowedUsers}
+          onChange={setAllowedUsers}
+          placeholder="123456789012345678,987…"
+          hint="Empty = anyone in shared servers can DM the bot."
+        />
+        <WizardField
+          label="Home channel ID (optional)"
+          value={homeChannel}
+          onChange={setHomeChannel}
+          placeholder="123456789012345678"
+          hint="Cron + cross-platform notifications land here. Set later with /set-home in Discord."
+        />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={save} disabled={busy} size="sm">
+          {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+          Save Discord config
+        </Button>
+        {successMsg && (
+          <span className="text-[11.5px] text-success">{successMsg}</span>
+        )}
+        {errorMsg && (
+          <span className="text-[11.5px] text-destructive">{errorMsg}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Slack setup panel — Socket Mode (recommended) for full bidirectional,
+// or one-way incoming webhook for posting only. Mirrors setup._setup_slack.
+// ─────────────────────────────────────────────────────────────────────
+function SlackSetupPanel({
+  draft,
+  updateField,
+}: {
+  draft: AgentSetupDraft;
+  updateField: <K extends keyof AgentSetupDraft>(
+    key: K,
+    value: AgentSetupDraft[K],
+  ) => void;
+}) {
+  const [mode, setMode] = useState<"socket" | "webhook">("socket");
+  const [botToken, setBotToken] = useState("");
+  const [appToken, setAppToken] = useState("");
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    if (mode === "webhook") {
+      // Webhook is one-way; nothing to save server-side beyond the existing
+      // draft fields. Leave the user a clear message.
+      setSuccessMsg(
+        "Webhook URL stored in draft — saved when you finish the wizard. (Socket Mode is required for inbound.)",
+      );
+      return;
+    }
+    if (!botToken.trim()) {
+      setErrorMsg("Slack bot token (xoxb-…) is required.");
+      return;
+    }
+    setBusy(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const resp = await api.configureSlackBot({
+        bot_token: botToken.trim(),
+        app_token: appToken.trim() || undefined,
+        allowed_users: allowedUsers.trim() || undefined,
+      });
+      setBotToken("");
+      setAppToken("");
+      setSuccessMsg(
+        `Saved. Bot token: ${resp.botTokenPreview || "(set)"}${
+          resp.appTokenPreview ? `, app token: ${resp.appTokenPreview}` : ""
+        }.`,
+      );
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not save Slack config"));
+    } finally {
+      setBusy(false);
+    }
+  }, [mode, botToken, appToken, allowedUsers]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2 text-[11.5px]">
+        <button
+          type="button"
+          onClick={() => setMode("socket")}
+          className={cn(
+            "rounded-md border px-2 py-1 transition-colors",
+            mode === "socket"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          Socket Mode (recommended)
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("webhook")}
+          className={cn(
+            "rounded-md border px-2 py-1 transition-colors",
+            mode === "webhook"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          Incoming webhook (one-way post)
+        </button>
+      </div>
+
+      {mode === "socket" ? (
+        <>
+          <ol className="ml-4 list-decimal space-y-1 text-[11.5px] leading-5 text-muted-foreground">
+            <li>
+              <a
+                href="https://api.slack.com/apps"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-primary underline-offset-2 hover:underline"
+              >
+                api.slack.com/apps
+              </a>{" "}
+              → Create New App (From scratch).
+            </li>
+            <li>
+              Settings → Socket Mode → enable, create an App-Level Token with{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                connections:write
+              </code>
+              .
+            </li>
+            <li>
+              Features → OAuth & Permissions → add Bot Token Scopes:{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                chat:write
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                app_mentions:read
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                channels:history
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                channels:read
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                im:history
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                im:read
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                im:write
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                users:read
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                files:read
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                files:write
+              </code>
+              .
+            </li>
+            <li>
+              Event Subscriptions → enable → subscribe to{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                message.im
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                message.channels
+              </code>
+              ,{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                app_mention
+              </code>
+              .
+            </li>
+            <li>
+              Install to Workspace, then{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                /invite @YourBot
+              </code>{" "}
+              in any channel.
+            </li>
+          </ol>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <WizardField
+              label="Bot token (xoxb-…)"
+              value={botToken}
+              onChange={setBotToken}
+              placeholder="xoxb-…"
+              type="password"
+            />
+            <WizardField
+              label="App token (xapp-…)"
+              value={appToken}
+              onChange={setAppToken}
+              placeholder="xapp-…"
+              type="password"
+            />
+            <WizardField
+              label="Allowed Slack member IDs (comma-separated, optional)"
+              value={allowedUsers}
+              onChange={setAllowedUsers}
+              placeholder="U01ABC…,U02DEF…"
+              hint="Empty = unpaired users denied by default."
+              fullWidth
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={save} disabled={busy} size="sm">
+              {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Save Slack config
+            </Button>
+            {successMsg && (
+              <span className="text-[11.5px] text-success">{successMsg}</span>
+            )}
+            {errorMsg && (
+              <span className="text-[11.5px] text-destructive">{errorMsg}</span>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="text-[11.5px] leading-5 text-muted-foreground">
+            One-way webhook. The agent can post to Slack but cannot receive
+            DMs or mentions. For full bidirectional flow, pick Socket Mode.
+          </p>
+          <div className="grid gap-3 md:grid-cols-2">
+            <WizardField
+              label="Incoming webhook URL"
+              value={draft.slackWebhookUrl}
+              onChange={(v) => updateField("slackWebhookUrl", v)}
+              placeholder="https://hooks.slack.com/services/T…/B…/…"
+              fullWidth
+            />
+            <WizardField
+              label="Channel (optional)"
+              value={draft.slackChannel}
+              onChange={(v) => updateField("slackChannel", v)}
+              placeholder="#elevate-ops"
+              fullWidth
+            />
+          </div>
+          <SlackTestButton
+            webhookUrl={draft.slackWebhookUrl}
+            channel={draft.slackChannel}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// iMessage panel — local Messages.app (default) or BlueBubbles bridge.
+// Local mode just flips the draft flag (gateway reads from chat.db).
+// BlueBubbles mirrors setup._setup_bluebubbles.
+// ─────────────────────────────────────────────────────────────────────
+function IMessageSetupPanel({
+  draft,
+  updateField,
+}: {
+  draft: AgentSetupDraft;
+  updateField: <K extends keyof AgentSetupDraft>(
+    key: K,
+    value: AgentSetupDraft[K],
+  ) => void;
+}) {
+  const [mode, setMode] = useState<"local" | "bluebubbles">("local");
+  const [serverUrl, setServerUrl] = useState("");
+  const [password, setPassword] = useState("");
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [homeChannel, setHomeChannel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const saveBlueBubbles = useCallback(async () => {
+    if (!serverUrl.trim() || !password.trim()) {
+      setErrorMsg("BlueBubbles server URL + password are required.");
+      return;
+    }
+    setBusy(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const resp = await api.configureBlueBubbles({
+        server_url: serverUrl.trim(),
+        password: password.trim(),
+        allowed_users: allowedUsers.trim() || undefined,
+        home_channel: homeChannel.trim() || undefined,
+      });
+      setPassword("");
+      updateField("imessageEnabled", true);
+      setSuccessMsg(`Saved. Server: ${resp.serverUrl}.`);
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not save BlueBubbles config"));
+    } finally {
+      setBusy(false);
+    }
+  }, [serverUrl, password, allowedUsers, homeChannel, updateField]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2 text-[11.5px]">
+        <button
+          type="button"
+          onClick={() => setMode("local")}
+          className={cn(
+            "rounded-md border px-2 py-1 transition-colors",
+            mode === "local"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          Local Mac (Messages.app)
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("bluebubbles")}
+          className={cn(
+            "rounded-md border px-2 py-1 transition-colors",
+            mode === "bluebubbles"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          BlueBubbles (remote bridge)
+        </button>
+      </div>
+
+      {mode === "local" ? (
+        <div className="space-y-2 text-[11.5px] leading-5 text-muted-foreground">
+          <p>
+            Reads inbound iMessage from this Mac's{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+              ~/Library/Messages/chat.db
+            </code>
+            . Grant Full Disk Access to Terminal/Elevate (System Settings →
+            Privacy & Security).
+          </p>
+          <WizardField
+            label="Your iMessage handle (optional)"
+            value={draft.imessageHandle}
+            onChange={(v) => updateField("imessageHandle", v)}
+            placeholder="+15551234567 or you@icloud.com"
+            fullWidth
+          />
+          <div className="text-[11px] text-muted-foreground/80">
+            Toggle stays on — local-Mac mode needs no save action.
+          </div>
+        </div>
+      ) : (
+        <>
+          <ol className="ml-4 list-decimal space-y-1 text-[11.5px] leading-5 text-muted-foreground">
+            <li>
+              Install{" "}
+              <a
+                href="https://bluebubbles.app/"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-primary underline-offset-2 hover:underline"
+              >
+                BlueBubbles Server
+              </a>{" "}
+              on a Mac (v1.0.0+).
+            </li>
+            <li>BlueBubbles Server → Settings → API → note Server URL + Password.</li>
+            <li>
+              Optional: install the{" "}
+              <a
+                href="https://docs.bluebubbles.app/helper-bundle/installation"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-primary underline-offset-2 hover:underline"
+              >
+                Private API helper
+              </a>{" "}
+              for typing indicators + tapbacks.
+            </li>
+          </ol>
+          <div className="grid gap-3 md:grid-cols-2">
+            <WizardField
+              label="Server URL"
+              value={serverUrl}
+              onChange={setServerUrl}
+              placeholder="http://192.168.1.10:1234"
+              fullWidth
+            />
+            <WizardField
+              label="Server password"
+              value={password}
+              onChange={setPassword}
+              placeholder="…"
+              type="password"
+            />
+            <WizardField
+              label="Allowed iMessage addresses (comma-separated)"
+              value={allowedUsers}
+              onChange={setAllowedUsers}
+              placeholder="you@icloud.com,+15551234567"
+              hint="Empty = anyone who can iMessage the host Mac can use the bot."
+            />
+            <WizardField
+              label="Home channel (optional)"
+              value={homeChannel}
+              onChange={setHomeChannel}
+              placeholder="+15551234567 or you@icloud.com"
+              hint="Where cron + notifications go. Set later with /set-home."
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={saveBlueBubbles} disabled={busy} size="sm">
+              {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Save BlueBubbles config
+            </Button>
+            {successMsg && (
+              <span className="text-[11.5px] text-success">{successMsg}</span>
+            )}
+            {errorMsg && (
+              <span className="text-[11.5px] text-destructive">{errorMsg}</span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// WhatsApp setup panel — free local Baileys bridge with live QR pair,
+// or paid cloud API. Local mode mirrors cmd_whatsapp.
+// ─────────────────────────────────────────────────────────────────────
+function WhatsAppSetupPanel({
+  draft,
+  updateField,
+}: {
+  draft: AgentSetupDraft;
+  updateField: <K extends keyof AgentSetupDraft>(
+    key: K,
+    value: AgentSetupDraft[K],
+  ) => void;
+}) {
+  const [mode, setMode] = useState<"local" | "cloud">("local");
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2 text-[11.5px]">
+        <button
+          type="button"
+          onClick={() => setMode("local")}
+          className={cn(
+            "rounded-md border px-2 py-1 transition-colors",
+            mode === "local"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          Local bridge (QR pair, free)
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("cloud")}
+          className={cn(
+            "rounded-md border px-2 py-1 transition-colors",
+            mode === "cloud"
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border text-muted-foreground hover:text-foreground",
+          )}
+        >
+          Cloud API (Meta / Composio / Twilio)
+        </button>
+      </div>
+
+      {mode === "local" ? (
+        <WhatsAppLocalPanel />
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2">
+          <WizardSelect
+            label="Gateway"
+            value={draft.whatsappProvider}
+            onChange={(v) => updateField("whatsappProvider", v)}
+            options={[
+              { value: "", label: "— pick one —" },
+              { value: "meta_cloud_api", label: "Meta Cloud API" },
+              { value: "composio", label: "Composio managed gateway" },
+              { value: "twilio", label: "Twilio WhatsApp Business" },
+            ]}
+          />
+          <WizardField
+            label="Access token"
+            value={draft.whatsappToken}
+            onChange={(v) => updateField("whatsappToken", v)}
+            placeholder="EAA… or csk_…"
+            type="password"
+          />
+          <WizardField
+            label="Phone number id (Cloud API)"
+            value={draft.whatsappPhoneId}
+            onChange={(v) => updateField("whatsappPhoneId", v)}
+            placeholder="1234567890"
+            fullWidth
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+type WAPairStatus = {
+  bridgePresent: boolean;
+  bridgeInstalled: boolean;
+  mode: string;
+  enabled: boolean;
+  paired: boolean;
+  allowedUsers: string;
+};
+
+function WhatsAppLocalPanel() {
+  const [status, setStatus] = useState<WAPairStatus | null>(null);
+  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [waMode, setWaMode] = useState<"bot" | "self-chat">("bot");
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [installing, setInstalling] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [pairing, setPairing] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [pairMessage, setPairMessage] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const next = await api.getWhatsAppStatus();
+      setStatus(next);
+      if (next.mode === "bot" || next.mode === "self-chat") setWaMode(next.mode);
+      if (next.allowedUsers) setAllowedUsers(next.allowedUsers);
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not read WhatsApp status"));
+    } finally {
+      setStatusLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    return () => {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    };
+  }, [refresh]);
+
+  const install = useCallback(async () => {
+    setInstalling(true);
+    setErrorMsg(null);
+    try {
+      await api.installWhatsAppBridge();
+      await refresh();
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "npm install failed"));
+    } finally {
+      setInstalling(false);
+    }
+  }, [refresh]);
+
+  const saveConfig = useCallback(async () => {
+    setSavingConfig(true);
+    setErrorMsg(null);
+    try {
+      await api.configureWhatsApp({
+        mode: waMode,
+        allowed_users: allowedUsers.trim() || undefined,
+      });
+      await refresh();
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not save WhatsApp config"));
+    } finally {
+      setSavingConfig(false);
+    }
+  }, [waMode, allowedUsers, refresh]);
+
+  const startPairing = useCallback(() => {
+    setPairing(true);
+    setQrDataUrl(null);
+    setPairMessage("Starting bridge…");
+    setErrorMsg(null);
+
+    const url = "/api/channels/whatsapp/pair/stream";
+    const es = new EventSource(url);
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.event === "qr") {
+          if (payload.dataUrl) setQrDataUrl(payload.dataUrl);
+          setPairMessage(
+            waMode === "bot"
+              ? "Open WhatsApp (or WhatsApp Business) on the bot's phone → Settings → Linked Devices → Link a Device. Scan this QR."
+              : "Open WhatsApp on your phone → Settings → Linked Devices → Link a Device. Scan this QR.",
+          );
+        } else if (payload.event === "connected") {
+          setPairMessage("Connected. Waiting for credentials to flush…");
+        } else if (payload.event === "paired") {
+          setPairMessage("Paired. WhatsApp session saved.");
+          setQrDataUrl(null);
+        } else if (payload.event === "exit") {
+          setPairing(false);
+          es.close();
+          eventSourceRef.current = null;
+          refresh();
+        }
+      } catch {
+        // ignore malformed
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      eventSourceRef.current = null;
+      setPairing(false);
+      if (!qrDataUrl) {
+        setErrorMsg("Pairing stream closed. If you weren't quick enough, click 'Start pairing' again.");
+      }
+    };
+  }, [waMode, refresh, qrDataUrl]);
+
+  if (!statusLoaded) {
+    return (
+      <p className="text-[11.5px] text-muted-foreground">
+        <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" /> Loading WhatsApp status…
+      </p>
+    );
+  }
+  if (!status?.bridgePresent) {
+    return (
+      <p className="text-[11.5px] text-warning">
+        WhatsApp bridge script not found. This Elevate install ships it at
+        scripts/whatsapp-bridge/bridge.js — try running `elevate update`.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <ol className="ml-4 list-decimal space-y-1 text-[11.5px] leading-5 text-muted-foreground">
+        <li>
+          Pick a mode. <strong>Separate bot number</strong> is cleaner — the
+          bot has its own WhatsApp number (e.g. WhatsApp Business on the same
+          phone with a 2nd line, or a cheap prepaid SIM). <strong>Self-chat</strong>{" "}
+          uses your own number; you DM yourself to talk to the agent.
+        </li>
+        <li>
+          Add allowed phone numbers (e.g. <code className="rounded bg-muted px-1 py-0.5 text-[11px]">15551234567</code>).
+          Empty means anyone can message the bot.
+        </li>
+        <li>Install bridge deps (one-time npm install).</li>
+        <li>Pair via QR — opens Linked Devices → scan the code below.</li>
+      </ol>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <WizardSelect
+          label="WhatsApp mode"
+          value={waMode}
+          onChange={(v) => setWaMode(v as "bot" | "self-chat")}
+          options={[
+            { value: "bot", label: "Separate bot number (recommended)" },
+            { value: "self-chat", label: "Personal number (self-chat)" },
+          ]}
+        />
+        <WizardField
+          label="Allowed phone numbers (comma-separated, or * for any)"
+          value={allowedUsers}
+          onChange={setAllowedUsers}
+          placeholder="15551234567,15559876543"
+        />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" onClick={saveConfig} disabled={savingConfig}>
+          {savingConfig && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+          Save mode + allowlist
+        </Button>
+        {!status.bridgeInstalled && (
+          <Button size="sm" variant="outline" onClick={install} disabled={installing}>
+            {installing && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+            Install bridge deps (npm install)
+          </Button>
+        )}
+        <Button
+          size="sm"
+          onClick={startPairing}
+          disabled={pairing || !status.bridgeInstalled || !status.mode}
+        >
+          {pairing && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+          {status.paired ? "Re-pair" : "Start pairing"}
+        </Button>
+        {status.paired && !pairing && (
+          <span className="inline-flex items-center gap-1 text-[11.5px] text-success">
+            <CheckCircle2 className="h-3.5 w-3.5" /> Session paired
+          </span>
+        )}
+      </div>
+
+      {qrDataUrl && (
+        <div className="flex flex-col items-start gap-2 rounded-md border border-border bg-card/60 p-3">
+          <img
+            src={qrDataUrl}
+            alt="WhatsApp pairing QR code"
+            className="h-56 w-56 rounded-sm bg-white p-2"
+          />
+          {pairMessage && (
+            <p className="text-[11.5px] leading-5 text-muted-foreground">{pairMessage}</p>
+          )}
+        </div>
+      )}
+      {!qrDataUrl && pairMessage && (
+        <p className="text-[11.5px] leading-5 text-muted-foreground">{pairMessage}</p>
       )}
       {errorMsg && (
         <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>

@@ -252,6 +252,81 @@ export const api = {
         body: JSON.stringify(params),
       },
     ),
+  configureDiscord: (params: {
+    bot_token?: string;
+    allowed_users?: string;
+    home_channel?: string;
+  }) =>
+    fetchJSON<{
+      ok: boolean;
+      tokenPreview: string;
+      allowedUsers: string;
+      homeChannel: string;
+    }>("/api/channels/discord/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+  configureSlackBot: (params: {
+    bot_token?: string;
+    app_token?: string;
+    allowed_users?: string;
+  }) =>
+    fetchJSON<{
+      ok: boolean;
+      botTokenPreview: string;
+      appTokenPreview: string;
+      allowedUsers: string;
+    }>("/api/channels/slack/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+  configureBlueBubbles: (params: {
+    server_url?: string;
+    password?: string;
+    allowed_users?: string;
+    home_channel?: string;
+  }) =>
+    fetchJSON<{
+      ok: boolean;
+      serverUrl: string;
+      passwordSet: boolean;
+      allowedUsers: string;
+      homeChannel: string;
+    }>("/api/channels/imessage/bluebubbles/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+  configureWhatsApp: (params: { mode?: "bot" | "self-chat"; allowed_users?: string }) =>
+    fetchJSON<{
+      ok: boolean;
+      mode: string;
+      enabled: boolean;
+      allowedUsers: string;
+      bridgePresent: boolean;
+      bridgeInstalled: boolean;
+      paired: boolean;
+    }>("/api/channels/whatsapp/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+  installWhatsAppBridge: () =>
+    fetchJSON<{ ok: boolean; installed: boolean }>(
+      "/api/channels/whatsapp/install",
+      { method: "POST" },
+    ),
+  getWhatsAppStatus: () =>
+    fetchJSON<{
+      bridgePresent: boolean;
+      bridgeInstalled: boolean;
+      mode: string;
+      enabled: boolean;
+      paired: boolean;
+      allowedUsers: string;
+    }>("/api/channels/whatsapp/status"),
   getAgentPeers: () =>
     fetchJSON<{
       peers: Array<{
