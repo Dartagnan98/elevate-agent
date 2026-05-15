@@ -533,6 +533,26 @@ def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
         merged["detected"] = True
         return merged
 
+    # Mode 1b: item was persisted as missing/skipped with no real value but
+    # env vars have since been wired (e.g. operator ran BlueBubbles bridge
+    # setup or pasted TELEGRAM_BOT_TOKEN after the first wizard pass).
+    # Promote to the overlay's status/provider/value so the wizard shows
+    # the new credentials instead of the stale "off" state.
+    persisted_provider = item.get("provider") or ""
+    if status in {"missing", "skipped"} and not persisted_provider:
+        merged = dict(item)
+        merged["status"] = overlay.get("status", merged["status"])
+        merged["provider"] = overlay.get("provider", merged["provider"])
+        if isinstance(value, dict) and isinstance(overlay.get("value"), dict):
+            # Merge: env-detected fields fill in, but anything the operator
+            # actually typed (e.g. a handle) wins.
+            merged_value = {**overlay["value"], **{k: v for k, v in value.items() if v not in (None, "", False)}}
+            merged["value"] = merged_value
+        else:
+            merged["value"] = overlay.get("value", value)
+        merged["detected"] = True
+        return merged
+
     # Mode 2: enrich an already-saved item with secret previews so re-run
     # wizards know the env still has the key. Never overwrite what the
     # operator actually typed.
@@ -541,8 +561,25 @@ def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
     overlay_value = overlay.get("value") or {}
     enriched = dict(value)
     changed = False
+    # Always keep secret hints fresh.
     for hint_key in ("secretPresent", "secretPreview", "secretSource"):
         if hint_key in overlay_value and not enriched.get(hint_key):
+            enriched[hint_key] = overlay_value[hint_key]
+            changed = True
+    # For provider-specific config (BlueBubbles URL, Telegram allowlist,
+    # etc.), surface overlay values only when the operator hasn't typed
+    # something different. Keys must be opt-in to avoid leaking unrelated
+    # overlay data onto a persisted item.
+    for hint_key in (
+        "bluebubblesServerUrl",
+        "bluebubblesAllowedUsers",
+        "bluebubblesHomeChannel",
+        "allowedUsers",
+        "homeChannel",
+        "dmBehavior",
+        "allowAllUsers",
+    ):
+        if hint_key in overlay_value and hint_key not in enriched:
             enriched[hint_key] = overlay_value[hint_key]
             changed = True
     if not changed:
