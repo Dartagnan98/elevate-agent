@@ -757,6 +757,12 @@ def walk_jsonl_source(
     # construction) but breaks replay idempotency. Pre-check by
     # (contact_id, kind, ts, payload_signature) so a second migrate
     # run is a no-op.
+    # Per-row dispatch: notes land as kind='note' so the UI's per-contact
+    # notes panel can read them; other lead-events (activities, tasks,
+    # sync placeholders, lifecycle changes) collapse to 'lifecycle_change'
+    # for the audit-log surface. source_id is the actual connector id so
+    # downstream readers can filter `WHERE source_id='crm'` etc.
+    _NOTE_TYPES = {"crm_note", "note"}
     for row in _read_jsonl(events_path, limit=limit):
         contact_native = row.get("contact_id")
         ts = row.get("timestamp") or row.get("ts")
@@ -769,14 +775,21 @@ def walk_jsonl_source(
             stats.lifecycle_events += 1
             continue
         legacy_type = row.get("type") or ""
+        record_kind = "note" if legacy_type in _NOTE_TYPES else "lifecycle_change"
         already = conn.execute(
             """
             SELECT id FROM events
-            WHERE contact_id=? AND kind='lifecycle_change' AND ts=?
+            WHERE contact_id=? AND kind=? AND ts=? AND source_id=?
               AND payload_json LIKE ?
             LIMIT 1
             """,
-            (contact_id, ts, f'%"legacyType":{json.dumps(legacy_type)}%'),
+            (
+                contact_id,
+                record_kind,
+                ts,
+                source_id,
+                f'%"legacyType":{json.dumps(legacy_type)}%',
+            ),
         ).fetchone()
         if already:
             continue
@@ -784,14 +797,16 @@ def walk_jsonl_source(
             record_lifecycle(
                 conn,
                 contact_id=contact_id,
-                kind="lifecycle_change",
+                kind=record_kind,
                 actor=row.get("actor") or "legacy_backfill",
                 ts=ts,
                 payload={
                     "legacyType": legacy_type,
                     "title": row.get("title"),
                     "summary": row.get("summary"),
+                    "body": row.get("body") or row.get("note") or row.get("text"),
                 },
+                source_id=source_id,
             )
             stats.lifecycle_events += 1
         except sqlite3.IntegrityError:
