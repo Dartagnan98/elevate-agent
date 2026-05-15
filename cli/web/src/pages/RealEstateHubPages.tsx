@@ -1572,6 +1572,8 @@ function FollowUpThreadsList({
   );
 }
 
+const BUYER_PAGE_SIZE = 20;
+
 function PrivateSearchBuyersList({
   buyers,
   data,
@@ -1580,14 +1582,33 @@ function PrivateSearchBuyersList({
   data: HubData;
 }) {
   const { byEmail, byPhone } = useProfileLookups(data);
-  const visible = buyers.slice(0, LANE_LIST_MAX);
-  if (!visible.length) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">
-        No active buyer searches — run the MLS analyzer to score buyers on the board.
-      </p>
-    );
-  }
+  const [page, setPage] = useState(1);
+  const [running, setRunning] = useState(false);
+
+  const pcsLane = AGENT_LANES.find((l) => l.id === "private-searches");
+  const pcsJob = pcsLane ? laneCronJob(pcsLane, data.cronJobs) : undefined;
+
+  const runSearch = async () => {
+    if (!pcsLane) return;
+    setRunning(true);
+    try {
+      let jobId = pcsJob?.id;
+      if (!jobId) {
+        const created = await api.createCronJob({
+          name: pcsLane.cronName,
+          schedule: pcsLane.schedule,
+          prompt: pcsLane.prompt,
+          deliver: "local",
+        });
+        jobId = created?.id;
+      }
+      if (jobId) await api.triggerCronJob(jobId);
+      await data.refresh();
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const lookupProfile = (buyer: BuyerWatchlistEntry): SourceInboxProfile | null => {
     const email = (buyer.email ?? "").trim().toLowerCase();
     if (email && byEmail.has(email)) return byEmail.get(email) ?? null;
@@ -1595,16 +1616,68 @@ function PrivateSearchBuyersList({
     if (phone && byPhone.has(phone)) return byPhone.get(phone) ?? null;
     return null;
   };
+
+  const totalPages = Math.max(1, Math.ceil(buyers.length / BUYER_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * BUYER_PAGE_SIZE;
+  const visible = buyers.slice(start, start + BUYER_PAGE_SIZE);
+
+  const runButton = (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => void runSearch()}
+      disabled={running}
+      title="Run the PCS pipeline: scrape Xposure, score, refresh this list"
+    >
+      {running ? (
+        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Zap className="mr-1.5 h-3.5 w-3.5" />
+      )}
+      Run search
+    </Button>
+  );
+
+  if (!buyers.length) {
+    return (
+      <div className="flex flex-col gap-3 px-1 py-1">
+        <p className="text-xs text-muted-foreground/80">
+          No tagged buyers yet. Buyers connected by the{" "}
+          <code className="font-mono-ui text-[0.7rem]">xposure-pcs</code> tag in
+          your CRM surface here. Run the search to scrape Xposure and score them.
+        </p>
+        <div>{runButton}</div>
+      </div>
+    );
+  }
+
   return (
-    <div className={LANE_LIST_SCROLL_CLASS}>
-      {visible.map((buyer) => (
-        <BuyerWatchlistRow
-          key={buyer.id}
-          buyer={buyer}
-          profile={lookupProfile(buyer)}
-          onChanged={() => data.refresh()}
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <span className="font-mono-ui text-[0.7rem] uppercase tracking-[0.06em] text-muted-foreground/80">
+          {buyers.length} tagged buyer{buyers.length === 1 ? "" : "s"}
+        </span>
+        {runButton}
+      </div>
+      <div className={LANE_LIST_SCROLL_CLASS}>
+        {visible.map((buyer) => (
+          <BuyerWatchlistRow
+            key={buyer.id}
+            buyer={buyer}
+            profile={lookupProfile(buyer)}
+            onChanged={() => data.refresh()}
+          />
+        ))}
+      </div>
+      {totalPages > 1 && (
+        <PaginationBar
+          page={safePage}
+          totalPages={totalPages}
+          onPageChange={setPage}
+          label="buyer searches"
         />
-      ))}
+      )}
     </div>
   );
 }
