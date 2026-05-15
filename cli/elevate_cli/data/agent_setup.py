@@ -17,9 +17,9 @@ do anything useful:
   for operator notifications + approvals.
 - ``operator_channel_slack`` (optional) — Slack webhook + channel as the
   alternative operator surface.
-- ``subagents_pack`` (optional skippable) — toggle the cortextos
-  PTY-agent pack (Jimmy/Gary/Nina/Ricky/QC). Off by default for solo
-  runtimes.
+- ``subagents_pack`` (optional skippable) — toggle the specialist
+  PTY-agent pack (Executive Assistant / Admin / Outreach / Ads /
+  Marketing / Social Media). Off by default for solo runtimes.
 
 Required minimum quorum is just the three required items above. Everything
 else is opt-in so a fresh agent can be brought up in 60 seconds and the
@@ -140,7 +140,7 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "key": "subagents_pack",
         "category": "subagents",
         "label": "Sub-agents pack",
-        "description": "Optional. Spin up specialist PTY agents (Jimmy / Gary / Nina / Ricky / QC). Skippable for solo runtimes.",
+        "description": "Optional. Spin up specialist PTY agents (Executive Assistant / Admin / Outreach / Ads / Marketing / Social Media). Skippable for solo runtimes.",
         "required": False,
         "sort_order": 80,
     },
@@ -149,10 +149,11 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "category": "channel",
         "label": "Per-agent channel routing",
         "description": (
-            "Optional. Wire each sub-agent (Jimmy / Gary / Nina / Ricky / QC) to one or more "
-            "channels — Telegram chat ids, iMessage handles, Slack channels, Discord channels, "
-            "WhatsApp numbers. Multiple entries per slot are allowed. No fallback — an agent "
-            "with no channels wired only acts when another agent hands work to it."
+            "Optional. Wire each agent (Executive Assistant / Admin / Outreach / Ads / "
+            "Marketing / Social Media) to one or more channels — Telegram chat ids, "
+            "iMessage handles, Slack channels, Discord channels, WhatsApp numbers. "
+            "Multiple entries per slot are allowed. No fallback — an agent with no "
+            "channels wired only acts when another agent hands work to it."
         ),
         "required": False,
         "sort_order": 90,
@@ -160,7 +161,14 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
 ]
 
 
-SUBAGENT_KEYS = ["jimmy", "gary", "nina", "ricky", "qc"]
+SUBAGENT_KEYS = [
+    "executive-assistant",
+    "admin",
+    "outreach",
+    "ads",
+    "marketing",
+    "social-media",
+]
 AGENT_CHANNEL_TYPES = ["telegram", "imessage", "slack", "discord", "whatsapp"]
 
 

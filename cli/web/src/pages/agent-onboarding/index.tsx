@@ -29,13 +29,21 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-export const SUBAGENT_KEYS = ["jimmy", "gary", "nina", "ricky", "qc"] as const;
+export const SUBAGENT_KEYS = [
+  "executive-assistant",
+  "admin",
+  "outreach",
+  "ads",
+  "marketing",
+  "social-media",
+] as const;
 export const SUBAGENT_LABELS: Record<string, { label: string; role: string }> = {
-  jimmy: { label: "Jimmy", role: "Orchestrator" },
-  gary: { label: "Gary", role: "Ads strategist" },
-  nina: { label: "Nina", role: "Analyst / reporting" },
-  ricky: { label: "Ricky", role: "Copywriter" },
-  qc: { label: "QC", role: "Reviewer" },
+  "executive-assistant": { label: "Executive Assistant agent", role: "Primary coordinator" },
+  admin: { label: "Admin agent", role: "Operations + deal files" },
+  outreach: { label: "Outreach agent", role: "Lead follow-up + nurture" },
+  ads: { label: "Ads agent", role: "Paid campaigns" },
+  marketing: { label: "Marketing agent", role: "Listings + email campaigns" },
+  "social-media": { label: "Social Media agent", role: "Organic posts + captions" },
 };
 export const AGENT_CHANNEL_TYPES = [
   { key: "telegram", label: "Telegram chat ids", placeholder: "-1001234567890" },
@@ -932,7 +940,7 @@ export function AgentSetupLaunch({
 
       <ItemCard
         title="Sub-agents pack"
-        description="Optional. Spin up the cortextos PTY specialists (Jimmy, Gary, Nina, Ricky, QC). Off by default — turn on if you want a council."
+        description="Optional. Spin up the specialist PTY agents (Executive Assistant, Admin, Outreach, Ads, Marketing, Social Media) so the council runs in parallel with the main agent. Off by default for solo runtimes."
         status={subagentsItem?.status ?? "missing"}
       >
         <label className="flex items-center gap-2 text-[12px] text-foreground">
@@ -950,8 +958,8 @@ export function AgentSetupLaunch({
             value={draft.subagentsPack}
             onChange={(v) => updateField("subagentsPack", v)}
             options={[
-              { value: "cortextos_default", label: "cortextos default (Jimmy + 4 specialists)" },
-              { value: "cortextos_minimal", label: "cortextos minimal (Jimmy only)" },
+              { value: "cortextos_default", label: "Default council (Executive Assistant + 5 specialists)" },
+              { value: "cortextos_minimal", label: "Minimal (Executive Assistant only)" },
             ]}
           />
         )}
@@ -959,7 +967,7 @@ export function AgentSetupLaunch({
 
       <ItemCard
         title="Per-agent channel routing"
-        description="Optional. Wire each sub-agent to one or more channels. Multiple entries per slot are allowed and the same channels work for inbound and outbound. No fallback — an agent with nothing wired only acts when another agent hands work to it."
+        description="Optional. Wire each agent to one or more channels. Multiple entries per slot are allowed and the same channels work for inbound and outbound. No fallback — an agent with nothing wired only acts when another agent hands work to it."
         status={agentChannelRoutingItem?.status ?? "missing"}
       >
         <div className="space-y-3">

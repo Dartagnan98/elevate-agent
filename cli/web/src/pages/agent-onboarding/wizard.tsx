@@ -90,7 +90,7 @@ const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
     eyebrow: "Step 6 of 6",
     title: "Sub-agents",
     subtitle:
-      "Opt-in. Spin up the cortextos PTY specialists (Jimmy + Gary + Nina + Ricky + QC) so the agent has a council. Off by default for solo runtimes.",
+      "Opt-in. Spin up the specialist PTY agents (Executive Assistant + Admin + Outreach + Ads + Marketing + Social Media) so the council runs alongside the main agent. Off by default for solo runtimes.",
   },
 ];
 
@@ -735,7 +735,7 @@ export function AgentOnboardingWizard({
             {step.id === "subagents" && (
               <WizardSection
                 title="cortextos sub-agents"
-                hint="Optional. Specialist PTY agents (Jimmy = orchestrator, Gary = ads, Nina = analyst, Ricky = copy, QC = reviewer) run alongside the main agent for parallel work."
+                hint="Optional. Specialist PTY agents (Executive Assistant coordinates; Admin runs deal files; Outreach handles follow-up; Ads runs paid; Marketing owns listings + email; Social Media owns organic) run alongside the main agent for parallel work."
               >
                 <label className="flex items-center gap-2 text-[13px] text-foreground">
                   <input
@@ -753,8 +753,8 @@ export function AgentOnboardingWizard({
                       value={draft.subagentsPack}
                       onChange={(v) => updateField("subagentsPack", v)}
                       options={[
-                        { value: "cortextos_default", label: "cortextos default (Jimmy + 4 specialists)" },
-                        { value: "cortextos_minimal", label: "cortextos minimal (Jimmy only)" },
+                        { value: "cortextos_default", label: "Default council (Executive Assistant + 5 specialists)" },
+                        { value: "cortextos_minimal", label: "Minimal (Executive Assistant only)" },
                       ]}
                     />
                   </div>
