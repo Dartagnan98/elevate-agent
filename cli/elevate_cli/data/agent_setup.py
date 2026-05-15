@@ -350,23 +350,51 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
 
 def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
-    """If the item is still untouched (missing + null value), surface
-    detected runtime credentials so the wizard pre-fills instead of
-    showing an empty form. Persisted state always wins over overlays.
+    """Surface detected runtime credentials into the wizard snapshot.
+
+    Two modes:
+      1. Item is still untouched (status='missing' + value is None) →
+         pre-fill provider + model + masked preview so the wizard shows
+         "already configured" instead of an empty form.
+      2. Item is already configured but the saved value has no apiKey
+         (the operator stored the choice without re-pasting the secret) →
+         enrich the saved value with secretPresent + secretPreview so the
+         wizard input shows "Already set — …last4 (paste to replace)" on
+         re-runs. Persisted provider/model/apiKey always win.
     """
-    if item.get("status") and item["status"] != "missing":
-        return item
-    if item.get("value") is not None:
-        return item
     overlays = _detect_runtime_credentials()
     overlay = overlays.get(item["key"])
     if not overlay:
         return item
+
+    status = item.get("status") or ""
+    value = item.get("value")
+
+    # Mode 1: untouched item gets the full overlay.
+    if status == "missing" and value is None:
+        merged = dict(item)
+        merged["status"] = overlay.get("status", merged["status"])
+        merged["provider"] = overlay.get("provider", merged["provider"])
+        merged["value"] = overlay.get("value", merged["value"])
+        merged["detected"] = True
+        return merged
+
+    # Mode 2: enrich an already-saved item with secret previews so re-run
+    # wizards know the env still has the key. Never overwrite what the
+    # operator actually typed.
+    if not isinstance(value, dict):
+        return item
+    overlay_value = overlay.get("value") or {}
+    enriched = dict(value)
+    changed = False
+    for hint_key in ("secretPresent", "secretPreview", "secretSource"):
+        if hint_key in overlay_value and not enriched.get(hint_key):
+            enriched[hint_key] = overlay_value[hint_key]
+            changed = True
+    if not changed:
+        return item
     merged = dict(item)
-    merged["status"] = overlay.get("status", merged["status"])
-    merged["provider"] = overlay.get("provider", merged["provider"])
-    merged["value"] = overlay.get("value", merged["value"])
-    merged["detected"] = True
+    merged["value"] = enriched
     return merged
 
 
