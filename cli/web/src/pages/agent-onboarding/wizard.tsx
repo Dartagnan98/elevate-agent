@@ -792,41 +792,30 @@ export function AgentOnboardingWizard({
 
                 <WizardSection
                   title="Composio (100+ pre-wired tools)"
-                  hint="Optional. Gmail, Calendar, Slack, GitHub, Notion, Linear, HubSpot — Composio handles the OAuth for all of them. Connect accounts inside the Composio dashboard after pasting a key."
+                  hint="Optional. Gmail, Calendar, Slack, GitHub, Notion, Linear, HubSpot — Composio brokers OAuth for all of them. Paste your key, then connect accounts inline."
                 >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="Composio API key"
-                      value={draft.composioApiKey}
-                      onChange={(v) => updateField("composioApiKey", v)}
-                      placeholder={
-                        draft.composioSecretPresent && !draft.composioApiKey
-                          ? `Already set — ${draft.composioSecretPreview} (paste to replace)`
-                          : "csk_…"
-                      }
-                      type="password"
-                      fullWidth
-                      hint={
-                        draft.composioSecretPresent && !draft.composioApiKey
-                          ? "Detected from environment. Leave blank to keep using it."
-                          : undefined
-                      }
-                    />
-                    <WizardField
-                      label="Workspace"
-                      value={draft.composioWorkspace}
-                      onChange={(v) => updateField("composioWorkspace", v)}
-                      placeholder="default"
+                  <WizardField
+                    label="Composio API key"
+                    value={draft.composioApiKey}
+                    onChange={(v) => updateField("composioApiKey", v)}
+                    placeholder={
+                      draft.composioSecretPresent && !draft.composioApiKey
+                        ? `Already set — ${draft.composioSecretPreview} (paste to replace)`
+                        : "csk_…"
+                    }
+                    type="password"
+                    fullWidth
+                    hint={
+                      draft.composioSecretPresent && !draft.composioApiKey
+                        ? "Detected from environment. Leave blank to keep using it."
+                        : undefined
+                    }
+                  />
+                  <div className="mt-3">
+                    <ComposioConnectionsInline
+                      keyPresent={draft.composioSecretPresent || Boolean(draft.composioApiKey.trim())}
                     />
                   </div>
-                  <a
-                    href="https://app.composio.dev/"
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="mt-3 inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
-                  >
-                    Open Composio dashboard <ExternalLink className="h-3 w-3" />
-                  </a>
                 </WizardSection>
               </>
             )}
@@ -1055,5 +1044,217 @@ function WizardSelect({
         ))}
       </select>
     </label>
+  );
+}
+
+// Inline Composio account connector — mirrors the connect-account flow in
+// ConfigPage's ComposioPanel but trimmed to fit inside a wizard step.
+// Lists already-connected toolkits and offers a search + connect for new
+// ones. Opens Composio's OAuth URL in a new tab; refreshes on focus.
+function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
+  const [status, setStatus] = useState<{ valid: boolean; error?: string | null } | null>(null);
+  const [connections, setConnections] = useState<
+    Array<{ id: string; toolkit?: { slug?: string | null; name?: string | null } | null; status?: string | null }>
+  >([]);
+  const [toolkits, setToolkits] = useState<
+    Array<{ slug?: string | null; name?: string | null; logo_url?: string | null }>
+  >([]);
+  const [loading, setLoading] = useState(false);
+  const [connectingSlug, setConnectingSlug] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!keyPresent) {
+      setStatus(null);
+      setConnections([]);
+      setToolkits([]);
+      return;
+    }
+    setLoading(true);
+    setErrorMsg(null);
+    try {
+      const s = await api.getComposioStatus();
+      setStatus(s);
+      if (s.valid) {
+        const [conns, tks] = await Promise.all([
+          api.getComposioConnections(),
+          api.getComposioToolkits(),
+        ]);
+        const conData = (conns.data as { items?: typeof connections } | typeof connections) ?? [];
+        setConnections(Array.isArray(conData) ? conData : conData.items ?? []);
+        const tkData = (tks.data as { items?: typeof toolkits } | typeof toolkits) ?? [];
+        setToolkits(Array.isArray(tkData) ? tkData : tkData.items ?? []);
+      } else {
+        setConnections([]);
+        setToolkits([]);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [keyPresent]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (status?.valid) void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refresh, status?.valid]);
+
+  const connect = useCallback(async (slug: string) => {
+    setConnectingSlug(slug);
+    setErrorMsg(null);
+    try {
+      const result = await api.initiateComposioConnection({ toolkitSlug: slug });
+      const url = result.data?.redirect_url ?? result.data?.redirect_uri;
+      if (url) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      setErrorMsg(
+        result.error ||
+          "This toolkit needs custom credentials. Open Settings → Composio to paste them.",
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConnectingSlug(null);
+    }
+  }, []);
+
+  if (!keyPresent) {
+    return (
+      <p className="text-[11.5px] leading-5 text-muted-foreground/80">
+        Paste a Composio key above to connect Gmail, Calendar, Slack, GitHub, Notion, and 100+ more.
+      </p>
+    );
+  }
+
+  if (loading && status === null) {
+    return (
+      <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Checking your Composio account…
+      </div>
+    );
+  }
+
+  if (status && !status.valid) {
+    return (
+      <p className="text-[11.5px] leading-5 text-destructive">
+        {status.error ?? "Composio rejected the key. Double-check it and save again."}
+      </p>
+    );
+  }
+
+  const lowered = query.trim().toLowerCase();
+  const visibleToolkits = (lowered
+    ? toolkits.filter(
+        (t) =>
+          (t.name ?? "").toLowerCase().includes(lowered) ||
+          (t.slug ?? "").toLowerCase().includes(lowered),
+      )
+    : toolkits
+  ).slice(0, 12);
+
+  const connectedSlugs = new Set(
+    connections.map((c) => (c.toolkit?.slug ?? "").toLowerCase()).filter(Boolean),
+  );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Connected accounts
+        </div>
+        {connections.length === 0 ? (
+          <p className="text-[11.5px] leading-5 text-muted-foreground/80">
+            None yet. Pick a tool below to connect — Composio opens an OAuth tab for that toolkit.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {connections.map((c) => (
+              <span
+                key={c.id}
+                className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] text-foreground"
+              >
+                <CheckCircle2 className="h-3 w-3 text-primary" />
+                {c.toolkit?.name ?? c.toolkit?.slug ?? c.id}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="mb-1.5 flex items-center justify-between gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Add a tool
+          </span>
+          <a
+            href="/config#composio"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center gap-1 text-[11px] text-primary underline-offset-2 hover:underline"
+          >
+            Open full Composio manager <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search Gmail, Slack, Notion, Linear, GitHub…"
+          className="mb-2 h-8 w-full rounded-md border border-border bg-card/60 px-3 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+        />
+        <div className="grid gap-1.5 md:grid-cols-2">
+          {visibleToolkits.map((t) => {
+            const slug = (t.slug ?? "").toLowerCase();
+            const connected = connectedSlugs.has(slug);
+            const busy = connectingSlug === slug;
+            return (
+              <button
+                key={slug || t.name}
+                type="button"
+                onClick={() => slug && !connected && !busy && connect(slug)}
+                disabled={!slug || connected || busy}
+                className={cn(
+                  "flex items-center justify-between gap-2 rounded-md border border-border bg-card/60 px-3 py-1.5 text-left text-[12px] transition-colors",
+                  !connected && !busy && "hover:border-primary/40 hover:bg-primary/5",
+                  connected && "opacity-60",
+                )}
+              >
+                <span className="truncate">{t.name ?? slug}</span>
+                {connected ? (
+                  <span className="text-[10.5px] uppercase tracking-wide text-primary">connected</span>
+                ) : busy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <span className="text-[10.5px] uppercase tracking-wide text-muted-foreground">
+                    connect
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          {visibleToolkits.length === 0 && (
+            <span className="col-span-full text-[11.5px] text-muted-foreground/80">
+              No toolkits match "{query}". Try another term.
+            </span>
+          )}
+        </div>
+      </div>
+
+      {errorMsg && (
+        <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>
+      )}
+    </div>
   );
 }
