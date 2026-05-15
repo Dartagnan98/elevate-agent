@@ -14,7 +14,12 @@ import {
   Loader2,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { AgentSetupSnapshot, OAuthProvider } from "@/lib/api-types";
+import type {
+  AgentSetupSnapshot,
+  OAuthProvider,
+  TelegramApprovedEntry,
+  TelegramPendingEntry,
+} from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
 import { cn } from "@/lib/utils";
@@ -568,10 +573,7 @@ export function AgentOnboardingWizard({
                 <ChannelToggle
                   enabled={
                     configuredChannelKeys.has("operator_channel_telegram") ||
-                    Boolean(
-                      (draft.telegramBotToken || draft.telegramSecretPresent) &&
-                        draft.telegramChatId,
-                    )
+                    Boolean(draft.telegramBotToken || draft.telegramSecretPresent)
                   }
                   onToggle={(v) => {
                     if (!v) {
@@ -580,33 +582,24 @@ export function AgentOnboardingWizard({
                     }
                   }}
                   title="Telegram"
-                  hint="Bot token from @BotFather + your chat id. Push approvals and status messages arrive in Telegram."
+                  hint="Paste your BotFather token, then DM /start to your bot. The bot replies with a pairing code that lights up here."
                   link={{ href: "https://t.me/BotFather", label: "Open @BotFather" }}
                 >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="Bot token"
-                      value={draft.telegramBotToken}
-                      onChange={(v) => updateField("telegramBotToken", v)}
-                      placeholder={
-                        draft.telegramSecretPresent && !draft.telegramBotToken
-                          ? `Already set — ${draft.telegramSecretPreview} (paste to replace)`
-                          : "123456789:ABC…"
+                  <TelegramPairingPanel
+                    draft={draft}
+                    updateField={updateField}
+                    alreadyConfigured={configuredChannelKeys.has(
+                      "operator_channel_telegram",
+                    )}
+                    onSetupRefresh={async () => {
+                      try {
+                        const next = await api.getAgentSetup();
+                        onSetupUpdated(next);
+                      } catch {
+                        /* swallow — surfaced inside the panel */
                       }
-                      type="password"
-                      hint={
-                        draft.telegramSecretPresent && !draft.telegramBotToken
-                          ? "Detected from environment. Leave blank to keep using it."
-                          : undefined
-                      }
-                    />
-                    <WizardField
-                      label="Chat id"
-                      value={draft.telegramChatId}
-                      onChange={(v) => updateField("telegramChatId", v)}
-                      placeholder="-1001234567890  or  987654321"
-                    />
-                  </div>
+                    }}
+                  />
                 </ChannelToggle>
 
                 <ChannelToggle
@@ -1252,6 +1245,277 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
         </div>
       </div>
 
+      {errorMsg && (
+        <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>
+      )}
+    </div>
+  );
+}
+
+// Mirrors the CLI's `elevate gateway setup` + `elevate pairing approve
+// telegram <code>` ritual: paste the BotFather token, restart the gateway
+// in pair mode, watch for the code the bot DMs back, approve it. The
+// gateway-side PairingStore is the source of truth — we poll it.
+function TelegramPairingPanel({
+  draft,
+  updateField,
+  onSetupRefresh,
+  alreadyConfigured,
+}: {
+  draft: AgentSetupDraft;
+  updateField: <K extends keyof AgentSetupDraft>(
+    key: K,
+    value: AgentSetupDraft[K],
+  ) => void;
+  onSetupRefresh: () => Promise<void> | void;
+  alreadyConfigured: boolean;
+}) {
+  type Stage = "token" | "polling" | "paired";
+  const [stage, setStage] = useState<Stage>(() =>
+    alreadyConfigured ? "paired" : draft.telegramSecretPresent ? "polling" : "token",
+  );
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pending, setPending] = useState<TelegramPendingEntry[]>([]);
+  const [approved, setApproved] = useState<TelegramApprovedEntry[]>([]);
+  const [statusNote, setStatusNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (stage !== "polling") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      try {
+        const resp = await api.listTelegramPairings();
+        if (cancelled) return;
+        setPending(resp.pending);
+        setApproved(resp.approved);
+        if (resp.approved.length > 0 && resp.pending.length === 0) {
+          setStage("paired");
+          return;
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setErrorMsg(errorMessage(e, "Couldn't read pairing state"));
+        }
+      }
+      if (!cancelled) timer = setTimeout(tick, 3000);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [stage]);
+
+  const startPairing = useCallback(async () => {
+    const token = draft.telegramBotToken.trim();
+    if (!token && !draft.telegramSecretPresent) {
+      setErrorMsg("Paste your BotFather token first.");
+      return;
+    }
+    setBusy(true);
+    setErrorMsg(null);
+    if (!token && draft.telegramSecretPresent) {
+      // Token already in env — skip the save+restart, just enter polling.
+      setStage("polling");
+      setStatusNote("Using the token already in your env. Send /start to the bot.");
+      setBusy(false);
+      return;
+    }
+    setStatusNote("Saving token + restarting the gateway…");
+    try {
+      await api.startTelegramPairing(token);
+      updateField("telegramSecretPresent", true);
+      updateField("telegramSecretPreview", "•••" + token.slice(-4));
+      updateField("telegramBotToken", "");
+      setStage("polling");
+      setStatusNote(
+        "Gateway is restarting. Open Telegram, find your bot, send /start.",
+      );
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not start pairing"));
+    } finally {
+      setBusy(false);
+    }
+  }, [draft.telegramBotToken, draft.telegramSecretPresent, updateField]);
+
+  const approveCode = useCallback(
+    async (code: string) => {
+      setBusy(true);
+      setErrorMsg(null);
+      setStatusNote(null);
+      try {
+        const resp = await api.approveTelegramPairing(code, true);
+        setStage("paired");
+        setStatusNote(
+          resp.user_name
+            ? `Paired with ${resp.user_name} (id ${resp.user_id}).`
+            : `Paired with user ${resp.user_id}.`,
+        );
+        await onSetupRefresh();
+      } catch (e) {
+        setErrorMsg(errorMessage(e, "Approval failed"));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onSetupRefresh],
+  );
+
+  if (stage === "paired") {
+    const display = approved[0]?.user_name || approved[0]?.user_id || "you";
+    return (
+      <div className="space-y-2">
+        <div className="rounded-md border border-primary/40 bg-card/60 px-3 py-3 text-[12px] text-foreground">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-primary" />
+            <span className="font-medium">Paired with {display}.</span>
+          </div>
+          <p className="mt-1 text-[11.5px] leading-5 text-muted-foreground">
+            The bot will deliver approvals and status messages here. Re-pair
+            from Settings → Channels later if you switch accounts.
+          </p>
+          {statusNote && (
+            <p className="mt-2 text-[11.5px] leading-5 text-muted-foreground">
+              {statusNote}
+            </p>
+          )}
+        </div>
+        <button
+          type="button"
+          className="text-[11.5px] text-muted-foreground underline-offset-2 hover:underline"
+          onClick={() => {
+            setStage("token");
+            setStatusNote(null);
+            setErrorMsg(null);
+          }}
+        >
+          Pair a different bot
+        </button>
+      </div>
+    );
+  }
+
+  if (stage === "polling") {
+    const tgPending = pending.filter((p) => p.platform === "telegram");
+    return (
+      <div className="space-y-3">
+        <div className="rounded-md border border-border bg-card/40 px-3 py-3 text-[12px] leading-5 text-foreground">
+          <div className="flex items-center gap-2 text-[12.5px] font-medium">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            Waiting for your /start DM…
+          </div>
+          <p className="mt-1.5 text-[11.5px] leading-5 text-muted-foreground">
+            Open Telegram, find your bot, and send <code>/start</code>. The bot
+            replies with a pairing code that shows up here in a few seconds.
+          </p>
+        </div>
+
+        {tgPending.length > 0 && (
+          <ul className="space-y-2">
+            {tgPending.map((row) => (
+              <li
+                key={row.code}
+                className="flex items-center justify-between gap-3 rounded-md border border-primary/40 bg-card/60 px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="font-mono text-[12.5px] font-semibold text-foreground">
+                    {row.code}
+                  </div>
+                  <div className="text-[11px] leading-4 text-muted-foreground">
+                    {row.user_name || `user ${row.user_id}`}
+                    {row.age_minutes > 0 ? ` · ${row.age_minutes}m ago` : ""}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => approveCode(row.code)}
+                  disabled={busy}
+                  className="h-8"
+                >
+                  {busy ? "Approving…" : "Approve"}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {statusNote && (
+          <p className="text-[11.5px] leading-5 text-muted-foreground">
+            {statusNote}
+          </p>
+        )}
+        {errorMsg && (
+          <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3 text-[11.5px] text-muted-foreground">
+          <button
+            type="button"
+            className="underline-offset-2 hover:underline"
+            onClick={() => {
+              setStage("token");
+              setStatusNote(null);
+              setErrorMsg(null);
+            }}
+          >
+            Paste a different bot token
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <WizardField
+        label="Bot token"
+        value={draft.telegramBotToken}
+        onChange={(v) => updateField("telegramBotToken", v)}
+        placeholder={
+          draft.telegramSecretPresent && !draft.telegramBotToken
+            ? `Already set — ${draft.telegramSecretPreview} (paste to replace)`
+            : "123456789:ABC…"
+        }
+        type="password"
+        fullWidth
+        hint={
+          draft.telegramSecretPresent && !draft.telegramBotToken
+            ? "Detected from env. Leave blank to keep using it, then continue below."
+            : "Create the bot with @BotFather (/newbot) and paste the token here."
+        }
+      />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button
+          size="sm"
+          onClick={startPairing}
+          disabled={
+            busy ||
+            (!draft.telegramBotToken.trim() && !draft.telegramSecretPresent)
+          }
+          className="h-8"
+        >
+          {busy ? "Starting…" : "Start pairing"}
+        </Button>
+        {draft.telegramSecretPresent && !draft.telegramBotToken.trim() && (
+          <button
+            type="button"
+            className="text-[11.5px] text-muted-foreground underline-offset-2 hover:underline"
+            onClick={() => {
+              setStage("polling");
+              setStatusNote("Using the token already in your env.");
+            }}
+          >
+            Skip — token already set, take me to /start →
+          </button>
+        )}
+      </div>
+      {statusNote && (
+        <p className="text-[11.5px] leading-5 text-muted-foreground">
+          {statusNote}
+        </p>
+      )}
       {errorMsg && (
         <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>
       )}
