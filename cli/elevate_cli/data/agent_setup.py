@@ -144,7 +144,24 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "required": False,
         "sort_order": 80,
     },
+    {
+        "key": "agent_channel_routing",
+        "category": "channel",
+        "label": "Per-agent channel routing",
+        "description": (
+            "Optional. Wire each sub-agent (Jimmy / Gary / Nina / Ricky / QC) to one or more "
+            "channels — Telegram chat ids, iMessage handles, Slack channels, Discord channels, "
+            "WhatsApp numbers. Multiple entries per slot are allowed. No fallback — an agent "
+            "with no channels wired only acts when another agent hands work to it."
+        ),
+        "required": False,
+        "sort_order": 90,
+    },
 ]
+
+
+SUBAGENT_KEYS = ["jimmy", "gary", "nina", "ricky", "qc"]
+AGENT_CHANNEL_TYPES = ["telegram", "imessage", "slack", "discord", "whatsapp"]
 
 
 def _ensure_seeded(conn: sqlite3.Connection) -> None:

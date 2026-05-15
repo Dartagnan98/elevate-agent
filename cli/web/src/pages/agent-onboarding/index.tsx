@@ -29,6 +29,75 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+export const SUBAGENT_KEYS = ["jimmy", "gary", "nina", "ricky", "qc"] as const;
+export const SUBAGENT_LABELS: Record<string, { label: string; role: string }> = {
+  jimmy: { label: "Jimmy", role: "Orchestrator" },
+  gary: { label: "Gary", role: "Ads strategist" },
+  nina: { label: "Nina", role: "Analyst / reporting" },
+  ricky: { label: "Ricky", role: "Copywriter" },
+  qc: { label: "QC", role: "Reviewer" },
+};
+export const AGENT_CHANNEL_TYPES = [
+  { key: "telegram", label: "Telegram chat ids", placeholder: "-1001234567890" },
+  { key: "imessage", label: "iMessage handles", placeholder: "+15551234567" },
+  { key: "slack", label: "Slack channels", placeholder: "#ops" },
+  { key: "discord", label: "Discord channel ids", placeholder: "987654321098765432" },
+  { key: "whatsapp", label: "WhatsApp numbers", placeholder: "+15551234567" },
+] as const;
+
+function emptyAgentChannels(): Record<string, Record<string, string[]>> {
+  const out: Record<string, Record<string, string[]>> = {};
+  for (const agent of SUBAGENT_KEYS) {
+    const slots: Record<string, string[]> = {};
+    for (const ch of AGENT_CHANNEL_TYPES) slots[ch.key] = [];
+    out[agent] = slots;
+  }
+  return out;
+}
+
+function parseAgentChannels(raw: unknown): Record<string, Record<string, string[]>> {
+  const out = emptyAgentChannels();
+  if (!raw || typeof raw !== "object") return out;
+  const routing = (raw as { routing?: unknown }).routing;
+  if (!routing || typeof routing !== "object") return out;
+  for (const agent of SUBAGENT_KEYS) {
+    const agentSlots = (routing as Record<string, unknown>)[agent];
+    if (!agentSlots || typeof agentSlots !== "object") continue;
+    for (const ch of AGENT_CHANNEL_TYPES) {
+      const list = (agentSlots as Record<string, unknown>)[ch.key];
+      if (Array.isArray(list)) {
+        out[agent][ch.key] = list.map((v) => String(v ?? "").trim()).filter(Boolean);
+      }
+    }
+  }
+  return out;
+}
+
+function agentChannelsToValue(
+  channels: Record<string, Record<string, string[]>>,
+): { routing: Record<string, Record<string, string[]>> } {
+  const routing: Record<string, Record<string, string[]>> = {};
+  for (const agent of SUBAGENT_KEYS) {
+    const slots: Record<string, string[]> = {};
+    for (const ch of AGENT_CHANNEL_TYPES) {
+      const list = channels[agent]?.[ch.key] ?? [];
+      const cleaned = list.map((v) => v.trim()).filter(Boolean);
+      if (cleaned.length) slots[ch.key] = cleaned;
+    }
+    if (Object.keys(slots).length) routing[agent] = slots;
+  }
+  return { routing };
+}
+
+function agentChannelsHasAny(channels: Record<string, Record<string, string[]>>): boolean {
+  for (const agent of SUBAGENT_KEYS) {
+    for (const ch of AGENT_CHANNEL_TYPES) {
+      if ((channels[agent]?.[ch.key] ?? []).some((v) => v.trim())) return true;
+    }
+  }
+  return false;
+}
+
 export type AgentSetupDraft = {
   primaryProvider: string;
   primaryModel: string;
@@ -60,6 +129,7 @@ export type AgentSetupDraft = {
   outboundImessageSenderHandle: string;
   subagentsEnabled: boolean;
   subagentsPack: string;
+  agentChannels: Record<string, Record<string, string[]>>;
   primarySecretPresent: boolean;
   primarySecretPreview: string;
   embeddingSecretPresent: boolean;
@@ -92,6 +162,7 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
   const outImessageVal = (outImessageItem?.value ?? {}) as Record<string, unknown>;
   const subagentsItem = byKey.get("subagents_pack");
   const subagentsVal = (subagentsItem?.value ?? {}) as Record<string, unknown>;
+  const agentChannelsItem = byKey.get("agent_channel_routing");
   return {
     primaryProvider: String(byKey.get("model_primary")?.provider ?? ""),
     primaryModel: String(primaryVal.model ?? ""),
@@ -123,6 +194,7 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     outboundImessageSenderHandle: String(outImessageVal.senderHandle ?? ""),
     subagentsEnabled: subagentsItem ? subagentsItem.status === "configured" : false,
     subagentsPack: String(subagentsVal.pack ?? "cortextos_default"),
+    agentChannels: parseAgentChannels(agentChannelsItem?.value),
     primarySecretPresent: Boolean(primaryVal.secretPresent),
     primarySecretPreview: String(primaryVal.secretPreview ?? ""),
     embeddingSecretPresent: Boolean(embeddingVal.secretPresent),
@@ -299,6 +371,14 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
         enabled: draft.subagentsEnabled,
       },
     },
+    {
+      key: "agent_channel_routing",
+      status: (agentChannelsHasAny(draft.agentChannels)
+        ? "configured"
+        : "skipped") as AdminSetupItemStatus,
+      provider: agentChannelsHasAny(draft.agentChannels) ? "elevate" : null,
+      value: agentChannelsToValue(draft.agentChannels),
+    },
   ];
 }
 
@@ -462,6 +542,7 @@ export function AgentSetupLaunch({
   const telegramItem = byKey.get("operator_channel_telegram");
   const slackItem = byKey.get("operator_channel_slack");
   const subagentsItem = byKey.get("subagents_pack");
+  const agentChannelRoutingItem = byKey.get("agent_channel_routing");
 
   const save = useCallback(async () => {
     setSaving(true);
@@ -501,6 +582,19 @@ export function AgentSetupLaunch({
   const updateField = useCallback(
     <K extends keyof AgentSetupDraft>(key: K, value: AgentSetupDraft[K]) => {
       setDraft((prev) => ({ ...prev, [key]: value }));
+    },
+    [],
+  );
+
+  const updateAgentChannel = useCallback(
+    (agent: string, channel: string, list: string[]) => {
+      setDraft((prev) => {
+        const nextChannels: Record<string, Record<string, string[]>> = { ...prev.agentChannels };
+        const agentSlots: Record<string, string[]> = { ...(nextChannels[agent] ?? {}) };
+        agentSlots[channel] = list;
+        nextChannels[agent] = agentSlots;
+        return { ...prev, agentChannels: nextChannels };
+      });
     },
     [],
   );
@@ -861,6 +955,83 @@ export function AgentSetupLaunch({
             ]}
           />
         )}
+      </ItemCard>
+
+      <ItemCard
+        title="Per-agent channel routing"
+        description="Optional. Wire each sub-agent to one or more channels. Multiple entries per slot are allowed and the same channels work for inbound and outbound. No fallback — an agent with nothing wired only acts when another agent hands work to it."
+        status={agentChannelRoutingItem?.status ?? "missing"}
+      >
+        <div className="space-y-3">
+          {SUBAGENT_KEYS.map((agent) => {
+            const slots = draft.agentChannels[agent] ?? {};
+            const meta = SUBAGENT_LABELS[agent];
+            return (
+              <div
+                key={agent}
+                className="rounded-md border border-border bg-background/40 p-3"
+              >
+                <header className="mb-2 flex items-baseline justify-between gap-2">
+                  <div>
+                    <h4 className="text-[12.5px] font-semibold text-foreground">
+                      {meta?.label ?? agent}
+                    </h4>
+                    <p className="text-[10.5px] text-muted-foreground">
+                      {meta?.role ?? ""}
+                    </p>
+                  </div>
+                </header>
+                <div className="space-y-2">
+                  {AGENT_CHANNEL_TYPES.map((ch) => {
+                    const list = slots[ch.key] ?? [];
+                    return (
+                      <div key={ch.key}>
+                        <div className="mb-1 text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+                          {ch.label}
+                        </div>
+                        <div className="space-y-1">
+                          {list.map((entry, idx) => (
+                            <div key={idx} className="flex items-center gap-1">
+                              <input
+                                type="text"
+                                value={entry}
+                                onChange={(e) => {
+                                  const next = [...list];
+                                  next[idx] = e.target.value;
+                                  updateAgentChannel(agent, ch.key, next);
+                                }}
+                                placeholder={ch.placeholder}
+                                className="w-full rounded-md border border-border bg-background px-2 py-1 text-[12px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                              />
+                              <button
+                                type="button"
+                                aria-label="Remove entry"
+                                onClick={() => {
+                                  const next = list.filter((_, i) => i !== idx);
+                                  updateAgentChannel(agent, ch.key, next);
+                                }}
+                                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground"
+                              >
+                                ×
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => updateAgentChannel(agent, ch.key, [...list, ""])}
+                            className="text-[11px] text-primary underline-offset-2 hover:underline"
+                          >
+                            + Add {ch.label.toLowerCase()}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </ItemCard>
 
       <div className="sticky bottom-2 z-10 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card/95 px-3 py-2 backdrop-blur">
