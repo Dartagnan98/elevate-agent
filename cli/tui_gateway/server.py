@@ -2483,12 +2483,13 @@ def _(rid, params: dict) -> dict:
 
 @method("session.steer")
 def _(rid, params: dict) -> dict:
-    """Inject a user message into the next tool result without interrupting.
+    """Inject a user message into the running turn without interrupting.
 
-    Mirrors AIAgent.steer(). Safe to call while a turn is running — the text
-    lands on the last tool result of the next tool batch and the model sees
-    it on its next iteration. No interrupt, no new user turn, no role
-    alternation violation.
+    Prefers AIAgent.queue_soft_interrupt() — drains into the next tool
+    result mid-flow, and falls back to a fresh user message after the
+    assistant text response so the steer is never silently lost when the
+    agent finishes before a tool batch lands. Falls back to AIAgent.steer()
+    for older agent instances that lack soft-interrupt support.
     """
     text = (params.get("text") or "").strip()
     if not text:
@@ -2497,10 +2498,15 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     agent = session.get("agent")
-    if agent is None or not hasattr(agent, "steer"):
+    if agent is None:
         return _err(rid, 4010, "agent does not support steer")
     try:
-        accepted = agent.steer(text)
+        if hasattr(agent, "queue_soft_interrupt"):
+            accepted = agent.queue_soft_interrupt(text, source="dashboard_steer")
+        elif hasattr(agent, "steer"):
+            accepted = agent.steer(text)
+        else:
+            return _err(rid, 4010, "agent does not support steer")
     except Exception as exc:
         return _err(rid, 5000, f"steer failed: {exc}")
     return _ok(rid, {"status": "queued" if accepted else "rejected", "text": text})
