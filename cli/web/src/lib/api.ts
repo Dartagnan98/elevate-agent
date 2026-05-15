@@ -239,6 +239,10 @@ export const api = {
   getDefaults: () => fetchJSON<Record<string, unknown>>("/api/config/defaults"),
   getSchema: () => fetchJSON<{ fields: Record<string, unknown>; category_order: string[] }>("/api/config/schema"),
   getModelInfo: () => fetchJSON<ModelInfoResponse>("/api/model/info"),
+  getProviderModels: (provider: string) =>
+    fetchJSON<{ provider: string; models: string[] }>(
+      `/api/models/by-provider?provider=${encodeURIComponent(provider)}`,
+    ),
   saveConfig: (config: Record<string, unknown>) =>
     fetchJSON<{ ok: boolean }>("/api/config", {
       method: "PUT",

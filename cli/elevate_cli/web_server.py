@@ -1823,6 +1823,31 @@ def get_models_available():
         return {"models": [], "default": ""}
 
 
+@app.get("/api/models/by-provider")
+def get_models_by_provider(provider: str = ""):
+    """Return the full model catalog for a specific provider.
+
+    Powers the onboarding wizard's "Pick the brain" dropdown — given a
+    provider id like ``anthropic`` / ``openai-codex`` / ``nous``, returns
+    every model id we know the provider has, refreshed live from the
+    provider's API when possible (codex, nous, anthropic, copilot, …) and
+    falling back to the static curated list otherwise. The caller passes
+    the *concrete* provider id, not the wizard's grouped label — e.g.
+    pass ``openai-codex`` for "OpenAI · connected via Codex".
+    """
+    prov = str(provider or "").strip()
+    if not prov:
+        return {"provider": "", "models": []}
+    try:
+        from elevate_cli.models import provider_model_ids, normalize_provider
+        normalized = normalize_provider(prov)
+        models = provider_model_ids(normalized) or []
+        return {"provider": normalized, "models": list(models)}
+    except Exception:
+        _log.exception("GET /api/models/by-provider failed for provider=%s", prov)
+        return {"provider": prov, "models": []}
+
+
 @app.get("/api/config/tiers")
 def get_config_tiers():
     """Return the persisted tier->model mapping plus current resolved tiers.

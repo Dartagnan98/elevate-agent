@@ -230,6 +230,58 @@ export function AgentOnboardingWizard({
   }, [oauthProviders]);
   const anyProviderConnected = connectedProviderIds.size > 0;
 
+  // Map the wizard's grouped provider value to the concrete provider id the
+  // backend catalog endpoint understands. "openai" routes to "openai-codex"
+  // when Codex is the signed-in flow; "qwen" routes to "qwen-oauth"; etc.
+  const catalogProviderId = useMemo(() => {
+    const p = draft.primaryProvider;
+    if (!p) return "";
+    if (p === "openai") {
+      return connectedProviderIds.has("openai-codex") ? "openai-codex" : "openai";
+    }
+    if (p === "anthropic") {
+      if (connectedProviderIds.has("anthropic")) return "anthropic";
+      if (connectedProviderIds.has("claude-code")) return "claude-code";
+      return "anthropic";
+    }
+    if (p === "qwen") {
+      return connectedProviderIds.has("qwen-oauth") ? "qwen-oauth" : "qwen";
+    }
+    return p;
+  }, [draft.primaryProvider, connectedProviderIds]);
+
+  // Live model catalog for the chosen provider. Refetches whenever the
+  // resolved provider id changes so the dropdown stays in sync with auth
+  // state (e.g. signing in to Codex unlocks the live gpt-5 list).
+  const [primaryModelCatalog, setPrimaryModelCatalog] = useState<string[]>([]);
+  const [primaryModelLoading, setPrimaryModelLoading] = useState(false);
+
+  useEffect(() => {
+    if (!catalogProviderId) {
+      setPrimaryModelCatalog([]);
+      setPrimaryModelLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPrimaryModelLoading(true);
+    api
+      .getProviderModels(catalogProviderId)
+      .then((resp) => {
+        if (cancelled) return;
+        setPrimaryModelCatalog(resp.models ?? []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPrimaryModelCatalog([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPrimaryModelLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogProviderId]);
+
   // Channels marked "configured" on the backend (env-detected or
   // wizard-confirmed). The toggle in the UI mirrors this so env-set creds
   // light up On instead of looking dead. User feedback: "these say off but
@@ -440,17 +492,13 @@ export function AgentOnboardingWizard({
                         { value: "azure_openai", label: "Azure OpenAI (paste key in .env)" },
                       ]}
                     />
-                    <WizardField
+                    <WizardModelPicker
                       label="Model ID"
                       value={draft.primaryModel}
                       onChange={(v) => updateField("primaryModel", v)}
-                      placeholder={
-                        draft.primaryProvider === "anthropic"
-                          ? "claude-opus-4-7  or  claude-sonnet-4-6"
-                          : draft.primaryProvider === "openai"
-                            ? "gpt-4-turbo  or  o4-mini"
-                            : "model id"
-                      }
+                      models={primaryModelCatalog}
+                      loading={primaryModelLoading}
+                      disabled={!draft.primaryProvider}
                     />
                   </div>
                   <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
@@ -1036,6 +1084,113 @@ function WizardSelect({
           </option>
         ))}
       </select>
+    </label>
+  );
+}
+
+// Provider-aware model picker. When the live catalog has entries, renders
+// a native <select> the user can scroll through. If the user typed a value
+// not in the catalog (e.g. an unreleased preview model), preserves it as
+// the first option so we never silently drop it. Includes a "Custom…" tail
+// option that swaps in a text input for one-off model ids. Falls back to a
+// plain text input when no catalog is loaded yet.
+function WizardModelPicker({
+  label,
+  value,
+  onChange,
+  models,
+  loading,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  models: string[];
+  loading: boolean;
+  disabled?: boolean;
+}) {
+  const [customMode, setCustomMode] = useState(false);
+
+  const optionList = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    if (value && !models.includes(value)) {
+      out.push(value);
+      seen.add(value);
+    }
+    for (const m of models) {
+      if (seen.has(m)) continue;
+      seen.add(m);
+      out.push(m);
+    }
+    return out;
+  }, [value, models]);
+
+  const showCustom = customMode || (!loading && optionList.length === 0);
+
+  return (
+    <label className="block min-w-0">
+      <span className="mb-1.5 flex items-center justify-between text-[12px] font-medium text-muted-foreground">
+        <span>{label}</span>
+        {loading && (
+          <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+            loading…
+          </span>
+        )}
+        {!loading && optionList.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setCustomMode((m) => !m)}
+            className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70 hover:text-foreground"
+          >
+            {customMode ? "pick from list" : "custom…"}
+          </button>
+        )}
+      </span>
+      {showCustom ? (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="paste any model id"
+          autoComplete="off"
+          spellCheck={false}
+          disabled={disabled}
+          className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
+        />
+      ) : (
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled || loading}
+          size={1}
+          className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {!value && (
+            <option value="">
+              {disabled
+                ? "— pick a provider first —"
+                : loading
+                  ? "loading models…"
+                  : "— pick a model —"}
+            </option>
+          )}
+          {optionList.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      )}
+      <span className="mt-1.5 block text-[11px] leading-4 text-muted-foreground/70">
+        {disabled
+          ? "Pick a provider first."
+          : loading
+            ? "Pulling live model list from the provider…"
+            : optionList.length > 0
+              ? `${optionList.length} model${optionList.length === 1 ? "" : "s"} available · scroll the list`
+              : "No catalog yet for this provider. Paste a model id."}
+      </span>
     </label>
   );
 }
