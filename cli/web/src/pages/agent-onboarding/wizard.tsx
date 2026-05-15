@@ -41,6 +41,50 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+// Static fallback catalogs. Mirrors `_PROVIDER_MODELS` + `DEFAULT_CODEX_MODELS`
+// from cli/elevate_cli/models.py — only consulted when the live /api/models/by-provider
+// endpoint returns empty (older dashboard build, offline provider, broken OAuth).
+// Source of truth is the backend; this is just so the picker is never empty.
+const STATIC_PROVIDER_MODELS: Record<string, string[]> = {
+  "openai-codex": [
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+  ],
+  openai: [
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-4.1",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o3-mini",
+  ],
+  anthropic: [
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+  ],
+  "claude-code": [
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+  ],
+};
+
+function staticModelsFor(providerId: string): string[] {
+  return STATIC_PROVIDER_MODELS[providerId] ?? [];
+}
+
 type AgentWizardStepId =
   | "models"
   | "memory"
@@ -264,15 +308,22 @@ export function AgentOnboardingWizard({
     }
     let cancelled = false;
     setPrimaryModelLoading(true);
+    // Seed with the static fallback immediately so the picker is never empty,
+    // then upgrade to the live catalog when the backend responds. This also
+    // protects against older dashboard builds that don't have the
+    // /api/models/by-provider endpoint registered (it 404s -> we'd otherwise
+    // strand the user on whatever stale draft.primaryModel was carrying).
+    setPrimaryModelCatalog(staticModelsFor(catalogProviderId));
     api
       .getProviderModels(catalogProviderId)
       .then((resp) => {
         if (cancelled) return;
-        setPrimaryModelCatalog(resp.models ?? []);
+        const live = resp.models ?? [];
+        setPrimaryModelCatalog(live.length > 0 ? live : staticModelsFor(catalogProviderId));
       })
       .catch(() => {
         if (cancelled) return;
-        setPrimaryModelCatalog([]);
+        setPrimaryModelCatalog(staticModelsFor(catalogProviderId));
       })
       .finally(() => {
         if (!cancelled) setPrimaryModelLoading(false);
@@ -281,6 +332,30 @@ export function AgentOnboardingWizard({
       cancelled = true;
     };
   }, [catalogProviderId]);
+
+  // Auto-clear primaryModel when the user switches providers and the carried
+  // value isn't in the new catalog. Prevents stale Anthropic ids surfacing
+  // when the resolved provider becomes openai-codex, etc.
+  useEffect(() => {
+    if (!catalogProviderId) return;
+    if (primaryModelLoading) return;
+    if (primaryModelCatalog.length === 0) return;
+    const current = draftRef.current.primaryModel.trim();
+    if (!current) return;
+    if (primaryModelCatalog.includes(current)) return;
+    // Best-effort cross-provider check: if the current model looks like it
+    // belongs to a different family (e.g. "claude-" while we're on OpenAI),
+    // wipe it so the picker doesn't parade it as the "1 model available".
+    const looksAnthropic = current.toLowerCase().startsWith("claude");
+    const looksOpenAI = current.toLowerCase().startsWith("gpt") || current.toLowerCase().startsWith("o");
+    const familyMismatch =
+      (catalogProviderId.startsWith("openai") && looksAnthropic) ||
+      (catalogProviderId.startsWith("anthropic") && looksOpenAI) ||
+      (catalogProviderId === "claude-code" && looksOpenAI);
+    if (familyMismatch) {
+      setDraft((prev) => ({ ...prev, primaryModel: primaryModelCatalog[0] ?? "" }));
+    }
+  }, [catalogProviderId, primaryModelCatalog, primaryModelLoading]);
 
   // Channels marked "configured" on the backend (env-detected or
   // wizard-confirmed). The toggle in the UI mirrors this so env-set creds
@@ -612,8 +687,9 @@ export function AgentOnboardingWizard({
             {step.id === "inbound" && (
               <>
                 <ChannelToggle
-                  enabled={draft.cliEnabled}
-                  onToggle={(v) => updateField("cliEnabled", v)}
+                  enabled={true}
+                  onToggle={() => {}}
+                  locked
                   title="CLI"
                   hint="Talk to the agent inside your terminal with `elevate`. Always available — keep on."
                 />
@@ -651,7 +727,10 @@ export function AgentOnboardingWizard({
                 </ChannelToggle>
 
                 <ChannelToggle
-                  enabled={draft.imessageEnabled}
+                  enabled={
+                    configuredChannelKeys.has("operator_channel_imessage") ||
+                    draft.imessageEnabled
+                  }
                   onToggle={(v) => updateField("imessageEnabled", v)}
                   title="iMessage"
                   hint="Read inbound iMessage threads from the local Messages database on this Mac. Requires Full Disk Access for Terminal/Elevate."
@@ -774,7 +853,13 @@ export function AgentOnboardingWizard({
                       fullWidth
                     />
                   </div>
+                  <SlackTestButton
+                    webhookUrl={draft.slackWebhookUrl}
+                    channel={draft.slackChannel}
+                  />
                 </ChannelToggle>
+
+                <ConnectedAgentsRail oauthProviders={oauthProviders ?? []} />
               </>
             )}
 
@@ -944,6 +1029,216 @@ export function AgentOnboardingWizard({
   );
 }
 
+// Slack test button — fires /api/channels/slack/test so the operator can
+// verify the webhook is live before saving. Reuses env-detected webhook
+// when the wizard field is blank (backend handles that fallback).
+function SlackTestButton({
+  webhookUrl,
+  channel,
+}: {
+  webhookUrl: string;
+  channel: string;
+}) {
+  const [status, setStatus] = useState<
+    { kind: "idle" } | { kind: "loading" } | { kind: "ok"; detail: string } | { kind: "err"; detail: string }
+  >({ kind: "idle" });
+
+  const onClick = useCallback(async () => {
+    setStatus({ kind: "loading" });
+    try {
+      const resp = await api.testSlackWebhook({
+        webhook_url: webhookUrl,
+        channel: channel || undefined,
+        text: "elevate · onboarding test message",
+      });
+      if (resp.ok) {
+        setStatus({ kind: "ok", detail: `delivered (HTTP ${resp.status})` });
+      } else {
+        setStatus({
+          kind: "err",
+          detail: `HTTP ${resp.status} — ${resp.detail || "unknown error"}`,
+        });
+      }
+    } catch (err) {
+      setStatus({ kind: "err", detail: errorMessage(err, "Network error") });
+    }
+  }, [webhookUrl, channel]);
+
+  return (
+    <div className="mt-3 flex items-center gap-3 text-[11.5px]">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={onClick}
+        disabled={status.kind === "loading"}
+        className="h-7 px-3 text-[11px]"
+      >
+        {status.kind === "loading" ? (
+          <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+        ) : null}
+        Send test message
+      </Button>
+      {status.kind === "ok" && (
+        <span className="inline-flex items-center gap-1 text-primary">
+          <CheckCircle2 className="h-3 w-3" />
+          {status.detail}
+        </span>
+      )}
+      {status.kind === "err" && (
+        <span className="inline-flex items-center gap-1 text-destructive">
+          <AlertTriangle className="h-3 w-3" />
+          {status.detail}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Surfaces the AI peers the operator has wired up alongside this elevate
+// agent — signed-in model providers + Cortex OS-style PTY specialists from
+// $HOME/claudeclaw/orgs. Read-only. Lets the wizard answer "who else is in
+// the room" without forcing the operator into a separate config page.
+function ConnectedAgentsRail({
+  oauthProviders,
+}: {
+  oauthProviders: OAuthProvider[];
+}) {
+  const [peers, setPeers] = useState<
+    Array<{
+      org: string;
+      name: string;
+      enabled: boolean;
+      workingDirectory: string;
+      communicationStyle: string;
+      cronCount: number;
+      roleHint: string;
+    }>
+  >([]);
+  const [peersLoading, setPeersLoading] = useState(true);
+  const [peersError, setPeersError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPeersLoading(true);
+    api
+      .getAgentPeers()
+      .then((resp) => {
+        if (cancelled) return;
+        setPeers(resp.peers ?? []);
+        setPeersError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPeers([]);
+        setPeersError(errorMessage(err, "Failed to load Cortex OS peers."));
+      })
+      .finally(() => {
+        if (!cancelled) setPeersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const connectedProviders = useMemo(
+    () => oauthProviders.filter((p) => p.status?.logged_in),
+    [oauthProviders],
+  );
+
+  return (
+    <section className="rounded-md border border-border bg-card/40 px-4 py-3 backdrop-blur-sm">
+      <header className="mb-3">
+        <h3 className="text-[13.5px] font-semibold text-foreground">
+          Agents already connected
+        </h3>
+        <p className="mt-0.5 text-[11.5px] leading-5 text-muted-foreground">
+          Other AI surfaces wired up on this Mac. Read-only — manage them from the CLI or their own config files.
+        </p>
+      </header>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div>
+          <h4 className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+            Model providers signed in
+          </h4>
+          {connectedProviders.length === 0 ? (
+            <p className="mt-2 text-[12px] text-muted-foreground/80">
+              Nothing yet. Sign in to a provider on Step 1.
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-1.5">
+              {connectedProviders.map((p) => (
+                <li
+                  key={p.id}
+                  className="flex items-center justify-between rounded-md border border-border/50 bg-background/40 px-3 py-2 text-[12px]"
+                >
+                  <span className="font-medium text-foreground">{p.name || p.id}</span>
+                  <span className="inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-primary">
+                    <CheckCircle2 className="h-3 w-3" />
+                    connected
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div>
+          <h4 className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+            Cortex OS specialists
+          </h4>
+          {peersLoading ? (
+            <p className="mt-2 text-[12px] text-muted-foreground/80">Loading…</p>
+          ) : peersError ? (
+            <p className="mt-2 text-[12px] text-muted-foreground/80">
+              {peersError}
+            </p>
+          ) : peers.length === 0 ? (
+            <p className="mt-2 text-[12px] text-muted-foreground/80">
+              No peers found under <code>~/claudeclaw/orgs</code>. Set <code>ELEVATE_PEERS_ROOT</code> to point at a different orgs directory.
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-1.5">
+              {peers.map((peer) => (
+                <li
+                  key={`${peer.org}/${peer.name}`}
+                  className="rounded-md border border-border/50 bg-background/40 px-3 py-2 text-[12px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-foreground">
+                      {peer.name}
+                    </span>
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em]",
+                        peer.enabled ? "text-primary" : "text-muted-foreground/60",
+                      )}
+                    >
+                      {peer.enabled ? (
+                        <CheckCircle2 className="h-3 w-3" />
+                      ) : (
+                        <Circle className="h-3 w-3" />
+                      )}
+                      {peer.enabled ? "enabled" : "disabled"}
+                    </span>
+                  </div>
+                  {peer.roleHint && (
+                    <p className="mt-0.5 text-[11px] text-muted-foreground/80">
+                      {peer.roleHint}
+                    </p>
+                  )}
+                  <p className="mt-0.5 font-mono-ui text-[10px] uppercase tracking-[0.16em] text-muted-foreground/60">
+                    {peer.org} · {peer.cronCount} cron{peer.cronCount === 1 ? "" : "s"}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function WizardSection({
   title,
   hint,
@@ -970,6 +1265,8 @@ function ChannelToggle({
   title,
   hint,
   link,
+  locked,
+  lockedLabel,
   children,
 }: {
   enabled: boolean;
@@ -977,6 +1274,10 @@ function ChannelToggle({
   title: string;
   hint?: string;
   link?: { href: string; label: string };
+  // Locked = state is reality, not preference. CLI is always on; renders
+  // an "Always on" badge instead of a clickable toggle.
+  locked?: boolean;
+  lockedLabel?: string;
   children?: React.ReactNode;
 }) {
   return (
@@ -1001,22 +1302,29 @@ function ChannelToggle({
             </a>
           )}
         </div>
-        <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-[11.5px] font-medium uppercase tracking-wide">
-          <span className={cn("text-muted-foreground", enabled && "text-primary")}>
-            {enabled ? (
-              <CheckCircle2 className="h-4 w-4" />
-            ) : (
-              <Circle className="h-4 w-4" />
-            )}
+        {locked ? (
+          <span className="inline-flex shrink-0 items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-[10.5px] font-medium uppercase tracking-wide text-primary">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            {lockedLabel ?? "Always on"}
           </span>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => onToggle(e.target.checked)}
-            className="sr-only"
-          />
-          <span className="text-muted-foreground">{enabled ? "On" : "Off"}</span>
-        </label>
+        ) : (
+          <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-[11.5px] font-medium uppercase tracking-wide">
+            <span className={cn("text-muted-foreground", enabled && "text-primary")}>
+              {enabled ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <Circle className="h-4 w-4" />
+              )}
+            </span>
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => onToggle(e.target.checked)}
+              className="sr-only"
+            />
+            <span className="text-muted-foreground">{enabled ? "On" : "Off"}</span>
+          </label>
+        )}
       </header>
       {enabled && children && <div className="mt-3">{children}</div>}
     </section>
@@ -1221,27 +1529,46 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
     }
     setLoading(true);
     setErrorMsg(null);
-    try {
-      const s = await api.getComposioStatus();
-      setStatus(s);
-      if (s.valid) {
-        const [conns, tks] = await Promise.all([
-          api.getComposioConnections(),
-          api.getComposioToolkits(),
-        ]);
-        const conData = (conns.data as { items?: typeof connections } | typeof connections) ?? [];
-        setConnections(Array.isArray(conData) ? conData : conData.items ?? []);
-        const tkData = (tks.data as { items?: typeof toolkits } | typeof toolkits) ?? [];
-        setToolkits(Array.isArray(tkData) ? tkData : tkData.items ?? []);
-      } else {
-        setConnections([]);
-        setToolkits([]);
-      }
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+    // Fire all three calls in parallel from the jump. The previous flow
+    // awaited /status before kicking off /connections + /toolkits — a
+    // 1+1 round-trip serial chain that put the wizard's slowest call on
+    // the critical path. Each toolkit/connection fetch hits Composio's
+    // API which can take 2-4s on cold cache; serializing it doubled the
+    // wait for no reason since an invalid key just gives 401s on the
+    // dependent calls that we ignore anyway.
+    const [statusRes, connsRes, toolkitsRes] = await Promise.allSettled([
+      api.getComposioStatus(),
+      api.getComposioConnections(),
+      api.getComposioToolkits(),
+    ]);
+
+    if (statusRes.status === "fulfilled") {
+      setStatus(statusRes.value);
+    } else {
+      setStatus(null);
+      setErrorMsg(
+        statusRes.reason instanceof Error
+          ? statusRes.reason.message
+          : String(statusRes.reason),
+      );
     }
+
+    const statusValid = statusRes.status === "fulfilled" && statusRes.value.valid;
+    if (statusValid && connsRes.status === "fulfilled") {
+      const conData =
+        (connsRes.value.data as { items?: typeof connections } | typeof connections) ?? [];
+      setConnections(Array.isArray(conData) ? conData : conData.items ?? []);
+    } else {
+      setConnections([]);
+    }
+    if (statusValid && toolkitsRes.status === "fulfilled") {
+      const tkData =
+        (toolkitsRes.value.data as { items?: typeof toolkits } | typeof toolkits) ?? [];
+      setToolkits(Array.isArray(tkData) ? tkData : tkData.items ?? []);
+    } else {
+      setToolkits([]);
+    }
+    setLoading(false);
   }, [keyPresent]);
 
   useEffect(() => {

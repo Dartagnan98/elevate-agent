@@ -159,7 +159,6 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
   const imageVal = (byKey.get("model_image")?.value ?? {}) as Record<string, unknown>;
   const memoryVal = (byKey.get("memory_store")?.value ?? {}) as Record<string, unknown>;
   const composioVal = (byKey.get("composio_workspace")?.value ?? {}) as Record<string, unknown>;
-  const cliItem = byKey.get("operator_channel_cli");
   const tgVal = (byKey.get("operator_channel_telegram")?.value ?? {}) as Record<string, unknown>;
   const imessageItem = byKey.get("operator_channel_imessage");
   const imessageVal = (imessageItem?.value ?? {}) as Record<string, unknown>;
@@ -186,7 +185,10 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     memorySupabaseKey: String(memoryVal.supabaseKey ?? ""),
     composioApiKey: String(composioVal.apiKey ?? ""),
     composioWorkspace: String(composioVal.workspace ?? ""),
-    cliEnabled: cliItem ? cliItem.status === "configured" : true,
+    // CLI is the always-on surface — the user is literally inside `elevate`
+    // to even reach this wizard. Don't let a stale "skipped" status from a
+    // previous save talk us into showing it as Off.
+    cliEnabled: true,
     telegramBotToken: String(tgVal.botToken ?? ""),
     telegramChatId: String(tgVal.chatId ?? ""),
     imessageEnabled: imessageItem ? imessageItem.status === "configured" : false,

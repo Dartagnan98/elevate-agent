@@ -56,7 +56,7 @@ from elevate_cli.data.deals import DealPhaseGateBlocked
 from gateway.status import get_running_pid, read_runtime_status
 
 try:
-    from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+    from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -1846,6 +1846,147 @@ def get_models_by_provider(provider: str = ""):
     except Exception:
         _log.exception("GET /api/models/by-provider failed for provider=%s", prov)
         return {"provider": prov, "models": []}
+
+
+@app.post("/api/channels/slack/test")
+def post_slack_test(payload: dict[str, Any] | None = Body(default=None)):
+    """Send a one-shot test message to a Slack incoming webhook.
+
+    Powers the wizard's "Send test" button so the operator can confirm their
+    webhook URL is live before saving. Accepts ``{"webhook_url": "...",
+    "channel": "...", "text": "..."}``. If ``webhook_url`` is omitted, falls
+    back to ``$SLACK_WEBHOOK_URL`` in env. Returns ``{"ok": bool,
+    "status": int, "detail": str}``.
+
+    Used by the wizard. The actual runtime "agent posts to Slack" plumbing
+    lives in the outbound sender — this endpoint exists so the wizard can
+    validate creds without needing the full agent loop to fire.
+    """
+    import os
+    import httpx
+
+    body = payload or {}
+    webhook = str(body.get("webhook_url") or "").strip()
+    if not webhook:
+        try:
+            from elevate_cli.config import load_env as _load_env
+
+            file_env = _load_env() or {}
+        except Exception:
+            file_env = {}
+        webhook = (os.environ.get("SLACK_WEBHOOK_URL") or file_env.get("SLACK_WEBHOOK_URL") or "").strip()
+    if not webhook:
+        return {"ok": False, "status": 0, "detail": "No webhook URL provided and SLACK_WEBHOOK_URL is not set."}
+
+    text = str(body.get("text") or "").strip() or "elevate · test message from onboarding wizard"
+    channel = str(body.get("channel") or "").strip()
+    msg: dict[str, Any] = {"text": text}
+    if channel:
+        msg["channel"] = channel if channel.startswith("#") or channel.startswith("@") else f"#{channel}"
+    try:
+        resp = httpx.post(webhook, json=msg, timeout=10)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "status": 0, "detail": f"{type(exc).__name__}: {exc}"}
+    body_text = (resp.text or "").strip()
+    return {
+        "ok": resp.is_success and body_text.lower() in ("ok", ""),
+        "status": resp.status_code,
+        "detail": body_text or "delivered",
+    }
+
+
+@app.get("/api/agents/peers")
+def get_agent_peers():
+    """Return the list of Cortex OS-style peer agents on this Mac.
+
+    Powers the onboarding wizard's "Agents connected" rail so the operator
+    can see which AI specialists already exist alongside this elevate agent
+    (e.g. jimmy/gary/nina/ricky/qc from claudeclaw). Discovery is purely
+    filesystem-based — no process probing here, the wizard just needs to
+    surface what's wired up.
+
+    Roots searched in order:
+      1. $ELEVATE_PEERS_ROOT (single root)
+      2. $ELEVATE_PEERS_ROOTS (colon-separated)
+      3. $HOME/claudeclaw/orgs
+    Each root is globbed as ``<root>/<org>/agents/<agent>/config.json``.
+    """
+    import json
+    import os
+    from pathlib import Path
+
+    roots: list[Path] = []
+    primary = os.environ.get("ELEVATE_PEERS_ROOT", "").strip()
+    if primary:
+        roots.append(Path(primary).expanduser())
+    extra = os.environ.get("ELEVATE_PEERS_ROOTS", "").strip()
+    if extra:
+        for chunk in extra.split(":"):
+            chunk = chunk.strip()
+            if chunk:
+                roots.append(Path(chunk).expanduser())
+    if not roots:
+        fallback = Path.home() / "claudeclaw" / "orgs"
+        if fallback.exists():
+            roots.append(fallback)
+
+    peers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            for config_path in sorted(root.glob("*/agents/*/config.json")):
+                try:
+                    payload = json.loads(config_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                org = config_path.parents[2].name
+                agent = str(payload.get("agent_name") or config_path.parent.name)
+                key = f"{org}/{agent}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Look for the matching AGENTS.md / CLAUDE.md for a one-line
+                # role hint without forcing an LLM call. First non-empty,
+                # non-header line under 140 chars wins.
+                role_hint = ""
+                for fname in ("AGENTS.md", "CLAUDE.md", "IDENTITY.md"):
+                    agent_doc = config_path.parent / fname
+                    if not agent_doc.exists():
+                        continue
+                    try:
+                        for line in agent_doc.read_text(encoding="utf-8").splitlines():
+                            stripped = line.strip()
+                            if not stripped or stripped.startswith("#"):
+                                continue
+                            if stripped.startswith("@"):
+                                continue
+                            if len(stripped) > 140:
+                                stripped = stripped[:137] + "…"
+                            role_hint = stripped
+                            break
+                        if role_hint:
+                            break
+                    except Exception:
+                        continue
+                peers.append({
+                    "org": org,
+                    "name": agent,
+                    "enabled": bool(payload.get("enabled", True)),
+                    "workingDirectory": str(payload.get("working_directory") or ""),
+                    "timezone": str(payload.get("timezone") or ""),
+                    "communicationStyle": str(payload.get("communication_style") or ""),
+                    "cronCount": len(payload.get("crons") or []),
+                    "roleHint": role_hint,
+                    "configPath": str(config_path),
+                })
+        except Exception:
+            _log.exception("GET /api/agents/peers failed walking root=%s", root)
+            continue
+    return {"peers": peers, "rootsSearched": [str(r) for r in roots]}
 
 
 @app.get("/api/config/tiers")
@@ -5597,36 +5738,145 @@ async def put_lane_channels_endpoint(lane: str, body: _LaneChannelsBody):
         raise HTTPException(status_code=500, detail=f"Set lane channels failed: {exc}")
 
 
+_WIRED_SOURCE_IDS = frozenset({"apple-messages", "crm", "social"})
+
+
 @app.post("/api/source-connectors")
 async def update_source_connector(body: SourceConnectorAction):
-    if body.action not in {"scaffold", "refresh"}:
+    if body.action not in {"scaffold", "refresh", "run-prompt"}:
         raise HTTPException(status_code=400, detail="Unsupported source connector action")
     try:
         from elevate_cli.source_connectors import (
             build_source_connectors_response,
+            connector_view as _connector_view,
+            get_source_root_info,
             initialize_apple_messages_source,
             scaffold_source,
+            source_prompt_for,
         )
 
         refresh_summary: dict[str, Any] | None = None
-        if body.action == "refresh":
-            if body.sourceId == "apple-messages":
-                initialize_apple_messages_source()
-            elif body.sourceId == "crm":
-                scaffold_source("crm")
-            elif body.sourceId == "social":
-                from elevate_cli import composio_inbound
+        run_result: dict[str, Any] | None = None
+        run_error: str | None = None
+        composio_summary: dict[str, Any] | None = None
 
-                refresh_summary = composio_inbound.pull_all_supported()
+        def _run_canonical(source_id: str) -> dict[str, Any] | None:
+            """Fire the source's wired pull. Returns the composio summary for
+            social; None for apple-messages and crm (their state lives in the
+            connector_view we read after). For unwired sources, scaffolds the
+            agent setup task with the latest prompt embedded."""
+            if source_id == "apple-messages":
+                initialize_apple_messages_source()
+                return None
+            if source_id == "crm":
+                scaffold_source("crm")
+                return None
+            if source_id == "social":
+                from elevate_cli import composio_inbound
+                return composio_inbound.pull_all_supported()
+            scaffold_source(source_id)
+            return None
+
+        if body.action == "refresh":
+            refresh_summary = _run_canonical(body.sourceId)
+        elif body.action == "run-prompt":
+            prompt_text = source_prompt_for(body.sourceId)
+            wired = body.sourceId in _WIRED_SOURCE_IDS
+            try:
+                composio_summary = _run_canonical(body.sourceId)
+            except Exception as exc:
+                _log.exception("run-prompt for %s failed", body.sourceId)
+                run_error = f"{type(exc).__name__}: {exc}"
+
+            # Read post-run connector state so the UI can show real outcome.
+            info = get_source_root_info()
+            source_root = Path(info["sourceRoot"])
+            view = _connector_view(source_root, body.sourceId) or {}
+
+            counts = view.get("recordCounts") if isinstance(view, dict) else None
+            counts = counts if isinstance(counts, dict) else {}
+            contact_count = int(counts.get("contacts") or 0)
+            conversation_count = int(counts.get("conversations") or 0)
+            message_count = int(counts.get("messages") or 0)
+
+            auth_status = view.get("authStatus") if isinstance(view, dict) else None
+            last_error = view.get("lastError") if isinstance(view, dict) else None
+            next_step = view.get("nextOperatorStep") if isinstance(view, dict) else None
+            connected = bool(view.get("connected")) if isinstance(view, dict) else False
+
+            outcome_kind: str
+            outcome_message: str
+
+            if run_error:
+                outcome_kind = "error"
+                outcome_message = f"Run failed: {run_error}"
+            elif body.sourceId == "social" and isinstance(composio_summary, dict):
+                total_new = composio_summary.get("total_new") or 0
+                total_fetched = composio_summary.get("total_fetched") or 0
+                outcome_kind = "ok"
+                outcome_message = f"Composio pulled {total_new} new / {total_fetched} fetched into operational.db."
+            elif body.sourceId == "crm" and auth_status == "missing_secret":
+                outcome_kind = "needs_operator"
+                outcome_message = (
+                    next_step
+                    or "CRM API key not configured — add it in the CRM Integration panel, then click Run prompt again."
+                )
+            elif body.sourceId == "crm":
+                outcome_kind = "ok" if connected else ("error" if last_error else "ok")
+                outcome_message = (
+                    f"Pulled {contact_count} CRM contacts / {message_count} activities into operational.db."
+                    if connected
+                    else (last_error or "CRM sync ran — see Sources page for details.")
+                )
+            elif body.sourceId == "apple-messages":
+                outcome_kind = "ok"
+                outcome_message = (
+                    f"Apple Messages: {contact_count} contacts, {conversation_count} chats, {message_count} messages indexed."
+                )
+            elif wired:
+                outcome_kind = "ok"
+                outcome_message = "Pulled inline — operational.db updated."
             else:
-                # Generic refresh: re-run scaffold so the connector record / task is up to date.
-                scaffold_source(body.sourceId)
+                outcome_kind = "dispatched"
+                source_dir = view.get("sourceDir") if isinstance(view, dict) else None
+                outcome_message = (
+                    f"Agent setup task scaffolded at {source_dir}/tasks.jsonl. "
+                    "Open /tasks or dispatch to Jimmy to build the connector."
+                )
+
+            run_result = {
+                "sourceId": body.sourceId,
+                "wired": wired,
+                "execution": "server_inline" if wired else "agent_task_dispatched",
+                "prompt": prompt_text,
+                "outcome": {
+                    "kind": outcome_kind,
+                    "message": outcome_message,
+                    "recordCounts": {
+                        "contacts": contact_count,
+                        "conversations": conversation_count,
+                        "messages": message_count,
+                    },
+                    "lastError": last_error,
+                    "authStatus": auth_status,
+                    "nextOperatorStep": next_step,
+                    "sourceDir": view.get("sourceDir") if isinstance(view, dict) else None,
+                },
+                "next_action_for_operator": None if wired else (
+                    f"Open {view.get('sourceDir') if isinstance(view, dict) else 'data/sources/<source-id>'}/tasks.jsonl, "
+                    "or dispatch to Jimmy via the dispatch-bridge."
+                ),
+            }
+            if isinstance(composio_summary, dict):
+                refresh_summary = composio_summary
         else:
             scaffold_source(body.sourceId)
 
         payload: dict[str, Any] = {"ok": True, **build_source_connectors_response()}
         if refresh_summary is not None:
             payload["refresh"] = refresh_summary
+        if run_result is not None:
+            payload["run"] = run_result
         return payload
     except Exception as exc:
         _log.exception("POST /api/source-connectors failed")
@@ -5873,18 +6123,35 @@ async def composio_capabilities(toolkit: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Composio capabilities failed: {exc}")
 
 
+# Process-level cache for the full Composio toolkit catalog. The list rarely
+# changes within a single dashboard session and the all-pages walk costs 3-6
+# round-trips to api.composio.dev. Cuts wizard load time roughly in half.
+_COMPOSIO_TOOLKITS_CACHE: dict[str, tuple[float, Any]] = {}
+_COMPOSIO_TOOLKITS_TTL_SEC = 300.0
+
+
 @app.get("/api/composio/toolkits")
 async def composio_toolkits(category: Optional[str] = None, all: bool = True, limit: int = 100):
     """List Composio toolkits.
 
     Defaults to walking every page so the hub UI can show the full catalog.
     Pass ``all=false`` to get just the first page (useful for cheap probes).
+    Cached for 5 minutes per (category, limit) pair when ``all=True``.
     """
+    import time
+
     try:
         from elevate_cli import composio_client
 
         if all:
-            return composio_client.list_all_toolkits(category=category, page_size=limit)
+            cache_key = f"all::{category or ''}::{limit}"
+            entry = _COMPOSIO_TOOLKITS_CACHE.get(cache_key)
+            now = time.monotonic()
+            if entry and (now - entry[0]) < _COMPOSIO_TOOLKITS_TTL_SEC:
+                return entry[1]
+            result = composio_client.list_all_toolkits(category=category, page_size=limit)
+            _COMPOSIO_TOOLKITS_CACHE[cache_key] = (now, result)
+            return result
         return composio_client.list_toolkits(category=category, limit=limit)
     except Exception as exc:
         _log.exception("GET /api/composio/toolkits failed")

@@ -371,6 +371,79 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
             },
         }
 
+    # CLI is the always-on surface. The fact that this code is executing
+    # means the user is talking to Elevate — surface it as configured so the
+    # wizard never paints CLI as "Off".
+    overlays["operator_channel_cli"] = {
+        "status": "configured",
+        "provider": "elevate-cli",
+        "value": {"enabled": True, "alwaysOn": True},
+    }
+
+    # iMessage — probe local Messages.db. If the file exists and is readable
+    # the channel is live; FDA enforcement happens at read time.
+    try:
+        from pathlib import Path
+
+        messages_db = Path.home() / "Library" / "Messages" / "chat.db"
+        if messages_db.exists() and os.access(messages_db, os.R_OK):
+            overlays["operator_channel_imessage"] = {
+                "status": "configured",
+                "provider": "imessage",
+                "value": {"handle": "", "secretSource": "macos"},
+            }
+    except Exception:
+        pass
+
+    discord_token = _get("DISCORD_BOT_TOKEN")
+    discord_channel = _get("DISCORD_CHANNEL_ID")
+    if discord_token and discord_channel:
+        overlays["operator_channel_discord"] = {
+            "status": "configured",
+            "provider": "discord",
+            "value": {
+                "botToken": "",
+                "channelId": discord_channel,
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(discord_token),
+            },
+        }
+
+    whatsapp_token = _get("WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN")
+    whatsapp_phone = _get("WHATSAPP_PHONE_ID", "WHATSAPP_PHONE_NUMBER_ID")
+    whatsapp_provider = _get("WHATSAPP_PROVIDER") or (
+        "meta_cloud_api" if whatsapp_token else None
+    )
+    if whatsapp_token and whatsapp_provider:
+        overlays["operator_channel_whatsapp"] = {
+            "status": "configured",
+            "provider": "whatsapp",
+            "value": {
+                "provider": whatsapp_provider,
+                "token": "",
+                "phoneId": whatsapp_phone or "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(whatsapp_token),
+            },
+        }
+
+    slack_webhook = _get("SLACK_WEBHOOK_URL")
+    slack_channel = _get("SLACK_DEFAULT_CHANNEL", "SLACK_CHANNEL")
+    if slack_webhook:
+        overlays["operator_channel_slack"] = {
+            "status": "configured",
+            "provider": "slack",
+            "value": {
+                "webhookUrl": "",
+                "channel": slack_channel or "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(slack_webhook),
+            },
+        }
+
     return overlays
 
 

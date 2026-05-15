@@ -243,6 +243,30 @@ export const api = {
     fetchJSON<{ provider: string; models: string[] }>(
       `/api/models/by-provider?provider=${encodeURIComponent(provider)}`,
     ),
+  testSlackWebhook: (params: { webhook_url: string; channel?: string; text?: string }) =>
+    fetchJSON<{ ok: boolean; status: number; detail: string }>(
+      "/api/channels/slack/test",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      },
+    ),
+  getAgentPeers: () =>
+    fetchJSON<{
+      peers: Array<{
+        org: string;
+        name: string;
+        enabled: boolean;
+        workingDirectory: string;
+        timezone: string;
+        communicationStyle: string;
+        cronCount: number;
+        roleHint: string;
+        configPath: string;
+      }>;
+      rootsSearched: string[];
+    }>("/api/agents/peers"),
   saveConfig: (config: Record<string, unknown>) =>
     fetchJSON<{ ok: boolean }>("/api/config", {
       method: "PUT",
