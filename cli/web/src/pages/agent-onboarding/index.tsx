@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { FullWindowAurora } from "@/components/FullWindowAurora";
 import type {
   AdminSetupItemStatus,
   AgentSetupItem,
@@ -859,30 +860,11 @@ export function AgentOnboardingPage() {
 
   if (loading) {
     return (
-      <div className="onboarding-overlay relative -mx-6 -my-6 flex min-h-[calc(100vh-9rem)] items-center justify-center overflow-hidden px-6 py-10">
-        <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
-        <div className="relative flex flex-col items-center text-center">
-          <div className="onboarding-rise flex items-center gap-3">
-            <span
-              aria-hidden
-              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-card text-[15px] font-semibold tracking-tight text-foreground"
-            >
-              E
-            </span>
-            <span className="text-[17px] font-medium tracking-tight text-foreground">Elevate</span>
-          </div>
-          <div className="onboarding-rise-delay-1 mt-7 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            Agent · onboarding
-          </div>
-          <h2 className="onboarding-rise-delay-2 mt-2 text-[26px] font-medium leading-[1.1] tracking-tight text-foreground">
-            Loading your setup
-          </h2>
-          <p className="onboarding-rise-delay-3 mt-2 max-w-sm text-[13px] leading-6 text-muted-foreground">
-            Reading existing connectors, memory wiring, and outbound channels.
-          </p>
-          <Loader2 className="onboarding-rise-delay-3 mt-6 h-4 w-4 animate-spin text-muted-foreground/70" />
-        </div>
-      </div>
+      <FullWindowAurora
+        label="Agent · onboarding"
+        title="Loading your setup"
+        subtitle="Reading existing connectors, memory wiring, and outbound channels."
+      />
     );
   }
   if (error) {

@@ -125,6 +125,7 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { FullWindowAurora } from "@/components/FullWindowAurora";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
 
@@ -136,28 +137,14 @@ function CoreRootRedirect() {
   return <Navigate to={isDashboardEmbeddedChatEnabled() ? "/chat" : "/hub"} replace />;
 }
 
-function FullWindowAurora({ label }: { label: string }) {
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div
-      role="status"
-      aria-live="polite"
-      className="onboarding-overlay fixed inset-0 z-[150] flex items-center justify-center overflow-hidden bg-background"
-    >
-      <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
-      <div className="relative flex flex-col items-center gap-3">
-        <Loader2 className="onboarding-rise h-5 w-5 animate-spin text-primary" />
-        <span className="onboarding-rise-delay-1 font-mono-ui text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-          {label}
-        </span>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 function AccessLoadingPage() {
-  return <FullWindowAurora label="Loading access" />;
+  return (
+    <FullWindowAurora
+      label="Checking access"
+      title="Opening Elevate"
+      subtitle="Verifying your workspace and signing you in."
+    />
+  );
 }
 
 function LockedDashboardRedirect() {
@@ -653,7 +640,15 @@ export default function App() {
                     !isChatRoute && !isConfigRoute && "elevate-route-transition",
                   )}
                 >
-                  <Suspense fallback={<FullWindowAurora label="Loading" />}>
+                  <Suspense
+                    fallback={
+                      <FullWindowAurora
+                        label="Loading"
+                        title="Opening view"
+                        subtitle="Loading the page bundle."
+                      />
+                    }
+                  >
                     <Routes>
                       {routes.map(({ key, path, element }) => (
                         <Route key={key} path={path} element={element} />
