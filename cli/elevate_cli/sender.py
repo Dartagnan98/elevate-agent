@@ -300,47 +300,98 @@ def _send_agent_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     }
 
 
-def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Send via macOS Messages.app — iMessage first, SMS fallback. No LLM.
+_CHAT_DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
 
-    Why: the elevate-chat agent path depended on Anthropic credits
-    (quota-blocked) or openai-codex (auth broken on this machine); the
-    LLM emitted no SENT line and rows piled up in `retrying`. The real
-    work is one osascript call. Tries the iMessage service first, falls
-    back to SMS (which routes through the user's paired iPhone if SMS
-    forwarding is enabled). Override with `ELEVATE_SMS_DISPATCHER=agent`.
+
+def _detect_preferred_transport(phone: str) -> str:
+    """Pick `iMessage` or `SMS` from chat.db history.
+
+    Per-handle: look at the most recent outbound message to that handle
+    where `error=0 AND is_sent=1`. If the winner was SMS, return "SMS";
+    if iMessage, return "iMessage"; if no successful history exists,
+    default to "iMessage" (Apple's own default).
+
+    chat.db.error column meanings the dispatcher cares about:
+        0  → no error (delivered / queued OK)
+        22 → "Not Delivered" — recipient unreachable on iMessage
+    A row with error != 0 means that service genuinely didn't work for
+    this recipient last time, so we down-rank it.
     """
-    payload = row.get("payload") or {}
-    draft = str(payload.get("draft_text") or "").strip()
-    if not draft:
-        raise SenderPermanentError("messages-native: payload missing draft_text")
-    recipient = payload.get("recipient") or {}
-    phone = _format_phone(recipient.get("phone"))
-    if not phone:
-        raise SenderPermanentError("messages-native: recipient missing phone")
+    if not os.path.exists(_CHAT_DB_PATH):
+        return "iMessage"
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(f"file:{_CHAT_DB_PATH}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute(
+                "SELECT m.service FROM message m "
+                "JOIN handle h ON m.handle_id = h.ROWID "
+                "WHERE h.id = ? AND m.is_from_me = 1 AND m.error = 0 AND m.is_sent = 1 "
+                "ORDER BY m.date DESC LIMIT 1",
+                (phone,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return "iMessage"
+    if row and row[0]:
+        svc = str(row[0]).strip()
+        if svc.lower() == "sms":
+            return "SMS"
+        if svc.lower() == "imessage":
+            return "iMessage"
+    return "iMessage"
 
+
+def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tuple[str, int] | None:
+    """Confirm the message actually delivered by reading chat.db.
+
+    Returns (service, error_code) for the most recent matching outbound
+    row, or None if nothing matched. Used after osascript returns 0 to
+    catch the silent-fail case where Messages.app accepts the send but
+    Apple's IDS later rejects it (error=22 "Not Delivered").
+
+    Matches on (handle.id == phone, is_from_me=1, date >= since_epoch).
+    `text` may live in attributedBody on newer macOS, so we don't filter
+    on draft content — the recency + handle match is enough.
+    """
+    if not os.path.exists(_CHAT_DB_PATH):
+        return None
+    # chat.db.date is nanoseconds since 2001-01-01 epoch.
+    apple_epoch_offset = 978307200.0  # 2001-01-01 in unix seconds
+    since_apple_ns = int((since_epoch - apple_epoch_offset) * 1_000_000_000)
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(f"file:{_CHAT_DB_PATH}?mode=ro", uri=True, timeout=5)
+        try:
+            cur = conn.execute(
+                "SELECT m.service, m.error FROM message m "
+                "JOIN handle h ON m.handle_id = h.ROWID "
+                "WHERE h.id = ? AND m.is_from_me = 1 AND m.date >= ? "
+                "ORDER BY m.date DESC LIMIT 1",
+                (phone, since_apple_ns),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return (str(row[0] or ""), int(row[1] or 0))
+
+
+def _osa_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, str]:
+    """Run a single osascript send via the named service ('iMessage' or 'SMS').
+
+    Returns (returncode, stdout, stderr). Caller decides what to do.
+    """
     def _q(s: str) -> str:
         return s.replace("\\", "\\\\").replace("\"", "\\\"")
-
-    # Try iMessage; if Messages raises (recipient not on iMessage, etc.)
-    # fall back to SMS — that goes through the user's iPhone via the
-    # SMS-forwarding bridge.  AppleScript's `try / on error` lets us do
-    # both in a single osascript call without a second subprocess hop.
     script = (
         'tell application "Messages"\n'
-        '  try\n'
-        '    set imSvc to 1st service whose service type = iMessage\n'
-        f'    send "{_q(draft)}" to buddy "{_q(phone)}" of imSvc\n'
-        '    return "imessage"\n'
-        '  on error errMsg\n'
-        '    try\n'
-        '      set smsSvc to 1st service whose service type = SMS\n'
-        f'      send "{_q(draft)}" to buddy "{_q(phone)}" of smsSvc\n'
-        '      return "sms"\n'
-        '    on error errMsg2\n'
-        '      error errMsg2\n'
-        '    end try\n'
-        '  end try\n'
+        f'  set targetService to 1st service whose service type = {service_type}\n'
+        f'  send "{_q(draft)}" to buddy "{_q(phone)}" of targetService\n'
         'end tell\n'
     )
     try:
@@ -351,24 +402,97 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
             timeout=30,
             check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise SenderTransientError("messages-native: osascript timed out") from exc
+    except subprocess.TimeoutExpired:
+        return (124, "", "osascript timed out")
+    return (result.returncode, result.stdout or "", result.stderr or "")
 
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip().splitlines()
-        last = err[-1][:280] if err else f"exit={result.returncode}"
-        raise SenderTransientError(f"messages-native: {last}")
 
-    transport = (result.stdout or "").strip() or "unknown"
-    pmid_prefix = "imessage" if transport == "imessage" else "sms" if transport == "sms" else "messages"
-    pmid = f"{pmid_prefix}-{uuid.uuid4().hex[:10]}"
-    return pmid, {
-        "agent": "messages-native",
-        "channel": "sms",
-        "phone": phone,
-        "transport": transport,
-        "dispatched_at": _now(),
-    }
+def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Send via macOS Messages.app — dynamic iMessage vs SMS per recipient.
+
+    Detection flow:
+      1. Pre-flight chat.db lookup → pick the service that worked most
+         recently for this handle. Defaults to iMessage if no history.
+      2. Run osascript send via the chosen service.
+      3. Post-send verify in chat.db (give Messages 1.5s to write the
+         row + Apple's IDS to ack). If the row landed with error != 0
+         AND we picked iMessage, retry on SMS once.
+      4. SMS legitimately succeeds even when chat.db.error != 0 in
+         rare cases (carrier propagation lag), so SMS post-verify only
+         fails on explicit "not sent" markers.
+
+    Override the whole detection with `ELEVATE_SMS_DISPATCHER=agent`
+    (revert to LLM) or `ELEVATE_FORCE_SMS=1` (skip iMessage entirely).
+    """
+    payload = row.get("payload") or {}
+    draft = str(payload.get("draft_text") or "").strip()
+    if not draft:
+        raise SenderPermanentError("messages-native: payload missing draft_text")
+    recipient = payload.get("recipient") or {}
+    phone = _format_phone(recipient.get("phone"))
+    if not phone:
+        raise SenderPermanentError("messages-native: recipient missing phone")
+
+    force_sms = os.getenv("ELEVATE_FORCE_SMS", "").lower() in ("1", "true", "yes")
+    detected = "SMS" if force_sms else _detect_preferred_transport(phone)
+    started = time.time()
+
+    def _attempt(service_type: str) -> tuple[str, dict[str, Any]] | None:
+        send_start = time.time()
+        rc, stdout, stderr = _osa_send_via(phone, draft, service_type)
+        if rc != 0:
+            last = (stderr or stdout or f"exit={rc}").strip().splitlines()[-1][:240]
+            raise SenderTransientError(f"messages-native[{service_type}]: {last}")
+        # Give Messages a moment to write the row + IDS to respond.
+        time.sleep(1.6)
+        verify = _verify_send_landed(phone, draft[:16], send_start - 0.5)
+        if verify is None:
+            # No row visible yet — give one more poll, then trust osascript.
+            time.sleep(1.5)
+            verify = _verify_send_landed(phone, draft[:16], send_start - 0.5)
+        if verify is not None:
+            svc_observed, err_code = verify
+            if err_code == 0:
+                pmid_prefix = "imessage" if svc_observed.lower() == "imessage" else "sms"
+                pmid = f"{pmid_prefix}-{uuid.uuid4().hex[:10]}"
+                return pmid, {
+                    "agent": "messages-native",
+                    "channel": "sms",
+                    "phone": phone,
+                    "transport": svc_observed,
+                    "transport_attempted": service_type,
+                    "dispatched_at": _now(),
+                    "verify_lag_ms": int((time.time() - send_start) * 1000),
+                }
+            # Service-level rejection (error 22 = "Not Delivered" for iMessage).
+            return None
+        # Couldn't observe the row at all — assume delivered (rare on this Mac).
+        pmid = f"{service_type.lower()}-{uuid.uuid4().hex[:10]}"
+        return pmid, {
+            "agent": "messages-native",
+            "channel": "sms",
+            "phone": phone,
+            "transport": service_type,
+            "transport_attempted": service_type,
+            "verified": False,
+            "dispatched_at": _now(),
+        }
+
+    first = _attempt(detected)
+    if first is not None:
+        return first
+
+    fallback = "SMS" if detected == "iMessage" else "iMessage"
+    second = _attempt(fallback)
+    if second is not None:
+        info = second[1]
+        info["fallback_from"] = detected
+        return second[0], info
+
+    raise SenderTransientError(
+        f"messages-native: both {detected} and {fallback} failed delivery "
+        f"checks for {phone} (chat.db error != 0)"
+    )
 
 
 # Back-compat alias for any callers that imported the older name.

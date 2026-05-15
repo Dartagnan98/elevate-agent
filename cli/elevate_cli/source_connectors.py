@@ -9,6 +9,7 @@ requiring a cloud backend.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextlib
 import fcntl
 import json
@@ -16,6 +17,7 @@ import os
 import re
 import hashlib
 import sqlite3
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3547,7 +3549,13 @@ def _lofty_headers(env_values: dict[str, str]) -> tuple[dict[str, str], str]:
     return {"Accept": "application/json", "Content-Type": "application/json"}, "missing"
 
 
-def _lofty_get(path: str, env_values: dict[str, str], params: dict[str, Any] | None = None) -> Any:
+def _lofty_get(
+    path: str,
+    env_values: dict[str, str],
+    params: dict[str, Any] | None = None,
+    *,
+    timeout: int = 18,
+) -> Any:
     headers, _auth_type = _lofty_headers(env_values)
     if headers.get("Authorization") is None:
         raise RuntimeError("LOFTY_API_KEY or LOFTY_ACCESS_TOKEN is not set")
@@ -3557,7 +3565,7 @@ def _lofty_get(path: str, env_values: dict[str, str], params: dict[str, Any] | N
         query = urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
         url = f"{url}?{query}"
     request = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(request, timeout=18) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read(1024 * 1024 * 4)
     return json.loads(raw.decode("utf-8") or "{}")
 
@@ -3604,6 +3612,8 @@ def _lofty_get_first_ok(
     paths: tuple[str, ...],
     env_values: dict[str, str],
     params: dict[str, Any] | None = None,
+    *,
+    timeout: int = 18,
 ) -> list[JsonRecord]:
     """Try each path in order; return the first response that yields a
     non-empty list of records. 404/403/timeout on one path falls through
@@ -3618,7 +3628,16 @@ def _lofty_get_first_ok(
     saw_ok = False
     for path in paths:
         try:
-            payload = _lofty_get(path, env_values, params)
+            payload = _lofty_get(path, env_values, params, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            # 404 is a clean "this endpoint shape isn't supported on this
+            # tenant" — fall through silently. Other HTTP errors track as
+            # real failures so callers can count them.
+            if exc.code == 404:
+                saw_ok = True
+                continue
+            last_error = exc
+            continue
         except Exception as exc:  # noqa: BLE001 — defensive cross-endpoint probe
             last_error = exc
             continue
@@ -3633,7 +3652,9 @@ def _lofty_get_first_ok(
     return []
 
 
-def _lofty_get_activities(lead_id: str, env_values: dict[str, str], *, limit: int = 50) -> list[JsonRecord]:
+def _lofty_get_activities(
+    lead_id: str, env_values: dict[str, str], *, limit: int = 50, timeout: int = 18,
+) -> list[JsonRecord]:
     """Pull the lead's activity feed (page views, saved-search hits,
     tour requests, email opens). Tries v2.0 then v1.0 — endpoint shape
     varies across Lofty/Chime tenant migrations."""
@@ -3648,10 +3669,13 @@ def _lofty_get_activities(lead_id: str, env_values: dict[str, str], *, limit: in
         ),
         env_values,
         params,
+        timeout=timeout,
     )
 
 
-def _lofty_get_notes(lead_id: str, env_values: dict[str, str], *, limit: int = 50) -> list[JsonRecord]:
+def _lofty_get_notes(
+    lead_id: str, env_values: dict[str, str], *, limit: int = 50, timeout: int = 18,
+) -> list[JsonRecord]:
     """Pull the lead's free-form notes (the ones agents type into Lofty).
 
     Real Lofty shape: ``GET /v1.0/notes?leadId=<id>`` → ``{notes: [...]}``.
@@ -3668,10 +3692,13 @@ def _lofty_get_notes(lead_id: str, env_values: dict[str, str], *, limit: int = 5
         ),
         env_values,
         None,
+        timeout=timeout,
     )
 
 
-def _lofty_get_tasks(lead_id: str, env_values: dict[str, str], *, limit: int = 50) -> list[JsonRecord]:
+def _lofty_get_tasks(
+    lead_id: str, env_values: dict[str, str], *, limit: int = 50, timeout: int = 18,
+) -> list[JsonRecord]:
     """Pull the lead's tasks/follow-ups assigned in Lofty.
 
     Real Lofty shape: ``GET /v1.0/tasks?leadId=<id>`` → ``{taskList: [...]}``."""
@@ -3685,6 +3712,7 @@ def _lofty_get_tasks(lead_id: str, env_values: dict[str, str], *, limit: int = 5
         ),
         env_values,
         None,
+        timeout=timeout,
     )
 
 
@@ -4432,6 +4460,159 @@ def crm_update_stage(
     raise NotImplementedError(f"crm_update_stage not yet implemented for provider: {provider}")
 
 
+# Lofty enrichment is the dominant cost of `elevate sync crm`: 3 HTTP calls
+# per lead (activities + notes + tasks). To prevent a slow tenant from hanging
+# the whole sync, enrichment runs in parallel with a per-call ceiling and
+# checkpoints to disk every N leads so a killed run resumes instead of restarting.
+_LOFTY_ENRICHMENT_WORKERS = 8
+_LOFTY_ENRICHMENT_TIMEOUT_S = 10
+_LOFTY_ENRICHMENT_CHECKPOINT_EVERY = 5
+
+
+def _lofty_load_enrichment_progress(
+    artifacts_dir: Path,
+) -> tuple[set[str], list[JsonRecord], dict[str, int]]:
+    """Load the prior enrichment checkpoint so a resumed sync skips already-
+    enriched lead_ids. Missing/corrupt file = clean start, never raises."""
+    path = artifacts_dir / "enrichment_progress.json"
+    if not path.exists():
+        return set(), [], {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (json.JSONDecodeError, OSError):
+        return set(), [], {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
+    completed = {str(x) for x in (payload.get("completed_lead_ids") or []) if x}
+    events = [e for e in (payload.get("events") or []) if isinstance(e, dict)]
+    summary = payload.get("summary") or {}
+    base_summary = {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
+    for key in base_summary:
+        base_summary[key] = int(summary.get(key, 0) or 0)
+    return completed, events, base_summary
+
+
+def _lofty_save_enrichment_progress(
+    artifacts_dir: Path,
+    *,
+    completed_lead_ids: set[str],
+    events: list[JsonRecord],
+    summary: dict[str, int],
+    total_leads: int,
+    status: str,
+) -> None:
+    """Atomic checkpoint write — same readers/writers can see partial
+    enrichment without a torn file."""
+    payload = {
+        "checkpointed_at": _now(),
+        "status": status,
+        "completed_lead_ids": sorted(completed_lead_ids),
+        "completed_count": len(completed_lead_ids),
+        "total_leads": total_leads,
+        "summary": summary,
+        "events": events,
+    }
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    tmp = artifacts_dir / "enrichment_progress.json.tmp"
+    final = artifacts_dir / "enrichment_progress.json"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, final)
+
+
+def _lofty_enrich_one_lead(
+    *,
+    lead_id: str,
+    record_id: str,
+    base_record: JsonRecord,
+    fallback_timestamp: str,
+    env_values: dict[str, str],
+    timeout: int,
+) -> tuple[str, list[JsonRecord], dict[str, int]]:
+    """Worker called from a thread pool. Pulls activities + notes + tasks
+    for one lead and returns the typed lead_events + a per-lead summary
+    delta. Never raises — endpoint errors increment the error counter so
+    one slow lead can't block the whole pool."""
+    events: list[JsonRecord] = []
+    summary = {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
+
+    try:
+        activity_payload = _lofty_get_activities(lead_id, env_values, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        activity_payload = []
+        summary["errors"] += 1
+    for raw_act in activity_payload:
+        norm = _lofty_normalize_activity(raw_act, lead_id)
+        act_id = norm["id"] or _stable_hash_id(
+            norm["subtype"], norm["title"], norm["timestamp"]
+        )
+        events.append(
+            {
+                **base_record,
+                "source_record_id": f"{record_id}:activity:{act_id}",
+                "type": "crm_activity",
+                "provider": "lofty",
+                "subtype": norm["subtype"],
+                "title": norm["title"],
+                "summary": norm["summary"],
+                "address": norm["address"],
+                "timestamp": norm["timestamp"] or fallback_timestamp,
+            }
+        )
+    summary["activities"] = len(activity_payload)
+
+    try:
+        notes_payload = _lofty_get_notes(lead_id, env_values, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        notes_payload = []
+        summary["errors"] += 1
+    for raw_note in notes_payload:
+        norm = _lofty_normalize_note(raw_note, lead_id)
+        note_id = norm["id"] or _stable_hash_id(
+            norm["title"], norm["summary"], norm["timestamp"]
+        )
+        events.append(
+            {
+                **base_record,
+                "source_record_id": f"{record_id}:note:{note_id}",
+                "type": "crm_note",
+                "provider": "lofty",
+                "title": norm["title"] or "Note",
+                "summary": norm["summary"],
+                "author": norm["author"],
+                "timestamp": norm["timestamp"] or fallback_timestamp,
+            }
+        )
+    summary["notes"] = len(notes_payload)
+
+    try:
+        tasks_payload = _lofty_get_tasks(lead_id, env_values, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        tasks_payload = []
+        summary["errors"] += 1
+    tasks_payload = [t for t in tasks_payload if not t.get("deleteFlag")]
+    for raw_task in tasks_payload:
+        norm = _lofty_normalize_task(raw_task, lead_id)
+        task_id = norm["id"] or _stable_hash_id(
+            norm["title"], norm["summary"], norm["dueAt"], norm["timestamp"]
+        )
+        events.append(
+            {
+                **base_record,
+                "source_record_id": f"{record_id}:task:{task_id}",
+                "type": "crm_task",
+                "provider": "lofty",
+                "title": norm["title"],
+                "summary": norm["summary"],
+                "status": norm["status"],
+                "task_subtype": norm["type"],
+                "assignedUser": norm["assignedUser"],
+                "dueAt": norm["dueAt"],
+                "timestamp": norm["timestamp"] or fallback_timestamp,
+            }
+        )
+    summary["tasks"] = len(tasks_payload)
+
+    return lead_id, events, summary
+
+
 def sync_lofty_crm_source(
     config: dict[str, Any] | None = None,
     *,
@@ -4534,6 +4715,7 @@ def sync_lofty_crm_source(
     conversation_records: list[JsonRecord] = []
     lead_events: list[JsonRecord] = []
     task_records: list[JsonRecord] = []
+    pending_enrichments: list[JsonRecord] = []
     enrichment_summary: dict[str, int] = {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
     max_enriched = max(0, int(enrichment_limit or 0))
     for index, lead in enumerate(deduped):
@@ -4592,88 +4774,18 @@ def sync_lofty_crm_source(
             }
         )
 
-        # Enrichment: pull activities/notes/tasks for this lead and stamp
-        # each as a typed lead_event so the thread-context drawer can show
-        # what the lead has actually been doing — not just a score. Each
-        # endpoint is best-effort: a 404 or transient error on one lead
-        # must not break the whole sync.
+        # Phase 2 enrichment runs in parallel after Phase 1 writes the
+        # lead snapshot to disk. Stash everything we need to enrich this
+        # lead later so the thread pool has self-contained job inputs.
         if lead_id and index < max_enriched:
-            try:
-                activity_payload = _lofty_get_activities(lead_id, env_values)
-            except Exception:  # noqa: BLE001
-                activity_payload = []
-                enrichment_summary["errors"] += 1
-            for raw_act in activity_payload:
-                norm = _lofty_normalize_activity(raw_act, lead_id)
-                act_id = norm["id"] or _stable_hash_id(
-                    norm["subtype"], norm["title"], norm["timestamp"]
-                )
-                lead_events.append(
-                    {
-                        **base_record,
-                        "source_record_id": f"{record_id}:activity:{act_id}",
-                        "type": "crm_activity",
-                        "provider": "lofty",
-                        "subtype": norm["subtype"],
-                        "title": norm["title"],
-                        "summary": norm["summary"],
-                        "address": norm["address"],
-                        "timestamp": norm["timestamp"] or timestamp,
-                    }
-                )
-            enrichment_summary["activities"] += len(activity_payload)
-
-            try:
-                notes_payload = _lofty_get_notes(lead_id, env_values)
-            except Exception:  # noqa: BLE001
-                notes_payload = []
-                enrichment_summary["errors"] += 1
-            for raw_note in notes_payload:
-                norm = _lofty_normalize_note(raw_note, lead_id)
-                note_id = norm["id"] or _stable_hash_id(
-                    norm["title"], norm["summary"], norm["timestamp"]
-                )
-                lead_events.append(
-                    {
-                        **base_record,
-                        "source_record_id": f"{record_id}:note:{note_id}",
-                        "type": "crm_note",
-                        "provider": "lofty",
-                        "title": norm["title"] or "Note",
-                        "summary": norm["summary"],
-                        "author": norm["author"],
-                        "timestamp": norm["timestamp"] or timestamp,
-                    }
-                )
-            enrichment_summary["notes"] += len(notes_payload)
-
-            try:
-                tasks_payload = _lofty_get_tasks(lead_id, env_values)
-            except Exception:  # noqa: BLE001
-                tasks_payload = []
-                enrichment_summary["errors"] += 1
-            tasks_payload = [t for t in tasks_payload if not t.get("deleteFlag")]
-            for raw_task in tasks_payload:
-                norm = _lofty_normalize_task(raw_task, lead_id)
-                task_id = norm["id"] or _stable_hash_id(
-                    norm["title"], norm["summary"], norm["dueAt"], norm["timestamp"]
-                )
-                lead_events.append(
-                    {
-                        **base_record,
-                        "source_record_id": f"{record_id}:task:{task_id}",
-                        "type": "crm_task",
-                        "provider": "lofty",
-                        "title": norm["title"],
-                        "summary": norm["summary"],
-                        "status": norm["status"],
-                        "task_subtype": norm["type"],
-                        "assignedUser": norm["assignedUser"],
-                        "dueAt": norm["dueAt"],
-                        "timestamp": norm["timestamp"] or timestamp,
-                    }
-                )
-            enrichment_summary["tasks"] += len(tasks_payload)
+            pending_enrichments.append(
+                {
+                    "lead_id": lead_id,
+                    "record_id": record_id,
+                    "base_record": base_record,
+                    "fallback_timestamp": timestamp,
+                }
+            )
 
         heat_score, heat_label = _heat_score_for_record(base_record)
         if heat_label in {"hot", "warm"}:
@@ -4692,6 +4804,177 @@ def sync_lofty_crm_source(
                 }
             )
 
+    # === PHASE 1 — Lead snapshot to disk + writethrough to operational.db ===
+    # Write the lead snapshot before enrichment so even if Phase 2 hangs or
+    # gets killed, downstream readers (operational.db, /leads UI, thread
+    # drawer) already see the 21 leads with stage/score/source. Enrichment
+    # in Phase 2 only adds the activity/note/task lead_events.
+    base_lead_events = list(lead_events)
+    with _snapshot_writer_lock(source_dir):
+        preserved_tasks_phase1 = [
+            r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
+            if str(r.get("task_type") or "").lower() != "lead_follow_up"
+        ]
+        _replace_jsonl(source_dir / "contacts.jsonl", contact_records)
+        _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
+        _replace_jsonl(source_dir / "messages.jsonl", [])
+        _replace_jsonl(source_dir / "message-days.jsonl", [])
+        _replace_jsonl(source_dir / "lead-events.jsonl", base_lead_events)
+        _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks_phase1 + task_records)
+    _write_json(
+        source_dir / "source.json",
+        {
+            "source_id": "crm",
+            "provider": "Lofty CRM",
+            "account_label": "Lofty CRM",
+            "connection_type": "lofty_api",
+            "auth_status": f"{auth_type}_configured",
+            "sync_mode": "crm_lead_snapshot",
+            "owner_agent": owner,
+            "enabled_ui_surfaces": surfaces,
+            "setup_status": "connected" if deduped else "needs_operator",
+            "last_sync_at": now,
+            "setup_notes": "Read-only Lofty lead snapshot normalized into the local Elevate source inbox.",
+            "attempted_endpoints": attempted,
+            "enrichment_status": "pending" if pending_enrichments else "skipped",
+            "record_counts": {
+                "contacts": len(contact_records),
+                "conversations": len(conversation_records),
+                "lead_events": len(base_lead_events),
+                "tasks": len(task_records),
+                "enrichment": dict(enrichment_summary),
+                "enrichment_lead_limit": max_enriched,
+            },
+        },
+    )
+    _write_json(
+        source_dir / "status.json",
+        {
+            "connected": bool(deduped),
+            "import_only": True,
+            "blocked": False,
+            "last_error": "; ".join(errors) if errors and not deduped else None,
+            "next_operator_step": (
+                "Lead snapshot written. Enrichment running in background — refresh in a minute for activities/notes."
+                if pending_enrichments
+                else (
+                    "Review the hot/warm lead cards and decide which conversations should become outreach tasks."
+                    if deduped
+                    else "Lofty auth was found, but no lead rows were returned. Check the key scope/OAuth permissions, then sync again."
+                )
+            ),
+            "last_checked_at": now,
+            "last_imported_at": now if deduped else None,
+            "counts": {
+                "contacts": len(contact_records),
+                "conversations": len(conversation_records),
+                "lead_events": len(base_lead_events),
+                "tasks": len(task_records),
+                "enrichment": dict(enrichment_summary),
+                "enrichment_lead_limit": max_enriched,
+            },
+        },
+    )
+    try:
+        _writethrough_to_operational_db(source_dir)
+    except Exception as exc:  # noqa: BLE001
+        if errors is not None:
+            errors.append(f"db writethrough (phase 1): {exc}")
+        _write_json(
+            artifacts_dir / "last-db-writethrough-error.json",
+            {"checked_at": _now(), "phase": 1, "error": str(exc)},
+        )
+
+    # === PHASE 2 — Parallel enrichment with checkpointing ===
+    # Each lead needs 3 HTTP calls (activities + notes + tasks). Running
+    # them serially × 21 leads × 18s timeout = 19 min worst case. Running
+    # in parallel (8 workers, 10s timeout each) brings this to 1-3 min for
+    # 21 leads. Checkpoints every N completed leads so a killed run
+    # resumes from where it left off.
+    enrichment_status = "skipped"
+    if pending_enrichments:
+        prior_completed, prior_events, prior_summary = _lofty_load_enrichment_progress(artifacts_dir)
+        # Keep prior summary so resumed runs surface cumulative counts.
+        for key in enrichment_summary:
+            enrichment_summary[key] = prior_summary.get(key, 0)
+        completed_lead_ids: set[str] = set(prior_completed)
+        enrichment_events: list[JsonRecord] = [
+            e for e in prior_events
+            if str((e.get("lead_id") or "")).strip() in completed_lead_ids
+        ]
+        to_enrich = [
+            job for job in pending_enrichments
+            if job["lead_id"] not in completed_lead_ids
+        ]
+        total = len(pending_enrichments)
+        done = len(completed_lead_ids)
+        if to_enrich:
+            print(
+                f"[crm] enrichment phase: {done}/{total} already done, "
+                f"enriching {len(to_enrich)} leads with {_LOFTY_ENRICHMENT_WORKERS} workers"
+                f" (timeout={_LOFTY_ENRICHMENT_TIMEOUT_S}s/call)",
+                file=sys.stderr,
+                flush=True,
+            )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=_LOFTY_ENRICHMENT_WORKERS,
+                thread_name_prefix="lofty-enrich",
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _lofty_enrich_one_lead,
+                        lead_id=job["lead_id"],
+                        record_id=job["record_id"],
+                        base_record=job["base_record"],
+                        fallback_timestamp=job["fallback_timestamp"],
+                        env_values=env_values,
+                        timeout=_LOFTY_ENRICHMENT_TIMEOUT_S,
+                    ): job["lead_id"]
+                    for job in to_enrich
+                }
+                for fut in concurrent.futures.as_completed(futures):
+                    try:
+                        lead_id, events, delta = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        enrichment_summary["errors"] += 1
+                        errors.append(f"enrichment worker crashed: {exc}")
+                        continue
+                    completed_lead_ids.add(lead_id)
+                    enrichment_events.extend(events)
+                    for key, val in delta.items():
+                        enrichment_summary[key] = enrichment_summary.get(key, 0) + int(val or 0)
+                    done = len(completed_lead_ids)
+                    if done % _LOFTY_ENRICHMENT_CHECKPOINT_EVERY == 0 or done == total:
+                        # Atomic checkpoint: lead-events.jsonl + progress file
+                        # both reflect the same partial state. Resume picks
+                        # up from the union of base + checkpoint events.
+                        with _snapshot_writer_lock(source_dir):
+                            _replace_jsonl(
+                                source_dir / "lead-events.jsonl",
+                                base_lead_events + enrichment_events,
+                            )
+                        _lofty_save_enrichment_progress(
+                            artifacts_dir,
+                            completed_lead_ids=completed_lead_ids,
+                            events=enrichment_events,
+                            summary=enrichment_summary,
+                            total_leads=total,
+                            status="in_progress" if done < total else "complete",
+                        )
+                        print(
+                            f"[crm] enriched {done}/{total} leads "
+                            f"(activities={enrichment_summary['activities']}, "
+                            f"notes={enrichment_summary['notes']}, "
+                            f"tasks={enrichment_summary['tasks']}, "
+                            f"errors={enrichment_summary['errors']})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+        # Always include prior + new events in the final lead_events list
+        lead_events = base_lead_events + enrichment_events
+        enrichment_status = "complete" if done >= total else "partial"
+
+    # === PHASE 3 — Final atomic rewrite + writethrough ===
     # Atomic multi-file rewrite — readers holding _snapshot_reader_lock
     # see either the pre-sync snapshot or the post-sync snapshot, never
     # a torn one. Codex audit P1 (2026-05-05).
@@ -4721,6 +5004,7 @@ def sync_lofty_crm_source(
             "last_sync_at": now,
             "setup_notes": "Read-only Lofty lead snapshot normalized into the local Elevate source inbox.",
             "attempted_endpoints": attempted,
+            "enrichment_status": enrichment_status,
             "record_counts": {
                 "contacts": len(contact_records),
                 "conversations": len(conversation_records),
@@ -4761,17 +5045,33 @@ def sync_lofty_crm_source(
     # Continuous ingest into operational.db so DB-primary readers see
     # tonight's Lofty data without a manual ``elevate migrate-data`` rerun.
     # Codex audit P0 (2026-05-05): JSONL-only sync left the DB stale.
+    # Phase 1 already ran a writethrough for the bare snapshot; this Phase 3
+    # writethrough lands the enrichment lead_events.
     try:
         _writethrough_to_operational_db(source_dir)
     except Exception as exc:  # noqa: BLE001
         # Never let the DB writethrough fail the sync; legacy JSONL is
         # still the canonical store under DB shadow-read mode.
         if errors is not None:
-            errors.append(f"db writethrough: {exc}")
+            errors.append(f"db writethrough (phase 3): {exc}")
         _write_json(
             artifacts_dir / "last-db-writethrough-error.json",
-            {"checked_at": now, "error": str(exc)},
+            {"checked_at": now, "phase": 3, "error": str(exc)},
         )
+    # Mark enrichment checkpoint complete so a subsequent run doesn't
+    # re-enrich leads already finalized.
+    if enrichment_status in {"complete", "partial"}:
+        try:
+            _lofty_save_enrichment_progress(
+                artifacts_dir,
+                completed_lead_ids=set(completed_lead_ids) if pending_enrichments else set(),
+                events=[e for e in lead_events if e.get("type") != "crm_lead_synced"],
+                summary=enrichment_summary,
+                total_leads=len(pending_enrichments),
+                status=enrichment_status,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     view = connector_view(source_root, "crm")
     if view is None:

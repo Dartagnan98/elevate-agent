@@ -60,7 +60,7 @@ class TestGetFirstOk:
     def test_returns_first_non_empty_payload(self, monkeypatch):
         calls: list[str] = []
 
-        def fake_get(path: str, env: dict, params: dict | None = None) -> Any:
+        def fake_get(path: str, env: dict, params: dict | None = None, **_kwargs) -> Any:
             calls.append(path)
             if path == "v2.0/leads/abc/activities":
                 return {"data": [{"id": "1"}]}
@@ -79,7 +79,7 @@ class TestGetFirstOk:
     def test_falls_through_404_to_next(self, monkeypatch):
         calls: list[str] = []
 
-        def fake_get(path: str, env: dict, params: dict | None = None) -> Any:
+        def fake_get(path: str, env: dict, params: dict | None = None, **_kwargs) -> Any:
             calls.append(path)
             if path == "v2.0/leads/abc/activities":
                 raise Exception("404 Not Found")
@@ -137,7 +137,7 @@ class TestPublicHelpers:
     def test_get_activities_threads_lead_id_into_path(self, monkeypatch):
         captured: dict[str, str] = {}
 
-        def fake_get(path: str, env: dict, params: dict | None = None) -> Any:
+        def fake_get(path: str, env: dict, params: dict | None = None, **_kwargs) -> Any:
             captured["path"] = path
             return {"data": [{"id": "act1", "type": "page_view"}]}
 
@@ -149,7 +149,7 @@ class TestPublicHelpers:
     def test_get_notes_threads_lead_id_into_query(self, monkeypatch):
         captured: dict[str, str] = {}
 
-        def fake_get(path: str, env: dict, params: dict | None = None) -> Any:
+        def fake_get(path: str, env: dict, params: dict | None = None, **_kwargs) -> Any:
             captured["path"] = path
             return {"notes": [{"id": "n1", "content": "hi"}]}
 
@@ -163,7 +163,7 @@ class TestPublicHelpers:
     def test_get_tasks_threads_lead_id_into_query(self, monkeypatch):
         captured: dict[str, str] = {}
 
-        def fake_get(path: str, env: dict, params: dict | None = None) -> Any:
+        def fake_get(path: str, env: dict, params: dict | None = None, **_kwargs) -> Any:
             captured["path"] = path
             return {"taskList": [{"id": "t1", "subject": "Call"}]}
 

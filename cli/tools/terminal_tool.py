@@ -100,9 +100,13 @@ def _safe_parse_import_env(
 
 
 # Hard cap on foreground timeout; override via TERMINAL_MAX_FOREGROUND_TIMEOUT env var.
+# Raised from 600s to 1800s (30min) so legitimate batch jobs (CRM sync with
+# enrichment, large backfills, archive imports) complete without being rejected.
+# Anything that legitimately needs longer should still use background=true +
+# process(action="wait"), but foreground stays viable for typical long-but-finite work.
 FOREGROUND_MAX_TIMEOUT = _safe_parse_import_env(
     "TERMINAL_MAX_FOREGROUND_TIMEOUT",
-    600,
+    1800,
     int,
     "integer",
 )

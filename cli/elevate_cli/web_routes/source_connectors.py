@@ -154,6 +154,35 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
             raise HTTPException(status_code=500, detail=f"Send status lookup failed: {exc}")
 
 
+    @router.get("/api/source-inbox/sent")
+    async def get_source_inbox_sent(limit: int = 100, include_pending: bool = False):
+        """Recent send_queue rows, newest first. Powers the /leads Sent tab.
+
+        - `include_pending=false` (default): only delivered messages (status=sent).
+        - `include_pending=true`: also surfaces queued/sending/retrying/failed
+          so the operator can see what's mid-flight or stuck.
+        """
+        try:
+            from elevate_cli import outreach_db
+
+            statuses: tuple[str, ...]
+            if include_pending:
+                statuses = (
+                    outreach_db.SEND_STATUS_SENT,
+                    outreach_db.SEND_STATUS_SENDING,
+                    outreach_db.SEND_STATUS_QUEUED,
+                    outreach_db.SEND_STATUS_RETRYING,
+                    outreach_db.SEND_STATUS_FAILED,
+                )
+            else:
+                statuses = (outreach_db.SEND_STATUS_SENT,)
+            items = outreach_db.list_recent_sends(statuses=statuses, limit=limit)
+            return {"items": items, "limit": limit, "includePending": include_pending}
+        except Exception as exc:
+            _log.exception("GET /api/source-inbox/sent failed")
+            raise HTTPException(status_code=500, detail=f"Sent list failed: {exc}")
+
+
     @router.post("/api/sender/tick")
     async def post_sender_tick(batch: int = 10):
         """Manual sender tick — useful for tests/admin. Cron calls this on schedule."""

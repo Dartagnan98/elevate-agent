@@ -813,6 +813,31 @@ def list_sends_by_thread(
     return [s for s in (_row_to_send(r) for r in rows) if s is not None]
 
 
+def list_recent_sends(
+    *,
+    statuses: tuple[str, ...] = (SEND_STATUS_SENT,),
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return send_queue rows across all sources, newest first.
+
+    Powers the /leads "Sent" tab. Defaults to status=sent only so the UI
+    shows confirmed deliveries; callers can pass other statuses (queued,
+    sending, retrying, failed) for an "outbound activity" view.
+    """
+    placeholders = ",".join("?" for _ in statuses) or "''"
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM send_queue
+            WHERE status IN ({placeholders})
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (*statuses, max(1, min(int(limit or 100), 500))),
+        ).fetchall()
+    return [s for s in (_row_to_send(r) for r in rows) if s is not None]
+
+
 def claim_due_sends(limit: int = 10) -> list[dict[str, Any]]:
     """Atomically claim up to `limit` due rows: status in (queued, retrying)
     AND (next_retry_at IS NULL OR next_retry_at <= now). Flips claimed rows to
