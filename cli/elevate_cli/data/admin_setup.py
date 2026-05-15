@@ -22,13 +22,7 @@ from elevate_cli.data._util import now_iso
 PROFILE_ID = "default"
 READY_STATUSES = {"configured", "connected", "manual"}
 VALID_STATUSES = READY_STATUSES | {"missing", "skipped"}
-VERIFICATION_REQUIRED_KEYS = {
-    "approval_channel",
-    "email",
-    "calendar",
-    "drive",
-    "crm",
-}
+VERIFICATION_REQUIRED_KEYS: set[str] = set()
 BROWSER_WORKFLOW_REQUIRED_KEYS = ("mls", "compliance", "showing")
 ADMIN_ONBOARDING_MEMORY_FILE = "ADMIN_ONBOARDING.md"
 ADMIN_PROVINCE_PLAYBOOK_FILE = "ADMIN_PROVINCE_PLAYBOOK.md"
