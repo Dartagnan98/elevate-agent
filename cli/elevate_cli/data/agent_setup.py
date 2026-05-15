@@ -400,6 +400,12 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
                 "secretPresent": True,
                 "secretSource": "env",
                 "secretPreview": _token_preview(telegram_token),
+                # Mirror the full CLI _setup_telegram surface so the wizard
+                # can show the existing config instead of an empty form.
+                "allowedUsers": _get("TELEGRAM_ALLOWED_USERS") or "",
+                "homeChannel": _get("TELEGRAM_HOME_CHANNEL") or "",
+                "dmBehavior": _get("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or "",
+                "allowAllUsers": (_get("GATEWAY_ALLOW_ALL_USERS") or "").lower() == "true",
             },
         }
 

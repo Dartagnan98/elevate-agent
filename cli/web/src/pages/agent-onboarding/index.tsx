@@ -124,6 +124,11 @@ export type AgentSetupDraft = {
   cliEnabled: boolean;
   telegramBotToken: string;
   telegramChatId: string;
+  // Mirror full _setup_telegram so the wizard can show what's already wired.
+  telegramAllowedUsers: string;
+  telegramHomeChannel: string;
+  telegramDmBehavior: string;
+  telegramAllowAllUsers: boolean;
   imessageEnabled: boolean;
   imessageHandle: string;
   // BlueBubbles bridge — populated from env overlay when already wired.
@@ -214,6 +219,10 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     cliEnabled: true,
     telegramBotToken: String(tgVal.botToken ?? ""),
     telegramChatId: String(tgVal.chatId ?? ""),
+    telegramAllowedUsers: String(tgVal.allowedUsers ?? ""),
+    telegramHomeChannel: String(tgVal.homeChannel ?? tgVal.chatId ?? ""),
+    telegramDmBehavior: String(tgVal.dmBehavior ?? ""),
+    telegramAllowAllUsers: Boolean(tgVal.allowAllUsers),
     imessageEnabled: imessageItem ? imessageItem.status === "configured" : false,
     imessageHandle: String(imessageVal.handle ?? ""),
     bluebubblesServerUrl: String(imessageVal.bluebubblesServerUrl ?? ""),

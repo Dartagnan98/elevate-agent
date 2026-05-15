@@ -267,6 +267,40 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
     }),
+  getTelegramStatus: () =>
+    fetchJSON<{
+      configured: boolean;
+      tokenPreview: string;
+      allowedUsers: string;
+      homeChannel: string;
+      dmBehavior: string;
+      allowAllUsers: boolean;
+      botId?: number;
+      botUsername?: string;
+      botName?: string;
+      canJoinGroups?: boolean;
+      canReadAllGroupMessages?: boolean;
+      error?: string;
+    }>("/api/channels/telegram/status"),
+  configureTelegram: (params: {
+    bot_token?: string;
+    allowed_users?: string | null;
+    home_channel?: string | null;
+    dm_behavior?: "pair" | "ignore" | "open" | "";
+    allow_all_users?: boolean;
+  }) =>
+    fetchJSON<{
+      ok: boolean;
+      tokenPreview: string;
+      allowedUsers: string;
+      homeChannel: string;
+      dmBehavior: string;
+      allowAllUsers: boolean;
+    }>("/api/channels/telegram/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
   configureSlackBot: (params: {
     bot_token?: string;
     app_token?: string;

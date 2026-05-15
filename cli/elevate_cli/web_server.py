@@ -1275,6 +1275,117 @@ def _token_preview(token: str) -> str:
     return "•" * (len(s) - 4) + s[-4:]
 
 
+@app.get("/api/channels/telegram/status")
+async def telegram_status():
+    """Return the currently-wired Telegram bot's identity + env config.
+
+    Calls Telegram's ``getMe`` so the wizard can show the bot's display name
+    and @username — answers "which bot is this token actually attached to?".
+    Falls back to env-only data if the API call fails (offline, bad token).
+    """
+    token = get_env_value("TELEGRAM_BOT_TOKEN") or ""
+    if not token:
+        return {
+            "configured": False,
+            "tokenPreview": "",
+            "allowedUsers": "",
+            "homeChannel": "",
+            "dmBehavior": "",
+            "allowAllUsers": False,
+        }
+
+    bot_info: dict[str, Any] = {}
+    try:
+        import urllib.request as _ur
+        import json as _json
+        req = _ur.Request(
+            f"https://api.telegram.org/bot{token}/getMe",
+            headers={"User-Agent": "elevate-wizard"},
+        )
+        with _ur.urlopen(req, timeout=5) as resp:
+            payload = _json.loads(resp.read().decode("utf-8"))
+        if payload.get("ok") and isinstance(payload.get("result"), dict):
+            r = payload["result"]
+            bot_info = {
+                "botId": r.get("id"),
+                "botUsername": r.get("username") or "",
+                "botName": (r.get("first_name") or "").strip(),
+                "canJoinGroups": bool(r.get("can_join_groups")),
+                "canReadAllGroupMessages": bool(r.get("can_read_all_group_messages")),
+            }
+    except Exception as exc:
+        bot_info = {"error": str(exc)[:200]}
+
+    return {
+        "configured": True,
+        "tokenPreview": _token_preview(token),
+        "allowedUsers": get_env_value("TELEGRAM_ALLOWED_USERS") or "",
+        "homeChannel": get_env_value("TELEGRAM_HOME_CHANNEL") or "",
+        "dmBehavior": get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or "",
+        "allowAllUsers": (get_env_value("GATEWAY_ALLOW_ALL_USERS") or "").lower() == "true",
+        **bot_info,
+    }
+
+
+@app.post("/api/channels/telegram/configure")
+async def configure_telegram(request: Request):
+    """Mirror ``setup._setup_telegram``. Saves TELEGRAM_BOT_TOKEN,
+    TELEGRAM_ALLOWED_USERS, TELEGRAM_HOME_CHANNEL,
+    TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR, GATEWAY_ALLOW_ALL_USERS.
+
+    Token is optional when one is already in env — the wizard can update
+    just the allowlist / home / DM behavior without re-pasting the secret.
+    """
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    bot_token = _strip(body.get("bot_token"))
+    allowed = _strip(body.get("allowed_users"))
+    home = _strip(body.get("home_channel"))
+    dm_behavior = _strip(body.get("dm_behavior")).lower()
+    allow_all = bool(body.get("allow_all_users"))
+
+    existing_token = get_env_value("TELEGRAM_BOT_TOKEN") or ""
+    if bot_token:
+        if not _looks_like_telegram_bot_token(bot_token):
+            raise HTTPException(
+                status_code=400,
+                detail="Token doesn't match Telegram's BotFather format (<id>:<secret>)",
+            )
+        _sync_executive_telegram_aliases("TELEGRAM_BOT_TOKEN", bot_token)
+        save_env_value("TELEGRAM_BOT_TOKEN", bot_token)
+    elif not existing_token:
+        raise HTTPException(status_code=400, detail="bot_token is required")
+
+    # "allowed_users":""  is an explicit clear, "allowed_users": None is leave-as-is.
+    if allowed is not None and body.get("allowed_users") is not None:
+        save_env_value("TELEGRAM_ALLOWED_USERS", allowed.replace(" ", ""))
+    if body.get("home_channel") is not None:
+        save_env_value("TELEGRAM_HOME_CHANNEL", home)
+    if dm_behavior:
+        if dm_behavior not in {"pair", "ignore", "open"}:
+            raise HTTPException(
+                status_code=400,
+                detail="dm_behavior must be one of: pair, ignore, open",
+            )
+        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", dm_behavior)
+    if allow_all:
+        save_env_value("GATEWAY_ALLOW_ALL_USERS", "true")
+    elif body.get("allow_all_users") is False:
+        save_env_value("GATEWAY_ALLOW_ALL_USERS", "false")
+
+    return {
+        "ok": True,
+        "tokenPreview": _token_preview(bot_token or existing_token),
+        "allowedUsers": get_env_value("TELEGRAM_ALLOWED_USERS") or "",
+        "homeChannel": get_env_value("TELEGRAM_HOME_CHANNEL") or "",
+        "dmBehavior": get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or "",
+        "allowAllUsers": (get_env_value("GATEWAY_ALLOW_ALL_USERS") or "").lower() == "true",
+    }
+
+
 @app.post("/api/channels/discord/configure")
 async def configure_discord(request: Request):
     """Mirror ``setup._setup_discord``. Saves DISCORD_BOT_TOKEN,

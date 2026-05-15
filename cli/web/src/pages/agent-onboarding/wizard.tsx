@@ -2188,7 +2188,12 @@ function TelegramPairingPanel({
   if (stage === "paired") {
     const display = approved[0]?.user_name || approved[0]?.user_id || "you";
     return (
-      <div className="space-y-2">
+      <div className="space-y-3">
+        <TelegramConnectedCard
+          draft={draft}
+          updateField={updateField}
+          onSetupRefresh={onSetupRefresh}
+        />
         <div className="rounded-md border border-primary/40 bg-card/60 px-3 py-3 text-[12px] text-foreground">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4 text-primary" />
@@ -2196,7 +2201,7 @@ function TelegramPairingPanel({
           </div>
           <p className="mt-1 text-[11.5px] leading-5 text-muted-foreground">
             The bot will deliver approvals and status messages here. Re-pair
-            from Settings → Channels later if you switch accounts.
+            below if you switch bots.
           </p>
           {statusNote && (
             <p className="mt-2 text-[11.5px] leading-5 text-muted-foreground">
@@ -2291,6 +2296,13 @@ function TelegramPairingPanel({
 
   return (
     <div className="space-y-3">
+      {draft.telegramSecretPresent && (
+        <TelegramConnectedCard
+          draft={draft}
+          updateField={updateField}
+          onSetupRefresh={onSetupRefresh}
+        />
+      )}
       <TelegramPeerRail />
       <WizardField
         label="Bot token"
@@ -2341,6 +2353,218 @@ function TelegramPairingPanel({
       )}
       {errorMsg && (
         <p className="text-[11.5px] leading-5 text-destructive">{errorMsg}</p>
+      )}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Shows the live Telegram bot identity (via getMe) plus an inline form
+// for the rest of _setup_telegram's prompts -- allowlist, home channel,
+// unauthorized-DM behavior. Renders whenever a bot token is already in
+// env so the operator sees "@gary_bot · Gary" + current access settings
+// instead of an empty wizard form.
+// ─────────────────────────────────────────────────────────────────────
+function TelegramConnectedCard({
+  draft,
+  updateField,
+  onSetupRefresh,
+}: {
+  draft: AgentSetupDraft;
+  updateField: <K extends keyof AgentSetupDraft>(
+    key: K,
+    value: AgentSetupDraft[K],
+  ) => void;
+  onSetupRefresh: () => Promise<void> | void;
+}) {
+  type Status = {
+    configured: boolean;
+    tokenPreview: string;
+    allowedUsers: string;
+    homeChannel: string;
+    dmBehavior: string;
+    allowAllUsers: boolean;
+    botId?: number;
+    botUsername?: string;
+    botName?: string;
+    error?: string;
+  };
+  const [status, setStatus] = useState<Status | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [allowedUsers, setAllowedUsers] = useState(draft.telegramAllowedUsers);
+  const [homeChannel, setHomeChannel] = useState(draft.telegramHomeChannel);
+  const [dmBehavior, setDmBehavior] = useState<string>(draft.telegramDmBehavior || "pair");
+  const [allowAll, setAllowAll] = useState(draft.telegramAllowAllUsers);
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await api.getTelegramStatus();
+        if (cancelled) return;
+        setStatus(resp);
+        setAllowedUsers(resp.allowedUsers || draft.telegramAllowedUsers);
+        setHomeChannel(resp.homeChannel || draft.telegramHomeChannel);
+        setDmBehavior(resp.dmBehavior || draft.telegramDmBehavior || "pair");
+        setAllowAll(resp.allowAllUsers || draft.telegramAllowAllUsers);
+      } catch (e) {
+        if (!cancelled) {
+          setStatus({
+            configured: true,
+            tokenPreview: draft.telegramSecretPreview,
+            allowedUsers: draft.telegramAllowedUsers,
+            homeChannel: draft.telegramHomeChannel,
+            dmBehavior: draft.telegramDmBehavior,
+            allowAllUsers: draft.telegramAllowAllUsers,
+            error: errorMessage(e, "Could not fetch bot identity"),
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const save = useCallback(async () => {
+    setBusy(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const resp = await api.configureTelegram({
+        allowed_users: allowedUsers,
+        home_channel: homeChannel,
+        dm_behavior: (dmBehavior as "pair" | "ignore" | "open") || "",
+        allow_all_users: allowAll,
+      });
+      setStatus((prev) => (prev ? { ...prev, ...resp } : { configured: true, ...resp }));
+      updateField("telegramAllowedUsers", resp.allowedUsers);
+      updateField("telegramHomeChannel", resp.homeChannel);
+      updateField("telegramDmBehavior", resp.dmBehavior);
+      updateField("telegramAllowAllUsers", resp.allowAllUsers);
+      if (resp.homeChannel) {
+        updateField("telegramChatId", resp.homeChannel);
+      }
+      setSuccessMsg("Access settings saved.");
+      setEditing(false);
+      await onSetupRefresh();
+    } catch (e) {
+      setErrorMsg(errorMessage(e, "Could not save Telegram access"));
+    } finally {
+      setBusy(false);
+    }
+  }, [allowedUsers, homeChannel, dmBehavior, allowAll, updateField, onSetupRefresh]);
+
+  const botLabel = status?.botUsername
+    ? `@${status.botUsername}${status.botName ? ` · ${status.botName}` : ""}`
+    : status?.tokenPreview
+      ? `Token ${status.tokenPreview}`
+      : "Bot configured";
+  const accessLabel = allowAll
+    ? "Open access — any Telegram user"
+    : allowedUsers
+      ? `Allowlist: ${allowedUsers}`
+      : dmBehavior === "pair"
+        ? "DM pairing on first /start"
+        : dmBehavior === "ignore"
+          ? "Deny unknown users"
+          : "No allowlist configured";
+
+  return (
+    <div className="rounded-md border border-primary/40 bg-card/60 px-3 py-3 text-[12px] text-foreground">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-primary" />
+            <span className="font-medium">Connected bot</span>
+          </div>
+          <div className="mt-1 font-mono text-[12.5px] text-foreground">
+            {botLabel}
+          </div>
+          <div className="mt-0.5 text-[11.5px] text-muted-foreground">
+            Home channel:{" "}
+            <span className="font-mono">{homeChannel || "—"}</span>
+          </div>
+          <div className="text-[11.5px] text-muted-foreground">{accessLabel}</div>
+          {status?.error && (
+            <div className="mt-1 text-[11px] text-destructive/80">
+              getMe failed: {status.error}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          className="shrink-0 text-[11.5px] text-muted-foreground underline-offset-2 hover:underline"
+          onClick={() => setEditing((v) => !v)}
+        >
+          {editing ? "Cancel" : "Edit access"}
+        </button>
+      </div>
+
+      {editing && (
+        <div className="mt-3 space-y-3 border-t border-border/60 pt-3">
+          <WizardField
+            label="Allowed user IDs"
+            value={allowedUsers}
+            onChange={setAllowedUsers}
+            placeholder="123456789, 987654321"
+            fullWidth
+            hint="Comma-separated Telegram user IDs. DM @userinfobot to find yours. Leave empty to use DM pairing or open access."
+          />
+          <WizardField
+            label="Home channel"
+            value={homeChannel}
+            onChange={setHomeChannel}
+            placeholder="123456789"
+            fullWidth
+            hint="Where cron jobs + cross-platform notifications land. For DMs this is your user ID."
+          />
+          <div className="space-y-1.5">
+            <div className="text-[11.5px] font-medium text-foreground">
+              When an unknown user DMs the bot:
+            </div>
+            {[
+              { value: "pair", label: "Mint a pairing code (recommended)" },
+              { value: "ignore", label: "Ignore them" },
+              { value: "open", label: "Allow anyone (also flips GATEWAY_ALLOW_ALL_USERS)" },
+            ].map((opt) => (
+              <label
+                key={opt.value}
+                className="flex items-center gap-2 text-[11.5px] text-muted-foreground"
+              >
+                <input
+                  type="radio"
+                  name="tg-dm-behavior"
+                  checked={dmBehavior === opt.value && !(opt.value !== "open" && allowAll)}
+                  onChange={() => {
+                    setDmBehavior(opt.value);
+                    setAllowAll(opt.value === "open");
+                  }}
+                />
+                {opt.label}
+              </label>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button size="sm" onClick={save} disabled={busy} className="h-8">
+              {busy ? "Saving…" : "Save access settings"}
+            </Button>
+            {successMsg && (
+              <span className="text-[11.5px] text-muted-foreground">{successMsg}</span>
+            )}
+            {errorMsg && (
+              <span className="text-[11.5px] text-destructive">{errorMsg}</span>
+            )}
+          </div>
+        </div>
+      )}
+      {!editing && successMsg && (
+        <p className="mt-2 text-[11.5px] text-muted-foreground">{successMsg}</p>
       )}
     </div>
   );
