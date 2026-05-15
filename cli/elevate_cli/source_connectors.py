@@ -2302,7 +2302,7 @@ def build_source_inbox_response(
         task_states = _as_dict(ui_state.get("tasks"))
         task_state_by_source[source_id] = task_states
 
-        for record in _candidate_records_for_source(source_dir, source, 100):
+        for record in _candidate_records_for_source(source_dir, source, safe_limit):
             thread_id = _thread_key(record)
             state = _as_dict(thread_states.get(thread_id))
             status = str(state.get("status") or "open")

@@ -193,7 +193,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
 
     info = get_source_root_info(None)
     source_root = Path(info["sourceRoot"])
-    safe_limit = max(1, min(int(limit or 16), 500))
+    safe_limit = max(1, min(int(limit or 16), 5000))
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
