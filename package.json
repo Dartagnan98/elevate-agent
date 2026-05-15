@@ -1,6 +1,6 @@
 {
   "name": "elevate-agent-bootstrap",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "GitHub fallback bootstrap for Elevate Agent.",
   "private": true,
   "license": "MIT",
