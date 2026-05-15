@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Database as DatabaseIcon,
   ExternalLink,
@@ -66,11 +67,13 @@ import type {
   SourceConnectorStatus,
   SourceInboxDraft,
   SourceInboxProfile,
+  SourceInboxSentItem,
   SourceInboxThread,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectOption } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, isoTimeAgo } from "@/lib/utils";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/pages/real-estate-hub/thread-drawer";
@@ -120,6 +123,90 @@ import { LeadsSetupLaunch, useLeadsSetup } from "@/pages/real-estate-hub/leads/o
 
 export type { BoardAction, HubData };
 
+const PROFILE_PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
+type ProfilePageSize = (typeof PROFILE_PAGE_SIZE_OPTIONS)[number];
+
+function compactPageNumbers(current: number, total: number): (number | "…")[] {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+  const pages: (number | "…")[] = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) pages.push("…");
+  for (let i = start; i <= end; i++) pages.push(i);
+  if (end < total - 1) pages.push("…");
+  pages.push(total);
+  return pages;
+}
+
+function PaginationBar({
+  page,
+  totalPages,
+  onPageChange,
+  label,
+}: {
+  page: number;
+  totalPages: number;
+  onPageChange: (next: number) => void;
+  label: string;
+}) {
+  if (totalPages <= 1) return null;
+  const pages = compactPageNumbers(page, totalPages);
+  return (
+    <nav
+      aria-label={label}
+      className="flex flex-wrap items-center justify-end gap-1 px-4 py-2.5"
+    >
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2"
+        disabled={page <= 1}
+        onClick={() => onPageChange(page - 1)}
+        aria-label="Previous page"
+      >
+        <ChevronLeft className="h-3.5 w-3.5" />
+      </Button>
+      {pages.map((p, idx) =>
+        p === "…" ? (
+          <span
+            key={`gap-${idx}`}
+            className="px-1 text-xs text-muted-foreground"
+            aria-hidden
+          >
+            …
+          </span>
+        ) : (
+          <Button
+            key={p}
+            type="button"
+            size="sm"
+            variant={p === page ? "default" : "outline"}
+            className="h-8 min-w-[2rem] px-2 text-xs"
+            onClick={() => onPageChange(p)}
+            aria-current={p === page ? "page" : undefined}
+          >
+            {p}
+          </Button>
+        ),
+      )}
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2"
+        disabled={page >= totalPages}
+        onClick={() => onPageChange(page + 1)}
+        aria-label="Next page"
+      >
+        <ChevronRight className="h-3.5 w-3.5" />
+      </Button>
+    </nav>
+  );
+}
+
 function LeadProfilesWorkbench({
   onChanged,
   showHeader = true,
@@ -134,6 +221,8 @@ function LeadProfilesWorkbench({
   const drawer = useThreadDrawer();
   const navigate = useNavigate();
   const [dealIdsByProfile, setDealIdsByProfile] = useState<Record<string, ProfileAdminDealIds>>({});
+  const [pageSize, setPageSize] = useState<ProfilePageSize>(20);
+  const [pageBySection, setPageBySection] = useState<Record<string, number>>({});
 
   useEffect(() => {
     let live = true;
@@ -243,21 +332,54 @@ function LeadProfilesWorkbench({
     );
   }
 
+  const handlePageSizeChange = (raw: string) => {
+    const next = Number(raw) as ProfilePageSize;
+    if (PROFILE_PAGE_SIZE_OPTIONS.includes(next)) {
+      setPageSize(next);
+      setPageBySection({});
+    }
+  };
+
   return (
     <div className="divide-y divide-border">
-      {showHeader && (
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        {showHeader ? (
           <div>
             <div className="text-sm font-semibold text-foreground">Profiles</div>
             <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
               People built from CRM, inbox, SMS, and social sources, with active conversations pinned first.
             </p>
           </div>
-          <Badge variant="outline">{profiles.length} profiles</Badge>
+        ) : (
+          <span className="font-mono-ui text-[0.66rem] uppercase tracking-[0.12em] text-muted-foreground">
+            Per page
+          </span>
+        )}
+        <div className="flex items-center gap-2">
+          {showHeader && (
+            <Badge variant="outline">{profiles.length} profiles</Badge>
+          )}
+          <Select
+            value={String(pageSize)}
+            onValueChange={handlePageSizeChange}
+            buttonClassName="h-8 px-2 text-xs"
+          >
+            {PROFILE_PAGE_SIZE_OPTIONS.map((option) => (
+              <SelectOption key={option} value={String(option)}>
+                {option} / page
+              </SelectOption>
+            ))}
+          </Select>
         </div>
-      )}
+      </div>
 
-      {profileSections.map((section) => (
+      {profileSections.map((section) => {
+        const totalPages = Math.max(1, Math.ceil(section.profiles.length / pageSize));
+        const rawPage = pageBySection[section.id] ?? 1;
+        const page = Math.min(Math.max(rawPage, 1), totalPages);
+        const start = (page - 1) * pageSize;
+        const visibleProfiles = section.profiles.slice(start, start + pageSize);
+        return (
         <div key={section.id} className="divide-y divide-border">
           <div className="bg-card px-4 py-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -271,7 +393,7 @@ function LeadProfilesWorkbench({
             </p>
           </div>
 
-          {section.profiles.map((profile) => {
+          {visibleProfiles.map((profile) => {
             const thread = threadByProfileId.get(profile.id);
             const activeConversation = profileHasActiveConversation(profile, threadsByProfileId.get(profile.id));
             const dealIds = dealIdsByProfile[profile.id] ?? {};
@@ -385,8 +507,17 @@ function LeadProfilesWorkbench({
               </div>
             );
           })}
+          <PaginationBar
+            page={page}
+            totalPages={totalPages}
+            onPageChange={(next) =>
+              setPageBySection((prev) => ({ ...prev, [section.id]: next }))
+            }
+            label={`${section.label} pagination`}
+          />
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -2450,6 +2581,7 @@ const LEAD_TABS = [
   { id: "action-board" as const, label: "Action Board", icon: Radar },
   { id: "profiles" as const, label: "Profiles", icon: Users },
   { id: "templates" as const, label: "Templates", icon: BookText },
+  { id: "sent" as const, label: "Sent", icon: Send },
 ];
 
 type LeadTab = (typeof LEAD_TABS)[number]["id"];
@@ -3065,6 +3197,175 @@ function TemplatesPanel() {
   );
 }
 
+type SentStatus = SourceInboxSentItem["status"];
+
+function sentStatusTone(status: SentStatus): "success" | "warning" | "danger" | "muted" {
+  switch (status) {
+    case "sent":
+      return "success";
+    case "sending":
+    case "queued":
+      return "muted";
+    case "retrying":
+      return "warning";
+    case "failed":
+      return "danger";
+    default:
+      return "muted";
+  }
+}
+
+function sentRecipientLabel(item: SourceInboxSentItem): string {
+  const r = item.payload?.recipient || {};
+  const name = (r.person_name || "").trim();
+  const phone = (r.phone || "").trim();
+  const email = (r.email || "").trim();
+  const handle = (r.social_handle || "").trim();
+  if (name && (phone || email || handle)) {
+    return `${name} · ${phone || email || handle}`;
+  }
+  return name || phone || email || handle || r.contact_id || item.threadId;
+}
+
+function sentTransportLabel(item: SourceInboxSentItem): string {
+  const pmid = (item.providerMessageId || "").toLowerCase();
+  if (pmid.startsWith("imessage")) return "iMessage";
+  if (pmid.startsWith("sms")) return "SMS";
+  if (pmid.startsWith("stub")) return "stub";
+  if (pmid.startsWith("agent")) return "agent";
+  return item.channel;
+}
+
+function SentMessagesBoard({ filterSourceId }: { filterSourceId: string | null }) {
+  const [items, setItems] = useState<SourceInboxSentItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [includePending, setIncludePending] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await api.getSourceInboxSent(200, includePending);
+      setItems(resp.items ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [includePending]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const visible = useMemo(
+    () => (filterSourceId ? items.filter((it) => it.sourceId === filterSourceId) : items),
+    [items, filterSourceId],
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs text-foreground/70">
+          {loading ? "Loading…" : `${visible.length} message${visible.length === 1 ? "" : "s"}`}
+          {includePending && !loading && " (including in-flight)"}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-foreground/70">
+            <input
+              type="checkbox"
+              checked={includePending}
+              onChange={(e) => setIncludePending(e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            Include queued / retrying / failed
+          </label>
+          <Button size="sm" variant="outline" onClick={() => void load()} className="h-8 px-3 text-xs">
+            Refresh
+          </Button>
+        </div>
+      </div>
+      {error && (
+        <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-foreground">
+          {error}
+        </div>
+      )}
+      {!loading && visible.length === 0 && !error && (
+        <div className="rounded-md border border-border bg-card px-4 py-6 text-center text-sm text-muted-foreground">
+          No sent messages yet. Approve a draft on the Action Board to send your first.
+        </div>
+      )}
+      {visible.length > 0 && (
+        <div className="overflow-hidden rounded-md border border-border bg-card">
+          <table className="w-full text-sm">
+            <thead className="bg-foreground/[0.03] text-[0.68rem] font-mono-ui uppercase tracking-[0.06em] text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 text-left">When</th>
+                <th className="px-3 py-2 text-left">Recipient</th>
+                <th className="px-3 py-2 text-left">Source · transport</th>
+                <th className="px-3 py-2 text-left">Message</th>
+                <th className="px-3 py-2 text-left">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((it) => {
+                const tone = sentStatusTone(it.status);
+                const draft = String(it.payload?.draft_text || "").trim();
+                const updatedAt = new Date(it.updatedAt);
+                const updatedLabel = isNaN(updatedAt.getTime())
+                  ? it.updatedAt
+                  : updatedAt.toLocaleString();
+                return (
+                  <tr key={it.id} className="border-t border-border/50 align-top">
+                    <td className="whitespace-nowrap px-3 py-2 font-mono-ui text-[0.72rem] tabular-nums text-muted-foreground">
+                      {updatedLabel}
+                    </td>
+                    <td className="px-3 py-2 text-foreground">{sentRecipientLabel(it)}</td>
+                    <td className="px-3 py-2 text-foreground/80">
+                      <div>{it.sourceId}</div>
+                      <div className="font-mono-ui text-[0.68rem] uppercase tracking-[0.06em] text-muted-foreground">
+                        {sentTransportLabel(it)}
+                      </div>
+                    </td>
+                    <td className="max-w-[40ch] px-3 py-2 text-foreground/85">
+                      <div className="line-clamp-2 whitespace-pre-wrap">{draft || <span className="text-muted-foreground">(empty)</span>}</div>
+                      {it.providerMessageId && (
+                        <div className="mt-1 font-mono-ui text-[0.66rem] text-muted-foreground">
+                          id: {it.providerMessageId}
+                        </div>
+                      )}
+                      {it.lastError && (
+                        <div className="mt-1 text-[0.7rem] text-warning">{it.lastError}</div>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2">
+                      <Badge
+                        variant={
+                          tone === "success"
+                            ? "success"
+                            : tone === "warning"
+                              ? "warning"
+                              : tone === "danger"
+                                ? "destructive"
+                                : "secondary"
+                        }
+                      >
+                        {it.status}
+                        {it.attempts > 0 && ` · ${it.attempts}×`}
+                      </Badge>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RealEstateLeadsPage() {
   const data = useRealEstateHubData();
   useHubHeader("Leads", data);
@@ -3155,13 +3456,19 @@ export function RealEstateLeadsPage() {
   const pulse = useMemo(() => computeResponsePulse(threads), [threads]);
 
   const refresh = data.refresh;
-  const shellIcon = tab === "profiles" ? Users : tab === "templates" ? BookText : Radar;
+  const shellIcon =
+    tab === "profiles" ? Users
+      : tab === "templates" ? BookText
+      : tab === "sent" ? Send
+      : Radar;
   const shellTitle =
     tab === "profiles"
       ? "Lead profiles."
       : tab === "templates"
         ? "Lead templates."
-        : "Lead action board.";
+        : tab === "sent"
+          ? "Sent messages."
+          : "Lead action board.";
 
   return (
     <ThreadDrawerProvider data={data}>
@@ -3214,11 +3521,20 @@ export function RealEstateLeadsPage() {
               Templates control what the agent says. Edits apply on the next lane run.
             </span>
           )}
+          {tab === "sent" && (
+            <span className="text-xs text-foreground/70">
+              Outbound history. Every message you approved on the Action Board lands here.
+            </span>
+          )}
         </div>
 
         {tab === "templates" ? (
           <div id="leads-panel-templates" role="tabpanel" aria-labelledby="leads-tab-templates">
             <TemplatesPanel />
+          </div>
+        ) : tab === "sent" ? (
+          <div id="leads-panel-sent" role="tabpanel" aria-labelledby="leads-tab-sent">
+            <SentMessagesBoard filterSourceId={sourceFilter} />
           </div>
         ) : (
           <>
