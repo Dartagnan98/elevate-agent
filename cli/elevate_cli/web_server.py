@@ -1972,6 +1972,62 @@ def get_agent_peers():
                             break
                     except Exception:
                         continue
+                # Peek inside the peer agent's directory for Telegram bot
+                # config so the wizard can surface "gary already pairs with
+                # @ctrl_gary_bot — want to reuse it?" rails. We scan
+                # config.json (top level), config["channels"], a sibling
+                # .env, and a memory MEMORY.md table — whichever surface
+                # the peer happens to use. We never return the secret
+                # itself, just a 4-char tail preview.
+                telegram_chat_id = ""
+                telegram_bot_handle = ""
+                telegram_preview = ""
+                telegram_source = ""
+
+                def _capture_token(value: str, source: str) -> None:
+                    nonlocal telegram_preview, telegram_source
+                    value = (value or "").strip().strip("'\"")
+                    if not value or telegram_preview:
+                        return
+                    telegram_preview = "•••" + value[-4:] if len(value) >= 4 else "•••"
+                    telegram_source = source
+
+                channels_blob = payload.get("channels")
+                if isinstance(channels_blob, dict):
+                    tg = channels_blob.get("telegram")
+                    if isinstance(tg, dict):
+                        chat = tg.get("chat_id") or tg.get("chatId")
+                        if chat:
+                            telegram_chat_id = str(chat)
+                        handle = tg.get("bot_handle") or tg.get("botHandle") or tg.get("username")
+                        if handle:
+                            telegram_bot_handle = str(handle)
+                        for k in ("bot_token", "botToken", "token"):
+                            if tg.get(k):
+                                _capture_token(str(tg[k]), f"{config_path.name}#channels.telegram.{k}")
+                                break
+
+                env_path = config_path.parent / ".env"
+                if env_path.exists():
+                    try:
+                        for raw in env_path.read_text(encoding="utf-8").splitlines():
+                            line = raw.strip()
+                            if not line or line.startswith("#"):
+                                continue
+                            if "=" not in line:
+                                continue
+                            k, _, v = line.partition("=")
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k in ("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN"):
+                                _capture_token(v, ".env#" + k)
+                            elif k in ("TELEGRAM_CHAT_ID", "TG_CHAT_ID") and not telegram_chat_id:
+                                telegram_chat_id = v
+                            elif k in ("TELEGRAM_BOT_USERNAME", "TG_BOT_USERNAME") and not telegram_bot_handle:
+                                telegram_bot_handle = v
+                    except Exception:
+                        pass
+
                 peers.append({
                     "org": org,
                     "name": agent,
@@ -1982,6 +2038,13 @@ def get_agent_peers():
                     "cronCount": len(payload.get("crons") or []),
                     "roleHint": role_hint,
                     "configPath": str(config_path),
+                    "telegram": {
+                        "configured": bool(telegram_preview or telegram_chat_id),
+                        "botHandle": telegram_bot_handle,
+                        "chatId": telegram_chat_id,
+                        "tokenPreview": telegram_preview,
+                        "source": telegram_source,
+                    },
                 })
         except Exception:
             _log.exception("GET /api/agents/peers failed walking root=%s", root)
@@ -6038,12 +6101,48 @@ class ComposioCustomAuthBody(BaseModel):
     userId: Optional[str] = None
 
 
+def _prewarm_composio_toolkits_in_background() -> None:
+    """Fire-and-forget background fetch of the full toolkit catalog.
+
+    Called whenever ``/api/composio/status`` reports valid creds. Populates
+    ``_COMPOSIO_TOOLKITS_CACHE`` so that by the time the wizard's user opens
+    the Composio panel (or types a search that misses the first page) the
+    full list is already on disk.
+    """
+    import threading
+    import time
+
+    def _warm() -> None:
+        try:
+            from elevate_cli import composio_client
+
+            cache_key = "all::::100"
+            entry = _COMPOSIO_TOOLKITS_CACHE.get(cache_key)
+            now = time.monotonic()
+            if entry and (now - entry[0]) < _COMPOSIO_TOOLKITS_TTL_SEC:
+                return
+            result = composio_client.list_all_toolkits(page_size=100)
+            _COMPOSIO_TOOLKITS_CACHE[cache_key] = (now, result)
+        except Exception:
+            _log.debug("Composio pre-warm failed", exc_info=True)
+
+    t = threading.Thread(target=_warm, daemon=True, name="composio-prewarm")
+    t.start()
+
+
 @app.get("/api/composio/status")
 async def composio_status():
     try:
         from elevate_cli import composio_client
 
-        return composio_client.get_status()
+        result = composio_client.get_status()
+        # Cheap optimization: as soon as we know the key is good, schedule a
+        # background fetch of the catalog. The wizard polls /status on mount
+        # and on window focus, so this kicks in exactly when the user is
+        # most likely to open the toolkit panel next.
+        if isinstance(result, dict) and result.get("valid"):
+            _prewarm_composio_toolkits_in_background()
+        return result
     except Exception as exc:
         _log.exception("GET /api/composio/status failed")
         raise HTTPException(status_code=500, detail=f"Composio status failed: {exc}")
@@ -6131,28 +6230,48 @@ _COMPOSIO_TOOLKITS_TTL_SEC = 300.0
 
 
 @app.get("/api/composio/toolkits")
-async def composio_toolkits(category: Optional[str] = None, all: bool = True, limit: int = 100):
+async def composio_toolkits(
+    category: Optional[str] = None,
+    all: bool = True,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    search: Optional[str] = None,
+):
     """List Composio toolkits.
 
-    Defaults to walking every page so the hub UI can show the full catalog.
-    Pass ``all=false`` to get just the first page (useful for cheap probes).
-    Cached for 5 minutes per (category, limit) pair when ``all=True``.
+    Three modes:
+      - ``search`` set → single-page server-side fuzzy search (always live).
+      - ``cursor`` set or ``all=false`` → single page (no cache, fast).
+      - default → full catalog walk, 5-min cached per (category, limit).
+
+    The wizard now uses cursor-paginated mode on first load so the user
+    sees results in ~200ms instead of waiting on the full 3-6 page walk.
     """
     import time
 
     try:
         from elevate_cli import composio_client
 
-        if all:
-            cache_key = f"all::{category or ''}::{limit}"
-            entry = _COMPOSIO_TOOLKITS_CACHE.get(cache_key)
-            now = time.monotonic()
-            if entry and (now - entry[0]) < _COMPOSIO_TOOLKITS_TTL_SEC:
-                return entry[1]
-            result = composio_client.list_all_toolkits(category=category, page_size=limit)
-            _COMPOSIO_TOOLKITS_CACHE[cache_key] = (now, result)
-            return result
-        return composio_client.list_toolkits(category=category, limit=limit)
+        # Search and explicit pagination both bypass the full-catalog cache.
+        # Search results are cheap and need to stay fresh; cursor walking
+        # already implies the caller knows what page they want.
+        if search:
+            return composio_client.list_toolkits(
+                category=category, limit=limit, search=search
+            )
+        if cursor or not all:
+            return composio_client.list_toolkits(
+                category=category, limit=limit, cursor=cursor
+            )
+
+        cache_key = f"all::{category or ''}::{limit}"
+        entry = _COMPOSIO_TOOLKITS_CACHE.get(cache_key)
+        now = time.monotonic()
+        if entry and (now - entry[0]) < _COMPOSIO_TOOLKITS_TTL_SEC:
+            return entry[1]
+        result = composio_client.list_all_toolkits(category=category, page_size=limit)
+        _COMPOSIO_TOOLKITS_CACHE[cache_key] = (now, result)
+        return result
     except Exception as exc:
         _log.exception("GET /api/composio/toolkits failed")
         raise HTTPException(status_code=500, detail=f"List Composio toolkits failed: {exc}")

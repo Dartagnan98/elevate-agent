@@ -268,10 +268,26 @@ def capability(toolkit_slug: str) -> dict[str, Any]:
     return {"toolkit": toolkit_slug, **entry}
 
 
-def list_toolkits(*, category: Optional[str] = None, limit: int = 100) -> dict[str, Any]:
+def list_toolkits(
+    *,
+    category: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    search: Optional[str] = None,
+) -> dict[str, Any]:
+    """Single-page toolkit listing. Returns Composio's raw shape — pull
+    ``next_cursor`` off ``data`` to walk forward.
+
+    ``search`` is passed through as Composio's ``search_query``; small typos
+    still match because the upstream search is fuzzy.
+    """
     params: dict[str, Any] = {"limit": limit}
     if category:
         params["category"] = category
+    if cursor:
+        params["cursor"] = cursor
+    if search:
+        params["search_query"] = search
     return _request("GET", "/api/v3/toolkits", params=params)
 
 

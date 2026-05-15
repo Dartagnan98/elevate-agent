@@ -134,7 +134,7 @@ const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
     eyebrow: "Step 5 of 6",
     title: "How the agent sends messages",
     subtitle:
-      "Outbound iMessage uses the Messages.app on this Mac. Anything you wire here lets the agent write back to leads, clients, or yourself.",
+      "Pick which channels the agent can write to. For bots and webhooks (Telegram, Discord, WhatsApp, Slack) the same credentials from Step 3 handle outbound — flip the channel off here to make the agent read-only on it. iMessage outbound uses Messages.app on this Mac.",
   },
   {
     id: "subagents",
@@ -299,6 +299,16 @@ export function AgentOnboardingWizard({
   // state (e.g. signing in to Codex unlocks the live gpt-5 list).
   const [primaryModelCatalog, setPrimaryModelCatalog] = useState<string[]>([]);
   const [primaryModelLoading, setPrimaryModelLoading] = useState(false);
+
+  // Local "user wants to configure this channel" intent. ChannelToggle gates
+  // its inputs on `enabled`, so without this map the WhatsApp/Slack/Discord
+  // toggles look on-click-broken — the boolean is derived from field
+  // presence, and the fields are empty, so the toggle visually moves but
+  // nothing expands. This map lets the toggle expand on intent.
+  const [expandedChannels, setExpandedChannels] = useState<Record<string, boolean>>({});
+  const setChannelExpanded = useCallback((key: string, value: boolean) => {
+    setExpandedChannels((prev) => ({ ...prev, [key]: value }));
+  }, []);
 
   useEffect(() => {
     if (!catalogProviderId) {
@@ -747,9 +757,11 @@ export function AgentOnboardingWizard({
                 <ChannelToggle
                   enabled={
                     configuredChannelKeys.has("operator_channel_discord") ||
-                    Boolean(draft.discordBotToken && draft.discordChannelId)
+                    Boolean(draft.discordBotToken && draft.discordChannelId) ||
+                    expandedChannels.discord === true
                   }
                   onToggle={(v) => {
+                    setChannelExpanded("discord", v);
                     if (!v) {
                       updateField("discordBotToken", "");
                       updateField("discordChannelId", "");
@@ -782,9 +794,11 @@ export function AgentOnboardingWizard({
                 <ChannelToggle
                   enabled={
                     configuredChannelKeys.has("operator_channel_whatsapp") ||
-                    Boolean(draft.whatsappProvider && draft.whatsappToken)
+                    Boolean(draft.whatsappProvider && draft.whatsappToken) ||
+                    expandedChannels.whatsapp === true
                   }
                   onToggle={(v) => {
+                    setChannelExpanded("whatsapp", v);
                     if (!v) {
                       updateField("whatsappProvider", "");
                       updateField("whatsappToken", "");
@@ -826,9 +840,11 @@ export function AgentOnboardingWizard({
                 <ChannelToggle
                   enabled={
                     configuredChannelKeys.has("operator_channel_slack") ||
-                    Boolean(draft.slackWebhookUrl)
+                    Boolean(draft.slackWebhookUrl) ||
+                    expandedChannels.slack === true
                   }
                   onToggle={(v) => {
+                    setChannelExpanded("slack", v);
                     if (!v) {
                       updateField("slackWebhookUrl", "");
                       updateField("slackChannel", "");
@@ -947,20 +963,61 @@ export function AgentOnboardingWizard({
             )}
 
             {step.id === "outbound" && (
-              <ChannelToggle
-                enabled={draft.outboundImessageEnabled}
-                onToggle={(v) => updateField("outboundImessageEnabled", v)}
-                title="Outbound iMessage"
-                hint="Let the agent send messages from Messages.app on this Mac. Requires the local Messages bridge + Accessibility permission. Replies go from whichever Apple ID you're signed in as."
-              >
-                <WizardField
-                  label="Sender handle (optional override)"
-                  value={draft.outboundImessageSenderHandle}
-                  onChange={(v) => updateField("outboundImessageSenderHandle", v)}
-                  placeholder="+15551234567  or  you@icloud.com"
-                  fullWidth
+              <>
+                <OutboundMirrorToggle
+                  channel="telegram"
+                  enabled={draft.outboundTelegramEnabled}
+                  inboundReady={
+                    configuredChannelKeys.has("operator_channel_telegram") ||
+                    Boolean(
+                      (draft.telegramBotToken.trim() || draft.telegramSecretPresent) &&
+                        draft.telegramChatId.trim(),
+                    )
+                  }
+                  onToggle={(v) => updateField("outboundTelegramEnabled", v)}
                 />
-              </ChannelToggle>
+                <OutboundMirrorToggle
+                  channel="discord"
+                  enabled={draft.outboundDiscordEnabled}
+                  inboundReady={
+                    configuredChannelKeys.has("operator_channel_discord") ||
+                    Boolean(draft.discordBotToken && draft.discordChannelId)
+                  }
+                  onToggle={(v) => updateField("outboundDiscordEnabled", v)}
+                />
+                <OutboundMirrorToggle
+                  channel="whatsapp"
+                  enabled={draft.outboundWhatsappEnabled}
+                  inboundReady={
+                    configuredChannelKeys.has("operator_channel_whatsapp") ||
+                    Boolean(draft.whatsappProvider && draft.whatsappToken)
+                  }
+                  onToggle={(v) => updateField("outboundWhatsappEnabled", v)}
+                />
+                <OutboundMirrorToggle
+                  channel="slack"
+                  enabled={draft.outboundSlackEnabled}
+                  inboundReady={
+                    configuredChannelKeys.has("operator_channel_slack") ||
+                    Boolean(draft.slackWebhookUrl)
+                  }
+                  onToggle={(v) => updateField("outboundSlackEnabled", v)}
+                />
+                <ChannelToggle
+                  enabled={draft.outboundImessageEnabled}
+                  onToggle={(v) => updateField("outboundImessageEnabled", v)}
+                  title="iMessage"
+                  hint="Let the agent send messages from Messages.app on this Mac. Requires the local Messages bridge + Accessibility permission. Replies go from whichever Apple ID you're signed in as."
+                >
+                  <WizardField
+                    label="Sender handle (optional override)"
+                    value={draft.outboundImessageSenderHandle}
+                    onChange={(v) => updateField("outboundImessageSenderHandle", v)}
+                    placeholder="+15551234567  or  you@icloud.com"
+                    fullWidth
+                  />
+                </ChannelToggle>
+              </>
             )}
 
             {step.id === "subagents" && (
@@ -1092,6 +1149,85 @@ function SlackTestButton({
         </span>
       )}
     </div>
+  );
+}
+
+// Lists peer agents that already have a Telegram bot configured. Shown
+// inside TelegramPairingPanel so the operator can see "@ctrl_gary_bot is
+// already wired to gary" before pasting a new token — answers the question
+// "which bots already have Telegram?" without leaving the wizard.
+function TelegramPeerRail() {
+  const [peers, setPeers] = useState<
+    Array<{
+      org: string;
+      name: string;
+      telegram?: {
+        configured: boolean;
+        botHandle: string;
+        chatId: string;
+        tokenPreview: string;
+        source: string;
+      };
+    }>
+  >([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAgentPeers()
+      .then((resp) => {
+        if (cancelled) return;
+        setPeers(resp.peers ?? []);
+      })
+      .catch(() => {
+        /* silent — the rail is purely informational */
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const tgPeers = useMemo(
+    () => peers.filter((p) => p.telegram?.configured),
+    [peers],
+  );
+
+  if (loading || tgPeers.length === 0) return null;
+
+  return (
+    <section className="rounded-md border border-border bg-card/40 px-3 py-2.5">
+      <header className="mb-1.5">
+        <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+          Bots already on this Mac
+        </span>
+      </header>
+      <ul className="space-y-1">
+        {tgPeers.map((p) => (
+          <li
+            key={`${p.org}/${p.name}`}
+            className="flex items-center justify-between gap-3 text-[11.5px] leading-4"
+          >
+            <span className="min-w-0 truncate">
+              <span className="text-foreground">{p.name}</span>
+              <span className="text-muted-foreground/70"> · {p.org}</span>
+              {p.telegram?.botHandle && (
+                <span className="ml-1 text-muted-foreground">@{p.telegram.botHandle}</span>
+              )}
+            </span>
+            <span className="shrink-0 font-mono-ui text-[10.5px] tracking-wide text-muted-foreground/80">
+              {p.telegram?.tokenPreview || "configured"}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5 text-[10.5px] leading-4 text-muted-foreground/70">
+        Reuse one of these tokens or paste a fresh BotFather token below.
+      </p>
+    </section>
   );
 }
 
@@ -1256,6 +1392,68 @@ function WizardSection({
       </header>
       {children}
     </section>
+  );
+}
+
+// Compact toggle for the outbound step. The matching inbound channel already
+// carries the credentials — this toggle just gates "agent is allowed to send
+// on this surface". When inbound isn't wired we render a muted row instead
+// of a clickable toggle so users know they need to go back to Step 3 first.
+const OUTBOUND_CHANNEL_LABELS: Record<string, { title: string; hint: string }> = {
+  telegram: {
+    title: "Telegram",
+    hint: "Same BotFather token writes outbound. Off = agent reads but never replies.",
+  },
+  discord: {
+    title: "Discord",
+    hint: "Bot token from Step 3 writes outbound. Off = agent is read-only in the channel.",
+  },
+  whatsapp: {
+    title: "WhatsApp",
+    hint: "Meta Cloud API / Twilio / Composio session can send back. Off = inbound-only.",
+  },
+  slack: {
+    title: "Slack",
+    hint: "Webhook URL is outbound-by-design. Off = the agent doesn't post into the channel.",
+  },
+};
+
+function OutboundMirrorToggle({
+  channel,
+  enabled,
+  inboundReady,
+  onToggle,
+}: {
+  channel: "telegram" | "discord" | "whatsapp" | "slack";
+  enabled: boolean;
+  inboundReady: boolean;
+  onToggle: (v: boolean) => void;
+}) {
+  const meta = OUTBOUND_CHANNEL_LABELS[channel];
+  if (!inboundReady) {
+    return (
+      <section className="rounded-md border border-border bg-card/30 px-4 py-3">
+        <header className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-[13.5px] font-semibold text-muted-foreground">{meta.title}</h3>
+            <p className="mt-0.5 text-[11.5px] leading-5 text-muted-foreground/80">
+              Wire {meta.title} inbound in Step 3 to enable outbound here.
+            </p>
+          </div>
+          <span className="inline-flex shrink-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-2 py-1 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">
+            Not connected
+          </span>
+        </header>
+      </section>
+    );
+  }
+  return (
+    <ChannelToggle
+      enabled={enabled}
+      onToggle={onToggle}
+      title={meta.title}
+      hint={meta.hint}
+    />
   );
 }
 
@@ -1503,45 +1701,147 @@ function WizardModelPicker({
   );
 }
 
+type ComposioToolkitRow = {
+  slug?: string | null;
+  name?: string | null;
+  logo?: string | null;
+  meta?: { logo?: string | null } | null;
+};
+
+const TOOLKIT_PAGE_SIZE = 30;
+
+// Pull the toolkit logo from either ``meta.logo`` (newer responses) or
+// ``logo`` (older). Composio mixes the two depending on endpoint.
+function toolkitLogo(t: ComposioToolkitRow): string | null {
+  return t.meta?.logo || t.logo || null;
+}
+
+// Step-by-step walkthrough rendered when there's no Composio key yet. The
+// previous panel just said "paste a key" — that's not enough for a brand-
+// new operator who has never opened composio.dev. Deep links go straight
+// to the page that produces the next required value.
+function ComposioWalkthrough() {
+  return (
+    <div className="space-y-2.5 rounded-md border border-border bg-card/50 px-4 py-3">
+      <div className="text-[11.5px] leading-5 text-foreground">
+        Composio brokers OAuth for Gmail, Calendar, Slack, GitHub, Notion, and
+        100+ other tools. Free tier is generous — paste an API key here and
+        every connector lights up.
+      </div>
+      <ol className="space-y-1.5 text-[11.5px] leading-5">
+        <li className="flex items-start gap-2">
+          <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary/40 text-[10px] font-semibold text-primary">
+            1
+          </span>
+          <span className="text-muted-foreground">
+            Create your account at{" "}
+            <a
+              href="https://app.composio.dev/signup"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
+            >
+              app.composio.dev/signup
+              <ExternalLink className="h-3 w-3" />
+            </a>
+            . Google sign-in works.
+          </span>
+        </li>
+        <li className="flex items-start gap-2">
+          <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary/40 text-[10px] font-semibold text-primary">
+            2
+          </span>
+          <span className="text-muted-foreground">
+            Open the{" "}
+            <a
+              href="https://app.composio.dev/developers"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
+            >
+              Developer dashboard
+              <ExternalLink className="h-3 w-3" />
+            </a>
+            {" "}— pick (or create) the project that should own this agent.
+          </span>
+        </li>
+        <li className="flex items-start gap-2">
+          <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary/40 text-[10px] font-semibold text-primary">
+            3
+          </span>
+          <span className="text-muted-foreground">
+            Generate an API key on the{" "}
+            <a
+              href="https://app.composio.dev/developers/api-keys"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
+            >
+              API keys page
+              <ExternalLink className="h-3 w-3" />
+            </a>
+            , then paste it into the Composio field above. Tool catalog
+            appears here as soon as the key validates.
+          </span>
+        </li>
+      </ol>
+    </div>
+  );
+}
+
 // Inline Composio account connector — mirrors the connect-account flow in
 // ConfigPage's ComposioPanel but trimmed to fit inside a wizard step.
-// Lists already-connected toolkits and offers a search + connect for new
-// ones. Opens Composio's OAuth URL in a new tab; refreshes on focus.
+// First paint loads a single 30-item page (no full catalog walk); search
+// queries Composio's index server-side; Prev/Next pages via cursor. Logos
+// render inline so the user actually recognizes each tool.
 function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
   const [status, setStatus] = useState<{ valid: boolean; error?: string | null } | null>(null);
   const [connections, setConnections] = useState<
-    Array<{ id: string; toolkit?: { slug?: string | null; name?: string | null } | null; status?: string | null }>
+    Array<{
+      id: string;
+      toolkit?: { slug?: string | null; name?: string | null; logo?: string | null; meta?: { logo?: string | null } | null } | null;
+      status?: string | null;
+    }>
   >([]);
-  const [toolkits, setToolkits] = useState<
-    Array<{ slug?: string | null; name?: string | null; logo_url?: string | null }>
-  >([]);
-  const [loading, setLoading] = useState(false);
+  const [toolkits, setToolkits] = useState<ComposioToolkitRow[]>([]);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [toolkitsLoading, setToolkitsLoading] = useState(false);
   const [connectingSlug, setConnectingSlug] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  // Pagination state — cursorStack[n] is the cursor that produced the
+  // current page n. Reset on every new search.
+  const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const pageIdx = cursorStack.length - 1;
+
+  // Debounce keystrokes so we don't fire a Composio search per character.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(handle);
+  }, [query]);
+
+  // Reset to page 1 whenever search term changes.
+  useEffect(() => {
+    setCursorStack([undefined]);
+  }, [debouncedQuery]);
+
+  // Status + connections are cheap; fire both in parallel up front so the
+  // user sees "Connected accounts" without waiting on the toolkit page.
+  const refreshStatusAndConns = useCallback(async () => {
     if (!keyPresent) {
       setStatus(null);
       setConnections([]);
-      setToolkits([]);
       return;
     }
-    setLoading(true);
+    setStatusLoading(true);
     setErrorMsg(null);
-    // Fire all three calls in parallel from the jump. The previous flow
-    // awaited /status before kicking off /connections + /toolkits — a
-    // 1+1 round-trip serial chain that put the wizard's slowest call on
-    // the critical path. Each toolkit/connection fetch hits Composio's
-    // API which can take 2-4s on cold cache; serializing it doubled the
-    // wait for no reason since an invalid key just gives 401s on the
-    // dependent calls that we ignore anyway.
-    const [statusRes, connsRes, toolkitsRes] = await Promise.allSettled([
+    const [statusRes, connsRes] = await Promise.allSettled([
       api.getComposioStatus(),
       api.getComposioConnections(),
-      api.getComposioToolkits(),
     ]);
-
     if (statusRes.status === "fulfilled") {
       setStatus(statusRes.value);
     } else {
@@ -1552,7 +1852,6 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
           : String(statusRes.reason),
       );
     }
-
     const statusValid = statusRes.status === "fulfilled" && statusRes.value.valid;
     if (statusValid && connsRes.status === "fulfilled") {
       const conData =
@@ -1561,27 +1860,69 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
     } else {
       setConnections([]);
     }
-    if (statusValid && toolkitsRes.status === "fulfilled") {
-      const tkData =
-        (toolkitsRes.value.data as { items?: typeof toolkits } | typeof toolkits) ?? [];
-      setToolkits(Array.isArray(tkData) ? tkData : tkData.items ?? []);
-    } else {
-      setToolkits([]);
-    }
-    setLoading(false);
+    setStatusLoading(false);
   }, [keyPresent]);
 
+  // Toolkit page loads independently; doesn't block the rest of the panel.
+  const loadToolkitPage = useCallback(
+    async (cursor: string | undefined, search: string) => {
+      if (!keyPresent) {
+        setToolkits([]);
+        setNextCursor(null);
+        return;
+      }
+      setToolkitsLoading(true);
+      try {
+        const resp = await api.getComposioToolkitsPage({
+          cursor,
+          search: search || undefined,
+          limit: TOOLKIT_PAGE_SIZE,
+        });
+        const raw =
+          (resp.data as
+            | { items?: ComposioToolkitRow[]; next_cursor?: string | null; nextCursor?: string | null }
+            | ComposioToolkitRow[]
+            | undefined) ?? [];
+        if (Array.isArray(raw)) {
+          setToolkits(raw);
+          setNextCursor(null);
+        } else {
+          setToolkits(raw.items ?? []);
+          setNextCursor(raw.next_cursor ?? raw.nextCursor ?? null);
+        }
+      } catch (err) {
+        setToolkits([]);
+        setNextCursor(null);
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      } finally {
+        setToolkitsLoading(false);
+      }
+    },
+    [keyPresent],
+  );
+
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void refreshStatusAndConns();
+  }, [refreshStatusAndConns]);
+
+  // Whenever the cursor or search changes (and status is valid), load the
+  // current page. We don't depend on status itself becoming valid in this
+  // hook because the first paint of /status validates the key — if status
+  // is invalid, /toolkits will 401 anyway and we handle the error.
+  useEffect(() => {
+    if (!keyPresent) return;
+    if (status === null) return;
+    if (!status.valid) return;
+    void loadToolkitPage(cursorStack[cursorStack.length - 1], debouncedQuery);
+  }, [keyPresent, status, cursorStack, debouncedQuery, loadToolkitPage]);
 
   useEffect(() => {
     const onFocus = () => {
-      if (status?.valid) void refresh();
+      if (status?.valid) void refreshStatusAndConns();
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [refresh, status?.valid]);
+  }, [refreshStatusAndConns, status?.valid]);
 
   const connect = useCallback(async (slug: string) => {
     setConnectingSlug(slug);
@@ -1604,15 +1945,18 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
     }
   }, []);
 
-  if (!keyPresent) {
-    return (
-      <p className="text-[11.5px] leading-5 text-muted-foreground/80">
-        Paste a Composio key above to connect Gmail, Calendar, Slack, GitHub, Notion, and 100+ more.
-      </p>
-    );
-  }
+  const goNextPage = useCallback(() => {
+    if (!nextCursor) return;
+    setCursorStack((prev) => [...prev, nextCursor]);
+  }, [nextCursor]);
 
-  if (loading && status === null) {
+  const goPrevPage = useCallback(() => {
+    setCursorStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+  }, []);
+
+  if (!keyPresent) return <ComposioWalkthrough />;
+
+  if (statusLoading && status === null) {
     return (
       <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1628,16 +1972,6 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
       </p>
     );
   }
-
-  const lowered = query.trim().toLowerCase();
-  const visibleToolkits = (lowered
-    ? toolkits.filter(
-        (t) =>
-          (t.name ?? "").toLowerCase().includes(lowered) ||
-          (t.slug ?? "").toLowerCase().includes(lowered),
-      )
-    : toolkits
-  ).slice(0, 12);
 
   const connectedSlugs = new Set(
     connections.map((c) => (c.toolkit?.slug ?? "").toLowerCase()).filter(Boolean),
@@ -1655,15 +1989,26 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
           </p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
-            {connections.map((c) => (
-              <span
-                key={c.id}
-                className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] text-foreground"
-              >
-                <CheckCircle2 className="h-3 w-3 text-primary" />
-                {c.toolkit?.name ?? c.toolkit?.slug ?? c.id}
-              </span>
-            ))}
+            {connections.map((c) => {
+              const logo = c.toolkit?.meta?.logo ?? c.toolkit?.logo;
+              return (
+                <span
+                  key={c.id}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] text-foreground"
+                >
+                  {logo ? (
+                    <img
+                      src={logo}
+                      alt=""
+                      className="h-3.5 w-3.5 rounded-sm object-contain"
+                    />
+                  ) : (
+                    <CheckCircle2 className="h-3 w-3 text-primary" />
+                  )}
+                  {c.toolkit?.name ?? c.toolkit?.slug ?? c.id}
+                </span>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1690,13 +2035,14 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
           className="mb-2 h-8 w-full rounded-md border border-border bg-card/60 px-3 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
         />
         <div className="grid gap-1.5 md:grid-cols-2">
-          {visibleToolkits.map((t) => {
+          {toolkits.map((t) => {
             const slug = (t.slug ?? "").toLowerCase();
             const connected = connectedSlugs.has(slug);
             const busy = connectingSlug === slug;
+            const logo = toolkitLogo(t);
             return (
               <button
-                key={slug || t.name}
+                key={slug || t.name || Math.random()}
                 type="button"
                 onClick={() => slug && !connected && !busy && connect(slug)}
                 disabled={!slug || connected || busy}
@@ -1706,7 +2052,19 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
                   connected && "opacity-60",
                 )}
               >
-                <span className="truncate">{t.name ?? slug}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  {logo ? (
+                    <img
+                      src={logo}
+                      alt=""
+                      className="h-4 w-4 shrink-0 rounded-sm object-contain"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <span className="h-4 w-4 shrink-0 rounded-sm bg-muted/40" />
+                  )}
+                  <span className="truncate">{t.name ?? slug}</span>
+                </span>
                 {connected ? (
                   <span className="text-[10.5px] uppercase tracking-wide text-primary">connected</span>
                 ) : busy ? (
@@ -1719,12 +2077,51 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
               </button>
             );
           })}
-          {visibleToolkits.length === 0 && (
+          {toolkitsLoading && toolkits.length === 0 && (
+            <span className="col-span-full inline-flex items-center gap-2 text-[11.5px] text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Loading toolkits…
+            </span>
+          )}
+          {!toolkitsLoading && toolkits.length === 0 && (
             <span className="col-span-full text-[11.5px] text-muted-foreground/80">
-              No toolkits match "{query}". Try another term.
+              {debouncedQuery
+                ? `No toolkits match "${debouncedQuery}". Try another term.`
+                : "Composio returned no toolkits. Check your key or try again."}
             </span>
           )}
         </div>
+
+        {/* Prev / Next page controls. Only render when there's a reason to. */}
+        {(pageIdx > 0 || nextCursor) && (
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={goPrevPage}
+              disabled={pageIdx === 0 || toolkitsLoading}
+              className={cn(
+                "rounded-md border border-border bg-card/60 px-2.5 py-1 text-[11px] uppercase tracking-wide text-muted-foreground transition-colors",
+                pageIdx === 0 ? "opacity-40" : "hover:border-primary/40 hover:text-foreground",
+              )}
+            >
+              ← Prev
+            </button>
+            <span className="font-mono-ui text-[10.5px] uppercase tracking-[0.18em] text-muted-foreground/70">
+              Page {pageIdx + 1}
+            </span>
+            <button
+              type="button"
+              onClick={goNextPage}
+              disabled={!nextCursor || toolkitsLoading}
+              className={cn(
+                "rounded-md border border-border bg-card/60 px-2.5 py-1 text-[11px] uppercase tracking-wide text-muted-foreground transition-colors",
+                !nextCursor ? "opacity-40" : "hover:border-primary/40 hover:text-foreground",
+              )}
+            >
+              Next →
+            </button>
+          </div>
+        )}
       </div>
 
       {errorMsg && (
@@ -1951,6 +2348,7 @@ function TelegramPairingPanel({
 
   return (
     <div className="space-y-3">
+      <TelegramPeerRail />
       <WizardField
         label="Bot token"
         value={draft.telegramBotToken}

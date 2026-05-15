@@ -135,6 +135,13 @@ export type AgentSetupDraft = {
   slackChannel: string;
   outboundImessageEnabled: boolean;
   outboundImessageSenderHandle: string;
+  // Outbound mirrors inbound — when the matching inbound channel is configured
+  // the same credentials let the agent send. These toggles let the user opt
+  // out per channel (e.g. agent reads Slack but doesn't write to it).
+  outboundTelegramEnabled: boolean;
+  outboundDiscordEnabled: boolean;
+  outboundWhatsappEnabled: boolean;
+  outboundSlackEnabled: boolean;
   subagentsEnabled: boolean;
   subagentsPack: string;
   agentChannels: Record<string, Record<string, string[]>>;
@@ -167,6 +174,14 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
   const slackVal = (byKey.get("operator_channel_slack")?.value ?? {}) as Record<string, unknown>;
   const outImessageItem = byKey.get("outbound_imessage");
   const outImessageVal = (outImessageItem?.value ?? {}) as Record<string, unknown>;
+  const outTelegramItem = byKey.get("outbound_telegram");
+  const outDiscordItem = byKey.get("outbound_discord");
+  const outWhatsappItem = byKey.get("outbound_whatsapp");
+  const outSlackItem = byKey.get("outbound_slack");
+  // Inbound configured? default outbound to ON. The agent already has the
+  // credentials; opt-out is a deliberate choice ("read but don't write").
+  const inboundConfigured = (key: string) =>
+    byKey.get(key)?.status === "configured";
   const subagentsItem = byKey.get("subagents_pack");
   const subagentsVal = (subagentsItem?.value ?? {}) as Record<string, unknown>;
   const agentChannelsItem = byKey.get("agent_channel_routing");
@@ -202,6 +217,18 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     slackChannel: String(slackVal.channel ?? ""),
     outboundImessageEnabled: outImessageItem ? outImessageItem.status === "configured" : false,
     outboundImessageSenderHandle: String(outImessageVal.senderHandle ?? ""),
+    outboundTelegramEnabled: outTelegramItem
+      ? outTelegramItem.status === "configured"
+      : inboundConfigured("operator_channel_telegram"),
+    outboundDiscordEnabled: outDiscordItem
+      ? outDiscordItem.status === "configured"
+      : inboundConfigured("operator_channel_discord"),
+    outboundWhatsappEnabled: outWhatsappItem
+      ? outWhatsappItem.status === "configured"
+      : inboundConfigured("operator_channel_whatsapp"),
+    outboundSlackEnabled: outSlackItem
+      ? outSlackItem.status === "configured"
+      : inboundConfigured("operator_channel_slack"),
     subagentsEnabled: subagentsItem ? subagentsItem.status === "configured" : false,
     subagentsPack: String(subagentsVal.pack ?? "cortextos_default"),
     agentChannels: parseAgentChannels(agentChannelsItem?.value),
@@ -252,6 +279,12 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
   );
   const slackReady = Boolean(draft.slackWebhookUrl.trim());
   const outImessageReady = draft.outboundImessageEnabled;
+  // Outbound on bot/webhook channels is only "ready" if the inbound side has
+  // credentials. Otherwise the agent has nothing to authenticate with.
+  const outTelegramReady = draft.outboundTelegramEnabled && telegramReady;
+  const outDiscordReady = draft.outboundDiscordEnabled && discordReady;
+  const outWhatsappReady = draft.outboundWhatsappEnabled && whatsappReady;
+  const outSlackReady = draft.outboundSlackEnabled && slackReady;
 
   return [
     {
@@ -371,6 +404,30 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
         enabled: draft.outboundImessageEnabled,
         senderHandle: draft.outboundImessageSenderHandle.trim(),
       },
+    },
+    {
+      key: "outbound_telegram",
+      status: (outTelegramReady ? "configured" : "skipped") as AdminSetupItemStatus,
+      provider: outTelegramReady ? "telegram" : null,
+      value: { enabled: draft.outboundTelegramEnabled },
+    },
+    {
+      key: "outbound_discord",
+      status: (outDiscordReady ? "configured" : "skipped") as AdminSetupItemStatus,
+      provider: outDiscordReady ? "discord" : null,
+      value: { enabled: draft.outboundDiscordEnabled },
+    },
+    {
+      key: "outbound_whatsapp",
+      status: (outWhatsappReady ? "configured" : "skipped") as AdminSetupItemStatus,
+      provider: outWhatsappReady ? draft.whatsappProvider.trim() : null,
+      value: { enabled: draft.outboundWhatsappEnabled },
+    },
+    {
+      key: "outbound_slack",
+      status: (outSlackReady ? "configured" : "skipped") as AdminSetupItemStatus,
+      provider: outSlackReady ? "slack" : null,
+      value: { enabled: draft.outboundSlackEnabled },
     },
     {
       key: "subagents_pack",

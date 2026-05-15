@@ -264,6 +264,13 @@ export const api = {
         cronCount: number;
         roleHint: string;
         configPath: string;
+        telegram?: {
+          configured: boolean;
+          botHandle: string;
+          chatId: string;
+          tokenPreview: string;
+          source: string;
+        };
       }>;
       rootsSearched: string[];
     }>("/api/agents/peers"),
@@ -396,6 +403,25 @@ export const api = {
   getComposioToolkits: (category?: string) => {
     const qs = category ? `?category=${encodeURIComponent(category)}` : "";
     return fetchJSON<ComposioApiResult<ComposioToolkit[]>>(`/api/composio/toolkits${qs}`);
+  },
+  // Paginated/searched version. ``all=false`` plus ``cursor`` lets the
+  // wizard load page-by-page without waiting on the full catalog walk.
+  // Pass ``search`` to use Composio's fuzzy search server-side.
+  getComposioToolkitsPage: (params: {
+    category?: string;
+    cursor?: string;
+    search?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    qs.set("all", "false");
+    qs.set("limit", String(params.limit ?? 30));
+    if (params.category) qs.set("category", params.category);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.search) qs.set("search", params.search);
+    return fetchJSON<ComposioApiResult<ComposioToolkit[]>>(
+      `/api/composio/toolkits?${qs.toString()}`,
+    );
   },
   initiateComposioConnection: (body: {
     toolkitSlug: string;
