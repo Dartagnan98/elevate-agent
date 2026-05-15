@@ -362,3 +362,101 @@ def test_walk_jsonl_source_directly(legacy_layout):
     assert "crm" in stats.sources_walked
     assert stats.contacts == 2
     assert stats.messages == 3
+
+
+def test_walk_jsonl_lead_events_dispatch(tmp_path):
+    """Regression for the 0.12.0/0.12.1 writethrough bug: every CRM
+    lead-event was being labeled source_id='ui:lifecycle' and
+    kind='lifecycle_change' regardless of its actual type. The walker
+    must instead:
+
+      - tag rows with the real source_id (so per-source filters work);
+      - dispatch row.type='crm_note' (and bare 'note') to kind='note'
+        so the per-contact notes UI surface can read them;
+      - leave everything else as kind='lifecycle_change' for the audit
+        log surface.
+
+    If you find yourself loosening this test, also re-check that the
+    profile notes panel still shows imported CRM notes."""
+    from elevate_cli.data.migrate import BackfillStats
+
+    sources = tmp_path / "sources"
+    crm = sources / "crm"
+    crm.mkdir(parents=True)
+
+    _write_jsonl(crm / "contacts.jsonl", [
+        {
+            "source_id": "crm",
+            "contact_id": "lofty-lead:9001",
+            "display_name": "Test Lead",
+            "channel": "Lofty CRM",
+            "emails": "test@example.com",
+            "phones": "+15555550199",
+        },
+    ])
+    _write_jsonl(crm / "lead-events.jsonl", [
+        {
+            "source_id": "crm",
+            "contact_id": "lofty-lead:9001",
+            "type": "crm_note",
+            "title": "Note from Lofty",
+            "summary": "Operator left a comment",
+            "body": "Called and left voicemail.",
+            "timestamp": "2026-05-01T09:00:00+00:00",
+        },
+        {
+            "source_id": "crm",
+            "contact_id": "lofty-lead:9001",
+            "type": "crm_activity",
+            "title": "Listing viewed",
+            "summary": "Lead viewed 123 Main St",
+            "timestamp": "2026-05-02T10:00:00+00:00",
+        },
+        {
+            "source_id": "crm",
+            "contact_id": "lofty-lead:9001",
+            "type": "crm_lead_synced",
+            "title": "Lofty lead synced",
+            "summary": "Synced from Lofty",
+            "timestamp": "2026-05-03T11:00:00+00:00",
+        },
+    ])
+
+    stats = BackfillStats()
+    with connect() as conn:
+        walk_jsonl_source(crm, conn=conn, stats=stats)
+
+        rows = conn.execute(
+            "SELECT kind, source_id, payload_json FROM events "
+            "WHERE source_id='crm' ORDER BY ts"
+        ).fetchall()
+
+    assert len(rows) == 3, f"expected 3 events, got {len(rows)}"
+
+    # crm_note -> kind='note', source_id='crm'
+    assert rows[0]["kind"] == "note"
+    assert rows[0]["source_id"] == "crm"
+    assert "crm_note" in rows[0]["payload_json"]
+
+    # crm_activity -> kind='lifecycle_change', source_id='crm'
+    assert rows[1]["kind"] == "lifecycle_change"
+    assert rows[1]["source_id"] == "crm"
+    assert "crm_activity" in rows[1]["payload_json"]
+
+    # crm_lead_synced -> kind='lifecycle_change', source_id='crm'
+    assert rows[2]["kind"] == "lifecycle_change"
+    assert rows[2]["source_id"] == "crm"
+    assert "crm_lead_synced" in rows[2]["payload_json"]
+
+    # Make sure NONE of them landed as the old default ui:lifecycle.
+    with connect() as conn:
+        leaked = conn.execute(
+            "SELECT COUNT(*) FROM events "
+            "WHERE source_id='ui:lifecycle' "
+            "  AND payload_json LIKE '%\"legacyType\":\"crm_%'"
+        ).fetchone()[0]
+    assert leaked == 0, (
+        "lead-events leaked into ui:lifecycle — the source_id pass-through "
+        "regressed. Check record_lifecycle's source_id kwarg and the walker "
+        "is forwarding it."
+    )

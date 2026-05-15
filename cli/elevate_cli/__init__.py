@@ -11,5 +11,5 @@ Provides subcommands for:
 - elevate cron          - Manage cron jobs
 """
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"
 __release_date__ = "2026.5.15"
