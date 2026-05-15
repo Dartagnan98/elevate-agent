@@ -2727,14 +2727,23 @@ function IMessageSetupPanel({
     value: AgentSetupDraft[K],
   ) => void;
 }) {
-  const [mode, setMode] = useState<"local" | "bluebubbles">("local");
-  const [serverUrl, setServerUrl] = useState("");
+  // If BlueBubbles is already wired in env, default to that mode + pre-fill.
+  const bbAlreadyWired =
+    Boolean(draft.bluebubblesServerUrl) && draft.bluebubblesSecretPresent;
+  const [mode, setMode] = useState<"local" | "bluebubbles">(
+    bbAlreadyWired ? "bluebubbles" : "local",
+  );
+  const [serverUrl, setServerUrl] = useState(draft.bluebubblesServerUrl);
   const [password, setPassword] = useState("");
-  const [allowedUsers, setAllowedUsers] = useState("");
-  const [homeChannel, setHomeChannel] = useState("");
+  const [allowedUsers, setAllowedUsers] = useState(draft.bluebubblesAllowedUsers);
+  const [homeChannel, setHomeChannel] = useState(draft.bluebubblesHomeChannel);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(
+    bbAlreadyWired
+      ? `Connected via BlueBubbles. Password: ${draft.bluebubblesSecretPreview || "(set)"}`
+      : null,
+  );
 
   const saveBlueBubbles = useCallback(async () => {
     if (!serverUrl.trim() || !password.trim()) {

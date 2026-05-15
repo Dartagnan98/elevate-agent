@@ -126,6 +126,14 @@ export type AgentSetupDraft = {
   telegramChatId: string;
   imessageEnabled: boolean;
   imessageHandle: string;
+  // BlueBubbles bridge — populated from env overlay when already wired.
+  // When ``bluebubblesServerUrl`` is non-empty the iMessage panel defaults
+  // to BlueBubbles mode and pre-fills the existing config.
+  bluebubblesServerUrl: string;
+  bluebubblesAllowedUsers: string;
+  bluebubblesHomeChannel: string;
+  bluebubblesSecretPresent: boolean;
+  bluebubblesSecretPreview: string;
   discordBotToken: string;
   discordChannelId: string;
   whatsappProvider: string;
@@ -208,6 +216,11 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     telegramChatId: String(tgVal.chatId ?? ""),
     imessageEnabled: imessageItem ? imessageItem.status === "configured" : false,
     imessageHandle: String(imessageVal.handle ?? ""),
+    bluebubblesServerUrl: String(imessageVal.bluebubblesServerUrl ?? ""),
+    bluebubblesAllowedUsers: String(imessageVal.bluebubblesAllowedUsers ?? ""),
+    bluebubblesHomeChannel: String(imessageVal.bluebubblesHomeChannel ?? imessageVal.handle ?? ""),
+    bluebubblesSecretPresent: Boolean(imessageVal.secretPresent),
+    bluebubblesSecretPreview: String(imessageVal.secretPreview ?? ""),
     discordBotToken: String(discordVal.botToken ?? ""),
     discordChannelId: String(discordVal.channelId ?? ""),
     whatsappProvider: String(whatsappVal.provider ?? ""),

@@ -380,20 +380,38 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
         "value": {"enabled": True, "alwaysOn": True},
     }
 
-    # iMessage — probe local Messages.db. If the file exists and is readable
-    # the channel is live; FDA enforcement happens at read time.
-    try:
-        from pathlib import Path
+    # iMessage — BlueBubbles bridge first (works on any machine), then
+    # local Messages.db (Mac-only, requires Full Disk Access). Either
+    # path flips the channel to configured.
+    bluebubbles_url = _get("BLUEBUBBLES_SERVER_URL")
+    bluebubbles_password = _get("BLUEBUBBLES_PASSWORD")
+    if bluebubbles_url and bluebubbles_password:
+        overlays["operator_channel_imessage"] = {
+            "status": "configured",
+            "provider": "bluebubbles",
+            "value": {
+                "handle": _get("BLUEBUBBLES_HOME_CHANNEL") or "",
+                "secretSource": "env",
+                "secretPresent": True,
+                "secretPreview": _token_preview(bluebubbles_password),
+                "bluebubblesServerUrl": bluebubbles_url,
+                "bluebubblesAllowedUsers": _get("BLUEBUBBLES_ALLOWED_USERS") or "",
+                "bluebubblesHomeChannel": _get("BLUEBUBBLES_HOME_CHANNEL") or "",
+            },
+        }
+    else:
+        try:
+            from pathlib import Path
 
-        messages_db = Path.home() / "Library" / "Messages" / "chat.db"
-        if messages_db.exists() and os.access(messages_db, os.R_OK):
-            overlays["operator_channel_imessage"] = {
-                "status": "configured",
-                "provider": "imessage",
-                "value": {"handle": "", "secretSource": "macos"},
-            }
-    except Exception:
-        pass
+            messages_db = Path.home() / "Library" / "Messages" / "chat.db"
+            if messages_db.exists() and os.access(messages_db, os.R_OK):
+                overlays["operator_channel_imessage"] = {
+                    "status": "configured",
+                    "provider": "imessage",
+                    "value": {"handle": "", "secretSource": "macos"},
+                }
+        except Exception:
+            pass
 
     discord_token = _get("DISCORD_BOT_TOKEN")
     discord_channel = _get("DISCORD_CHANNEL_ID")
