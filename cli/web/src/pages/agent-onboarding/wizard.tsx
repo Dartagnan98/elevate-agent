@@ -2404,6 +2404,31 @@ function TelegramConnectedCard({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // Snapshot can arrive after this card mounts (gateway restart + refetch).
+  // Sync from draft when the input is still empty.
+  useEffect(() => {
+    if (draft.telegramAllowedUsers && !allowedUsers) {
+      setAllowedUsers(draft.telegramAllowedUsers);
+    }
+    const draftHome = draft.telegramHomeChannel || draft.telegramChatId;
+    if (draftHome && !homeChannel) {
+      setHomeChannel(draftHome);
+    }
+    if (draft.telegramDmBehavior && (!dmBehavior || dmBehavior === "pair")) {
+      setDmBehavior(draft.telegramDmBehavior);
+    }
+    if (draft.telegramAllowAllUsers && !allowAll) {
+      setAllowAll(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    draft.telegramAllowedUsers,
+    draft.telegramHomeChannel,
+    draft.telegramChatId,
+    draft.telegramDmBehavior,
+    draft.telegramAllowAllUsers,
+  ]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -2983,6 +3008,44 @@ function IMessageSetupPanel({
       ? `Connected via BlueBubbles. Password: ${draft.bluebubblesSecretPreview || "(set)"}`
       : null,
   );
+
+  // The snapshot can arrive AFTER this panel mounted (e.g. user opened
+  // the wizard, we then restarted the gateway, snapshot refreshed). Sync
+  // state from the draft when the operator hasn't typed something
+  // different -- prevents the inputs from looking empty even though the
+  // env values are sitting right there in the draft.
+  useEffect(() => {
+    if (draft.bluebubblesServerUrl && !serverUrl) {
+      setServerUrl(draft.bluebubblesServerUrl);
+    }
+    if (draft.bluebubblesAllowedUsers && !allowedUsers) {
+      setAllowedUsers(draft.bluebubblesAllowedUsers);
+    }
+    if (draft.bluebubblesHomeChannel && !homeChannel) {
+      setHomeChannel(draft.bluebubblesHomeChannel);
+    }
+    if (
+      bbAlreadyWired &&
+      mode === "local" &&
+      !serverUrl &&
+      !allowedUsers &&
+      !homeChannel
+    ) {
+      setMode("bluebubbles");
+    }
+    if (bbAlreadyWired && !successMsg && !errorMsg && password === "") {
+      setSuccessMsg(
+        `Connected via BlueBubbles. Password: ${draft.bluebubblesSecretPreview || "(set)"}`,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    draft.bluebubblesServerUrl,
+    draft.bluebubblesAllowedUsers,
+    draft.bluebubblesHomeChannel,
+    draft.bluebubblesSecretPresent,
+    draft.bluebubblesSecretPreview,
+  ]);
 
   const saveBlueBubbles = useCallback(async () => {
     if (!serverUrl.trim() || !password.trim()) {
