@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
@@ -13,8 +14,9 @@ import {
   Loader2,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { AgentSetupSnapshot } from "@/lib/api-types";
+import type { AgentSetupSnapshot, OAuthProvider } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
+import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
 import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
@@ -55,7 +57,7 @@ const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
     eyebrow: "Step 1 of 6",
     title: "Brain",
     subtitle:
-      "The model the agent thinks with, plus an embedding model for memory recall. You can paste one API key for both — Anthropic and OpenAI both work.",
+      "Sign in to a model provider, then pick which one the agent thinks with. Same auth state as the CLI — if `elevate auth add anthropic` is done, you'll see Anthropic connected below.",
   },
   {
     id: "memory",
@@ -166,10 +168,62 @@ export function AgentOnboardingWizard({
   const [error, setError] = useState<string | null>(null);
   const [showMissing, setShowMissing] = useState(false);
   const [stepIdx, setStepIdx] = useState(0);
+  const [oauthProviders, setOauthProviders] = useState<OAuthProvider[] | null>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   useEffect(() => {
     setDraft(draftFromSnapshot(setup));
   }, [setup]);
+
+  // Pull real CLI auth state so the Brain step reflects what's actually
+  // signed in (anthropic via PKCE, claude-code subscription, etc) — NOT
+  // just what's in ~/.elevate/.env. Refreshes when the user lands on or
+  // returns to step 1.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchProviders = () => {
+      api
+        .getOAuthProviders()
+        .then((resp) => {
+          if (cancelled) return;
+          setOauthProviders(resp.providers);
+          // Auto-default primaryProvider when nothing is picked yet but
+          // a CLI provider is signed in. Saves the user a click when they
+          // already authed via `elevate auth add anthropic`.
+          const current = draftRef.current.primaryProvider;
+          if (!current.trim()) {
+            const live = resp.providers.find(
+              (p) => p.status.logged_in && p.id !== "claude-code",
+            );
+            const fallback = resp.providers.find((p) => p.status.logged_in);
+            const pick = live ?? fallback;
+            if (pick) {
+              setDraft((prev) =>
+                prev.primaryProvider.trim()
+                  ? prev
+                  : { ...prev, primaryProvider: pick.id === "claude-code" ? "anthropic" : pick.id },
+              );
+            }
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setOauthProviders([]);
+        });
+    };
+    if (AGENT_WIZARD_STEPS[stepIdx]?.id === "models") {
+      fetchProviders();
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [stepIdx]);
+
+  const connectedProviderIds = useMemo(() => {
+    if (!oauthProviders) return new Set<string>();
+    return new Set(oauthProviders.filter((p) => p.status.logged_in).map((p) => p.id));
+  }, [oauthProviders]);
+  const anyProviderConnected = connectedProviderIds.size > 0;
 
   const step = AGENT_WIZARD_STEPS[stepIdx];
   const isLast = stepIdx === AGENT_WIZARD_STEPS.length - 1;
@@ -185,10 +239,22 @@ export function AgentOnboardingWizard({
 
   const missingMessage = useMemo(() => {
     if (step.id === "models") {
+      // A provider is "available" if either: the user signed in via CLI/wizard
+      // OAuth (real auth store), OR a key is detected in ~/.elevate/.env, OR
+      // the user pasted one in this session.
+      const providerConnected =
+        connectedProviderIds.has(draft.primaryProvider) ||
+        // claude-code subscription credentials count as anthropic access
+        (draft.primaryProvider === "anthropic" && connectedProviderIds.has("claude-code"));
       const primaryHasKey =
-        Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent;
+        providerConnected ||
+        Boolean(draft.primaryApiKey.trim()) ||
+        draft.primarySecretPresent;
+      if (!anyProviderConnected && !primaryHasKey) {
+        return "Connect a model provider below before continuing.";
+      }
       if (!draft.primaryProvider.trim() || !draft.primaryModel.trim() || !primaryHasKey) {
-        return "Pick a provider, model, and paste an API key before continuing.";
+        return "Pick a provider and model the agent should think with.";
       }
       if (!draft.embeddingProvider.trim() || !draft.embeddingModel.trim()) {
         return "Pick an embedding provider and model — memory recall needs it.";
@@ -312,44 +378,62 @@ export function AgentOnboardingWizard({
           <div className="onboarding-rise-delay-3 mt-8 flex flex-col gap-5">
             {step.id === "models" && (
               <>
-                <WizardSection title="Primary LLM" hint="The model the agent thinks with.">
+                <WizardSection
+                  title="Sign in to a model provider"
+                  hint="Real CLI auth state. Sign in here once and the agent, the CLI, and every cron all share the same credential."
+                >
+                  <div className="-mx-1">
+                    <OAuthProvidersCard
+                      onError={(msg) => setError(msg)}
+                      onSuccess={() => {
+                        // Re-pull so the wizard picks up the new auth state.
+                        api.getOAuthProviders().then((resp) => setOauthProviders(resp.providers)).catch(() => {});
+                      }}
+                    />
+                  </div>
+                </WizardSection>
+
+                <WizardSection
+                  title="Pick the brain"
+                  hint="Which connected provider + which model id the agent should use as its primary."
+                >
                   <div className="grid gap-4 md:grid-cols-2">
                     <WizardSelect
                       label="Provider"
                       value={draft.primaryProvider}
                       onChange={(v) => updateField("primaryProvider", v)}
                       options={[
-                        { value: "", label: "— pick one —" },
-                        { value: "anthropic", label: "Anthropic (Claude)" },
-                        { value: "openai", label: "OpenAI" },
-                        { value: "openrouter", label: "OpenRouter" },
-                        { value: "azure_openai", label: "Azure OpenAI" },
+                        { value: "", label: anyProviderConnected ? "— pick one —" : "— connect a provider above first —" },
+                        {
+                          value: "anthropic",
+                          label: `Anthropic (Claude)${connectedProviderIds.has("anthropic") || connectedProviderIds.has("claude-code") ? " · connected" : ""}`,
+                        },
+                        {
+                          value: "openai",
+                          label: `OpenAI${connectedProviderIds.has("openai-codex") ? " · connected via Codex" : ""}`,
+                        },
+                        { value: "nous", label: `Nous Portal${connectedProviderIds.has("nous") ? " · connected" : ""}` },
+                        { value: "qwen", label: `Qwen${connectedProviderIds.has("qwen-oauth") ? " · connected" : ""}` },
+                        { value: "openrouter", label: "OpenRouter (paste key in .env)" },
+                        { value: "azure_openai", label: "Azure OpenAI (paste key in .env)" },
                       ]}
                     />
                     <WizardField
                       label="Model ID"
                       value={draft.primaryModel}
                       onChange={(v) => updateField("primaryModel", v)}
-                      placeholder="claude-opus-4-7  or  gpt-4-turbo"
-                    />
-                    <WizardField
-                      label="API key"
-                      value={draft.primaryApiKey}
-                      onChange={(v) => updateField("primaryApiKey", v)}
                       placeholder={
-                        draft.primarySecretPresent && !draft.primaryApiKey
-                          ? `Already set — ${draft.primarySecretPreview} (paste to replace)`
-                          : "sk-ant-…  or  sk-…"
-                      }
-                      type="password"
-                      fullWidth
-                      hint={
-                        draft.primarySecretPresent && !draft.primaryApiKey
-                          ? "Detected from environment. Leave blank to keep using it."
-                          : undefined
+                        draft.primaryProvider === "anthropic"
+                          ? "claude-opus-4-7  or  claude-sonnet-4-6"
+                          : draft.primaryProvider === "openai"
+                            ? "gpt-4-turbo  or  o4-mini"
+                            : "model id"
                       }
                     />
                   </div>
+                  <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
+                    Don't see your provider connected? Hit "Sign in" on a card above, or paste the key in <code className="rounded bg-muted px-1 py-0.5 text-[10.5px]">~/.elevate/.env</code> and reload.
+                  </p>
                 </WizardSection>
 
                 <WizardSection title="Embedding model" hint="Powers memory recall + semantic search.">
