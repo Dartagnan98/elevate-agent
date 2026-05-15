@@ -371,12 +371,14 @@ function FieldRow({
   onChange,
   placeholder,
   type = "text",
+  hint,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
+  hint?: string;
 }) {
   return (
     <label className="block text-[11.5px] text-muted-foreground">
@@ -386,8 +388,13 @@ function FieldRow({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        autoComplete={type === "password" ? "new-password" : "off"}
+        spellCheck={type === "password" ? false : undefined}
         className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
       />
+      {hint && (
+        <span className="mt-1 block text-[10.5px] leading-4 text-muted-foreground/80">{hint}</span>
+      )}
     </label>
   );
 }
@@ -569,8 +576,17 @@ export function AgentSetupLaunch({
           label="API key"
           value={draft.primaryApiKey}
           onChange={(v) => updateField("primaryApiKey", v)}
-          placeholder="sk-ant-…  or  sk-…"
+          placeholder={
+            draft.primarySecretPresent && !draft.primaryApiKey
+              ? `Already set — ${draft.primarySecretPreview} (paste to replace)`
+              : "sk-ant-…  or  sk-…"
+          }
           type="password"
+          hint={
+            draft.primarySecretPresent && !draft.primaryApiKey
+              ? "Detected from environment. Leave blank to keep using it."
+              : undefined
+          }
         />
       </ItemCard>
 
@@ -611,8 +627,17 @@ export function AgentSetupLaunch({
             label="Embedding API key"
             value={draft.embeddingApiKey}
             onChange={(v) => updateField("embeddingApiKey", v)}
-            placeholder="sk-…"
+            placeholder={
+              draft.embeddingSecretPresent && !draft.embeddingApiKey
+                ? `Already set — ${draft.embeddingSecretPreview} (paste to replace)`
+                : "sk-…"
+            }
             type="password"
+            hint={
+              draft.embeddingSecretPresent && !draft.embeddingApiKey
+                ? "Detected from environment. Leave blank to keep using it."
+                : undefined
+            }
           />
         )}
       </ItemCard>
@@ -644,8 +669,17 @@ export function AgentSetupLaunch({
               label="Supabase service-role key"
               value={draft.memorySupabaseKey}
               onChange={(v) => updateField("memorySupabaseKey", v)}
-              placeholder="eyJhbGc…"
+              placeholder={
+                draft.memorySecretPresent && !draft.memorySupabaseKey
+                  ? `Already set — ${draft.memorySecretPreview} (paste to replace)`
+                  : "eyJhbGc…"
+              }
               type="password"
+              hint={
+                draft.memorySecretPresent && !draft.memorySupabaseKey
+                  ? "Detected from environment. Leave blank to keep using it."
+                  : undefined
+              }
             />
           </>
         )}
@@ -679,9 +713,18 @@ export function AgentSetupLaunch({
           value={draft.imageApiKey}
           onChange={(v) => updateField("imageApiKey", v)}
           placeholder={
-            draft.imageProvider === "nano_banana" ? "AIzaSy…  (from AI Studio)" : "sk-…"
+            draft.imageSecretPresent && !draft.imageApiKey
+              ? `Already set — ${draft.imageSecretPreview} (paste to replace)`
+              : draft.imageProvider === "nano_banana"
+                ? "AIzaSy…  (from AI Studio)"
+                : "sk-…"
           }
           type="password"
+          hint={
+            draft.imageSecretPresent && !draft.imageApiKey
+              ? "Detected from environment. Leave blank to keep using it."
+              : undefined
+          }
         />
         {draft.imageProvider === "nano_banana" && (
           <a
@@ -704,8 +747,17 @@ export function AgentSetupLaunch({
           label="Composio API key"
           value={draft.composioApiKey}
           onChange={(v) => updateField("composioApiKey", v)}
-          placeholder="csk_…"
+          placeholder={
+            draft.composioSecretPresent && !draft.composioApiKey
+              ? `Already set — ${draft.composioSecretPreview} (paste to replace)`
+              : "csk_…"
+          }
           type="password"
+          hint={
+            draft.composioSecretPresent && !draft.composioApiKey
+              ? "Detected from environment. Leave blank to keep using it."
+              : undefined
+          }
         />
         <FieldRow
           label="Workspace (optional)"
@@ -737,8 +789,17 @@ export function AgentSetupLaunch({
           label="Bot token (from @BotFather)"
           value={draft.telegramBotToken}
           onChange={(v) => updateField("telegramBotToken", v)}
-          placeholder="123456789:ABC…"
+          placeholder={
+            draft.telegramSecretPresent && !draft.telegramBotToken
+              ? `Already set — ${draft.telegramSecretPreview} (paste to replace)`
+              : "123456789:ABC…"
+          }
           type="password"
+          hint={
+            draft.telegramSecretPresent && !draft.telegramBotToken
+              ? "Detected from environment. Leave blank to keep using it."
+              : undefined
+          }
         />
         <FieldRow
           label="Chat id"
@@ -988,25 +1049,13 @@ export function AgentOnboardingPage() {
         )}
       </div>
 
-      {showOnboarding ? (
-        <AgentSetupLaunch
-          setup={setup}
-          onSetupUpdated={setSetup}
-          forceOnboarding={forceOnboarding}
-          onForceOnboardingDone={() => setForceOnboarding(false)}
-        />
-      ) : (
-        <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-6">
-          <div className="rounded-md border border-border bg-card p-4">
-            <h2 className="text-[14px] font-semibold text-foreground">Agent runtime is up</h2>
-            <p className="mt-1 text-[12px] text-muted-foreground">
-              All required items connected. Re-run onboarding to add optional connectors or rotate
-              keys. Re-open gate forces the runtime to block again until you mark complete (useful
-              if you swapped infra).
-            </p>
-          </div>
-        </div>
-      )}
+      <AgentSetupLaunch
+        setup={setup}
+        onSetupUpdated={setSetup}
+        forceOnboarding={forceOnboarding}
+        onForceOnboardingDone={() => setForceOnboarding(false)}
+      />
+
     </div>
   );
 }
