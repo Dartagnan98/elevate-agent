@@ -225,6 +225,23 @@ export function AgentOnboardingWizard({
   }, [oauthProviders]);
   const anyProviderConnected = connectedProviderIds.size > 0;
 
+  // Channels marked "configured" on the backend (env-detected or
+  // wizard-confirmed). The toggle in the UI mirrors this so env-set creds
+  // light up On instead of looking dead. User feedback: "these say off but
+  // they are on?".
+  const configuredChannelKeys = useMemo(() => {
+    const out = new Set<string>();
+    for (const item of setup.items ?? []) {
+      if (
+        item.key?.startsWith("operator_channel_") &&
+        item.status === "configured"
+      ) {
+        out.add(item.key);
+      }
+    }
+    return out;
+  }, [setup.items]);
+
   const step = AGENT_WIZARD_STEPS[stepIdx];
   const isLast = stepIdx === AGENT_WIZARD_STEPS.length - 1;
   const isFirst = stepIdx === 0;
@@ -549,7 +566,13 @@ export function AgentOnboardingWizard({
                 />
 
                 <ChannelToggle
-                  enabled={Boolean(draft.telegramBotToken && draft.telegramChatId)}
+                  enabled={
+                    configuredChannelKeys.has("operator_channel_telegram") ||
+                    Boolean(
+                      (draft.telegramBotToken || draft.telegramSecretPresent) &&
+                        draft.telegramChatId,
+                    )
+                  }
                   onToggle={(v) => {
                     if (!v) {
                       updateField("telegramBotToken", "");
@@ -602,7 +625,10 @@ export function AgentOnboardingWizard({
                 </ChannelToggle>
 
                 <ChannelToggle
-                  enabled={Boolean(draft.discordBotToken && draft.discordChannelId)}
+                  enabled={
+                    configuredChannelKeys.has("operator_channel_discord") ||
+                    Boolean(draft.discordBotToken && draft.discordChannelId)
+                  }
                   onToggle={(v) => {
                     if (!v) {
                       updateField("discordBotToken", "");
@@ -634,7 +660,10 @@ export function AgentOnboardingWizard({
                 </ChannelToggle>
 
                 <ChannelToggle
-                  enabled={Boolean(draft.whatsappProvider && draft.whatsappToken)}
+                  enabled={
+                    configuredChannelKeys.has("operator_channel_whatsapp") ||
+                    Boolean(draft.whatsappProvider && draft.whatsappToken)
+                  }
                   onToggle={(v) => {
                     if (!v) {
                       updateField("whatsappProvider", "");
@@ -675,7 +704,10 @@ export function AgentOnboardingWizard({
                 </ChannelToggle>
 
                 <ChannelToggle
-                  enabled={Boolean(draft.slackWebhookUrl)}
+                  enabled={
+                    configuredChannelKeys.has("operator_channel_slack") ||
+                    Boolean(draft.slackWebhookUrl)
+                  }
                   onToggle={(v) => {
                     if (!v) {
                       updateField("slackWebhookUrl", "");
