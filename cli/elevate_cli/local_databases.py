@@ -125,6 +125,36 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
             path = Path("~/.elevate/tools/data/outreach/outreach.db").expanduser()
         results.append(_fail("outreach", path, exc))
 
+    # Register the recurring connector-sync launchd jobs so a fresh install
+    # starts pulling apple-messages / crm / social on its own schedule. Same
+    # ELEVATE_HOME used for the operational DB above is baked into the plists,
+    # so multiple profiles / installs don't trample each other. Idempotent —
+    # re-running ``elevate db init`` refreshes the plists in place.
+    try:
+        from elevate_cli import sync_scheduler as _ss
+
+        scheduler_results = _ss.install_all()
+        ok_count = sum(1 for r in scheduler_results if r.ok and r.action in ("installed", "refreshed"))
+        skip_count = sum(1 for r in scheduler_results if r.ok and r.action == "skipped")
+        fail_count = sum(1 for r in scheduler_results if not r.ok)
+        unsupp_count = sum(1 for r in scheduler_results if r.action == "unsupported")
+        plist_dir = Path("~/Library/LaunchAgents").expanduser()
+        if unsupp_count and not ok_count:
+            results.append(_ok("sync-scheduler", plist_dir, "skipped — not macOS"))
+        elif fail_count:
+            errs = "; ".join(f"{r.job.source_id}: {r.message}" for r in scheduler_results if not r.ok)
+            results.append(LocalDatabaseInitResult(
+                name="sync-scheduler", path=plist_dir, ok=False, message=errs,
+            ))
+        else:
+            results.append(_ok(
+                "sync-scheduler", plist_dir,
+                f"{ok_count} installed/refreshed; {skip_count} already current",
+            ))
+    except Exception as exc:  # pragma: no cover - surfaced in installer output
+        plist_dir = Path("~/Library/LaunchAgents").expanduser()
+        results.append(_fail("sync-scheduler", plist_dir, exc))
+
     return results
 
 

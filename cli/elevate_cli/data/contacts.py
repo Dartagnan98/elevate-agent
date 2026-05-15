@@ -24,6 +24,9 @@ from elevate_cli.data._util import new_id, now_iso
 
 
 def _row_to_contact(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys() if hasattr(row, "keys") else []
+    def _get(name: str, default: Any = None) -> Any:
+        return row[name] if name in keys else default
     return {
         "id": row["id"],
         "displayName": row["display_name"],
@@ -40,7 +43,44 @@ def _row_to_contact(row: sqlite3.Row) -> dict[str, Any]:
         "ingestRunId": row["ingest_run_id"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        # Lane flags (migration 0013_contact_flags). Read-default if older row
+        # made it through before the migration applied.
+        "heatLabel": _get("heat_label", "normal"),
+        "heatScore": int(_get("heat_score", 0) or 0),
+        "heatReason": _get("heat_reason"),
+        "needsFollowUp": bool(_get("needs_follow_up", 0)),
+        "nextFollowUpAt": _get("next_follow_up_at"),
+        "buyerSearchActive": bool(_get("buyer_search_active", 0)),
+        "listingActive": bool(_get("listing_active", 0)),
+        "aiLastReviewedAt": _get("ai_last_reviewed_at"),
+        "aiReviewRunId": _get("ai_review_run_id"),
+        # Pipeline status (migration 0014_pipeline_status). Set by either the
+        # operator clicking the /leads dropdown or the AI in review_contact.
+        "pipelineStatus": _get("pipeline_status"),
+        "pipelineStatusSetAt": _get("pipeline_status_set_at"),
+        "pipelineStatusSetBy": _get("pipeline_status_set_by"),
     }
+
+
+_FLAG_COLUMNS: dict[str, str] = {
+    "heatLabel": "heat_label",
+    "heatScore": "heat_score",
+    "heatReason": "heat_reason",
+    "needsFollowUp": "needs_follow_up",
+    "nextFollowUpAt": "next_follow_up_at",
+    "buyerSearchActive": "buyer_search_active",
+    "listingActive": "listing_active",
+    "aiLastReviewedAt": "ai_last_reviewed_at",
+    "aiReviewRunId": "ai_review_run_id",
+}
+
+_HEAT_LABELS = {"hot", "warm", "watch", "normal"}
+_VALID_SIDES_FOR_ADMIN = {"buyer", "listing"}
+_PIPELINE_STATUS_VALUES = {
+    "new_lead", "follow_up", "ghosting", "dead",
+    "closed_seller", "closed_buyer",
+}
+_PIPELINE_STATUS_SET_BY = {"operator", "ai"}
 
 
 # ─── Reads ─────────────────────────────────────────────────────────────
@@ -338,3 +378,249 @@ def set_open_conflict_flag(
             "UPDATE contacts SET has_open_conflict=?, updated_at=? WHERE id=?",
             (flag, now_iso(), cid),
         )
+
+
+# ─── Lane flags (heat / follow-up / buyer-search / listing) ────────────
+
+
+def update_flags(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    *,
+    actor: str,
+    record_event: bool = True,
+    **flags: Any,
+) -> dict[str, Any] | None:
+    """Partial update of the AI-maintained lane flags on ``contacts``.
+
+    Accepts camelCase keys matching ``_FLAG_COLUMNS`` (heatLabel, heatScore,
+    heatReason, needsFollowUp, nextFollowUpAt, buyerSearchActive,
+    listingActive, aiLastReviewedAt, aiReviewRunId). Unknown keys raise.
+
+    Bools coerce to 0/1. Heat label is validated against the enum.
+
+    Writes one ``lifecycle_change`` event with the diff so the audit log
+    can replay how a contact moved between lanes. Pass ``record_event=False``
+    for high-volume bulk reviews where event noise isn't useful.
+    """
+    if not flags:
+        return get_contact(conn, contact_id)
+
+    sets: list[str] = []
+    values: list[Any] = []
+    payload: dict[str, Any] = {}
+    for key, value in flags.items():
+        col = _FLAG_COLUMNS.get(key)
+        if col is None:
+            raise ValueError(f"unknown flag {key!r}; expected one of {sorted(_FLAG_COLUMNS)}")
+        if key == "heatLabel" and value is not None and value not in _HEAT_LABELS:
+            raise ValueError(f"invalid heat label {value!r}; expected one of {sorted(_HEAT_LABELS)}")
+        if key == "heatScore" and value is not None:
+            ivalue = int(value)
+            if not 0 <= ivalue <= 100:
+                raise ValueError(f"heat score out of range: {value!r}")
+            value = ivalue
+        if key in ("needsFollowUp", "buyerSearchActive", "listingActive"):
+            value = 1 if value else 0
+        sets.append(f"{col}=?")
+        values.append(value)
+        payload[key] = value
+
+    now = now_iso()
+    sets.append("updated_at=?")
+    values.append(now)
+    values.append(contact_id)
+    cursor = conn.execute(
+        f"UPDATE contacts SET {', '.join(sets)} WHERE id=?",
+        tuple(values),
+    )
+    if cursor.rowcount == 0:
+        return None
+
+    if record_event:
+        _events.record_lifecycle(
+            conn,
+            contact_id=contact_id,
+            kind="lifecycle_change",
+            actor=actor,
+            ts=now,
+            payload={"flags": payload},
+        )
+    return get_contact(conn, contact_id)
+
+
+def close_to_admin(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    *,
+    side: str,
+    actor: str,
+    province: str = "BC",
+    listing_address: str | None = None,
+    workflow: str | None = None,
+) -> dict[str, Any]:
+    """Convert a /leads contact into an /admin deal.
+
+    Workflow:
+      1. Validate the contact exists and has a verifier (email or phone) so
+         ``promote_profile_to_admin_deal`` will accept it.
+      2. Flip ``contacts.stage`` → ``'closed'`` and clear the active-lane
+         flags so the contact disappears from /leads widgets.
+      3. Call ``promote_profile_to_admin_deal(side=...)`` to create or
+         match an Admin deal under the buyer or listing side.
+
+    Raises ``ValueError`` on missing contact, invalid side, or missing
+    verifier (which Admin promotion needs).
+    """
+    if side not in _VALID_SIDES_FOR_ADMIN:
+        raise ValueError(f"invalid side {side!r}; expected 'buyer' or 'listing'")
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+
+    email = (contact.get("primaryEmail") or "").strip()
+    phone = (contact.get("primaryPhone") or "").strip()
+    if not email and not phone:
+        raise ValueError(
+            f"contact {contact_id!r} has no email or phone — add a verifier "
+            "before closing to admin"
+        )
+
+    now = now_iso()
+    conn.execute(
+        """
+        UPDATE contacts
+        SET stage='closed',
+            type=COALESCE(NULLIF(type,'unclassified'), ?),
+            buyer_search_active=0,
+            listing_active=0,
+            needs_follow_up=0,
+            heat_label='normal',
+            heat_score=0,
+            updated_at=?
+        WHERE id=?
+        """,
+        (side, now, contact_id),
+    )
+    _events.record_lifecycle(
+        conn,
+        contact_id=contact_id,
+        kind="lifecycle_change",
+        actor=actor,
+        ts=now,
+        payload={"stage": "closed", "promotedTo": "admin", "side": side},
+    )
+
+    from elevate_cli.data import deals as _deals  # local to avoid cycle
+    profile_context = {
+        "displayName": contact.get("displayName"),
+        "contactIds": [contact_id],
+        "phones": [phone] if phone else [],
+        "emails": [email] if email else [],
+    }
+    promotion = _deals.promote_profile_to_admin_deal(
+        conn,
+        profile_id=contact_id,
+        side=side,
+        actor=actor,
+        province=province,
+        display_name=contact.get("displayName"),
+        primary_contact_id=contact_id,
+        listing_address=listing_address,
+        workflow=workflow,
+        profile_context=profile_context,
+    )
+    return {
+        "contact": get_contact(conn, contact_id),
+        "deal": promotion.get("deal"),
+        "action": promotion.get("action"),
+        "matchReason": promotion.get("matchReason"),
+    }
+
+
+def set_pipeline_status(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    *,
+    status: str | None,
+    actor: str,
+    set_by: str = "operator",
+    province: str = "BC",
+) -> dict[str, Any]:
+    """Set or clear the operator/AI-marked pipeline status for a contact.
+
+    Validates the status against the migration 0014 CHECK constraint, writes
+    the contacts row, and emits a lifecycle_change event. When the operator
+    picks ``closed_seller`` or ``closed_buyer`` from the dropdown, this routes
+    through :func:`close_to_admin` so the contact lands on the /admin kanban
+    in the same transaction — UI clicks should never leave the contact in a
+    half-promoted state.
+
+    Pass ``status=None`` (or any falsy string) to clear the field. AI callers
+    must pass ``set_by="ai"``; the operator dropdown passes the default.
+
+    Returns the refreshed contact dict.
+    """
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+    if set_by not in _PIPELINE_STATUS_SET_BY:
+        raise ValueError(f"invalid set_by {set_by!r}")
+
+    norm = (status or "").strip().lower() or None
+    if norm is not None and norm not in _PIPELINE_STATUS_VALUES:
+        raise ValueError(f"invalid pipeline_status {status!r}")
+
+    # AI must not overwrite explicit operator marks. The check is here, not
+    # in review_contact, so any AI caller respects the precedence rule.
+    if set_by == "ai" and contact.get("pipelineStatusSetBy") == "operator":
+        if contact.get("pipelineStatus") not in (None, norm):
+            return contact  # operator owns this contact's status; no-op
+
+    if norm in ("closed_seller", "closed_buyer"):
+        side = "listing" if norm == "closed_seller" else "buyer"
+        result = close_to_admin(
+            conn,
+            contact_id,
+            side=side,
+            actor=actor,
+            province=province,
+        )
+        # close_to_admin already flips stage='closed'; record the status too
+        # so the dropdown shows the right pill on next read.
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE contacts
+            SET pipeline_status=?,
+                pipeline_status_set_at=?,
+                pipeline_status_set_by=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (norm, now, set_by, now, contact_id),
+        )
+        refreshed = get_contact(conn, contact_id)
+        return {**(refreshed or {}), "closedTo": result}
+
+    now = now_iso()
+    conn.execute(
+        """
+        UPDATE contacts
+        SET pipeline_status=?,
+            pipeline_status_set_at=?,
+            pipeline_status_set_by=?,
+            updated_at=?
+        WHERE id=?
+        """,
+        (norm, now if norm else None, set_by if norm else None, now, contact_id),
+    )
+    _events.record_lifecycle(
+        conn,
+        contact_id=contact_id,
+        kind="lifecycle_change",
+        actor=actor,
+        ts=now,
+        payload={"pipelineStatus": norm, "setBy": set_by},
+    )
+    return get_contact(conn, contact_id) or contact

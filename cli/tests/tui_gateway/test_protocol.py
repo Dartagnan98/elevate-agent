@@ -201,6 +201,74 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     ]
 
 
+def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
+    class _DB:
+        def resolve_session_id(self, value):
+            return value
+
+        def get_session(self, _sid):
+            return {"id": "20260409_010101_abc123"}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _sid):
+            raise AssertionError("live in-memory sessions should not be reopened from db")
+
+        def get_messages_as_conversation(self, _sid):
+            raise AssertionError("live in-memory sessions should not be hydrated from db")
+
+    lock = threading.Lock()
+    server._sessions["live1234"] = {
+        "agent": object(),
+        "history": [{"role": "user", "content": "keep going"}],
+        "history_lock": lock,
+        "running": True,
+        "session_key": "20260409_010101_abc123",
+        "transport": None,
+    }
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    resp = server.handle_request(
+        {
+            "id": "r-live",
+            "method": "session.resume",
+            "params": {"session_id": "20260409_010101_abc123", "cols": 100},
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["session_id"] == "live1234"
+    assert resp["result"]["persisted_session_id"] == "20260409_010101_abc123"
+    assert resp["result"]["running"] is True
+    assert resp["result"]["messages"] == [{"role": "user", "text": "keep going"}]
+
+
+def test_session_close_detaches_running_session(server):
+    server._sessions["live1234"] = {
+        "running": True,
+        "session_key": "20260409_010101_abc123",
+        "slash_worker": None,
+    }
+
+    resp = server.handle_request(
+        {
+            "id": "r-close-running",
+            "method": "session.close",
+            "params": {"session_id": "live1234"},
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"] == {
+        "closed": False,
+        "detached": True,
+        "running": True,
+        "persisted_session_id": "20260409_010101_abc123",
+    }
+    assert "live1234" in server._sessions
+
+
 # ── Config I/O ───────────────────────────────────────────────────────
 
 

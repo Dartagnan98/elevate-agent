@@ -7927,11 +7927,21 @@ For more help on a command:
     # parity-report + migrate-data commands (data module — Sprint 1D/1E)
     # =========================================================================
     from elevate_cli.data_cli import (
+        add_apple_contacts_parser,
         add_migrate_data_parser,
         add_parity_report_parser,
+        add_review_contacts_parser,
+        add_review_unmatched_parser,
+        add_scheduler_parser,
+        add_sync_parser,
     )
     add_parity_report_parser(subparsers)
     add_migrate_data_parser(subparsers)
+    add_review_contacts_parser(subparsers)
+    add_sync_parser(subparsers)
+    add_review_unmatched_parser(subparsers)
+    add_apple_contacts_parser(subparsers)
+    add_scheduler_parser(subparsers)
 
     # =========================================================================
     # harness command

@@ -6,11 +6,12 @@ The Admin Hub should not start at raw lead capture.
 
 It should start when the client/opportunity is already real enough to require operations, paperwork, deadlines, coordination, and follow-up.
 
-**Seller start point:** after the CMA stage.
+**Seller start point:** approved send of the seller package (stage 0 — CMA / Prospect).
+The `seller-package` skill is the entry agent — it requires seller name(s), email, phone, and listing address as inputs, so the contact already has the verifiers needed for `promote_profile_to_admin_deal`. CMA work then runs against the new deal.
 
 **Buyer start point:** after the buyer agrees to do walkthroughs/showings.
 
-Everything before that belongs in separate lead generation, nurture, qualification, and outreach lanes.
+Everything before that belongs in separate lead generation, nurture, qualification, and outreach lanes (`/leads`).
 
 ---
 
@@ -35,16 +36,19 @@ It does **not** start at:
 ## Seller Flow
 
 ```text
-CMA complete
-→ Post-CMA Seller Conversion
-→ Listing Intake
-→ MLC / Listing Paperwork
-→ Listing Launch
-→ Active Listing Management
-→ Offer Management
-→ Accepted Offer / Transaction Heartbeat
-→ Completion
-→ Post-close
+Lead in /leads (listing_active=1)
+→ Seller Package skill (collect verifiers + draft + approve send)
+   ↳ close_to_admin(side='listing')  ← lands on /admin kanban at stage 0
+→ Post-Send CMA / Prospect (stage 0)
+→ Listing Intake (stage 1)
+→ MLC / Listing Paperwork (stage 2)
+→ Photos (stage 3)
+→ MLS Entry (stage 4)
+→ Listing Live / Marketing (stage 5)
+→ Accepted Offer (stage 6)
+→ Condition Removal (stage 7)
+→ Closing (stage 8)
+→ Closed / Post-close (stage 9)
 ```
 
 ---

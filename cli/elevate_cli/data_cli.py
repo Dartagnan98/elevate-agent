@@ -9,6 +9,9 @@ Currently houses:
   JSONL sources + the outreach.db ``templates`` table into the central
   operational store. Always backs up first; supports dry-run and
   rollback.
+* ``elevate review-contacts`` — run the AI heat-scoring sweep across
+  ``contacts``, populating heat_label / heat_score / needs_follow_up /
+  buyer_search_active / listing_active. Idempotent; safe to re-run.
 
 Keeping the CLI surface in one module prevents main.py from sprouting
 yet another inline import block.
@@ -29,6 +32,8 @@ from elevate_cli.data import (
     parity_diff_count,
     parity_total_count,
     recent_diffs,
+    review_all_contacts,
+    score_contact,
 )
 from elevate_cli.data.migrate import (
     BackfillStats,
@@ -292,3 +297,486 @@ def add_migrate_data_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit JSON instead of human-readable output",
     )
     parser.set_defaults(func=lambda a: sys.exit(cmd_migrate_data(a)))
+
+
+# ─── elevate review-contacts ────────────────────────────────────────────
+
+
+def cmd_review_contacts(args: argparse.Namespace) -> int:
+    """Run the AI heat-scoring sweep against the operational DB."""
+    if args.contact_id:
+        with connect() as conn:
+            try:
+                result = score_contact(
+                    conn,
+                    args.contact_id,
+                    actor=args.actor,
+                    write=not args.dry_run,
+                )
+            except LookupError as exc:
+                print(f"score-contact failed: {exc}", file=sys.stderr)
+                return 2
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        else:
+            print(f"contact_id  : {result['contact_id']}")
+            if result.get("skipped"):
+                print(f"skipped     : {result['skipped']}")
+            else:
+                print(f"heat_label  : {result['heat_label']}")
+                print(f"heat_score  : {result['heat_score']}")
+                print(f"heat_reason : {result['heat_reason']}")
+                print(f"needs_follow_up    : {result['needs_follow_up']}")
+                print(f"buyer_search_active: {result['buyer_search_active']}")
+                print(f"listing_active     : {result['listing_active']}")
+                print(f"wrote       : {result['wrote']}")
+        return 0
+
+    with connect() as conn:
+        summary = review_all_contacts(
+            conn,
+            actor=args.actor,
+            limit=args.limit,
+            write=not args.dry_run,
+        )
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True, default=str))
+        return 0
+
+    print(f"review-contacts run_id={summary['run_id']} version={summary['scoring_version']}")
+    print(f"  scanned : {summary['scanned']}")
+    print(f"  wrote   : {summary['wrote']}{'  (dry-run)' if args.dry_run else ''}")
+    print(f"  skipped : {summary['skipped']} (closed contacts)")
+    print(f"  hot     : {summary['by_label']['hot']}")
+    print(f"  warm    : {summary['by_label']['warm']}")
+    print(f"  watch   : {summary['by_label']['watch']}")
+    print(f"  normal  : {summary['by_label']['normal']}")
+    print(f"  needs_follow_up    : {summary['needs_follow_up']}")
+    print(f"  buyer_search_active: {summary['buyer_search_active']}")
+    print(f"  listing_active     : {summary['listing_active']}")
+    errs = summary.get("errors") or []
+    if errs:
+        print(f"  errors  : {len(errs)} (first 5 shown)")
+        for e in errs[:5]:
+            print(f"    - {e}")
+        return 1
+    return 0
+
+
+def add_review_contacts_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "review-contacts",
+        help="Run the AI heat-scoring sweep against contacts",
+        description=(
+            "Score every non-closed contact and write back heat_label, "
+            "heat_score, heat_reason, needs_follow_up, next_follow_up_at, "
+            "buyer_search_active, listing_active. Idempotent. Pulls "
+            "CRM-native scores (pcs_buyers / lead_signals payload) as a "
+            "floor, then adds event-derived signals on top."
+        ),
+    )
+    parser.add_argument(
+        "--contact-id", default=None,
+        help="Score a single contact instead of the whole sweep",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Compute scores without writing flag changes back to contacts",
+    )
+    parser.add_argument(
+        "--actor", default="cli:review-contacts",
+        help="Actor string for the lifecycle_change events (default cli:review-contacts)",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Cap the number of contacts scanned (debug/smoke use)",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of human-readable output",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_review_contacts(a)))
+
+
+# ─── elevate sync ──────────────────────────────────────────────────────
+#
+# Provider-agnostic dispatch over every connected source. Same flow for
+# Lofty, Follow Up Boss, Sierra, Brivity, apple-messages, social, gmail —
+# anything registered in source_connectors.scaffold_source. The CLI
+# never names the provider; the connector reads it from
+# ``integrations.crm.provider`` in the config and routes itself.
+
+
+_KNOWN_SOURCE_IDS = ("apple-messages", "crm", "social", "gmail")
+
+
+def _load_connector_config() -> dict[str, Any]:
+    from elevate_cli.source_connectors import load_config
+    return load_config()
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Run a connector sync. ``--all`` walks every known source.
+
+    Provider-agnostic — the CRM connector picks its adapter from the
+    configured provider, so this command name never changes across
+    Lofty / FUB / Sierra / Brivity / BoldTrail workspaces.
+    """
+    from elevate_cli.source_connectors import scaffold_source
+
+    if args.all:
+        targets = list(_KNOWN_SOURCE_IDS)
+    elif args.source:
+        targets = [s.strip() for s in args.source.split(",") if s.strip()]
+    else:
+        print(
+            "elevate sync: pass a source id (e.g. crm, apple-messages, social) or --all",
+            file=sys.stderr,
+        )
+        return 2
+
+    config = _load_connector_config()
+    results: dict[str, Any] = {}
+    failed: list[str] = []
+    for source_id in targets:
+        try:
+            # 'social' and 'gmail' are Composio-backed inbound channels — the
+            # live pull happens through composio_inbound.pull_all_supported,
+            # not the scaffolder (which only writes setup files). Route them
+            # directly so the CLI surface matches what the cron does.
+            if source_id in ("social", "gmail"):
+                from elevate_cli import composio_inbound as _ci
+                view = _ci.pull_all_supported()
+            else:
+                view = scaffold_source(source_id, config)
+            results[source_id] = {"ok": True, "view": view}
+            if not args.json:
+                state = (view or {}).get("state") or "unknown"
+                counts = (view or {}).get("counts") or {}
+                count_summary = " ".join(
+                    f"{k}={v}" for k, v in counts.items() if v not in (None, 0)
+                ) or "(no rows)"
+                print(f"[{source_id}] state={state} {count_summary}")
+        except Exception as exc:
+            failed.append(source_id)
+            results[source_id] = {"ok": False, "error": str(exc)}
+            if not args.json:
+                print(f"[{source_id}] FAILED: {exc}", file=sys.stderr)
+
+    if args.json:
+        print(json.dumps(results, indent=2, sort_keys=True, default=str))
+
+    return 0 if not failed else 1
+
+
+def add_sync_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "sync",
+        help="Run a connector sync (provider-agnostic)",
+        description=(
+            "Drive any connected source's sync from the CLI. The CRM "
+            "connector picks its adapter from the configured provider — "
+            "no Lofty-specific command. Identity-first writethrough in "
+            "data/migrate.py ensures the same person collapses to one "
+            "contact_id across every source."
+        ),
+    )
+    parser.add_argument(
+        "source", nargs="?", default=None,
+        help="Source id: apple-messages, crm, social, gmail (comma-separated for several)",
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help=f"Run every known source in order: {', '.join(_KNOWN_SOURCE_IDS)}",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of human-readable output",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_sync(a)))
+
+
+# ─── elevate review-unmatched ──────────────────────────────────────────
+#
+# Surface contacts that exist on a message channel (apple-messages,
+# whatsapp, gmail, instagram, etc.) but are NOT yet in any CRM —
+# candidates the operator should review and either add to the CRM or
+# park as not-a-lead. CRM-agnostic: filters out anyone with a
+# lofty_id / fub_id / sierra_id / brivity_id / boldtrail_id identity.
+
+
+_CRM_IDENTITY_KINDS = (
+    "lofty_id", "fub_id", "sierra_id", "brivity_id", "boldtrail_id",
+)
+_MESSAGE_IDENTITY_KINDS = (
+    "apple_handle", "wa_id",
+    "instagram_id", "instagram_handle", "facebook_id", "telegram_id",
+    # generic phone/email count too — gmail contacts and SMS-only people
+    "phone", "email",
+)
+
+
+def cmd_review_unmatched(args: argparse.Namespace) -> int:
+    """List contacts who have a message-channel identity but no CRM id.
+
+    These are the "potential leads" — people the operator has a thread
+    with on iMessage / WhatsApp / Gmail / Instagram, but who aren't in
+    the CRM yet. After review, the operator can push them into the
+    configured CRM via the CRM adapter (task #29) or park as noise.
+    """
+    min_outbound = max(0, int(getattr(args, "min_outbound", 0)))
+    min_inbound = max(0, int(getattr(args, "min_inbound", 1)))
+    limit = max(1, int(getattr(args, "limit", 100)))
+
+    crm_kinds_csv = ",".join(f"'{k}'" for k in _CRM_IDENTITY_KINDS)
+    msg_kinds_csv = ",".join(f"'{k}'" for k in _MESSAGE_IDENTITY_KINDS)
+
+    sql = f"""
+        WITH
+        crm_contacts AS (
+            SELECT DISTINCT contact_id FROM identities
+            WHERE kind IN ({crm_kinds_csv})
+        ),
+        msg_contacts AS (
+            SELECT DISTINCT contact_id FROM identities
+            WHERE kind IN ({msg_kinds_csv})
+        ),
+        thread_totals AS (
+            SELECT
+                contact_id,
+                COALESCE(SUM(inbound_count), 0)  AS inbound,
+                COALESCE(SUM(outbound_count), 0) AS outbound,
+                MAX(COALESCE(last_inbound_at, last_outbound_at)) AS last_activity
+            FROM conversations
+            GROUP BY contact_id
+        )
+        SELECT
+            c.id, c.display_name, c.primary_phone, c.primary_email,
+            c.last_activity_at,
+            COALESCE(t.inbound, 0)  AS inbound,
+            COALESCE(t.outbound, 0) AS outbound,
+            t.last_activity AS last_thread_activity
+        FROM contacts c
+        JOIN msg_contacts m  ON m.contact_id = c.id
+        LEFT JOIN crm_contacts cc ON cc.contact_id = c.id
+        LEFT JOIN thread_totals t ON t.contact_id = c.id
+        WHERE cc.contact_id IS NULL
+          AND COALESCE(t.inbound, 0)  >= ?
+          AND COALESCE(t.outbound, 0) >= ?
+        ORDER BY COALESCE(t.last_activity, c.last_activity_at) DESC NULLS LAST
+        LIMIT ?
+    """
+
+    with connect() as conn:
+        try:
+            rows = conn.execute(sql, (min_inbound, min_outbound, limit)).fetchall()
+        except Exception:
+            # SQLite older than 3.30 doesn't grok NULLS LAST; retry without.
+            sql2 = sql.replace("DESC NULLS LAST", "DESC")
+            rows = conn.execute(sql2, (min_inbound, min_outbound, limit)).fetchall()
+
+    out_rows = [
+        {
+            "contactId": r["id"],
+            "displayName": r["display_name"],
+            "primaryPhone": r["primary_phone"],
+            "primaryEmail": r["primary_email"],
+            "inbound": r["inbound"],
+            "outbound": r["outbound"],
+            "lastActivityAt": r["last_thread_activity"] or r["last_activity_at"],
+        }
+        for r in rows
+    ]
+
+    if args.json:
+        print(json.dumps({"count": len(out_rows), "contacts": out_rows},
+                         indent=2, sort_keys=True, default=str))
+        return 0
+
+    if not out_rows:
+        print("No unmatched contacts above thresholds.")
+        return 0
+
+    print(f"{len(out_rows)} potential lead(s) — in messages but not in any CRM:")
+    print()
+    print(f"  {'NAME':30}  {'PHONE/EMAIL':30}  IN/OUT   LAST ACTIVITY")
+    print("  " + "-" * 90)
+    for row in out_rows:
+        handle = row["primaryPhone"] or row["primaryEmail"] or ""
+        name = (row["displayName"] or "")[:30]
+        last = (row["lastActivityAt"] or "")[:19]
+        print(
+            f"  {name:30}  {handle:30}  "
+            f"{row['inbound']:>3}/{row['outbound']:<3}  {last}"
+        )
+    print()
+    print("Push promising ones into the CRM, park noise as not-a-lead.")
+    return 0
+
+
+def add_review_unmatched_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "review-unmatched",
+        help="List message-channel contacts not yet in any CRM",
+        description=(
+            "Show contacts who have a message-channel identity "
+            "(apple-messages, WhatsApp, Gmail, Instagram, raw phone/email) "
+            "but no CRM identity. CRM-agnostic — filters out anyone with "
+            "a lofty_id / fub_id / sierra_id / brivity_id / boldtrail_id. "
+            "Use to surface potential leads after a sync run."
+        ),
+    )
+    parser.add_argument(
+        "--min-inbound", type=int, default=1,
+        help="Minimum inbound message count to qualify (default 1)",
+    )
+    parser.add_argument(
+        "--min-outbound", type=int, default=0,
+        help="Minimum outbound message count to qualify (default 0)",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=100,
+        help="Cap rows returned (default 100)",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of human-readable output",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_review_unmatched(a)))
+
+
+def cmd_apple_contacts(args: argparse.Namespace) -> int:
+    """elevate apple-contacts resolve [--apply]
+
+    Retrofit identity rows (apple_handle, phone, email, apple_addressbook_id,
+    apple_chat_id) onto legacy apple-messages contacts so cross-source
+    matching (Lofty <-> apple) works. Enrichment-only — never merges,
+    never deletes, never overwrites human-readable names. Phone collisions
+    with existing CRM contacts are logged to identity_conflicts for
+    operator review (no auto-merge).
+
+    Default is dry-run; pass --apply to commit.
+    """
+    from elevate_cli.apple_contacts_backfill import render, run
+
+    sub = getattr(args, "apple_contacts_cmd", None)
+    if sub != "resolve":
+        print("usage: elevate apple-contacts resolve [--apply]")
+        return 2
+
+    stats = run(apply=bool(getattr(args, "apply", False)))
+    print(render(stats, applied=bool(getattr(args, "apply", False))))
+    return 0 if not stats.errors else 1
+
+
+def add_apple_contacts_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "apple-contacts",
+        help="Enrich apple-messages contacts with identity rows",
+        description=(
+            "Retrofit identities (apple_handle, phone, email, "
+            "apple_addressbook_id, apple_chat_id) onto legacy "
+            "apple-messages contacts. Enrichment-only — never merges, "
+            "never deletes, never clobbers curated display names."
+        ),
+    )
+    sub = parser.add_subparsers(dest="apple_contacts_cmd")
+    resolve = sub.add_parser(
+        "resolve",
+        help="Walk apple-messages contacts and backfill identity rows",
+    )
+    resolve.add_argument(
+        "--apply", action="store_true",
+        help="Commit changes. Default is dry-run.",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_apple_contacts(a)))
+
+
+# ─── elevate scheduler ─────────────────────────────────────────────────
+#
+# Manage the recurring connector-sync launchd jobs that ``elevate db init``
+# installs automatically. Idempotent — useful for inspection, manual
+# refresh after a CLI upgrade, or tear-down before uninstall.
+
+
+def cmd_scheduler(args: argparse.Namespace) -> int:
+    from elevate_cli import sync_scheduler as ss
+
+    action = getattr(args, "scheduler_action", None) or "status"
+
+    if action == "status":
+        rows = ss.status()
+        if getattr(args, "json", False):
+            print(json.dumps(rows, indent=2, sort_keys=True, default=str))
+        else:
+            ss.print_status(rows)
+        return 0
+
+    if action == "install":
+        results = ss.install_all(force=getattr(args, "force", False))
+        rc = ss.print_results(results)
+        return rc
+
+    if action == "uninstall":
+        results = ss.uninstall_all()
+        rc = ss.print_results(results)
+        return rc
+
+    if action == "run":
+        # Fire each registered source synchronously — useful as a manual
+        # "setup cron" trigger right after install, or after a long offline
+        # gap when you want the DB hot before the next launchd tick.
+        source_filter = getattr(args, "source", None)
+        targets = [j for j in ss.jobs() if (source_filter is None or j.source_id == source_filter)]
+        if not targets:
+            print(f"No matching sync job for source={source_filter!r}", file=sys.stderr)
+            return 2
+        from elevate_cli.source_connectors import scaffold_source
+        config = _load_connector_config()
+        rc = 0
+        for job in targets:
+            sid = job.source_id
+            try:
+                if sid in ("social", "gmail"):
+                    from elevate_cli import composio_inbound as _ci
+                    view = _ci.pull_all_supported()
+                else:
+                    view = scaffold_source(sid, config)
+                state = (view or {}).get("state") or "unknown"
+                counts = (view or {}).get("counts") or {}
+                count_summary = " ".join(f"{k}={v}" for k, v in counts.items() if v not in (None, 0)) or "(no rows)"
+                print(f"[{sid}] state={state} {count_summary}")
+            except Exception as exc:
+                print(f"[{sid}] FAILED: {exc}", file=sys.stderr)
+                rc = 1
+        return rc
+
+    print(f"Unknown scheduler action: {action}", file=sys.stderr)
+    return 2
+
+
+def add_scheduler_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "scheduler",
+        help="Manage recurring connector-sync jobs (launchd)",
+        description=(
+            "Install / inspect / remove the launchd plists that drive "
+            "recurring `elevate sync <source>` runs. `elevate db init` "
+            "calls `install` automatically so a fresh download just works."
+        ),
+    )
+    sub = parser.add_subparsers(dest="scheduler_action")
+
+    status = sub.add_parser("status", help="Show installed / loaded state for each sync job")
+    status.add_argument("--json", action="store_true")
+
+    install = sub.add_parser("install", help="Install / refresh all sync plists (idempotent)")
+    install.add_argument("--force", action="store_true", help="Rewrite plists even if byte-identical")
+
+    sub.add_parser("uninstall", help="Bootout and remove all sync plists")
+
+    run = sub.add_parser("run", help="Run the registered sync jobs immediately (one-shot)")
+    run.add_argument("--source", default=None, help="Only fire one source (apple-messages, crm, social)")
+
+    parser.set_defaults(func=lambda a: sys.exit(cmd_scheduler(a)))

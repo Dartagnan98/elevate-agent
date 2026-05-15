@@ -1,4 +1,5 @@
 import atexit
+import collections
 import concurrent.futures
 import contextvars
 import copy
@@ -115,6 +116,12 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+# Per-session event ring buffer cap. Enough to cover ~10 minutes of a
+# busy agent turn (tool calls, deltas, subagent events) without blowing
+# memory across many parallel sessions. Older events fall off — the
+# final transcript is still persisted via prompt.submit, so replay only
+# covers the "what happened while I was on another chat" window.
+_EVENT_RING_MAXLEN = 1000
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
@@ -298,7 +305,34 @@ def write_json(obj: dict) -> bool:
     """
     if obj.get("method") == "event":
         sid = ((obj.get("params") or {}).get("session_id")) or ""
-        if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
+        sess = _sessions.get(sid) if sid else None
+        if sess is not None:
+            # Capture the event params into the session's ring buffer so
+            # session.resume can replay them on reattach. Cap at maxlen
+            # to bound memory; the final transcript still goes to the DB
+            # via prompt.submit, so the buffer is purely for "what
+            # happened while I was looking at another chat" replay.
+            ring = sess.get("events")
+            if ring is not None:
+                lock = sess.get("events_lock")
+                params = obj.get("params") or {}
+                event_type = params.get("type") if isinstance(params, dict) else None
+                if lock is not None:
+                    with lock:
+                        sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
+                        ring.append(params)
+                        # Once a turn completes the server transcript holds
+                        # everything visible from that turn; drop the ring
+                        # so a later resume doesn't replay (and double up)
+                        # already-committed messages and tool cards.
+                        if event_type == "message.complete":
+                            ring.clear()
+                else:
+                    sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
+                    ring.append(params)
+                    if event_type == "message.complete":
+                        ring.clear()
+        if sess is not None and (t := sess.get("transport")) is not None:
             return t.write(obj)
 
     return (current_transport() or _stdio_transport).write(obj)
@@ -1356,6 +1390,9 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "tool_progress_mode": _load_tool_progress_mode(),
         "edit_snapshots": {},
         "tool_started_at": {},
+        "events": collections.deque(maxlen=_EVENT_RING_MAXLEN),
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
         # Pin async event emissions to whichever transport created the
         # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
         "transport": current_transport() or _stdio_transport,
@@ -1639,6 +1676,9 @@ def _(rid, params: dict) -> dict:
         "attached_files": [],
         "cols": cols,
         "edit_snapshots": {},
+        "events": collections.deque(maxlen=_EVENT_RING_MAXLEN),
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
         "history": [],
         "history_lock": threading.Lock(),
         "history_version": 0,
@@ -1833,6 +1873,48 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4007, "session not found")
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+    for existing_sid, existing_session in list(_sessions.items()):
+        if existing_session.get("session_key") != target:
+            continue
+        # Snapshot the event ring AND bind the new transport under the
+        # same lock that write_json takes. This is the no-duplicate
+        # contract: while we hold events_lock, no concurrent emit can
+        # both append-to-ring and write-to-transport. After we release,
+        # every new emit goes to the new transport AND is excluded from
+        # the snapshot — so the client gets each event exactly once,
+        # via replay or live, never both.
+        new_transport = current_transport() or _stdio_transport
+        replay_events: list[dict] = []
+        replay_seq = 0
+        ring = existing_session.get("events")
+        events_lock = existing_session.get("events_lock")
+        if ring is not None and events_lock is not None:
+            with events_lock:
+                existing_session["transport"] = new_transport
+                replay_events = list(ring)
+                replay_seq = int(existing_session.get("events_seq", 0))
+        else:
+            # Legacy sessions created before the ring existed — bind
+            # transport without the snapshot; replay just stays empty.
+            existing_session["transport"] = new_transport
+        with existing_session.get("history_lock", threading.Lock()):
+            history = list(existing_session.get("history", []))
+        messages = _history_to_messages(history) if include_messages else None
+        result = {
+            "session_id": existing_sid,
+            "resumed": target,
+            "persisted_session_id": target,
+            "message_count": len(messages) if messages is not None else len(history),
+            "agent_ready": bool(existing_session.get("agent")),
+            "info": _light_session_info(existing_session.get("agent")),
+            "running": bool(existing_session.get("running")),
+            "replay_events": replay_events,
+            "replay_seq": replay_seq,
+        }
+        if messages is not None:
+            result["messages"] = messages
+        return _ok(rid, result)
+
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
@@ -1850,6 +1932,9 @@ def _(rid, params: dict) -> dict:
         "attached_files": [],
         "cols": int(params.get("cols", 80)),
         "edit_snapshots": {},
+        "events": collections.deque(maxlen=_EVENT_RING_MAXLEN),
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
         "history": history,
         "history_lock": threading.Lock(),
         "history_version": 0,
@@ -2061,6 +2146,24 @@ def _(rid, params: dict) -> dict:
 @method("session.close")
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
+    force = params.get("force") is True
+    session = _sessions.get(sid)
+    if not session:
+        return _ok(rid, {"closed": False})
+    if session.get("running") and not force:
+        # UI navigation is a detach, not a kill. Keep the server-side session
+        # alive so the client can switch away and reattach by persisted id while
+        # the turn keeps running. Explicit force=true remains available for hard
+        # cleanup/interrupt flows.
+        return _ok(
+            rid,
+            {
+                "closed": False,
+                "detached": True,
+                "running": True,
+                "persisted_session_id": session.get("session_key"),
+            },
+        )
     session = _sessions.pop(sid, None)
     if not session:
         return _ok(rid, {"closed": False})

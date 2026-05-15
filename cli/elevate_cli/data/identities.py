@@ -40,7 +40,8 @@ def _canonicalize(kind: str, value: str) -> str | None:
     if kind in {
         "instagram_id", "facebook_id", "telegram_id",
         "lofty_id", "fub_id", "sierra_id", "brivity_id", "boldtrail_id",
-        "apple_handle", "wa_id",
+        "apple_handle", "apple_addressbook_id", "apple_chat_id",
+        "wa_id",
     }:
         v = (value or "").strip()
         return v or None
@@ -113,6 +114,22 @@ def add_identity(
             """,
             (iid, contact_id, kind, canon, source_id, 1 if verified else 0, now_iso()),
         )
+        # Denormalize phone/email onto contacts.primary_* so single-table
+        # reads (and the verification spot-check) work without joining
+        # identities. Only fill a blank — never overwrite a value the
+        # operator may have curated.
+        if kind == "phone":
+            conn.execute(
+                "UPDATE contacts SET primary_phone=? "
+                "WHERE id=? AND (primary_phone IS NULL OR primary_phone='')",
+                (canon, contact_id),
+            )
+        elif kind == "email":
+            conn.execute(
+                "UPDATE contacts SET primary_email=? "
+                "WHERE id=? AND (primary_email IS NULL OR primary_email='')",
+                (canon, contact_id),
+            )
         return _row_to_identity(
             conn.execute(
                 "SELECT * FROM identities WHERE id = ?", (iid,)

@@ -16,6 +16,7 @@ import os
 import re
 import hashlib
 import sqlite3
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -198,17 +199,33 @@ SOURCE_PROMPT_CATEGORIES = (
     {"id": "forms", "label": "Forms"},
 )
 
-CONNECTION_CONTRACT = """Build this as an Elevate Agent connection layer, not a standalone note:
+CONNECTION_CONTRACT = """Canonical Elevate connector contract (every source MUST follow this — already enforced for apple-messages, crm, social):
 
-- Read the customer tools root from sources.tools_root or ELEVATE_TOOLS_ROOT.
-- Create or update data/sources/<source-id> inside the customer tools root.
-- Write source.json with provider, account_label, connection_type, auth_status, sync_mode, owner_agent, enabled_ui_surfaces, setup_status, last_sync_at, and setup_notes.
-- Write status.json with connected, import_only, blocked, last_error, next_operator_step, and last_checked_at.
-- Normalize people into contacts.jsonl, threads into conversations.jsonl, inbound/outbound items into messages.jsonl, qualified moments into lead-events.jsonl, and human work into tasks.jsonl.
-- Store provider exports, screenshots, PDFs, reports, or raw files under artifacts/.
-- Add or document the repeatable connector entrypoint: webhook route, polling command, import command, or local bridge command.
+Storage layout (all paths portable, work on any user's install):
+- `$ELEVATE_HOME/data/operational.db` — the unified SQLite store. Same path on every install (default `~/.elevate/data/operational.db`). Migrations auto-apply on first `data.connect()`.
+- `<tools_root>/data/sources/<source-id>/` — per-source workspace. Holds `source.json`, `status.json`, `contacts.jsonl`, `conversations.jsonl`, `messages.jsonl`, `lead-events.jsonl`, `tasks.jsonl`, `artifacts/`.
 
-Start read-only. Do not send messages, submit forms, move files, change permissions, upload data, or create persistent API keys unless the operator explicitly approves that action."""
+Canonical 3-file write shape (REQUIRED — the walker depends on it):
+- `contacts.jsonl` — one row per person, MUST include `source_record_id` and at least one of `phone` / `email` / `<channel>_handle` / `<provider>_id`.
+- `conversations.jsonl` — one row per thread; `source_record_id` is the conversation id, `contact_id` links to a contacts row.
+- `messages.jsonl` — one row per message; MUST include `contact_id` AND `conversation_id` (the synthesizer in `composio_inbound.synthesize_canonical_files` derives these for messages-only sources — copy that pattern).
+
+Identity-first writethrough (handled for you by `elevate_cli/data/migrate.py:walk_jsonl_source`):
+- E.164 normalize phones, lowercase emails.
+- `_SOURCE_TO_HANDLE_KIND` + `_CRM_PROVIDER_TO_IDENTITY_KIND` + `_TOOLKIT_TO_HANDLE_KIND` registries map raw native ids to canonical identity kinds. Add a row to the right registry — do NOT branch in code.
+- The same person collapses to one `contact_id` across every source. Cross-source duplicates land in `identity_conflicts` for operator review (never auto-merge — `merge_contacts` requires `actor.startswith("human")`).
+
+Recurring sync (handled by `elevate_cli/sync_scheduler.py`):
+- Every wired source gets a launchd plist `ai.elevate.sync-<source-id>` installed by `elevate db init`.
+- Plist runs `elevate sync <source-id>` on a fixed interval (apple-messages 600s, crm 3600s, social 600s). `RunAtLoad=true` doubles as the setup cron.
+- New sources auto-register by adding a tuple to `sync_scheduler._JOBS`.
+
+Per-source files:
+- `source.json` — provider, account_label, connection_type, auth_status, sync_mode, owner_agent, enabled_ui_surfaces, setup_status, last_sync_at, setup_notes.
+- `status.json` — connected, import_only, blocked, last_error, next_operator_step, last_checked_at.
+- `artifacts/` — raw exports, screenshots, PDFs, full payloads.
+
+Safety: start read-only. Do not send messages, submit forms, move files, change permissions, upload data, or create persistent API keys unless the operator explicitly approves."""
 
 COMPOSIO_SOCIAL_CONTRACT = """Use Composio as the social account hub:
 
@@ -414,6 +431,7 @@ def _write_source_ui_state(source_dir: Path, state: JsonRecord) -> None:
 # skip cold/closed people. Distinct from thread-level status which only
 # tracks open/done/archived.
 PROFILE_STATUS_VALUES: tuple[str, ...] = (
+    "new_lead",
     "follow_up",
     "ghosting",
     "dead",
@@ -1746,6 +1764,17 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
             },
         },
     )
+    # Continuous DB writethrough — same pattern as Lofty/CRM sync (Codex
+    # audit P0, 2026-05-05). Pushes the just-written JSONL into
+    # operational.db so identity-first resolution sees the apple-messages
+    # handles immediately, no manual ``elevate migrate-data`` needed.
+    try:
+        _writethrough_to_operational_db(source_dir)
+    except Exception as exc:  # noqa: BLE001
+        _write_json(
+            source_dir / "artifacts" / "last-db-writethrough-error.json",
+            {"checked_at": now, "error": str(exc)},
+        )
     view = connector_view(source_root, "apple-messages")
     if view is None:
         raise RuntimeError("Apple Messages import finished but could not be read")
@@ -1772,23 +1801,220 @@ def _blueprint(source_id: str) -> JsonRecord | None:
     return next((item for item in SOURCE_CONNECTION_BLUEPRINTS if item["id"] == source_id), None)
 
 
+# ─── Per-source operational prompts ────────────────────────────────────
+#
+# Each prompt describes the EXACT code path that runs when the operator
+# clicks "Run prompt" for that source. For wired sources (apple-messages,
+# crm, social) it's a deterministic shell call; for not-yet-built sources
+# it's the canonical contract an agent should follow to build it.
+#
+# Update these whenever the implementation changes — they are the
+# operator/agent-facing source of truth for what this connector does.
+
+_WIRED_SOURCE_PROMPTS: dict[str, str] = {
+    "apple-messages": """RUNS NOW (already wired):
+  CLI:    elevate sync apple-messages
+  Code:   elevate_cli.source_connectors.initialize_apple_messages_source()
+  Schedule: ai.elevate.sync-apple-messages (launchd, every 600s, installed by `elevate db init`)
+
+What happens when you click Run:
+  1. Walk macOS AddressBook (~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb)
+     via `elevate_cli.apple_contacts.walk_addressbook()` — pulls every contact card's
+     full name, phones (E.164 normalized), emails, apple_addressbook_id.
+  2. Walk the Messages chat.db at ~/Library/Messages/chat.db — every handle, chat,
+     message, attachment timestamp. Joined to AddressBook by phone/email so contacts
+     get human names instead of phone-number-shaped strings.
+  3. Write `<tools_root>/data/sources/apple-messages/contacts.jsonl`,
+     `conversations.jsonl`, `messages.jsonl` with the canonical 3-file shape.
+     Each contacts row includes an `identities[]` array
+     (apple_handle, phone, email, apple_addressbook_id, apple_chat_id).
+  4. Walk the JSONL into `$ELEVATE_HOME/data/operational.db` via
+     `elevate_cli.data.migrate.walk_jsonl_source()`. Identity-first resolution
+     collapses duplicates: same person across phone + email + apple_handle becomes
+     one contact_id. Collisions across sources go to `identity_conflicts` for
+     human review — never auto-merged.
+
+Dashboard surface after run: Outreach threads, Leads (people in Messages but NOT
+in CRM are surfaced via `elevate review-unmatched`), Today follow-ups, Approvals
+for any draft replies.
+
+If macOS Full Disk Access is missing for your terminal / Claude / Elevate, the
+chat.db read fails. status.json is marked blocked with the exact System Settings
+path the operator needs to grant.""",
+
+    "crm": "__CRM_DYNAMIC__",  # rendered at runtime by _render_crm_prompt()
+
+    "social": """RUNS NOW (already wired, Composio is the account hub):
+  CLI:    elevate sync social
+  Code:   elevate_cli.composio_inbound.pull_all_supported()
+            → loops every connected toolkit (gmail, instagram, facebook,
+              whatsapp, telegram, slack) via Composio MCP.
+  Schedule: ai.elevate.sync-social (launchd, every 600s)
+
+What happens when you click Run:
+  1. Resolve Composio MCP server URL from config.integrations.composio.mcp_server
+     (or COMPOSIO_MCP_SERVER env). If missing, status.json → `needs_composio_mcp`
+     with the exact setup step. No pull.
+  2. For each toolkit Composio reports as connected:
+       pull_toolkit(toolkit) → hits the toolkit's inbound endpoint
+       (gmail messages, instagram DMs, whatsapp messages, etc.), paginated,
+       writes `<tools_root>/data/sources/<toolkit>/messages.jsonl` for the
+       raw inbound events.
+  3. synthesize_canonical_files(toolkit) derives contacts.jsonl + conversations.jsonl
+     from the messages-only feed. Uses `_TOOLKIT_TO_HANDLE_KIND` to map the
+     toolkit's native sender id → identity kind (gmail→email, instagram→instagram_id,
+     whatsapp→wa_id, etc.). Pure derivation — re-running is idempotent.
+  4. Walk into operational.db via the same writethrough. A gmail email and an
+     instagram DM from the same person (matched by phone/email) collapse to
+     one contact_id.
+
+Dashboard surface after run: Social Media pulse (metrics), Leads (DMs/comments
+that look like leads, lead-scored by tags + keywords), content tasks, Outreach
+approvals for drafted replies (NEVER auto-sends, always approval-gated).
+
+If a toolkit is not connected in Composio, it's skipped silently — the operator
+adds it inside the Composio account, then re-runs.""",
+}
+
+
+def _render_crm_prompt() -> str:
+    """Build a task-first CRM prompt with live state baked in.
+
+    Resolves the configured provider (admin profile → config fallback) and
+    peeks at last sync + contact count. The job is always the same: run
+    `elevate sync crm` to backfill the operator's CRM into operational.db.
+    Provider + credential are read from disk by the CLI — don't ask the user.
+    """
+    config = load_config()
+    provider, _api_key, crm, _env = _resolve_crm_context(config)
+    provider_label = _provider_label(provider) if provider else "CRM"
+
+    last_sync = None
+    contact_count = 0
+    try:
+        info = get_source_root_info(config)
+        source_root = Path(info["sourceRoot"])
+        source_dir = _source_dir(source_root, "crm")
+        source_meta = _read_json(source_dir / "source.json")
+        if isinstance(source_meta, dict):
+            last_sync = source_meta.get("last_sync_at")
+        contact_count = _count_jsonl(source_dir / "contacts.jsonl")
+    except Exception:
+        pass
+
+    return (
+        "TASK\n"
+        f"Backfill the operator's {provider_label} CRM into Elevate's operational.db,\n"
+        f"then VERIFY the sync actually succeeded end-to-end. Don't trust the CLI's\n"
+        f"exit code alone — check the resulting data with your own eyes. Do not ask\n"
+        f"the operator for the API key; the CLI reads it from ~/.elevate/.env. If\n"
+        f"the CLI raises a missing-key error, surface that error verbatim and stop.\n\n"
+        "CURRENT STATE (snapshot at render time — verify against live values)\n"
+        f"  provider:       {provider_label} ({provider or 'unset'})\n"
+        f"  contacts in DB: {contact_count}\n"
+        f"  last sync:      {last_sync or 'never'}\n\n"
+        "DO THIS (every step. Don't skip the verification steps.)\n"
+        "1. Run: `elevate sync crm`\n"
+        "2. Wait for it to finish (paginated full backfill — may take a few minutes).\n"
+        "   Watch stderr for HTTP 4xx/5xx, rate-limit, or auth errors. Do not silently\n"
+        "   ignore non-zero exit codes.\n"
+        "3. VERIFY the source files were written (jsonl, fresh timestamps):\n"
+        "     ls -la ~/.elevate/tools/data/sources/crm/\n"
+        "     wc -l ~/.elevate/tools/data/sources/crm/contacts.jsonl \\\n"
+        "           ~/.elevate/tools/data/sources/crm/conversations.jsonl \\\n"
+        "           ~/.elevate/tools/data/sources/crm/lead-events.jsonl \\\n"
+        "           ~/.elevate/tools/data/sources/crm/tasks.jsonl\n"
+        "     cat ~/.elevate/tools/data/sources/crm/source.json   # last_sync_at, record_counts (CUMULATIVE — source of truth)\n"
+        "     cat ~/.elevate/tools/data/sources/crm/status.json   # connected:true, blocked:false\n"
+        "   Note: jsonl line counts may be lower than source.json record_counts because\n"
+        "   the jsonl is the latest snapshot (may be incremental), while record_counts\n"
+        "   is cumulative across all syncs. Use record_counts for the totals.\n"
+        "4. VERIFY the walker wrote rows into operational.db (real schema — these are\n"
+        "   the only tables the walker actually populates):\n"
+        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM contacts;\"\n"
+        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM events WHERE kind='lifecycle_change';\"  -- lead-events live here\n"
+        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM conversations;\"\n"
+        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM identities;\"\n"
+        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM identity_conflicts WHERE resolved_at IS NULL;\"\n"
+        "   Counts should be > 0 and roughly match source.json record_counts. If DB\n"
+        "   is empty but jsonl is populated, the writethrough is broken — flag it loudly.\n"
+        "   NOTE: there is no `tasks` table by design — tasks live as JSONL only\n"
+        "   (see reads.py). Don't query it. There is no `lead_events` table either —\n"
+        "   lead lifecycle changes are stored in `events` with kind='lifecycle_change'.\n"
+        "5. Spot-check 2 real rows are coherent (use REAL column names):\n"
+        "     sqlite3 ~/.elevate/data/operational.db \"SELECT id, display_name, primary_phone, primary_email FROM contacts ORDER BY updated_at DESC LIMIT 2;\"\n"
+        "   Both rows should have a real display_name plus primary_phone OR primary_email.\n"
+        "   If they're empty strings or duplicates, the adapter mapping is broken — flag it.\n"
+        "6. Report back with a CSV-style summary (use REAL table/column names):\n"
+        "     contacts_jsonl=N, conversations_jsonl=N, lead_events_jsonl=N, tasks_jsonl=N,\n"
+        "     contacts_db=N, lifecycle_events_db=N, conversations_db=N, identities_db=N,\n"
+        "     identity_conflicts_pending=N, last_sync_at=<iso>, record_counts_total=N,\n"
+        "     errors=<count or 'none'>\n"
+        "   Plus a one-line verdict: HEALTHY / DEGRADED / FAILED and what the operator\n"
+        "   should look at next (e.g. 'review N identity_conflicts before merging').\n\n"
+        "OUTCOME\n"
+        "  Success = both the source jsonl files and operational.db tables hold the\n"
+        "  same row counts (within rounding), the dashboard's /leads, /admin, /today\n"
+        "  surfaces show live data, and any cross-CRM duplicates land in\n"
+        "  identity_conflicts for human merge (NEVER auto-merge —\n"
+        "  merge_contacts requires actor.startswith(\"human\"))."
+    )
+
+
 def source_prompt_for(source_id: str) -> str:
     blueprint = _blueprint(source_id)
     if not blueprint:
         return ""
     surfaces = ", ".join(UI_BY_SOURCE.get(source_id, ["Settings"]))
     owner = OWNER_BY_SOURCE.get(source_id, "Executive Assistant")
+
+    wired = _WIRED_SOURCE_PROMPTS.get(source_id)
+    if wired:
+        # CRM is rendered live so the agent gets current provider + credential
+        # state, not a generic stub.
+        if source_id == "crm":
+            wired = _render_crm_prompt()
+        # Live source — describe exactly what runs. Append the canonical
+        # contract so the agent / operator still sees the universal storage
+        # layout and identity rules.
+        return (
+            f"{blueprint['source']} — owner_agent={owner}, surfaces: {surfaces}\n\n"
+            f"{wired}\n\n"
+            f"Canonical contract (applies to every Elevate source):\n{CONNECTION_CONTRACT}\n"
+        )
+
+    # Not-yet-wired source — emit the agent build brief that follows the
+    # canonical pattern, with apple-messages / crm / social pointed at as
+    # working reference implementations.
     extra_contract = f"\n\n{COMPOSIO_SOCIAL_CONTRACT}" if source_id == "social" else ""
     return (
-        f"You are wiring {blueprint['source']} into Elevate Agent.\n\n"
-        f"Connection goal:\nCreate a read-only local source first. Use source_id={source_id}. "
-        "If credentials, OAuth, exports, webhook approval, or app review are needed, mark status.json as needs_operator with the exact next step.\n\n"
+        f"You are wiring {blueprint['source']} into Elevate Agent.\n"
+        f"source_id={source_id}, owner_agent={owner}, target UI surfaces: {surfaces}\n\n"
+        "STATUS: No live pull code exists for this source yet. This prompt creates a\n"
+        "tasks.jsonl entry with `task_type=connector_setup` and `agent_prompt` embedded.\n"
+        "An agent (Jimmy via dispatch-bridge, or the operator) reads this prompt and\n"
+        "builds the real connector following the canonical contract below.\n\n"
         f"Information Elevate needs:\n{blueprint['informationNeeded']}\n\n"
+        "Reference implementations to mirror:\n"
+        "- Local-file source (chat.db / AddressBook): see `initialize_apple_messages_source`\n"
+        "  in `elevate_cli/source_connectors.py` + `elevate_cli/apple_contacts.py`.\n"
+        "- API source with pagination + enrichment: see `sync_lofty_crm_source` and the\n"
+        "  generic adapter pattern in `elevate_cli/crm_adapters/`.\n"
+        "- Messages-only source needing synthesized contacts/conversations: see\n"
+        "  `elevate_cli/composio_inbound.py:synthesize_canonical_files`.\n\n"
         f"{CONNECTION_CONTRACT}{extra_contract}\n\n"
-        f"Connector behavior:\n- owner_agent={owner}\n- target UI surfaces: {surfaces}\n"
-        "- include source_id, source_record_id, source_url when available, display_name, channel, direction, timestamp, text or summary, confidence, tags, and target_ui_surfaces.\n"
-        "- put outbound work in tasks.jsonl with approval_required=true unless the operator explicitly authorizes sending.\n\n"
+        "When the connector is built:\n"
+        f"- Add a tuple to `elevate_cli/sync_scheduler.py:_JOBS` so `elevate db init`\n"
+        f"  installs the recurring launchd plist on every fresh install.\n"
+        f"- Add `{source_id}` to the routing block in\n"
+        f"  `elevate_cli/web_server.py:update_source_connector` so the UI Run button fires it.\n"
+        f"- Add the relevant identity kind to the `_SOURCE_TO_HANDLE_KIND`,\n"
+        f"  `_CRM_PROVIDER_TO_IDENTITY_KIND`, or `_TOOLKIT_TO_HANDLE_KIND` registry —\n"
+        f"  do NOT branch in walker code.\n\n"
         f"Done when:\n{blueprint['successSignal']}\n"
+        "- And: clicking Run on the connector card pulls live records into\n"
+        "  operational.db on a fresh install with no manual steps beyond providing\n"
+        "  the operator's credential / file path.\n"
     )
 
 
@@ -2012,7 +2238,7 @@ def build_source_inbox_response(
     config = config or load_config()
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
-    safe_limit = max(1, min(int(limit or 16), 500))
+    safe_limit = max(1, min(int(limit or 16), 5000))
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
@@ -2197,10 +2423,47 @@ def build_source_inbox_response(
     )
     profiles = _profiles_from_threads(threads, source_by_id)
     profile_state_entries = _as_dict(_read_profile_state(source_root).get("profiles"))
+    # SQLite contacts.pipeline_status is the source of truth when a profile
+    # has a linked contactId; fall back to the legacy JSON state file
+    # otherwise (e.g. composio inbox threads with no CRM contact yet).
+    db_status_by_contact: dict[str, dict[str, Any]] = {}
+    try:
+        from elevate_cli.data import connect as _db_connect
+        contact_ids: list[str] = []
+        for p in profiles:
+            for cid in p.get("contactIds") or []:
+                cid_s = str(cid or "").strip()
+                if cid_s:
+                    contact_ids.append(cid_s)
+        if contact_ids:
+            with _db_connect() as _conn:
+                placeholders = ",".join("?" for _ in contact_ids)
+                cur = _conn.execute(
+                    f"SELECT id, pipeline_status, pipeline_status_set_at "
+                    f"FROM contacts WHERE id IN ({placeholders})",
+                    contact_ids,
+                )
+                for row in cur.fetchall():
+                    db_status_by_contact[row["id"]] = {
+                        "status": row["pipeline_status"],
+                        "updated_at": row["pipeline_status_set_at"],
+                    }
+    except Exception:
+        db_status_by_contact = {}
     for profile in profiles:
-        entry = _as_dict(profile_state_entries.get(str(profile.get("id") or "")))
-        profile["status"] = entry.get("status")
-        profile["statusUpdatedAt"] = entry.get("updated_at")
+        db_entry: dict[str, Any] | None = None
+        for cid in profile.get("contactIds") or []:
+            entry = db_status_by_contact.get(str(cid))
+            if entry and entry.get("status"):
+                db_entry = entry
+                break
+        if db_entry is not None:
+            profile["status"] = db_entry.get("status")
+            profile["statusUpdatedAt"] = db_entry.get("updated_at")
+        else:
+            entry = _as_dict(profile_state_entries.get(str(profile.get("id") or "")))
+            profile["status"] = entry.get("status")
+            profile["statusUpdatedAt"] = entry.get("updated_at")
     visible_threads = threads[:safe_limit]
     totals["threads"] = len(threads)
     totals["drafts"] = len(drafts)
@@ -2493,7 +2756,7 @@ def build_thread_context_response(
         event_type = str(record.get("type") or record.get("event_type") or "event").strip()
         timestamp = record.get("timestamp") or record.get("created_at") or record.get("last_seen_at")
         rec_id = str(record.get("source_record_id") or record.get("id") or "")
-        if event_type == "lofty_note":
+        if event_type in {"crm_note", "lofty_note"}:
             notes_records.append(
                 {
                     "id": rec_id,
@@ -2504,7 +2767,7 @@ def build_thread_context_response(
                 }
             )
             continue
-        if event_type == "lofty_task":
+        if event_type in {"crm_task", "lofty_task"}:
             tasks_records.append(
                 {
                     "id": rec_id,
@@ -2641,10 +2904,20 @@ def update_profile_state(
     status: str | None,
     config: dict[str, Any] | None = None,
 ) -> JsonRecord:
-    """Persist the operator-set pipeline status for a profile (e.g.
-    follow_up, ghosting, dead, closed_seller, closed_buyer). Passing
-    a falsy/`none` status clears the entry. Returns the refreshed
-    /leads response so the caller can rerender without a second fetch."""
+    """Persist the operator-set pipeline status for a profile.
+
+    Writes ``contacts.pipeline_status`` in the operational DB via
+    :func:`set_pipeline_status` (migration 0014). Picking
+    ``closed_seller`` / ``closed_buyer`` from the dropdown also calls
+    :func:`close_to_admin` so the contact lands on /admin in the same
+    transaction. Returns the refreshed /leads response so the caller
+    can rerender without a second fetch.
+
+    Falls back to the legacy ``profile-state.json`` writer when the
+    profile is not a contact UUID (e.g. composio thread-derived profiles
+    that don't have a contacts row yet); the AI sweep eventually merges
+    them, at which point the SQLite path takes over.
+    """
     pid = str(profile_id or "").strip()
     if not pid:
         raise ValueError("profileId is required")
@@ -2655,6 +2928,53 @@ def update_profile_state(
         raise ValueError(f"Unsupported profile status: {status}")
 
     config = config or load_config()
+
+    # Primary path: write to contacts.pipeline_status in SQLite. The UI
+    # passes the source-inbox profile id (e.g. "email:foo@bar.com" or
+    # "phone:+15551234567") so we resolve to a contacts row by either UUID
+    # or verifier match.
+    try:
+        from elevate_cli.data import connect, get_contact, set_pipeline_status
+        with connect() as conn:
+            contact_id: str | None = None
+            if get_contact(conn, pid) is not None:
+                contact_id = pid
+            elif ":" in pid:
+                kind, _, value = pid.partition(":")
+                kind = kind.strip().lower()
+                value = value.strip()
+                if value:
+                    if kind == "email":
+                        row = conn.execute(
+                            "SELECT id FROM contacts WHERE LOWER(primary_email) = LOWER(?) LIMIT 1",
+                            (value,),
+                        ).fetchone()
+                    elif kind == "phone":
+                        row = conn.execute(
+                            "SELECT id FROM contacts WHERE primary_phone = ? LIMIT 1",
+                            (value,),
+                        ).fetchone()
+                    else:
+                        row = None
+                    if row is not None:
+                        contact_id = row["id"]
+            if contact_id:
+                set_pipeline_status(
+                    conn,
+                    contact_id,
+                    status=normalized or None,
+                    actor="operator:leads-ui",
+                    set_by="operator",
+                )
+                return build_source_inbox_response(config)
+    except ValueError:
+        raise
+    except Exception:
+        # Fall through to the legacy JSON writer if the data module can't
+        # accept this profile_id (e.g. composio thread profile without a
+        # contacts row yet).
+        pass
+
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
     state = _read_profile_state(source_root)
@@ -2781,27 +3101,40 @@ def _approve_atomic(
         _write_source_ui_state(source_dir, state)
         return
 
-    thread_id = str(task_record.get("thread_id") or task_record.get("threadId") or task_id)
-    draft_text = str(task_record.get("draft_text") or "").strip()
+    # ui-state's task entry only carries {status, updated_at, draft_text}.
+    # The recipient (phone/email/handle) lives in the original tasks.jsonl
+    # record. Merge it in so the queue payload has what the dispatcher needs;
+    # ui-state values win when present (user-edited draft_text).
+    merged: dict[str, Any] = {}
+    for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
+        if _task_key(record) == task_id:
+            merged.update(record)
+            break
+    for k, v in (task_record or {}).items():
+        if v not in (None, ""):
+            merged[k] = v
+
+    thread_id = str(merged.get("thread_id") or merged.get("threadId") or task_id)
+    draft_text = str(merged.get("draft_text") or _draft_text_for_task(merged) or "").strip()
     payload = {
         "draft_text": draft_text,
         "recipient": {
-            "person_name": task_record.get("person_name") or task_record.get("personName"),
-            "contact_id": task_record.get("contact_id"),
-            "conversation_id": task_record.get("conversation_id") or task_record.get("source_record_id"),
-            "phone": task_record.get("phone") or task_record.get("recipient_phone"),
-            "email": task_record.get("email") or task_record.get("recipient_email"),
-            "social_handle": task_record.get("social_handle") or task_record.get("recipient_handle"),
+            "person_name": merged.get("person_name") or merged.get("personName") or merged.get("display_name"),
+            "contact_id": merged.get("contact_id"),
+            "conversation_id": merged.get("conversation_id") or merged.get("source_record_id"),
+            "phone": merged.get("phone") or merged.get("recipient_phone") or (merged.get("phones") or [None])[0],
+            "email": merged.get("email") or merged.get("recipient_email") or (merged.get("emails") or [None])[0],
+            "social_handle": merged.get("social_handle") or merged.get("recipient_handle"),
         },
         "channel_meta": {
-            "toolkit": task_record.get("toolkit"),
-            "account_id": task_record.get("composio_account_id"),
+            "toolkit": merged.get("toolkit"),
+            "account_id": merged.get("composio_account_id"),
         },
         "source_id": source_id,
         "thread_id": thread_id,
         "task_id": task_id,
     }
-    attempt_id = task_record.get("attempt_id") or task_record.get("attemptId")
+    attempt_id = merged.get("attempt_id") or merged.get("attemptId")
 
     with outreach_db.connect() as conn:
         with outreach_db.transaction(conn):
@@ -2815,6 +3148,21 @@ def _approve_atomic(
                 attempt_id=attempt_id,
             )
             _write_source_ui_state(source_dir, state)
+
+    # Fire the sender immediately so the UI experience is "click → sent."
+    # Background thread so the HTTP response isn't blocked on the agent
+    # subprocess (10-90s for an LLM dispatch). Tick once with a small batch
+    # so unrelated queued rows don't get drained on every approve.
+    if os.getenv("ELEVATE_APPROVE_AUTO_TICK", "1") not in ("0", "false", "no"):
+        import threading
+        def _tick() -> None:
+            try:
+                from elevate_cli import sender as _sender
+                _sender.tick(batch=int(os.getenv("ELEVATE_APPROVE_TICK_BATCH", "1")))
+            except Exception as _exc:
+                import traceback
+                traceback.print_exc()
+        threading.Thread(target=_tick, name=f"approve-tick-{task_id[:24]}", daemon=True).start()
 
 
 def _lofty_lead_name(lead: JsonRecord) -> str:
@@ -2943,7 +3291,7 @@ def _provider_label(provider: str) -> str:
 
 
 def sync_generic_crm_source(
-    config: dict[str, Any] | None = None, *, limit: int = 50
+    config: dict[str, Any] | None = None, *, limit: int = 5000
 ) -> JsonRecord:
     config = config or load_config()
     info = get_source_root_info(config)
@@ -3893,6 +4241,144 @@ def crm_add_note(
     raise NotImplementedError(f"crm_add_note not yet implemented for provider: {provider}")
 
 
+def sync_pending_notes_to_lofty(
+    config: dict[str, Any] | None = None,
+    *,
+    limit: int = 25,
+    max_attempts: int = 5,
+) -> JsonRecord:
+    """Push every ``notes`` row with ``crm_sync_state='pending'`` to
+    Lofty. Returns a summary ``{pushed, skipped, failed, errors[]}``.
+
+    Skip rules (counted in ``skipped``, not retried):
+      * non-Lofty CRM provider — caller picked the wrong source.
+      * Contact has no ``lofty_id`` identity — we have nowhere to POST.
+
+    Failure rules:
+      * 4xx → ``mark_lofty_failed(permanent=True)`` — payload bad, retry
+        won't fix it. Operator can re-trigger by editing the body.
+      * 5xx / timeout / unknown → ``mark_lofty_failed(permanent=False)`` —
+        attempt counter bumps; row stays ``pending`` until ``max_attempts``.
+
+    Content prefix: ``[AI/{author_name}] {body}`` — so the operator can
+    skim Lofty's note feed and know what wrote each line.
+    """
+    config = config or load_config()
+    provider, _api_key, _crm, env_values = _resolve_crm_context(config)
+
+    summary: JsonRecord = {
+        "provider": provider,
+        "pushed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "errors": [],
+    }
+
+    if provider != "lofty":
+        # Future: dispatch to followupboss / sierra / etc. For now only
+        # Lofty is wired — others fall through silently to keep the cron
+        # safe to run regardless of which CRM the operator connected.
+        return summary
+
+    headers, _auth_type = _lofty_headers(env_values)
+    if not headers.get("Authorization"):
+        summary["errors"].append("LOFTY_API_KEY / LOFTY_ACCESS_TOKEN not set")
+        return summary
+
+    from elevate_cli.data import (
+        connect as _db_connect,
+        list_pending_lofty_notes,
+        mark_lofty_synced,
+        mark_lofty_failed,
+    )
+
+    with _db_connect() as conn:
+        pending = list_pending_lofty_notes(conn, limit=limit, max_attempts=max_attempts)
+        for note in pending:
+            note_id = note["id"]
+            contact_id = note["contactId"]
+            # Resolve the contact's Lofty lead id via the identities table.
+            lofty_row = conn.execute(
+                "SELECT value FROM identities "
+                "WHERE contact_id=? AND kind='lofty_id' LIMIT 1",
+                (contact_id,),
+            ).fetchone()
+            if lofty_row is None or not lofty_row["value"]:
+                # No Lofty linkage — permanently fail. If a Lofty identity
+                # gets added later, the operator can re-trigger by editing
+                # the note body (which moves it back to pending).
+                mark_lofty_failed(
+                    conn,
+                    note_id=note_id,
+                    error="contact has no lofty_id identity",
+                    permanent=True,
+                )
+                summary["skipped"] += 1
+                continue
+            lead_id = str(lofty_row["value"])
+            content = f"[AI/{note['authorName']}] {note['body']}"
+
+            try:
+                resp = _lofty_write(
+                    f"v1.0/leads/{lead_id}/notes",
+                    env_values,
+                    {"content": content},
+                    method="POST",
+                )
+            except urllib.error.HTTPError as exc:
+                if 400 <= exc.code < 500:
+                    mark_lofty_failed(
+                        conn,
+                        note_id=note_id,
+                        error=f"HTTP {exc.code}: {exc.reason}",
+                        permanent=True,
+                    )
+                    summary["failed"] += 1
+                else:
+                    mark_lofty_failed(
+                        conn,
+                        note_id=note_id,
+                        error=f"HTTP {exc.code}: {exc.reason}",
+                        permanent=False,
+                    )
+                    summary["errors"].append(f"{note_id}: HTTP {exc.code}")
+                continue
+            except Exception as exc:
+                mark_lofty_failed(
+                    conn,
+                    note_id=note_id,
+                    error=str(exc)[:500],
+                    permanent=False,
+                )
+                summary["errors"].append(f"{note_id}: {exc}")
+                continue
+
+            lofty_note_id = None
+            if isinstance(resp, dict):
+                # Lofty returns either {"noteId": …} or wraps the row under
+                # "data". Probe both shapes.
+                raw = resp.get("noteId") or resp.get("id")
+                if raw is None and isinstance(resp.get("data"), dict):
+                    raw = resp["data"].get("noteId") or resp["data"].get("id")
+                if raw is not None:
+                    lofty_note_id = str(raw)
+
+            if lofty_note_id:
+                mark_lofty_synced(conn, note_id=note_id, lofty_note_id=lofty_note_id)
+                summary["pushed"] += 1
+            else:
+                # POST succeeded (no exception) but we couldn't parse the
+                # id. Mark synced with a placeholder so we don't double-post,
+                # but flag in errors so the operator can investigate.
+                mark_lofty_synced(conn, note_id=note_id, lofty_note_id=f"unknown:{note_id}")
+                summary["pushed"] += 1
+                summary["errors"].append(
+                    f"{note_id}: posted but noteId missing from response"
+                )
+
+    return summary
+
+
 def crm_update_stage(
     lead_id: str,
     stage: str,
@@ -3946,7 +4432,12 @@ def crm_update_stage(
     raise NotImplementedError(f"crm_update_stage not yet implemented for provider: {provider}")
 
 
-def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 50) -> JsonRecord:
+def sync_lofty_crm_source(
+    config: dict[str, Any] | None = None,
+    *,
+    limit: int = 5000,
+    enrichment_limit: int = 5000,
+) -> JsonRecord:
     config = config or load_config()
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
@@ -4044,7 +4535,8 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
     lead_events: list[JsonRecord] = []
     task_records: list[JsonRecord] = []
     enrichment_summary: dict[str, int] = {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
-    for lead in deduped:
+    max_enriched = max(0, int(enrichment_limit or 0))
+    for index, lead in enumerate(deduped):
         lead_id = str(lead.get("leadId") or lead.get("id") or lead.get("lead_id") or "").strip()
         record_id = f"lofty-lead:{lead_id or len(contact_records) + 1}"
         name = _lofty_lead_name(lead)
@@ -4105,7 +4597,7 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
         # what the lead has actually been doing — not just a score. Each
         # endpoint is best-effort: a 404 or transient error on one lead
         # must not break the whole sync.
-        if lead_id:
+        if lead_id and index < max_enriched:
             try:
                 activity_payload = _lofty_get_activities(lead_id, env_values)
             except Exception:  # noqa: BLE001
@@ -4120,7 +4612,8 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                     {
                         **base_record,
                         "source_record_id": f"{record_id}:activity:{act_id}",
-                        "type": "lofty_activity",
+                        "type": "crm_activity",
+                        "provider": "lofty",
                         "subtype": norm["subtype"],
                         "title": norm["title"],
                         "summary": norm["summary"],
@@ -4144,7 +4637,8 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                     {
                         **base_record,
                         "source_record_id": f"{record_id}:note:{note_id}",
-                        "type": "lofty_note",
+                        "type": "crm_note",
+                        "provider": "lofty",
                         "title": norm["title"] or "Note",
                         "summary": norm["summary"],
                         "author": norm["author"],
@@ -4168,7 +4662,8 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                     {
                         **base_record,
                         "source_record_id": f"{record_id}:task:{task_id}",
-                        "type": "lofty_task",
+                        "type": "crm_task",
+                        "provider": "lofty",
                         "title": norm["title"],
                         "summary": norm["summary"],
                         "status": norm["status"],
@@ -4232,6 +4727,7 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                 "lead_events": len(lead_events),
                 "tasks": len(task_records),
                 "enrichment": dict(enrichment_summary),
+                "enrichment_lead_limit": max_enriched,
             },
         },
     )
@@ -4255,6 +4751,7 @@ def sync_lofty_crm_source(config: dict[str, Any] | None = None, *, limit: int = 
                 "lead_events": len(lead_events),
                 "tasks": len(task_records),
                 "enrichment": dict(enrichment_summary),
+                "enrichment_lead_limit": max_enriched,
             },
         },
     )
@@ -4548,6 +5045,66 @@ DEFAULT_CRM = {
 }
 
 
+_CRM_PROVIDER_ALIASES = {
+    "lofty": "lofty",
+    "chime": "lofty",  # Chime → Lofty rebrand
+    "follow up boss": "followupboss",
+    "followupboss": "followupboss",
+    "fub": "followupboss",
+    "sierra": "sierra",
+    "sierra interactive": "sierra",
+    "boldtrail": "boldtrail",
+    "bold trail": "boldtrail",
+    "kvcore": "boldtrail",  # kvCORE → BoldTrail rebrand
+    "kvcore / boldtrail": "boldtrail",
+    "brivity": "brivity",
+}
+
+
+_CRM_PROVIDER_ENV_DEFAULTS = {
+    "lofty": "LOFTY_API_KEY",
+    "followupboss": "FUB_API_KEY",
+    "sierra": "SIERRA_API_KEY",
+    "boldtrail": "BOLDTRAIL_API_KEY",
+    "brivity": "BRIVITY_API_KEY",
+}
+
+
+def _provider_from_admin_profile() -> str:
+    """Read admin_setup_profile.crm_provider and normalize to canonical slug.
+
+    Returns "" if the admin profile is empty or unreadable. Never raises —
+    this is a soft overlay on top of config.yaml.
+    """
+    import sqlite3, os
+    db_path = os.path.expanduser("~/.elevate/data/operational.db")
+    if not os.path.exists(db_path):
+        return ""
+    try:
+        con = sqlite3.connect(db_path)
+    except Exception:
+        return ""
+    try:
+        con.row_factory = sqlite3.Row
+        try:
+            row = con.execute(
+                "SELECT crm_provider FROM admin_setup_profile WHERE id='default'"
+            ).fetchone()
+        except Exception:
+            return ""
+        if not row:
+            return ""
+        raw = str(row["crm_provider"] or "").strip().lower()
+        if not raw:
+            return ""
+        return _CRM_PROVIDER_ALIASES.get(raw, raw.replace(" ", ""))
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 def _merge_crm(raw: Any) -> JsonRecord:
     merged = deepcopy(DEFAULT_CRM)
     raw_dict = _as_dict(raw)
@@ -4556,6 +5113,20 @@ def _merge_crm(raw: Any) -> JsonRecord:
             merged[key] = {**merged[key], **value}
         else:
             merged[key] = value
+
+    # Auto-resolve provider from admin onboarding when config is still the
+    # default ("custom") or empty. The user already told the wizard which
+    # CRM they use — don't make them edit yaml.
+    config_provider = str(merged.get("provider") or "").strip().lower()
+    if config_provider in {"", "custom"}:
+        admin_provider = _provider_from_admin_profile()
+        if admin_provider:
+            merged["provider"] = admin_provider
+            # Derive the env var name unless the config explicitly set one.
+            if str(merged.get("api_key_env") or "CRM_API_KEY") == "CRM_API_KEY":
+                env_default = _CRM_PROVIDER_ENV_DEFAULTS.get(admin_provider)
+                if env_default:
+                    merged["api_key_env"] = env_default
     return merged
 
 

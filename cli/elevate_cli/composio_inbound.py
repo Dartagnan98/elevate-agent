@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,202 @@ from elevate_cli.config import load_config
 from elevate_cli.source_connectors import _candidate_tools_root, get_source_root_info
 
 _log = logging.getLogger(__name__)
+
+
+# Toolkit → kind of identity that uniquely keys the sender. Used by the
+# contact-synthesizer below to project the per-message ``from`` field into
+# a stable native id that the canonical walker can group on.
+_TOOLKIT_TO_HANDLE_KIND: dict[str, str] = {
+    "gmail": "email",
+    "instagram": "instagram_id",
+    "facebook": "facebook_id",
+    "whatsapp": "wa_id",
+    "telegram": "telegram_id",
+    "slack": "slack_id",
+}
+
+_EMAIL_RE = re.compile(r"<([^>]+@[^>]+)>")
+
+
+def _sender_identity(toolkit: str, sender_raw: Any) -> tuple[str, str, str]:
+    """Return (kind, value, display_name) for a composio sender payload.
+
+    Toolkit-specific extraction — gmail's ``from`` is "Name <email>", IG's
+    is a dict, FB's nests email under ``from.email``. Falls back to the
+    flattened sender string so we never lose a row, even when the toolkit
+    payload shape drifts.
+    """
+    handle_kind = _TOOLKIT_TO_HANDLE_KIND.get(toolkit, f"{toolkit}_id")
+
+    if isinstance(sender_raw, dict):
+        for key in ("id", "username", "email"):
+            v = sender_raw.get(key)
+            if v:
+                value = str(v).strip().lower()
+                display = (
+                    sender_raw.get("name")
+                    or sender_raw.get("username")
+                    or sender_raw.get("display_name")
+                    or value
+                )
+                if key == "email" or "@" in value:
+                    return ("email", value, str(display))
+                return (handle_kind, value, str(display))
+        return (handle_kind, "unknown", "Unknown sender")
+
+    s = (str(sender_raw) if sender_raw is not None else "").strip()
+    if not s:
+        return (handle_kind, "unknown", "Unknown sender")
+
+    m = _EMAIL_RE.search(s)
+    if m:
+        email = m.group(1).strip().lower()
+        name = s.split("<", 1)[0].strip().strip('"') or email
+        return ("email", email, name)
+
+    if "@" in s and " " not in s:
+        return ("email", s.lower(), s)
+
+    return (handle_kind, s.lower(), s)
+
+
+def _read_messages_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def _write_jsonl_atomic(path: Path, records: list[dict[str, Any]]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tmp.open("w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+    tmp.replace(path)
+
+
+def synthesize_canonical_files(toolkit: str) -> dict[str, int]:
+    """Rebuild ``contacts.jsonl`` + ``conversations.jsonl`` for a toolkit
+    from its accumulated ``messages.jsonl``. Also stamps ``contact_id`` /
+    ``conversation_id`` onto every message row so the canonical walker
+    can join.
+
+    Pure derivation — replays in-memory. Safe to re-run; output is
+    deterministic for a given messages.jsonl.
+
+    Returns ``{"contacts": N, "conversations": M, "messages": K}``.
+    """
+    source_id = _source_id_for_toolkit(toolkit)
+    source_dir = _source_dir_for_toolkit(toolkit)
+    messages_path = source_dir / "messages.jsonl"
+    messages = _read_messages_jsonl(messages_path)
+    if not messages:
+        return {"contacts": 0, "conversations": 0, "messages": 0}
+
+    contacts: dict[str, dict[str, Any]] = {}
+    conversations: dict[str, dict[str, Any]] = {}
+    updated_messages: list[dict[str, Any]] = []
+
+    for msg in messages:
+        sender_raw = msg.get("from") or msg.get("from_") or msg.get("sender")
+        kind, value, display = _sender_identity(toolkit, sender_raw)
+        native_contact_id = f"{kind}:{value}"
+        thread_id = (
+            msg.get("conversation_id")
+            or msg.get("thread_id")
+            or msg.get("threadId")
+            or native_contact_id
+        )
+        ts = msg.get("timestamp") or msg.get("ts") or _now_iso()
+        direction = msg.get("direction") or "inbound"
+
+        c = contacts.get(native_contact_id)
+        if c is None:
+            c = {
+                "source_id": source_id,
+                "source_record_id": native_contact_id,
+                "display_name": display,
+                "channel": source_id,
+                "handle": value,
+                "identities": [{"kind": kind, "value": value}],
+                "tags": [source_id, "message-contact"],
+                "target_ui_surfaces": ["Outreach", "Leads", "Today", "Approvals"],
+                "total_messages": 0,
+                "inbound_count": 0,
+                "outbound_count": 0,
+                "first_seen_at": ts,
+                "last_seen_at": ts,
+                "last_text": "",
+            }
+            if kind == "email":
+                c["primary_email"] = value
+            contacts[native_contact_id] = c
+
+        c["total_messages"] += 1
+        if direction == "outbound":
+            c["outbound_count"] += 1
+        else:
+            c["inbound_count"] += 1
+        if ts < c["first_seen_at"]:
+            c["first_seen_at"] = ts
+        if ts > c["last_seen_at"]:
+            c["last_seen_at"] = ts
+            c["last_text"] = msg.get("text") or msg.get("last_text") or msg.get("body") or ""
+
+        conv = conversations.get(thread_id)
+        if conv is None:
+            conversations[thread_id] = {
+                "source_id": source_id,
+                "source_record_id": thread_id,
+                "conversation_id": thread_id,
+                "contact_id": native_contact_id,
+                "channel": source_id,
+                "first_seen_at": ts,
+                "last_seen_at": ts,
+                "inbound_count": 0,
+                "outbound_count": 0,
+                "total_messages": 0,
+            }
+            conv = conversations[thread_id]
+        conv["total_messages"] += 1
+        if direction == "outbound":
+            conv["outbound_count"] += 1
+        else:
+            conv["inbound_count"] += 1
+        if ts < conv["first_seen_at"]:
+            conv["first_seen_at"] = ts
+        if ts > conv["last_seen_at"]:
+            conv["last_seen_at"] = ts
+
+        msg = dict(msg)
+        msg["contact_id"] = native_contact_id
+        msg["conversation_id"] = thread_id
+        msg.setdefault("source_id", source_id)
+        msg.setdefault("source_record_id", msg.get("provider_message_id") or msg.get("id"))
+        msg.setdefault("timestamp", ts)
+        msg.setdefault("channel", source_id)
+        msg.setdefault("text", msg.get("body") or msg.get("last_text") or "")
+        updated_messages.append(msg)
+
+    _write_jsonl_atomic(source_dir / "contacts.jsonl", list(contacts.values()))
+    _write_jsonl_atomic(source_dir / "conversations.jsonl", list(conversations.values()))
+    _write_jsonl_atomic(messages_path, updated_messages)
+
+    return {
+        "contacts": len(contacts),
+        "conversations": len(conversations),
+        "messages": len(updated_messages),
+    }
 
 
 def _now_iso() -> str:
@@ -670,7 +867,31 @@ def pull_toolkit(toolkit: str, *, page_size: int = 50, max_pages: int = 5) -> di
         _odb.inbound_seen_record(toolkit, [r["provider_message_id"] for r in new_records])
     _save_cursors(toolkit, cursors)
 
-    return {
+    writethrough_error: str | None = None
+    if new_records:
+        try:
+            synthesize_canonical_files(toolkit)
+        except Exception as exc:
+            _log.exception("composio_inbound[%s]: synthesize failed", toolkit)
+            writethrough_error = f"synthesize: {exc}"
+
+        if writethrough_error is None:
+            try:
+                from elevate_cli.data import connect as _data_connect
+                from elevate_cli.data.migrate import (
+                    BackfillStats as _BackfillStats,
+                    walk_jsonl_source as _walk_jsonl_source,
+                )
+
+                source_dir = _source_dir_for_toolkit(toolkit)
+                stats = _BackfillStats()
+                with _data_connect() as conn:
+                    _walk_jsonl_source(source_dir, conn=conn, stats=stats, dry_run=False)
+            except Exception as exc:
+                _log.exception("composio_inbound[%s]: writethrough failed", toolkit)
+                writethrough_error = str(exc)
+
+    result: dict[str, Any] = {
         "ok": True,
         "skipped": False,
         "toolkit": toolkit,
@@ -679,6 +900,9 @@ def pull_toolkit(toolkit: str, *, page_size: int = 50, max_pages: int = 5) -> di
         "fetched": fetched,
         "new": len(new_records),
     }
+    if writethrough_error:
+        result["writethrough_error"] = writethrough_error
+    return result
 
 
 def pull_all_supported() -> dict[str, Any]:

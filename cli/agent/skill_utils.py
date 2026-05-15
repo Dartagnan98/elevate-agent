@@ -130,15 +130,8 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     Reads the config file directly (no CLI config imports) to stay
     lightweight.
     """
-    config_path = get_config_path()
-    if not config_path.exists():
-        return set()
-    try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.debug("Could not read skill config %s: %s", config_path, e)
-        return set()
-    if not isinstance(parsed, dict):
+    parsed = _load_skills_config()
+    if not parsed:
         return set()
 
     skills_cfg = parsed.get("skills")
@@ -158,6 +151,68 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
         if platform_disabled is not None:
             return _normalize_string_set(platform_disabled)
     return _normalize_string_set(skills_cfg.get("disabled"))
+
+
+def get_prompt_hidden_skill_names(
+    platform: str | None = None,
+    agent_id: str | None = None,
+) -> Set[str]:
+    """Read skill names hidden from the system prompt but still loadable.
+
+    Config shape::
+
+        skills:
+          prompt_hidden: [phase-skill]
+          platform_prompt_hidden:
+            telegram: [telegram-only-phase]
+          agent_prompt_hidden:
+            admin: [admin-only-phase]
+
+    Unlike ``disabled``, prompt-hidden skills remain callable via ``skill_view``
+    and slash/preloaded skill paths.  Global, platform, and agent lists are
+    unioned so narrow contexts can add hiding without replacing the global list.
+    """
+    parsed = _load_skills_config()
+    if not parsed:
+        return set()
+    skills_cfg = parsed.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return set()
+
+    from gateway.session_context import get_session_env
+    resolved_platform = (
+        platform
+        or os.getenv("ELEVATE_PLATFORM")
+        or get_session_env("ELEVATE_SESSION_PLATFORM")
+    )
+    resolved_agent = (
+        agent_id
+        or os.getenv("ELEVATE_AGENT_ID")
+        or get_session_env("ELEVATE_SESSION_AGENT_ID")
+    )
+
+    hidden = _normalize_string_set(skills_cfg.get("prompt_hidden"))
+    if resolved_platform:
+        hidden |= _normalize_string_set(
+            (skills_cfg.get("platform_prompt_hidden") or {}).get(resolved_platform)
+        )
+    if resolved_agent:
+        hidden |= _normalize_string_set(
+            (skills_cfg.get("agent_prompt_hidden") or {}).get(resolved_agent)
+        )
+    return hidden
+
+
+def _load_skills_config() -> Dict[str, Any]:
+    config_path = get_config_path()
+    if not config_path.exists():
+        return {}
+    try:
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("Could not read skill config %s: %s", config_path, e)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _normalize_string_set(values) -> Set[str]:
@@ -268,6 +323,20 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
         "fallback_for_tools": elevate.get("fallback_for_tools", []),
         "requires_tools": elevate.get("requires_tools", []),
     }
+
+
+def skill_prompt_hidden(frontmatter: Dict[str, Any]) -> bool:
+    """Return True when a skill declares itself hidden from the prompt index."""
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    elevate = metadata.get("elevate") or {}
+    if not isinstance(elevate, dict):
+        elevate = {}
+    value = elevate.get("prompt_hidden", frontmatter.get("prompt_hidden", False))
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 # ── Skill config extraction ───────────────────────────────────────────────

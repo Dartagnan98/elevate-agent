@@ -20,9 +20,11 @@ from agent.skill_utils import (
     extract_skill_description,
     get_all_skills_dirs,
     get_disabled_skill_names,
+    get_prompt_hidden_skill_names,
     iter_skill_index_files,
     parse_frontmatter,
     skill_matches_platform,
+    skill_prompt_hidden,
 )
 from utils import atomic_json_write
 
@@ -778,6 +780,7 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "prompt_hidden": skill_prompt_hidden(frontmatter),
         "required_entitlements": required_entitlements,
     }
 
@@ -893,22 +896,31 @@ def build_skills_system_prompt(
         return ""
 
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
-    # Include the resolved platform so per-platform disabled-skill lists
-    # produce distinct cache entries (gateway serves multiple platforms).
+    # Include the resolved platform/agent so per-context disabled and
+    # prompt-hidden lists produce distinct cache entries (gateway serves many
+    # platforms/lanes in one process).
     from gateway.session_context import get_session_env
     _platform_hint = (
         os.environ.get("ELEVATE_PLATFORM")
         or get_session_env("ELEVATE_SESSION_PLATFORM")
         or ""
     )
+    _agent_hint = (
+        os.environ.get("ELEVATE_AGENT_ID")
+        or get_session_env("ELEVATE_SESSION_AGENT_ID")
+        or ""
+    )
     disabled = get_disabled_skill_names()
+    prompt_hidden = get_prompt_hidden_skill_names()
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
+        _agent_hint,
         tuple(sorted(disabled)),
+        tuple(sorted(prompt_hidden)),
         _access_cache_key(),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
@@ -936,6 +948,10 @@ def build_skills_system_prompt(
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue
+            if frontmatter_name in prompt_hidden or skill_name in prompt_hidden:
+                continue
+            if entry.get("prompt_hidden"):
+                continue
             if not _required_entitlements_allowed(entry.get("required_entitlements") or []):
                 continue
             if not _skill_should_show(
@@ -962,6 +978,10 @@ def build_skills_system_prompt(
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
+                continue
+            if entry["frontmatter_name"] in prompt_hidden or skill_name in prompt_hidden:
+                continue
+            if entry.get("prompt_hidden"):
                 continue
             if not _skill_access_should_show(frontmatter):
                 continue
@@ -1019,6 +1039,10 @@ def build_skills_system_prompt(
                 if frontmatter_name in seen_skill_names:
                     continue
                 if frontmatter_name in disabled or skill_name in disabled:
+                    continue
+                if frontmatter_name in prompt_hidden or skill_name in prompt_hidden:
+                    continue
+                if entry.get("prompt_hidden"):
                     continue
                 if not _skill_access_should_show(frontmatter):
                     continue

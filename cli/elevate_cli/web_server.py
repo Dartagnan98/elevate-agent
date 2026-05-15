@@ -2859,8 +2859,12 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     {
         "id": "claude-code",
         "name": "Claude Code (subscription)",
-        "flow": "external",
-        "cli_command": "claude setup-token",
+        # PKCE flow — refreshes the same Anthropic credential family that
+        # Claude Code reads. Functionally identical to the Anthropic entry;
+        # exposed separately so users coming from `claude setup-token` can
+        # find a Login button without learning that "Anthropic" covers it.
+        "flow": "pkce",
+        "cli_command": "elevate auth add anthropic",
         "docs_url": "https://docs.claude.com/en/docs/claude-code",
         "status_fn": _claude_code_only_status,
     },
@@ -3526,6 +3530,7 @@ async def start_oauth_login(provider_id: str, request: Request):
         )
     try:
         if catalog_entry["flow"] == "pkce":
+            # anthropic + claude-code share the same Anthropic PKCE plumbing.
             return _start_anthropic_pkce()
         if catalog_entry["flow"] == "device_code":
             return await _start_device_code_flow(provider_id)
@@ -3546,7 +3551,8 @@ class OAuthSubmitBody(BaseModel):
 async def submit_oauth_code(provider_id: str, body: OAuthSubmitBody, request: Request):
     """Submit the auth code for PKCE flows. Token-protected."""
     _require_token(request)
-    if provider_id == "anthropic":
+    # claude-code shares the Anthropic PKCE plumbing — same credential family.
+    if provider_id in {"anthropic", "claude-code"}:
         return await asyncio.get_event_loop().run_in_executor(
             None, _submit_anthropic_pkce, body.session_id, body.code,
         )
@@ -7277,6 +7283,149 @@ async def get_skill_steps(name: str):
     content = str(payload.get("content") or "")
     steps = parse_steps_from_text(content, source=name)
     return {"name": name, "steps": steps}
+
+
+def _resolve_skill_dir(name: str):
+    """Locate the on-disk directory for *name*. Returns Path or None.
+
+    Mirrors the search order used by tools.skills_tool.skill_view but only
+    returns the directory — callers handle file reads / tree walks.
+    """
+    from pathlib import Path
+    from tools.skills_tool import SKILLS_DIR, _EXCLUDED_SKILL_DIRS
+    from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+
+    candidates = []
+    if SKILLS_DIR.exists():
+        candidates.append(SKILLS_DIR)
+    candidates.extend(get_external_skills_dirs())
+
+    for search_dir in candidates:
+        direct = search_dir / name
+        if direct.is_dir() and (direct / "SKILL.md").exists():
+            return direct
+
+    for search_dir in candidates:
+        for skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            if skill_md.parent.name == name:
+                return skill_md.parent
+    return None
+
+
+def _walk_skill_tree(skill_dir, max_depth: int = 4):
+    """Return a nested list of {name, type, path, children?} for the skill dir.
+
+    `path` is relative to the skill directory and is what callers pass to
+    /api/skills/{name}/file. SKILL.md always sorts first; folders next;
+    other files last (each group sorted alphabetically).
+    """
+    from tools.skills_tool import _EXCLUDED_SKILL_DIRS
+
+    def walk(dir_path, rel_prefix: str, depth: int):
+        if depth > max_depth:
+            return []
+        entries = []
+        try:
+            children = list(dir_path.iterdir())
+        except (PermissionError, OSError):
+            return []
+        files = []
+        folders = []
+        for child in children:
+            if child.name in _EXCLUDED_SKILL_DIRS or child.name.startswith("."):
+                continue
+            rel = f"{rel_prefix}{child.name}" if rel_prefix else child.name
+            if child.is_dir():
+                folders.append((child.name, rel, child))
+            else:
+                files.append((child.name, rel))
+
+        skill_md_entry = None
+        other_files = []
+        for fname, rel in sorted(files, key=lambda x: x[0].lower()):
+            entry = {"name": fname, "type": "file", "path": rel}
+            if fname == "SKILL.md":
+                skill_md_entry = entry
+            else:
+                other_files.append(entry)
+        if skill_md_entry:
+            entries.append(skill_md_entry)
+
+        for fname, rel, child_dir in sorted(folders, key=lambda x: x[0].lower()):
+            entries.append({
+                "name": fname,
+                "type": "dir",
+                "path": rel,
+                "children": walk(child_dir, f"{rel}/", depth + 1),
+            })
+
+        entries.extend(other_files)
+        return entries
+
+    return walk(skill_dir, "", 0)
+
+
+@app.get("/api/skills/{name}/tree")
+async def get_skill_tree(name: str):
+    """Return the folder/file tree for a skill, used by the Skills page rail."""
+    skill_dir = _resolve_skill_dir(name)
+    if skill_dir is None:
+        return {"name": name, "tree": [], "error": "skill not found"}
+    return {
+        "name": name,
+        "root": skill_dir.name,
+        "tree": _walk_skill_tree(skill_dir),
+    }
+
+
+@app.get("/api/skills/{name}/file")
+async def get_skill_file(name: str, path: str = ""):
+    """Return the contents of a file inside a skill directory.
+
+    `path` is relative to the skill root (e.g. ``SKILL.md`` or
+    ``references/api.md``). Empty path defaults to SKILL.md.
+    Binary files return ``{"binary": true, "size": N}`` instead of content.
+    """
+    from tools.path_security import has_traversal_component, validate_within_dir
+
+    skill_dir = _resolve_skill_dir(name)
+    if skill_dir is None:
+        return {"name": name, "path": path, "error": "skill not found"}
+
+    rel = path.strip().lstrip("/") or "SKILL.md"
+    if has_traversal_component(rel):
+        return {"name": name, "path": rel, "error": "invalid path"}
+
+    target = skill_dir / rel
+    err = validate_within_dir(target, skill_dir)
+    if err:
+        return {"name": name, "path": rel, "error": err}
+    if not target.exists() or not target.is_file():
+        return {"name": name, "path": rel, "error": "file not found"}
+
+    try:
+        size = target.stat().st_size
+    except OSError:
+        size = 0
+
+    try:
+        content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {
+            "name": name,
+            "path": rel,
+            "binary": True,
+            "size": size,
+        }
+
+    return {
+        "name": name,
+        "path": rel,
+        "size": size,
+        "content": content,
+    }
 
 
 @app.get("/api/tools/toolsets")

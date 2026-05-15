@@ -84,6 +84,88 @@ def _heat_label_for(score: int) -> str:
     return "normal"
 
 
+def db_private_search_buyers(
+    conn: sqlite3.Connection, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """DB-backed equivalent of ``_read_private_search_buyers``.
+
+    Returns ``BuyerWatchlistEntry`` rows by joining ``contacts`` (the
+    source of truth — ``buyer_search_active`` flag is set by review_contact)
+    with ``pcs_buyers`` (per-contact MLS scoring detail). Matches the JSONL
+    reader's sort order: score desc (CRM-native preferred over heat), then
+    most-recent activity first.
+
+    Surfaced fields match ``web/src/lib/api-types.ts::BuyerWatchlistEntry``.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+          c.id,
+          c.display_name,
+          c.primary_email,
+          c.primary_phone,
+          c.heat_score,
+          c.heat_label,
+          c.updated_at,
+          pb.score                  AS pcs_score,
+          pb.tier                   AS pcs_tier,
+          pb.days                   AS pcs_days,
+          pb.last_activity_at       AS pcs_last_activity,
+          pb.last_scraped_at        AS pcs_last_scraped,
+          pb.profile_url            AS pcs_profile_url,
+          pb.searches_json,
+          pb.matching_listings_json
+        FROM contacts c
+        LEFT JOIN pcs_buyers pb ON pb.contact_id = c.id
+        WHERE c.buyer_search_active = 1
+           OR pb.contact_id IS NOT NULL
+        ORDER BY COALESCE(pb.score, c.heat_score, 0) DESC,
+                 COALESCE(pb.last_activity_at, c.updated_at) DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        def _list_from_json(blob: str | None) -> list[str]:
+            if not blob:
+                return []
+            try:
+                parsed = json.loads(blob)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return []
+            if not isinstance(parsed, list):
+                return []
+            return [str(x) for x in parsed if x]
+
+        score_val: int | None = None
+        if row["pcs_score"] is not None:
+            score_val = _safe_int(row["pcs_score"], default=0)
+        elif row["heat_score"] is not None:
+            score_val = _safe_int(row["heat_score"], default=0)
+
+        entries.append({
+            "id": row["id"],
+            "name": row["display_name"] or "Unnamed buyer",
+            "email": row["primary_email"],
+            "phone": row["primary_phone"],
+            "score": score_val,
+            "tier": row["pcs_tier"],
+            "days": row["pcs_days"],
+            "lastActivity": row["pcs_last_activity"],
+            "dateEntered": None,
+            "searches": _list_from_json(row["searches_json"]),
+            "matchingListings": _list_from_json(row["matching_listings_json"]),
+            "profileUrl": row["pcs_profile_url"],
+            "source": "mls-private-search",
+            "sourceLabel": "MLS private search",
+            "tags": [],
+            "scrapedAt": row["pcs_last_scraped"],
+        })
+    return entries
+
+
 # ─── Source inbox ──────────────────────────────────────────────────────
 
 
@@ -105,7 +187,6 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         SOURCE_CONNECTION_BLUEPRINTS,
         _discover_composio_views,
         _profiles_from_threads,
-        _read_private_search_buyers,
         connector_view,
         get_source_root_info,
     )
@@ -133,6 +214,14 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         "contacts": 0,
         "hotThreads": 0,
         "drafts": 0,
+        # Contact-level (AI-maintained) flag counts — these back the
+        # /leads dashboard widgets directly. After review_contact runs,
+        # these reflect the actual source of truth.
+        "hotContacts": 0,
+        "warmContacts": 0,
+        "needsFollowUpContacts": 0,
+        "buyerSearchContacts": 0,
+        "listingActiveContacts": 0,
     }
 
     with connect() as conn:
@@ -156,6 +245,29 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             ).fetchall()
         }
         totals["sources"] = len(active_sources)
+
+        # Contact-flag counts — these are what /leads widgets show.
+        # `hotContacts` answers "how many people are hot leads" rather
+        # than "how many threads have a hot heat", which is what the
+        # legacy threads-array filter measured. Closed contacts are
+        # excluded because they live on /admin.
+        flag_row = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN heat_label='hot'            THEN 1 ELSE 0 END) AS hot,
+              SUM(CASE WHEN heat_label='warm'           THEN 1 ELSE 0 END) AS warm,
+              SUM(CASE WHEN needs_follow_up = 1         THEN 1 ELSE 0 END) AS nfu,
+              SUM(CASE WHEN buyer_search_active = 1     THEN 1 ELSE 0 END) AS bsa,
+              SUM(CASE WHEN listing_active = 1          THEN 1 ELSE 0 END) AS la
+            FROM contacts
+            WHERE stage != 'closed'
+            """,
+        ).fetchone()
+        totals["hotContacts"] = _safe_int(flag_row["hot"])
+        totals["warmContacts"] = _safe_int(flag_row["warm"])
+        totals["needsFollowUpContacts"] = _safe_int(flag_row["nfu"])
+        totals["buyerSearchContacts"] = _safe_int(flag_row["bsa"])
+        totals["listingActiveContacts"] = _safe_int(flag_row["la"])
 
         # Fetch a slice of conversations large enough to mirror the
         # legacy "candidate_records_for_source" walk. Order by
@@ -286,10 +398,10 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                     (status,),
                 ).fetchone()["c"]
             )
-    private_search_buyers = _read_private_search_buyers(
-        source_root,
-        limit=max(safe_limit, 50),
-    )
+        private_search_buyers = db_private_search_buyers(
+            conn,
+            limit=max(safe_limit, 50),
+        )
 
     return {
         **info,

@@ -59,7 +59,7 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "key": "google_lead_forms",
         "category": "lead_source",
         "label": "Google Lead Form Ads (optional)",
-        "description": "Paid-search lead-form extensions. Skip if you don't run them. Requires a Google Ads developer token + customer ID — campaign IDs are auto-discovered.",
+        "description": "Paid-search lead-form extensions. Skip if you don't run them. Just paste a Google Ads developer token — Elevate's CLI auto-discovers the customer ID and campaign IDs.",
         "required": False,
         "sort_order": 30,
     },
@@ -242,19 +242,23 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
             item["status"] = crm_status
 
     by_key = {it["key"]: it for it in items}
+    # The CRM is itself a lead source AND an outreach lane — Lofty / FUB /
+    # kvCore / BoldTrail / GHL all sync leads natively (from Meta/Google/
+    # website forms) and have built-in messaging. If CRM is connected, that
+    # alone satisfies the lead-source quorum; the dedicated Meta/Google/
+    # webhook connectors are optional add-ons.
+    crm_ready = bool(by_key.get("crm") and _item_counts_ready(by_key["crm"]))
     lead_source_keys = ("meta_lead_ads", "google_lead_forms", "website_form_webhook")
-    any_lead_source_ready = any(
+    any_direct_lead_source_ready = any(
         by_key.get(k) and _item_counts_ready(by_key[k]) for k in lead_source_keys
     )
-    # The CRM is itself an outreach lane — Lofty / GHL / kvCore / BoldTrail all
-    # have built-in messaging. If the CRM is connected, that satisfies the
-    # outreach quorum without forcing any direct channel.
-    crm_outreach_ready = bool(by_key.get("crm") and _item_counts_ready(by_key["crm"]))
+    any_lead_source_ready = crm_ready or any_direct_lead_source_ready
     outreach_connectors = _outreach_connectors_snapshot()
     any_direct_outreach_ready = any(
         c.get("connected") or c.get("importOnly") for c in outreach_connectors
     )
-    any_outreach_ready = crm_outreach_ready or any_direct_outreach_ready
+    # Surfaced read-only for UI display; not part of the gate.
+    any_outreach_ready = crm_ready or any_direct_outreach_ready
 
     required = [item for item in items if item["required"]]
     complete_required = [item for item in required if _item_counts_ready(item)]
@@ -262,19 +266,16 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
     missing_keys = [item["key"] for item in missing]
     if not any_lead_source_ready:
         missing_keys.append("lead_sources_quorum")
-    if not any_outreach_ready:
-        missing_keys.append("outreach_quorum")
 
     state_row = conn.execute(
         "SELECT * FROM leads_setup_state WHERE id=?", (STATE_ID,)
     ).fetchone()
     completed_at = state_row["completed_at"] if state_row else None
 
-    required_count = len(required) + 2
+    required_count = len(required) + 1
     completed_count = (
         len(complete_required)
         + (1 if any_lead_source_ready else 0)
-        + (1 if any_outreach_ready else 0)
     )
     complete = completed_count == required_count
 

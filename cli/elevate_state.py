@@ -1005,7 +1005,7 @@ WHERE message_id IS NOT NULL AND message_id != '';
         query = f"""
             SELECT s.*,
                 COALESCE(
-                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 200)
                      FROM messages m
                      WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
                      ORDER BY m.timestamp, m.id LIMIT 1),
@@ -1030,8 +1030,10 @@ WHERE message_id IS NOT NULL AND message_id != '';
             # Build the preview from the raw substring
             raw = s.pop("_preview_raw", "").strip()
             if raw:
-                text = raw[:60]
-                s["preview"] = text + ("..." if len(raw) > 60 else "")
+                # Longer previews so sidebar/title fallback shows enough context
+                # to recognise the conversation at a glance.
+                text = raw[:96]
+                s["preview"] = text + ("..." if len(raw) > 96 else "")
             else:
                 s["preview"] = ""
             sessions.append(s)
@@ -1080,7 +1082,7 @@ WHERE message_id IS NOT NULL AND message_id != '';
         query = """
             SELECT s.*,
                 COALESCE(
-                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 200)
                      FROM messages m
                      WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
                      ORDER BY m.timestamp, m.id LIMIT 1),

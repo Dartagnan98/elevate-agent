@@ -30,6 +30,8 @@ from __future__ import annotations
 import logging
 import os
 import random
+import shutil
+import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -140,6 +142,258 @@ def composio_dispatcher(toolkit: str) -> Dispatcher:
         }
 
     return _dispatch
+
+
+_SEND_AGENT_MODEL = os.getenv("ELEVATE_SEND_AGENT_MODEL", "openai/gpt-5.4-nano")
+_SEND_AGENT_MAX_TURNS = int(os.getenv("ELEVATE_SEND_AGENT_MAX_TURNS", "6"))
+_SEND_AGENT_TIMEOUT_S = int(os.getenv("ELEVATE_SEND_AGENT_TIMEOUT", "90"))
+
+
+def _format_phone(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return ""
+    if raw.startswith("+"):
+        return f"+{digits}"
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return f"+{digits}"
+
+
+def _haiku_recipient_descriptor(payload: dict[str, Any], channel: str) -> str:
+    recipient = payload.get("recipient") or {}
+    phone = _format_phone(recipient.get("phone"))
+    email = str(recipient.get("email") or "").strip()
+    handle = str(recipient.get("social_handle") or "").strip()
+    person = str(recipient.get("person_name") or "").strip()
+    bits: list[str] = []
+    if person:
+        bits.append(f"name: {person}")
+    if channel == "sms":
+        if phone:
+            bits.append(f"phone (iMessage): {phone}")
+        if email:
+            bits.append(f"iMessage email fallback: {email}")
+    elif channel == "email":
+        if email:
+            bits.append(f"email: {email}")
+    elif channel == "social_dm":
+        if handle:
+            bits.append(f"handle: {handle}")
+    else:
+        if phone:
+            bits.append(f"phone: {phone}")
+        if email:
+            bits.append(f"email: {email}")
+        if handle:
+            bits.append(f"handle: {handle}")
+    return "; ".join(bits) if bits else "(no recipient info)"
+
+
+def _build_send_prompt(row: dict[str, Any]) -> str:
+    payload = row.get("payload") or {}
+    channel = row.get("channel") or ""
+    draft = str(payload.get("draft_text") or "").strip()
+    descriptor = _haiku_recipient_descriptor(payload, channel)
+    if channel == "sms":
+        instructions = (
+            "Send this iMessage via the macOS Messages.app using the terminal toolset.\n"
+            "Run osascript with a 'tell application \"Messages\"' block that targets the iMessage service\n"
+            "and sends to the phone number (use the buddy form: `send \"<text>\" to buddy \"<phone>\" of (service whose service type is iMessage)`).\n"
+            "If the buddy form errors, fall back to opening a new chat: use participants {<phone>}, account (1st account whose service type is iMessage).\n"
+            "After osascript returns 0, reply with the single line: SENT <provider-id>\n"
+            "Where <provider-id> is any short token you choose (timestamp is fine)."
+        )
+    else:
+        instructions = (
+            "Use the send_message tool to deliver this draft to the recipient on the most appropriate platform.\n"
+            "After the tool reports success, reply with: SENT <message_id>."
+        )
+    return (
+        f"You are an outbound sender agent. {instructions}\n\n"
+        f"Recipient: {descriptor}\n"
+        f"Channel: {channel}\n"
+        f"Draft text:\n{draft}\n"
+    )
+
+
+def _parse_agent_provider_id(stdout: str) -> str | None:
+    for line in reversed((stdout or "").splitlines()):
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("SENT "):
+            token = text[5:].strip()
+            return token or f"agent-{uuid.uuid4().hex[:10]}"
+        if text == "SENT":
+            return f"agent-{uuid.uuid4().hex[:10]}"
+    return None
+
+
+def _send_agent_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Spawn a low-tier OpenAI elevate chat session to actually send the message.
+
+    Channel `sms` routes through Messages.app via osascript (the terminal
+    toolset). Other channels lean on the agent's cross-platform `send_message`
+    tool (messaging toolset). Returns (provider_message_id, info).
+    """
+    channel = row.get("channel") or ""
+    elevate_bin = shutil.which("elevate") or "/Users/dartagnanpatricio/.local/bin/elevate"
+    if not elevate_bin or not os.path.exists(elevate_bin):
+        raise SenderPermanentError("haiku-dispatch: elevate CLI not on PATH")
+
+    payload = row.get("payload") or {}
+    if not str(payload.get("draft_text") or "").strip():
+        raise SenderPermanentError("send-agent: payload missing draft_text")
+
+    toolsets = "terminal,messaging" if channel == "sms" else "messaging"
+    prompt = _build_send_prompt(row)
+
+    cmd = [
+        elevate_bin, "chat",
+        "-q", prompt,
+        "-m", _SEND_AGENT_MODEL,
+        "-t", toolsets,
+        "-Q",
+        "--yolo",
+        "--ignore-rules",
+        "--max-turns", str(_SEND_AGENT_MAX_TURNS),
+    ]
+    _log.info(
+        "sender.send_agent_dispatch channel=%s task=%s model=%s",
+        channel, row.get("taskId"), _SEND_AGENT_MODEL,
+    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_SEND_AGENT_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SenderTransientError(f"send-agent timed out after {_SEND_AGENT_TIMEOUT_S}s") from exc
+
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    pmid = _parse_agent_provider_id(stdout)
+    if result.returncode != 0 and pmid is None:
+        snippet = (stderr.strip().splitlines() or [""])[-1][:280]
+        raise SenderTransientError(
+            f"send-agent exit={result.returncode}: {snippet}"
+        )
+    if pmid is None:
+        snippet = (stdout.strip().splitlines() or [""])[-1][:280]
+        raise SenderTransientError(
+            f"send-agent produced no SENT line: {snippet}"
+        )
+    return pmid, {
+        "agent": "send-agent",
+        "model": _SEND_AGENT_MODEL,
+        "channel": channel,
+        "dispatched_at": _now(),
+    }
+
+
+def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Send via macOS Messages.app — iMessage first, SMS fallback. No LLM.
+
+    Why: the elevate-chat agent path depended on Anthropic credits
+    (quota-blocked) or openai-codex (auth broken on this machine); the
+    LLM emitted no SENT line and rows piled up in `retrying`. The real
+    work is one osascript call. Tries the iMessage service first, falls
+    back to SMS (which routes through the user's paired iPhone if SMS
+    forwarding is enabled). Override with `ELEVATE_SMS_DISPATCHER=agent`.
+    """
+    payload = row.get("payload") or {}
+    draft = str(payload.get("draft_text") or "").strip()
+    if not draft:
+        raise SenderPermanentError("messages-native: payload missing draft_text")
+    recipient = payload.get("recipient") or {}
+    phone = _format_phone(recipient.get("phone"))
+    if not phone:
+        raise SenderPermanentError("messages-native: recipient missing phone")
+
+    def _q(s: str) -> str:
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+    # Try iMessage; if Messages raises (recipient not on iMessage, etc.)
+    # fall back to SMS — that goes through the user's iPhone via the
+    # SMS-forwarding bridge.  AppleScript's `try / on error` lets us do
+    # both in a single osascript call without a second subprocess hop.
+    script = (
+        'tell application "Messages"\n'
+        '  try\n'
+        '    set imSvc to 1st service whose service type = iMessage\n'
+        f'    send "{_q(draft)}" to buddy "{_q(phone)}" of imSvc\n'
+        '    return "imessage"\n'
+        '  on error errMsg\n'
+        '    try\n'
+        '      set smsSvc to 1st service whose service type = SMS\n'
+        f'      send "{_q(draft)}" to buddy "{_q(phone)}" of smsSvc\n'
+        '      return "sms"\n'
+        '    on error errMsg2\n'
+        '      error errMsg2\n'
+        '    end try\n'
+        '  end try\n'
+        'end tell\n'
+    )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SenderTransientError("messages-native: osascript timed out") from exc
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip().splitlines()
+        last = err[-1][:280] if err else f"exit={result.returncode}"
+        raise SenderTransientError(f"messages-native: {last}")
+
+    transport = (result.stdout or "").strip() or "unknown"
+    pmid_prefix = "imessage" if transport == "imessage" else "sms" if transport == "sms" else "messages"
+    pmid = f"{pmid_prefix}-{uuid.uuid4().hex[:10]}"
+    return pmid, {
+        "agent": "messages-native",
+        "channel": "sms",
+        "phone": phone,
+        "transport": transport,
+        "dispatched_at": _now(),
+    }
+
+
+# Back-compat alias for any callers that imported the older name.
+_imessage_native_dispatch = _messages_native_dispatch
+
+
+def _wire_default_dispatchers() -> None:
+    """Register dispatchers for outbound channels.
+
+    - sms: native osascript (set ELEVATE_SMS_DISPATCHER=agent to use the agent).
+    - email / social_dm: low-tier-GPT agent dispatcher.
+    Disable both with `ELEVATE_SENDER_DISABLE_AGENT` so harnesses keep the stub.
+    """
+    if os.getenv("ELEVATE_SENDER_DISABLE_AGENT"):
+        return
+    sms_mode = (os.getenv("ELEVATE_SMS_DISPATCHER") or "native").lower()
+    if sms_mode == "agent":
+        register_dispatcher("sms", _send_agent_dispatch)
+    else:
+        register_dispatcher("sms", _messages_native_dispatch)
+    for channel in ("email", "social_dm"):
+        register_dispatcher(channel, _send_agent_dispatch)
+
+
+_wire_default_dispatchers()
 
 
 def _now() -> str:

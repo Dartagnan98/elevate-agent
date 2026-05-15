@@ -270,6 +270,178 @@ _CRM_PROVIDER_TO_IDENTITY_KIND: dict[str, str] = {
 }
 
 
+# Per-source handle kind for non-CRM sources. When a connector emits a
+# ``handle`` field on its contacts.jsonl row, this map tells the migrator
+# which kind-specific identity to write alongside the generic phone/email
+# one (so reverse lookup from chat.db handle → contact_id is O(log n)).
+#
+# This is the ONE place that knows source-specific identity kinds. The
+# walker logic is identical across sources — it just iterates whatever
+# (kind, value) pairs ``_gather_identity_candidates`` produces. To add a
+# new source: drop one line here. No new code paths.
+_SOURCE_TO_HANDLE_KIND: dict[str, str] = {
+    "apple-messages": "apple_handle",
+    "imessage": "apple_handle",
+    "instagram": "instagram_id",
+    "composio-instagram": "instagram_id",
+    "facebook": "facebook_id",
+    "composio-facebook": "facebook_id",
+    "whatsapp": "wa_id",
+    "telegram": "telegram_id",
+}
+
+
+def _looks_like_email(value: str) -> bool:
+    """Cheap shape check — no regex, no validation, just '@' presence."""
+    return "@" in value
+
+
+def _gather_identity_candidates(
+    row: dict[str, Any],
+    *,
+    source_id: str,
+    crm_identity_kind: str | None,
+    native: str | None,
+) -> list[tuple[str, str]]:
+    """Extract every (kind, raw_value) pair from a contact row, shape-
+    agnostic. Connectors can emit any of:
+
+    * ``email`` / ``emails`` — string or list, comma/semicolon-delimited
+    * ``phone`` / ``phones`` — same
+    * ``handle`` — single auto-detected phone-or-email (apple-messages,
+      Instagram, etc.)
+    * ``identities`` — explicit ``[{"kind": "...", "value": "..."}, ...]``
+      for connectors that want full control
+
+    Plus the migrator adds:
+
+    * The CRM-native id as ``(crm_identity_kind, native)`` when the source
+      is a CRM (read from ``source.json``).
+    * For non-CRM sources that emit a ``handle``, an extra
+      ``(<source-specific kind>, normalized_value)`` pair — e.g. an
+      apple-messages handle becomes BOTH ``('phone', '+1…')`` AND
+      ``('apple_handle', '+1…')`` so the chat.db reverse lookup works.
+
+    Returns raw values — canonicalization happens later in
+    :func:`add_identity`. Duplicates are deduped by (kind, value).
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+
+    def _push(kind: str, value: Any) -> None:
+        v = str(value or "").strip()
+        if not v:
+            return
+        key = (kind, v)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(key)
+
+    # Generic email/phone lists
+    for v in _normalize_split(row.get("emails") or row.get("email")):
+        _push("email", v)
+    for v in _normalize_split(row.get("phones") or row.get("phone")):
+        _push("phone", v)
+
+    # Source-native handle field (apple-messages, social, etc.)
+    handle_kind = _SOURCE_TO_HANDLE_KIND.get(source_id)
+    for raw_handle in _normalize_split(row.get("handle") or row.get("handles")):
+        if _looks_like_email(raw_handle):
+            _push("email", raw_handle)
+        else:
+            _push("phone", raw_handle)
+        if handle_kind:
+            _push(handle_kind, raw_handle)
+
+    # CRM-native id (lofty_id / fub_id / …)
+    if crm_identity_kind and native:
+        _push(crm_identity_kind, str(native))
+
+    # Explicit identities array — lets future connectors carry kinds the
+    # migrator doesn't auto-derive (apple_chat_id, instagram_handle, …).
+    for entry in row.get("identities") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "").strip()
+        value = entry.get("value")
+        if kind and value:
+            _push(kind, value)
+
+    return out
+
+
+_PHONE_NAME_RE = None  # lazy-built
+
+
+def _looks_like_phone_name(value: str | None) -> bool:
+    """A display_name that's really just a phone number — what Apple
+    Messages and unknown-sender SMS feeds give us. We never let one of
+    these clobber an existing human-readable name during merge."""
+    if not value:
+        return True
+    s = value.strip()
+    if not s:
+        return True
+    # Phone-shape: 80%+ digits, optional + - ( ) spaces. Cheap check.
+    digits = sum(1 for c in s if c.isdigit())
+    return digits >= 7 and digits / max(len(s), 1) >= 0.6
+
+
+def _better_display_name(existing: str | None, candidate: str | None) -> str | None:
+    """Return the name to actually persist. Preference order:
+
+    1. Existing human-readable name (Lofty 'Sarah Martinez') NEVER gets
+       overwritten by a phone-shaped one (apple-messages '+1…').
+    2. A populated existing name beats an empty candidate.
+    3. Candidate wins when existing is empty or phone-shaped and
+       candidate isn't.
+
+    Returns ``None`` when the existing value should be kept (caller
+    passes ``None`` to upsert_contact, skipping the update)."""
+    cand = (candidate or "").strip() or None
+    exist = (existing or "").strip() or None
+    if cand is None:
+        return None  # don't overwrite with nothing
+    if exist is None:
+        return cand  # nothing to lose
+    if _looks_like_phone_name(exist) and not _looks_like_phone_name(cand):
+        return cand  # upgrade phone-shape → human name
+    if not _looks_like_phone_name(exist) and _looks_like_phone_name(cand):
+        return None  # don't downgrade human name → phone-shape
+    return None  # both human or both phone; first-write wins
+
+
+def _resolve_via_identities(
+    conn: sqlite3.Connection,
+    candidates: list[tuple[str, str]],
+) -> tuple[str | None, list[str]]:
+    """Walk candidate (kind, value) pairs and return the first contact_id
+    any of them resolves to, plus the full list of distinct contact_ids
+    seen across all candidates (for conflict logging).
+
+    Identity-first contact resolution — the canonical pattern from
+    ``docs/database-contract.md`` step 2: every connector's sync must
+    join to an existing contact via identity match BEFORE creating a new
+    contact row. Without this, the same human ends up split across one
+    row per source.
+    """
+    from elevate_cli.data.identities import _canonicalize  # local import — avoids cycle
+
+    matches: list[str] = []
+    for kind, raw in candidates:
+        canon = _canonicalize(kind, raw)
+        if canon is None:
+            continue
+        row = conn.execute(
+            "SELECT contact_id FROM identities WHERE kind=? AND value=?",
+            (kind, canon),
+        ).fetchone()
+        if row and row["contact_id"] not in matches:
+            matches.append(row["contact_id"])
+    return (matches[0] if matches else None), matches
+
+
 def _crm_identity_kind_for_source(source_dir: Path) -> str | None:
     """Inspect ``source.json`` to figure out which identity kind to use
     for the CRM-native contact id. Returns ``None`` if the source isn't
@@ -336,6 +508,20 @@ def walk_jsonl_source(
     crm_identity_kind = _crm_identity_kind_for_source(source_dir)
 
     # ─── Contacts ─────────────────────────────────────────────────
+    #
+    # Canonical contract (docs/database-contract.md, step 2):
+    #
+    #   1. Gather every identity the row carries (handle/phone/email/CRM
+    #      native id/explicit identities[]) — source-shape agnostic.
+    #   2. Resolve those identities against ``identities`` table. If any
+    #      match an existing contact, reuse that contact_id.
+    #   3. Upsert contact via the resolved id (or via source_key for a
+    #      brand-new contact).
+    #   4. Write every identity. (kind, value) UNIQUE handles dedup.
+    #
+    # No per-source branching. New connectors don't add code here —
+    # they declare their handle kind in ``_SOURCE_TO_HANDLE_KIND`` or
+    # emit ``identities[]`` rows directly.
     for row in _read_jsonl(contacts_path, limit=limit):
         native = row.get("contact_id") or row.get("source_record_id")
         if not native:
@@ -343,42 +529,80 @@ def walk_jsonl_source(
             continue
         source_key = _build_source_key(source_id, native)
         try:
-            existing = conn.execute(
+            # Step 1+2: gather candidates, resolve via identities.
+            candidates = _gather_identity_candidates(
+                row,
+                source_id=source_id,
+                crm_identity_kind=crm_identity_kind,
+                native=str(native),
+            )
+            resolved_id, matched_ids = _resolve_via_identities(conn, candidates)
+
+            existing_by_sk = conn.execute(
                 "SELECT id FROM contacts WHERE source_key=?", (source_key,)
             ).fetchone()
+            existing_id = (
+                resolved_id
+                or (existing_by_sk["id"] if existing_by_sk else None)
+            )
 
             if dry_run:
-                if existing:
+                if existing_id:
                     stats.contacts_skipped += 1
-                    contact_by_native[native] = existing["id"]
+                    contact_by_native[native] = existing_id
                 else:
                     stats.contacts += 1
-                    # Synthetic placeholder so subsequent walkers see
-                    # this contact as resolved during the dry-run.
                     contact_by_native[native] = f"<dryrun>:{source_key}"
                 continue
 
+            # Step 3: upsert. Reuse resolved_id when an identity already
+            # ties this person to an existing contact (e.g. Lofty pulled
+            # them first, now apple-messages finds the same phone). Only
+            # set source_key when creating a brand-new contact, so the
+            # first-source's source_key remains canonical.
+            #
+            # Display-name preservation rule (database-contract.md, write
+            # contract step 3): a phone-shaped name from a fresh source
+            # never overwrites an existing human name. _better_display_name
+            # returns None when we should skip the update — upsert_contact
+            # treats None as "don't touch".
+            candidate_name = row.get("display_name") or row.get("name")
+            if resolved_id:
+                existing_row = conn.execute(
+                    "SELECT display_name FROM contacts WHERE id=?",
+                    (resolved_id,),
+                ).fetchone()
+                existing_name = existing_row["display_name"] if existing_row else None
+                name_to_write = _better_display_name(existing_name, candidate_name)
+            else:
+                name_to_write = candidate_name
             contact = upsert_contact(
                 conn,
-                source_key=source_key,
-                display_name=row.get("display_name") or row.get("name"),
+                contact_id=resolved_id,
+                source_key=None if resolved_id else source_key,
+                display_name=name_to_write,
             )
             contact_by_native[native] = contact["id"]
-            if existing:
+            if existing_id:
                 stats.contacts_skipped += 1
             else:
                 stats.contacts += 1
 
-            # Identities — emails + phones (string OR list)
-            for email in _normalize_split(row.get("emails") or row.get("email")):
+            # Step 4: write every identity. add_identity is idempotent on
+            # (kind, value) and records identity_conflicts automatically
+            # when the same (kind, value) maps to a different contact.
+            for kind, raw in candidates:
                 try:
                     out = add_identity(
                         conn,
                         contact_id=contact["id"],
-                        kind="email",
-                        value=email,
+                        kind=kind,
+                        value=raw,
                         source_id=source_id,
-                        verified=False,
+                        # CRM-native ids are the workspace's source of
+                        # truth; everything else stays unverified until a
+                        # human confirms.
+                        verified=(kind == crm_identity_kind),
                     )
                     if out is not None:
                         stats.identities += 1
@@ -386,51 +610,22 @@ def walk_jsonl_source(
                         stats.identities_skipped += 1
                 except Exception as exc:
                     stats.identities_skipped += 1
-                    _LOG.debug("identity skip (email %s): %s", email, exc)
-            for phone in _normalize_split(row.get("phones") or row.get("phone")):
-                try:
-                    out = add_identity(
-                        conn,
-                        contact_id=contact["id"],
-                        kind="phone",
-                        value=phone,
-                        source_id=source_id,
-                        verified=False,
-                    )
-                    if out is not None:
-                        stats.identities += 1
-                    else:
-                        stats.identities_skipped += 1
-                except Exception as exc:
-                    stats.identities_skipped += 1
-                    _LOG.debug("identity skip (phone %s): %s", phone, exc)
+                    _LOG.debug("identity skip (%s %s): %s", kind, raw, exc)
 
-            # CRM native id (lofty_id / fub_id / …). The schema reserves
-            # these kinds but the migrator was never writing them, so the
-            # same human stayed split across Lofty + iMessage + Gmail.
-            # Codex audit P1 (2026-05-05).
-            if crm_identity_kind and native:
-                try:
-                    out = add_identity(
-                        conn,
-                        contact_id=contact["id"],
-                        kind=crm_identity_kind,
-                        value=str(native),
-                        source_id=source_id,
-                        verified=True,  # native CRM id is the workspace's source of truth
-                    )
-                    if out is not None:
-                        stats.identities += 1
-                    else:
-                        stats.identities_skipped += 1
-                except Exception as exc:
-                    stats.identities_skipped += 1
-                    _LOG.debug(
-                        "identity skip (%s %s): %s",
-                        crm_identity_kind,
-                        native,
-                        exc,
-                    )
+            # If resolution saw multiple existing contacts via different
+            # identities, log the straddle so an operator can merge.
+            # ``add_identity`` only catches the (kind, value) collision —
+            # this catches the (different kinds → different contacts)
+            # case that's invisible to the per-row insert.
+            if len(matched_ids) > 1:
+                from elevate_cli.data.identities import record_identity_conflict
+                record_identity_conflict(
+                    conn,
+                    kind="contact",
+                    value=contact["id"],
+                    candidate_contact_ids=matched_ids,
+                    reason="cross_kind_mismatch",
+                )
         except Exception as exc:
             stats.errors.append(f"{source_id}/contacts:{native}: {exc}")
             _LOG.exception("contact replay failed: %s", native)
