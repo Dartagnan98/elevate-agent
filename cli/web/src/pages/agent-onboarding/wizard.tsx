@@ -185,19 +185,25 @@ export function AgentOnboardingWizard({
 
   const missingMessage = useMemo(() => {
     if (step.id === "models") {
-      if (!draft.primaryProvider.trim() || !draft.primaryModel.trim() || !draft.primaryApiKey.trim()) {
+      const primaryHasKey =
+        Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent;
+      if (!draft.primaryProvider.trim() || !draft.primaryModel.trim() || !primaryHasKey) {
         return "Pick a provider, model, and paste an API key before continuing.";
       }
       if (!draft.embeddingProvider.trim() || !draft.embeddingModel.trim()) {
         return "Pick an embedding provider and model — memory recall needs it.";
       }
-      if (!draft.embeddingShareKey && !draft.embeddingApiKey.trim()) {
+      const embeddingHasKey =
+        Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
+      if (!draft.embeddingShareKey && !embeddingHasKey) {
         return "Paste an embedding API key, or check 'share the primary key.'";
       }
     }
     if (step.id === "memory") {
       if (draft.memoryProvider === "supabase") {
-        if (!draft.memorySupabaseUrl.trim() || !draft.memorySupabaseKey.trim()) {
+        const memoryHasKey =
+          Boolean(draft.memorySupabaseKey.trim()) || draft.memorySecretPresent;
+        if (!draft.memorySupabaseUrl.trim() || !memoryHasKey) {
           return "Paste your Supabase URL and service-role key, or switch back to local SQLite.";
         }
       } else if (!draft.memoryProvider.trim()) {
@@ -330,9 +336,18 @@ export function AgentOnboardingWizard({
                       label="API key"
                       value={draft.primaryApiKey}
                       onChange={(v) => updateField("primaryApiKey", v)}
-                      placeholder="sk-ant-…  or  sk-…"
+                      placeholder={
+                        draft.primarySecretPresent && !draft.primaryApiKey
+                          ? `Already set — ${draft.primarySecretPreview} (paste to replace)`
+                          : "sk-ant-…  or  sk-…"
+                      }
                       type="password"
                       fullWidth
+                      hint={
+                        draft.primarySecretPresent && !draft.primaryApiKey
+                          ? "Detected from environment. Leave blank to keep using it."
+                          : undefined
+                      }
                     />
                   </div>
                 </WizardSection>
@@ -373,9 +388,18 @@ export function AgentOnboardingWizard({
                         label="Embedding API key"
                         value={draft.embeddingApiKey}
                         onChange={(v) => updateField("embeddingApiKey", v)}
-                        placeholder="sk-…"
+                        placeholder={
+                          draft.embeddingSecretPresent && !draft.embeddingApiKey
+                            ? `Already set — ${draft.embeddingSecretPreview} (paste to replace)`
+                            : "sk-…"
+                        }
                         type="password"
                         fullWidth
+                        hint={
+                          draft.embeddingSecretPresent && !draft.embeddingApiKey
+                            ? "Detected from environment. Leave blank to keep using it."
+                            : undefined
+                        }
                       />
                     </div>
                   )}
@@ -410,9 +434,18 @@ export function AgentOnboardingWizard({
                       label="Service-role key"
                       value={draft.memorySupabaseKey}
                       onChange={(v) => updateField("memorySupabaseKey", v)}
-                      placeholder="eyJhbGc…"
+                      placeholder={
+                        draft.memorySecretPresent && !draft.memorySupabaseKey
+                          ? `Already set — ${draft.memorySecretPreview} (paste to replace)`
+                          : "eyJhbGc…"
+                      }
                       type="password"
                       fullWidth
+                      hint={
+                        draft.memorySecretPresent && !draft.memorySupabaseKey
+                          ? "Detected from environment. Leave blank to keep using it."
+                          : undefined
+                      }
                     />
                   </div>
                 )}
@@ -448,8 +481,17 @@ export function AgentOnboardingWizard({
                       label="Bot token"
                       value={draft.telegramBotToken}
                       onChange={(v) => updateField("telegramBotToken", v)}
-                      placeholder="123456789:ABC…"
+                      placeholder={
+                        draft.telegramSecretPresent && !draft.telegramBotToken
+                          ? `Already set — ${draft.telegramSecretPreview} (paste to replace)`
+                          : "123456789:ABC…"
+                      }
                       type="password"
+                      hint={
+                        draft.telegramSecretPresent && !draft.telegramBotToken
+                          ? "Detected from environment. Leave blank to keep using it."
+                          : undefined
+                      }
                     />
                     <WizardField
                       label="Chat id"
@@ -606,9 +648,18 @@ export function AgentOnboardingWizard({
                       value={draft.imageApiKey}
                       onChange={(v) => updateField("imageApiKey", v)}
                       placeholder={
-                        draft.imageProvider === "nano_banana" ? "AIzaSy…" : "sk-…"
+                        draft.imageSecretPresent && !draft.imageApiKey
+                          ? `Already set — ${draft.imageSecretPreview} (paste to replace)`
+                          : draft.imageProvider === "nano_banana"
+                            ? "AIzaSy…"
+                            : "sk-…"
                       }
                       type="password"
+                      hint={
+                        draft.imageSecretPresent && !draft.imageApiKey
+                          ? "Detected from environment. Leave blank to keep using it."
+                          : undefined
+                      }
                     />
                   </div>
                   {draft.imageProvider === "nano_banana" && (
@@ -632,9 +683,18 @@ export function AgentOnboardingWizard({
                       label="Composio API key"
                       value={draft.composioApiKey}
                       onChange={(v) => updateField("composioApiKey", v)}
-                      placeholder="csk_…"
+                      placeholder={
+                        draft.composioSecretPresent && !draft.composioApiKey
+                          ? `Already set — ${draft.composioSecretPreview} (paste to replace)`
+                          : "csk_…"
+                      }
                       type="password"
                       fullWidth
+                      hint={
+                        draft.composioSecretPresent && !draft.composioApiKey
+                          ? "Detected from environment. Leave blank to keep using it."
+                          : undefined
+                      }
                     />
                     <WizardField
                       label="Workspace"
@@ -824,6 +884,7 @@ function WizardField({
   placeholder,
   type = "text",
   fullWidth = false,
+  hint,
 }: {
   label: string;
   value: string;
@@ -831,6 +892,7 @@ function WizardField({
   placeholder?: string;
   type?: string;
   fullWidth?: boolean;
+  hint?: string;
 }) {
   return (
     <label className={cn("block min-w-0", fullWidth && "md:col-span-2")}>
@@ -844,6 +906,9 @@ function WizardField({
         spellCheck={type === "password" || type === "email" ? false : undefined}
         className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30"
       />
+      {hint && (
+        <span className="mt-1.5 block text-[11px] leading-4 text-muted-foreground/80">{hint}</span>
+      )}
     </label>
   );
 }

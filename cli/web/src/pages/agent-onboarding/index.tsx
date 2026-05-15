@@ -60,6 +60,18 @@ export type AgentSetupDraft = {
   outboundImessageSenderHandle: string;
   subagentsEnabled: boolean;
   subagentsPack: string;
+  primarySecretPresent: boolean;
+  primarySecretPreview: string;
+  embeddingSecretPresent: boolean;
+  embeddingSecretPreview: string;
+  imageSecretPresent: boolean;
+  imageSecretPreview: string;
+  memorySecretPresent: boolean;
+  memorySecretPreview: string;
+  composioSecretPresent: boolean;
+  composioSecretPreview: string;
+  telegramSecretPresent: boolean;
+  telegramSecretPreview: string;
 };
 
 export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft {
@@ -111,28 +123,46 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     outboundImessageSenderHandle: String(outImessageVal.senderHandle ?? ""),
     subagentsEnabled: subagentsItem ? subagentsItem.status === "configured" : false,
     subagentsPack: String(subagentsVal.pack ?? "cortextos_default"),
+    primarySecretPresent: Boolean(primaryVal.secretPresent),
+    primarySecretPreview: String(primaryVal.secretPreview ?? ""),
+    embeddingSecretPresent: Boolean(embeddingVal.secretPresent),
+    embeddingSecretPreview: String(embeddingVal.secretPreview ?? ""),
+    imageSecretPresent: Boolean(imageVal.secretPresent),
+    imageSecretPreview: String(imageVal.secretPreview ?? ""),
+    memorySecretPresent: Boolean(memoryVal.secretPresent),
+    memorySecretPreview: String(memoryVal.secretPreview ?? ""),
+    composioSecretPresent: Boolean(composioVal.secretPresent),
+    composioSecretPreview: String(composioVal.secretPreview ?? ""),
+    telegramSecretPresent: Boolean(tgVal.secretPresent),
+    telegramSecretPreview: String(tgVal.secretPreview ?? ""),
   };
 }
 
 export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
+  const primaryHasKey = Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent;
   const primaryReady = Boolean(
-    draft.primaryProvider.trim() && draft.primaryApiKey.trim() && draft.primaryModel.trim(),
+    draft.primaryProvider.trim() && primaryHasKey && draft.primaryModel.trim(),
   );
   const embeddingHasKey = draft.embeddingShareKey
-    ? Boolean(draft.primaryApiKey.trim())
-    : Boolean(draft.embeddingApiKey.trim());
+    ? primaryHasKey
+    : Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
   const embeddingReady = Boolean(
     draft.embeddingProvider.trim() && draft.embeddingModel.trim() && embeddingHasKey,
   );
-  const imageReady = Boolean(draft.imageProvider.trim() && draft.imageApiKey.trim());
+  const imageReady = Boolean(
+    draft.imageProvider.trim() && (draft.imageApiKey.trim() || draft.imageSecretPresent),
+  );
   const memoryReady = ((): boolean => {
     if (draft.memoryProvider === "supabase") {
-      return Boolean(draft.memorySupabaseUrl.trim() && draft.memorySupabaseKey.trim());
+      const hasKey = Boolean(draft.memorySupabaseKey.trim()) || draft.memorySecretPresent;
+      return Boolean(draft.memorySupabaseUrl.trim() && hasKey);
     }
     return Boolean(draft.memoryProvider.trim());
   })();
-  const composioReady = Boolean(draft.composioApiKey.trim());
-  const telegramReady = Boolean(draft.telegramBotToken.trim() && draft.telegramChatId.trim());
+  const composioReady = Boolean(draft.composioApiKey.trim()) || draft.composioSecretPresent;
+  const telegramReady =
+    (Boolean(draft.telegramBotToken.trim()) || draft.telegramSecretPresent) &&
+    Boolean(draft.telegramChatId.trim());
   const imessageReady = draft.imessageEnabled;
   const discordReady = Boolean(draft.discordBotToken.trim() && draft.discordChannelId.trim());
   const whatsappReady = Boolean(
@@ -149,6 +179,7 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
       value: {
         model: draft.primaryModel.trim(),
         apiKey: draft.primaryApiKey,
+        usesEnvSecret: !draft.primaryApiKey.trim() && draft.primarySecretPresent,
       },
     },
     {
@@ -159,6 +190,10 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
         model: draft.embeddingModel.trim(),
         apiKey: draft.embeddingShareKey ? "" : draft.embeddingApiKey,
         sharesPrimaryKey: draft.embeddingShareKey,
+        usesEnvSecret:
+          !draft.embeddingShareKey &&
+          !draft.embeddingApiKey.trim() &&
+          draft.embeddingSecretPresent,
       },
     },
     {
@@ -167,6 +202,7 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
       provider: draft.imageProvider.trim() || null,
       value: {
         apiKey: draft.imageApiKey,
+        usesEnvSecret: !draft.imageApiKey.trim() && draft.imageSecretPresent,
       },
     },
     {
@@ -176,6 +212,10 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
       value: {
         supabaseUrl: draft.memorySupabaseUrl.trim(),
         supabaseKey: draft.memorySupabaseKey,
+        usesEnvSecret:
+          draft.memoryProvider === "supabase" &&
+          !draft.memorySupabaseKey.trim() &&
+          draft.memorySecretPresent,
       },
     },
     {
@@ -185,6 +225,7 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
       value: {
         apiKey: draft.composioApiKey,
         workspace: draft.composioWorkspace.trim(),
+        usesEnvSecret: !draft.composioApiKey.trim() && draft.composioSecretPresent,
       },
     },
     {
@@ -200,6 +241,7 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
       value: {
         botToken: draft.telegramBotToken,
         chatId: draft.telegramChatId.trim(),
+        usesEnvSecret: !draft.telegramBotToken.trim() && draft.telegramSecretPresent,
       },
     },
     {

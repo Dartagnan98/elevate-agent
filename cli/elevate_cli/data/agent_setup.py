@@ -195,6 +195,181 @@ def _clean_text(value: Any) -> str | None:
     return text or None
 
 
+def _token_preview(value: str | None, visible: int = 4) -> str:
+    if not value:
+        return ""
+    s = str(value).strip()
+    if len(s) <= visible:
+        return s
+    return f"…{s[-visible:]}"
+
+
+def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
+    """Detect provider credentials already wired into the runtime.
+
+    Returns a map of item-key → in-memory overlay values. The wizard reads
+    these so it can show "this is already set up" instead of an empty form.
+    Only the public-safe fields (provider, model defaults, masked previews,
+    secret_present flags) are surfaced; the raw secret stays in env / file.
+    """
+    import os
+
+    # Pull from os.environ first, then fall back to ~/.elevate/.env so we
+    # surface anything the user wrote into the dotenv file even if the
+    # running process hasn't reloaded it yet.
+    file_env: dict[str, str] = {}
+    try:
+        from elevate_cli.config import load_env as _load_env
+
+        file_env = _load_env() or {}
+    except Exception:
+        file_env = {}
+
+    def _get(*names: str) -> str | None:
+        for name in names:
+            val = os.environ.get(name)
+            if val:
+                return val
+            val = file_env.get(name)
+            if val:
+                return val
+        return None
+
+    overlays: dict[str, dict[str, Any]] = {}
+
+    anthropic_token = _get("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    openai_key = _get("OPENAI_API_KEY")
+    gemini_key = _get("GEMINI_API_KEY", "GOOGLE_API_KEY", "NANO_BANANA_API_KEY")
+    voyage_key = _get("VOYAGE_API_KEY")
+    telegram_token = _get("TELEGRAM_BOT_TOKEN")
+    telegram_chat = _get("TELEGRAM_CHAT_ID", "TELEGRAM_DEFAULT_CHAT_ID")
+    composio_key = _get("COMPOSIO_API_KEY")
+    supabase_url = _get("SUPABASE_URL")
+    supabase_key = _get("SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY")
+
+    if anthropic_token:
+        overlays["model_primary"] = {
+            "status": "configured",
+            "provider": "anthropic",
+            "value": {
+                "model": "claude-opus-4-7",
+                "apiKey": "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(anthropic_token),
+            },
+        }
+    elif openai_key:
+        overlays["model_primary"] = {
+            "status": "configured",
+            "provider": "openai",
+            "value": {
+                "model": "gpt-4-turbo",
+                "apiKey": "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(openai_key),
+            },
+        }
+
+    embedding_key = voyage_key or openai_key or anthropic_token
+    if embedding_key:
+        if voyage_key:
+            provider, model = "voyage", "voyage-3"
+        elif openai_key:
+            provider, model = "openai", "text-embedding-3-large"
+        else:
+            provider, model = "anthropic", "voyage-3"
+        shares_primary = bool(anthropic_token and not (voyage_key or openai_key)) or (
+            openai_key and overlays.get("model_primary", {}).get("provider") == "openai"
+        )
+        overlays["model_embedding"] = {
+            "status": "configured",
+            "provider": provider,
+            "value": {
+                "model": model,
+                "apiKey": "",
+                "sharesPrimaryKey": bool(shares_primary),
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(embedding_key),
+            },
+        }
+
+    if gemini_key:
+        overlays["model_image"] = {
+            "status": "configured",
+            "provider": "gemini",
+            "value": {
+                "apiKey": "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(gemini_key),
+            },
+        }
+
+    overlays["memory_store"] = {
+        "status": "configured",
+        "provider": "supabase" if (supabase_url and supabase_key) else "sqlite_local",
+        "value": {
+            "supabaseUrl": supabase_url or "",
+            "supabaseKey": "",
+            "secretPresent": bool(supabase_key),
+            "secretSource": "env" if supabase_key else None,
+            "secretPreview": _token_preview(supabase_key) if supabase_key else "",
+        },
+    }
+
+    if composio_key:
+        overlays["composio_workspace"] = {
+            "status": "configured",
+            "provider": "composio",
+            "value": {
+                "apiKey": "",
+                "workspace": _get("COMPOSIO_WORKSPACE") or "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(composio_key),
+            },
+        }
+
+    if telegram_token:
+        overlays["operator_channel_telegram"] = {
+            "status": "configured",
+            "provider": "telegram",
+            "value": {
+                "botToken": "",
+                "chatId": telegram_chat or "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(telegram_token),
+            },
+        }
+
+    return overlays
+
+
+def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
+    """If the item is still untouched (missing + null value), surface
+    detected runtime credentials so the wizard pre-fills instead of
+    showing an empty form. Persisted state always wins over overlays.
+    """
+    if item.get("status") and item["status"] != "missing":
+        return item
+    if item.get("value") is not None:
+        return item
+    overlays = _detect_runtime_credentials()
+    overlay = overlays.get(item["key"])
+    if not overlay:
+        return item
+    merged = dict(item)
+    merged["status"] = overlay.get("status", merged["status"])
+    merged["provider"] = overlay.get("provider", merged["provider"])
+    merged["value"] = overlay.get("value", merged["value"])
+    merged["detected"] = True
+    return merged
+
+
 def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "key": row["key"],
@@ -248,7 +423,7 @@ def get_agent_setup(conn: sqlite3.Connection) -> dict[str, Any]:
     rows = conn.execute(
         "SELECT * FROM agent_setup_items ORDER BY sort_order ASC, key ASC"
     ).fetchall()
-    items = [_row_to_item(row) for row in rows]
+    items = [_apply_runtime_overlay(_row_to_item(row)) for row in rows]
     return _snapshot(conn, items)
 
 
