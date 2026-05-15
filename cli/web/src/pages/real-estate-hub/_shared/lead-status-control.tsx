@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 
 const STATUS_OPTIONS: Array<{ value: SourceInboxProfileStatus | "none"; label: string }> = [
   { value: "none", label: "No status" },
+  { value: "new_lead", label: "New Lead" },
   { value: "follow_up", label: "Follow Up" },
   { value: "ghosting", label: "Ghosting" },
   { value: "dead", label: "Dead" },
@@ -19,6 +20,7 @@ const STATUS_BADGE: Record<
   SourceInboxProfileStatus,
   { label: string; variant: "default" | "secondary" | "success" | "warning" | "destructive" | "outline" }
 > = {
+  new_lead: { label: "new lead", variant: "default" },
   follow_up: { label: "follow up", variant: "warning" },
   ghosting: { label: "ghosting", variant: "secondary" },
   dead: { label: "dead", variant: "destructive" },
@@ -38,12 +40,16 @@ export function LeadStatusControl({
   status,
   onChanged,
   className,
+  selectClassName = "w-40",
+  selectButtonClassName,
   disabled = false,
 }: {
   profileId: string;
   status: SourceInboxProfileStatus | null;
   onChanged?: () => void | Promise<void>;
   className?: string;
+  selectClassName?: string;
+  selectButtonClassName?: string;
   disabled?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
@@ -72,7 +78,8 @@ export function LeadStatusControl({
           value={status ?? "none"}
           onValueChange={handleChange}
           disabled={busy || disabled}
-          className="w-40"
+          className={selectClassName}
+          buttonClassName={selectButtonClassName}
         >
           {STATUS_OPTIONS.map((option) => (
             <SelectOption key={option.value} value={option.value}>

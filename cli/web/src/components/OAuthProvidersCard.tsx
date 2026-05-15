@@ -123,6 +123,17 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           {providers?.map((p) => {
             const expiresLabel = formatExpiresAt(p.status.expires_at, t.oauth.expiresIn);
             const isBusy = busyId === p.id;
+            const isExpired = expiresLabel === "expired";
+            // Show Login on every non-external row so the user can swap
+            // accounts or refresh credentials without first disconnecting.
+            // External-CLI providers (Qwen) still can't take a Login click
+            // (they need the third-party tool to run), so they stay hidden.
+            const showLoginButton = p.flow !== "external";
+            const loginLabel = !p.status.logged_in
+              ? t.oauth.login
+              : isExpired
+                ? "Re-login"
+                : "Switch account";
             return (
               <div
                 key={p.id}
@@ -158,11 +169,11 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                       )}
                     </div>
                     {p.status.logged_in && p.status.token_preview && (
-                      <code className="text-xs font-mono-ui truncate">
-                        <span className="opacity-50">token{" "}</span>
+                      <code className="text-xs font-mono-ui truncate !bg-transparent !p-0 text-muted-foreground/80">
+                        <span className="opacity-70">token{" "}</span>
                         {p.status.token_preview}
                         {p.status.source_label && (
-                          <span className="opacity-40">
+                          <span className="opacity-60">
                             {" "}· {p.status.source_label}
                           </span>
                         )}
@@ -199,7 +210,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                       </Button>
                     </a>
                   )}
-                  {!p.status.logged_in && p.flow !== "external" && (
+                  {showLoginButton && (
                     <Button
                       variant="default"
                       size="sm"
@@ -207,7 +218,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                       className="text-xs h-7"
                     >
                       <LogIn className="h-3 w-3 mr-1" />
-                      {t.oauth.login}
+                      {loginLabel}
                     </Button>
                   )}
                   {!p.status.logged_in && (

@@ -168,8 +168,8 @@ function Block({
   switch (block.type) {
     case "code":
       return (
-        <pre className="bg-secondary/60 border border-border px-3 py-2.5 text-xs font-mono leading-relaxed overflow-x-auto">
-          <code>
+        <pre className="rounded-md bg-foreground/[0.06] border border-border px-3 py-2.5 text-xs font-mono leading-relaxed overflow-x-auto text-foreground">
+          <code className="text-foreground">
             {block.content}
             {caret}
           </code>
@@ -307,7 +307,7 @@ function InlineContent({
             return (
               <code
                 key={i}
-                className="bg-secondary/60 px-1.5 py-0.5 text-xs font-mono text-primary/90"
+                className="rounded-sm bg-foreground/[0.08] px-1.5 py-0.5 text-[0.85em] font-mono text-foreground"
               >
                 {node.content}
               </code>

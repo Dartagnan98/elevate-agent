@@ -7,7 +7,6 @@ import {
   useRef,
   useState,
   type ComponentType,
-  type ReactNode,
 } from "react";
 import {
   Activity,
@@ -18,6 +17,7 @@ import {
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  ChevronRight,
   Database as DatabaseIcon,
   ExternalLink,
   FileCheck2,
@@ -71,6 +71,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, isoTimeAgo } from "@/lib/utils";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/pages/real-estate-hub/thread-drawer";
 import {
@@ -438,11 +439,13 @@ function LeadProfilesListPage({
 const LeadBoardRow = memo(function LeadBoardRow({
   data,
   thread,
+  profile,
   showOpenThread = true,
   variant = "card",
 }: {
   data: HubData;
   thread: SourceInboxThread;
+  profile?: SourceInboxProfile | null;
   showOpenThread?: boolean;
   variant?: "card" | "list";
 }) {
@@ -532,51 +535,49 @@ const LeadBoardRow = memo(function LeadBoardRow({
   );
 
   if (isList) {
+    // Minimal lane row: dot + name + status select, whole row clicks open
+    // the thread. Status select inside stops propagation so changing the
+    // status doesn't navigate. Status mutates the same profile record as
+    // the thread drawer — both surfaces stay in sync via data.refresh().
+    const handleRowKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        void openInChat();
+      }
+    };
     return (
-      <div className="group flex items-start gap-3 px-3 py-3 transition-colors first:pt-3 last:pb-3 hover:bg-foreground/[0.02]">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => void openInChat()}
+        onKeyDown={handleRowKey}
+        aria-label={`Open thread with ${thread.personName}`}
+        className="group flex w-full cursor-pointer items-center gap-3 px-3 py-2 transition-colors hover:bg-foreground/[0.03] focus:bg-foreground/[0.04] focus:outline-none"
+      >
         <span
           aria-label={heat.label}
           role="img"
-          className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", heat.dot)}
+          className={cn("h-2 w-2 shrink-0 rounded-full", heat.dot)}
         />
-        <div className="min-w-0 flex-1">
-          {headerRow}
-          {previewText}
-          {metaRow}
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-11 w-11 p-0 text-foreground/60 hover:text-foreground sm:h-9 sm:w-9"
-            onClick={() => void mark("archive")}
-            aria-label={`Remove ${thread.personName} from list`}
-            title="Remove"
+        <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+          {thread.personName}
+        </span>
+        {profile && (
+          <div
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            className="shrink-0"
           >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-11 w-11 p-0 text-foreground/60 hover:text-foreground sm:h-9 sm:w-9"
-            onClick={() => void mark("done")}
-            aria-label={`Mark ${thread.personName} done`}
-            title="Mark done"
-          >
-            <CheckCircle2 className="h-3.5 w-3.5" />
-          </Button>
-          {showOpenThread && (
-            <Button
-              size="sm"
-              className="h-11 px-3 sm:h-9"
-              onClick={() => void openInChat()}
-              aria-label={`Open thread with ${thread.personName}`}
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-              Open
-            </Button>
-          )}
-        </div>
+            <LeadStatusControl
+              profileId={profile.id}
+              status={profile.status}
+              onChanged={() => data.refresh()}
+              selectClassName="w-32"
+              selectButtonClassName="h-7 px-2 text-xs"
+            />
+          </div>
+        )}
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-foreground/60" />
       </div>
     );
   }
@@ -1289,6 +1290,42 @@ function DraftMessagesBoard({
 }
 
 
+const LANE_LIST_MAX = 10;
+const LANE_LIST_SCROLL_CLASS =
+  "max-h-[26rem] divide-y divide-border overflow-y-auto rounded-md border border-border/60";
+
+function useProfileLookups(data: HubData) {
+  return useMemo(() => {
+    // Profile.threadIds is keyed by the composite "{sourceId}:{threadId}"
+    // string (matching SourceInboxThread.id), so we index by that AND by
+    // the bare thread tail so callers can look up using either form
+    // (threads have both fields; drafts only have the bare threadId).
+    const byThread = new Map<string, SourceInboxProfile>();
+    const byEmail = new Map<string, SourceInboxProfile>();
+    const byPhone = new Map<string, SourceInboxProfile>();
+    for (const profile of data.sourceInbox?.profiles ?? []) {
+      for (const threadKey of profile.threadIds) {
+        if (!threadKey) continue;
+        byThread.set(threadKey, profile);
+        const colonAt = threadKey.indexOf(":");
+        if (colonAt >= 0) {
+          const tail = threadKey.slice(colonAt + 1);
+          if (tail) byThread.set(tail, profile);
+        }
+      }
+      for (const email of profile.emails ?? []) {
+        const key = email.trim().toLowerCase();
+        if (key) byEmail.set(key, profile);
+      }
+      for (const phone of profile.phones ?? []) {
+        const key = phone.trim();
+        if (key) byPhone.set(key, profile);
+      }
+    }
+    return { byThread, byEmail, byPhone };
+  }, [data.sourceInbox?.profiles]);
+}
+
 function HotLeadsList({
   data,
   threads,
@@ -1296,7 +1333,8 @@ function HotLeadsList({
   data: HubData;
   threads: SourceInboxThread[];
 }) {
-  const hot = leadThreadBuckets(threads).hot.slice(0, 8);
+  const { byThread } = useProfileLookups(data);
+  const hot = leadThreadBuckets(threads).hot.slice(0, LANE_LIST_MAX);
   if (!hot.length) {
     return (
       <p className="px-1 py-1 text-xs text-muted-foreground/80">
@@ -1305,35 +1343,21 @@ function HotLeadsList({
     );
   }
   return (
-    <div className="divide-y divide-border">
+    <div className={LANE_LIST_SCROLL_CLASS}>
       {hot.map((thread) => (
-        <LeadBoardRow key={thread.id} data={data} thread={thread} showOpenThread variant="list" />
+        <LeadBoardRow
+          key={thread.id}
+          data={data}
+          thread={thread}
+          profile={byThread.get(thread.threadId) ?? null}
+          showOpenThread
+          variant="list"
+        />
       ))}
     </div>
   );
 }
 
-function LeadQueuePanel({
-  children,
-  count,
-  title,
-}: {
-  children: ReactNode;
-  count: number;
-  title: string;
-}) {
-  return (
-    <div className="min-w-0">
-      <div className="flex items-baseline gap-2 pb-1.5">
-        <h3 className="text-sm font-medium text-foreground">{title}</h3>
-        <span className="inline-flex items-baseline gap-1 font-mono-ui text-[0.7rem] text-muted-foreground/80">
-          ·<span className="tabular-nums">{count}</span>
-        </span>
-      </div>
-      <div>{children}</div>
-    </div>
-  );
-}
 
 function LeadPipelineBoard({
   buyers,
@@ -1347,25 +1371,41 @@ function LeadPipelineBoard({
   threads: SourceInboxThread[];
 }) {
   const buckets = leadThreadBuckets(threads);
+  const lanes = [
+    { value: "hot", label: "Hot leads", count: buckets.hot.length },
+    { value: "follow", label: "Follow-ups", count: buckets.followUp.length },
+    { value: "buyers", label: "Buyer searches", count: buyers.length },
+    { value: "skipped", label: "Recently skipped", count: skippedDrafts.length },
+  ];
 
   return (
-    <div className="grid gap-x-6 gap-y-4 xl:grid-cols-2">
-      <LeadQueuePanel title="Hot leads" count={buckets.hot.length}>
-        <HotLeadsList data={data} threads={threads} />
-      </LeadQueuePanel>
-
-      <LeadQueuePanel title="Follow-ups" count={buckets.followUp.length}>
-        <FollowUpThreadsList data={data} threads={threads} />
-      </LeadQueuePanel>
-
-      <LeadQueuePanel title="Buyer searches" count={buyers.length}>
-        <PrivateSearchBuyersList buyers={buyers} />
-      </LeadQueuePanel>
-
-      <LeadQueuePanel title="Recently skipped" count={skippedDrafts.length}>
-        <SkippedDraftsList data={data} drafts={skippedDrafts} />
-      </LeadQueuePanel>
-    </div>
+    <Tabs defaultValue="hot">
+      {(active, setActive) => (
+        <>
+          <TabsList>
+            {lanes.map((lane) => (
+              <TabsTrigger
+                key={lane.value}
+                active={active === lane.value}
+                value={lane.value}
+                onClick={() => setActive(lane.value)}
+              >
+                {lane.label}
+                <span className="ml-1.5 font-mono-ui text-[0.7rem] text-muted-foreground/80 tabular-nums">
+                  {lane.count}
+                </span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <div className="min-w-0">
+            {active === "hot" && <HotLeadsList data={data} threads={threads} />}
+            {active === "follow" && <FollowUpThreadsList data={data} threads={threads} />}
+            {active === "buyers" && <PrivateSearchBuyersList buyers={buyers} data={data} />}
+            {active === "skipped" && <SkippedDraftsList data={data} drafts={skippedDrafts} />}
+          </div>
+        </>
+      )}
+    </Tabs>
   );
 }
 
@@ -1376,7 +1416,8 @@ function FollowUpThreadsList({
   data: HubData;
   threads: SourceInboxThread[];
 }) {
-  const followUps = leadThreadBuckets(threads).followUp.slice(0, 8);
+  const { byThread } = useProfileLookups(data);
+  const followUps = leadThreadBuckets(threads).followUp.slice(0, LANE_LIST_MAX);
   if (!followUps.length) {
     return (
       <p className="px-1 py-1 text-xs text-muted-foreground/80">
@@ -1385,124 +1426,120 @@ function FollowUpThreadsList({
     );
   }
   return (
-    <div className="divide-y divide-border">
+    <div className={LANE_LIST_SCROLL_CLASS}>
       {followUps.map((thread) => (
-        <LeadBoardRow key={thread.id} data={data} thread={thread} showOpenThread variant="list" />
+        <LeadBoardRow
+          key={thread.id}
+          data={data}
+          thread={thread}
+          profile={byThread.get(thread.threadId) ?? null}
+          showOpenThread
+          variant="list"
+        />
       ))}
     </div>
   );
 }
 
-function PrivateSearchBuyersList({ buyers }: { buyers: BuyerWatchlistEntry[] }) {
-  if (!buyers.length) {
+function PrivateSearchBuyersList({
+  buyers,
+  data,
+}: {
+  buyers: BuyerWatchlistEntry[];
+  data: HubData;
+}) {
+  const { byEmail, byPhone } = useProfileLookups(data);
+  const visible = buyers.slice(0, LANE_LIST_MAX);
+  if (!visible.length) {
     return (
       <p className="px-1 py-1 text-xs text-muted-foreground/80">
         No active buyer searches — run the MLS analyzer to score buyers on the board.
       </p>
     );
   }
+  const lookupProfile = (buyer: BuyerWatchlistEntry): SourceInboxProfile | null => {
+    const email = (buyer.email ?? "").trim().toLowerCase();
+    if (email && byEmail.has(email)) return byEmail.get(email) ?? null;
+    const phone = (buyer.phone ?? "").trim();
+    if (phone && byPhone.has(phone)) return byPhone.get(phone) ?? null;
+    return null;
+  };
   return (
-    <div className="divide-y divide-border">
-      {buyers.map((buyer) => (
-        <BuyerWatchlistRow key={buyer.id} buyer={buyer} />
+    <div className={LANE_LIST_SCROLL_CLASS}>
+      {visible.map((buyer) => (
+        <BuyerWatchlistRow
+          key={buyer.id}
+          buyer={buyer}
+          profile={lookupProfile(buyer)}
+          onChanged={() => data.refresh()}
+        />
       ))}
     </div>
   );
 }
 
-function BuyerWatchlistRow({ buyer }: { buyer: BuyerWatchlistEntry }) {
-  const score = typeof buyer.score === "number" ? buyer.score : null;
+function BuyerWatchlistRow({
+  buyer,
+  profile,
+  onChanged,
+}: {
+  buyer: BuyerWatchlistEntry;
+  profile: SourceInboxProfile | null;
+  onChanged: () => void | Promise<void>;
+}) {
   const tier = (buyer.tier ?? "").toUpperCase();
-  const days = typeof buyer.days === "number" ? buyer.days : null;
-  const searches = (buyer.searches ?? []).filter(Boolean);
-  const tone =
-    tier === "HOT"
-      ? "border-border bg-card text-destructive"
-      : tier === "WARM"
-        ? "border-border bg-card text-warning"
-        : "border-border bg-card text-foreground/70";
   const dot =
     tier === "HOT"
       ? "bg-destructive"
       : tier === "WARM"
         ? "bg-warning"
         : "bg-foreground/40";
+  const name = buyer.name || "Unnamed buyer";
+  const rowClasses =
+    "group flex w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.03] focus:bg-foreground/[0.04] focus:outline-none";
 
-  return (
-    <div className="group flex items-start gap-3 px-3 py-3 transition-colors first:pt-3 last:pb-3 hover:bg-foreground/[0.02]">
-      <span aria-hidden="true" className={cn("mt-1 h-2.5 w-2.5 shrink-0 rounded-full", dot)} />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <div className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-            {buyer.name || "Unnamed buyer"}
-          </div>
-          {score !== null && (
-            <span
-              className={cn(
-                "font-mono-ui inline-flex items-center rounded-sm border px-2 py-0.5 text-[0.7rem] font-semibold",
-                tone,
-              )}
-            >
-              {score}
-            </span>
-          )}
-        </div>
-        {searches.length > 0 && (
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-foreground/75">
-            {searches.join(" · ")}
-          </p>
-        )}
-        <div className="font-mono-ui mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-muted-foreground">
-          {tier && <span>{tier.toLowerCase()}</span>}
-          {tier && (days != null || buyer.lastActivity) && <span aria-hidden>·</span>}
-          {days != null ? (
-            <span>{days === 0 ? "today" : `${days}d ago`}</span>
-          ) : buyer.lastActivity ? (
-            <span>{buyer.lastActivity}</span>
-          ) : null}
-          {buyer.email && (
-            <>
-              <span aria-hidden>·</span>
-              <span className="inline-flex items-center gap-1">
-                <Mail className="h-3 w-3" />
-                <span className="truncate">{buyer.email}</span>
-              </span>
-            </>
-          )}
-          {buyer.phone && (
-            <>
-              <span aria-hidden>·</span>
-              <span className="inline-flex items-center gap-1">
-                <Phone className="h-3 w-3" />
-                {buyer.phone}
-              </span>
-            </>
-          )}
-          {buyer.sourceLabel && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{buyer.sourceLabel}</span>
-            </>
-          )}
-        </div>
-      </div>
-      {buyer.profileUrl && (
-        <a
-          href={buyer.profileUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`Open MLS profile for ${buyer.name}`}
-          className={cn(
-            buttonVariants({ size: "sm", variant: "outline" }),
-            "h-11 shrink-0 px-3 sm:h-9",
-          )}
+  // No thread on a buyer-watchlist entry — the row opens the MLS profile
+  // (when present). Status select writes through to the matched profile so
+  // it stays in sync with the thread drawer for that contact.
+  const body = (
+    <>
+      <span aria-hidden="true" className={cn("h-2 w-2 shrink-0 rounded-full", dot)} />
+      <span className="min-w-0 flex-1 truncate text-sm text-foreground">{name}</span>
+      {profile && (
+        <div
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onKeyDown={(event) => event.stopPropagation()}
+          className="shrink-0"
         >
-          <ExternalLink className="h-3.5 w-3.5" />
-          Profile
-        </a>
+          <LeadStatusControl
+            profileId={profile.id}
+            status={profile.status}
+            onChanged={onChanged}
+            selectClassName="h-7 w-32 px-2 text-xs"
+          />
+        </div>
       )}
-    </div>
+      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-foreground/60" />
+    </>
   );
+
+  if (buyer.profileUrl) {
+    return (
+      <a
+        href={buyer.profileUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={`Open MLS profile for ${name}`}
+        className={rowClasses}
+      >
+        {body}
+      </a>
+    );
+  }
+  return <div className={rowClasses}>{body}</div>;
 }
 
 function SkippedDraftsList({
@@ -1512,48 +1549,13 @@ function SkippedDraftsList({
   data: HubData;
   drafts?: SourceInboxDraft[];
 }) {
-  const skipped = draftsOverride ?? data.sourceInbox?.skippedDrafts ?? [];
-  const [restoredIds, setRestoredIds] = useState<Set<string>>(() => new Set());
+  const drawer = useThreadDrawer();
+  const navigate = useNavigate();
+  const { byThread } = useProfileLookups(data);
+  const allSkipped = draftsOverride ?? data.sourceInbox?.skippedDrafts ?? [];
+  const skipped = allSkipped.slice(0, LANE_LIST_MAX);
 
-  const visible = skipped.filter((d) => !restoredIds.has(d.id));
-
-  useEffect(() => {
-    setRestoredIds((current) => {
-      if (current.size === 0) return current;
-      const liveIds = new Set(skipped.map((d) => d.id));
-      let changed = false;
-      const next = new Set<string>();
-      current.forEach((id) => {
-        if (liveIds.has(id)) next.add(id);
-        else changed = true;
-      });
-      return changed ? next : current;
-    });
-  }, [skipped]);
-
-  const restore = useCallback(
-    async (draft: SourceInboxDraft) => {
-      setRestoredIds((current) => {
-        const next = new Set(current);
-        next.add(draft.id);
-        return next;
-      });
-      try {
-        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "restore", draft.draftText);
-        void data.refresh();
-      } catch (error) {
-        setRestoredIds((current) => {
-          const next = new Set(current);
-          next.delete(draft.id);
-          return next;
-        });
-        window.alert(`Failed to restore: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    },
-    [data],
-  );
-
-  if (!visible.length) {
+  if (!skipped.length) {
     return (
       <p className="px-1 py-1 text-xs text-muted-foreground/80">
         Nothing skipped — drafts auto-clear after 3 days.
@@ -1561,46 +1563,64 @@ function SkippedDraftsList({
     );
   }
 
+  const openThread = (draft: SourceInboxDraft) => {
+    if (drawer && draft.threadId) {
+      drawer.openThread(draft.sourceId, draft.threadId);
+      return;
+    }
+    const params = new URLSearchParams({
+      thread: draft.threadId,
+      source: draft.sourceId,
+    });
+    navigate(`/chat?${params.toString()}`);
+  };
+
   return (
-    <div className="divide-y divide-border">
-      {visible.map((draft) => {
+    <div className={LANE_LIST_SCROLL_CLASS}>
+      {skipped.map((draft) => {
         const identity = parseIdentity(draft.personName);
+        const profile =
+          (draft.sourceId && draft.threadId
+            ? byThread.get(`${draft.sourceId}:${draft.threadId}`)
+            : null) ??
+          (draft.threadId ? byThread.get(draft.threadId) ?? null : null);
+        const handleKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openThread(draft);
+          }
+        };
         return (
-        <div
-          key={draft.id}
-          className="group flex items-start gap-2 px-2.5 py-2.5 transition-colors hover:bg-card"
-        >
-          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-sm bg-card text-muted-foreground">
-            <XCircle className="h-3.5 w-3.5" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-baseline gap-2">
-              <div className="min-w-0 flex-1 truncate text-sm font-medium leading-5 text-foreground">
-                {identity.name}
-              </div>
-              <span className="font-mono-ui shrink-0 text-[0.62rem] tabular-nums text-muted-foreground/80">
-                {draft.skippedAt ? isoTimeAgo(draft.skippedAt) : "—"}
-              </span>
-            </div>
-            {identity.email && (
-              <div className="truncate font-mono-ui text-[0.62rem] text-muted-foreground/70">
-                {identity.email}
+          <div
+            key={draft.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => openThread(draft)}
+            onKeyDown={handleKey}
+            aria-label={`Open thread with ${identity.name}`}
+            className="group flex w-full cursor-pointer items-center gap-3 px-3 py-2 transition-colors hover:bg-foreground/[0.03] focus:bg-foreground/[0.04] focus:outline-none"
+          >
+            <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/50" />
+            <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+              {identity.name}
+            </span>
+            {profile && (
+              <div
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                className="shrink-0"
+              >
+                <LeadStatusControl
+                  profileId={profile.id}
+                  status={profile.status}
+                  onChanged={() => data.refresh()}
+                  selectClassName="w-32"
+              selectButtonClassName="h-7 px-2 text-xs"
+                />
               </div>
             )}
-            <p className="mt-0.5 line-clamp-2 text-[0.78rem] leading-5 text-muted-foreground">
-              {draft.draftText}
-            </p>
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-foreground/60" />
           </div>
-          <button
-            type="button"
-            onClick={() => void restore(draft)}
-            title="Restore to queue"
-            aria-label={`Restore draft for ${identity.name}`}
-            className="font-mono-ui inline-flex h-11 shrink-0 items-center rounded-sm px-3 text-[0.7rem] font-semibold text-muted-foreground transition hover:bg-muted hover:text-primary sm:h-9"
-          >
-            Restore
-          </button>
-        </div>
         );
       })}
     </div>
@@ -1716,68 +1736,35 @@ function LeadFilterBar({
         ))}
       </div>
       {options.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 px-1 py-1.5">
-          <span className="mr-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <Filter className="h-3 w-3" />
-            Filter
-          </span>
-          <FilterChip
-            active={active === null}
-            label="All"
-            onClick={() => onSelect(null)}
-          />
-          {options.map((option) => (
-            <FilterChip
-              key={option.id}
-              active={active === option.id}
-              label={option.label}
-              meta={`${option.drafts ? `${option.drafts} drafts · ` : ""}${option.profiles ? `${option.profiles} profiles · ` : ""}${option.threads}`}
-              onClick={() => onSelect(option.id)}
-            />
-          ))}
+        <div className="px-1 py-1.5">
+          <TabsList>
+            <TabsTrigger
+              active={active === null}
+              value="__all"
+              onClick={() => onSelect(null)}
+            >
+              All
+            </TabsTrigger>
+            {options.map((option) => (
+              <TabsTrigger
+                key={option.id}
+                active={active === option.id}
+                value={option.id}
+                onClick={() => onSelect(option.id)}
+              >
+                {option.label}
+                <span className="ml-1.5 font-mono-ui text-[0.7rem] text-muted-foreground/80 tabular-nums">
+                  {option.drafts || option.profiles || option.threads}
+                </span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
         </div>
       )}
     </div>
   );
 }
 
-function FilterChip({
-  active,
-  label,
-  meta,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  meta?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "inline-flex h-11 items-center gap-1.5 rounded-sm border px-3 text-xs font-medium transition-colors sm:h-8",
-        active
-          ? "border-primary bg-muted text-foreground"
-          : "border-border bg-card text-muted-foreground hover:bg-card hover:text-foreground",
-      )}
-    >
-      <span>{label}</span>
-      {meta && (
-        <span
-          className={cn(
-            "font-mono-ui rounded-sm px-1.5 py-0.5 text-[0.62rem] tabular-nums",
-            active ? "bg-muted text-foreground" : "bg-card text-muted-foreground",
-          )}
-        >
-          {meta}
-        </span>
-      )}
-    </button>
-  );
-}
 
 function CollapsibleSection({
   children,

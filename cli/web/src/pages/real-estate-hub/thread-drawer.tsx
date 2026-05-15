@@ -17,6 +17,7 @@ import type { HubData } from "../RealEstateHubPages";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { LeadStatusControl } from "./_shared/lead-status-control";
 
 type ThreadDrawerTarget = { sourceId: string; threadId: string } | null;
 
@@ -161,6 +162,20 @@ function ThreadDrawer({
   const sends = context?.sends ?? [];
   const messages = context?.messages ?? [];
 
+  const profile = useMemo(() => {
+    const profiles = data.sourceInbox?.profiles ?? [];
+    const composite = `${target.sourceId}:${target.threadId}`;
+    for (const p of profiles) {
+      for (const key of p.threadIds ?? []) {
+        if (!key) continue;
+        if (key === composite) return p;
+        const colonAt = key.indexOf(":");
+        if (colonAt >= 0 && key.slice(colonAt + 1) === target.threadId) return p;
+      }
+    }
+    return null;
+  }, [data.sourceInbox?.profiles, target.sourceId, target.threadId]);
+
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center animate-[fade-in_120ms_ease-out] sm:items-center sm:p-6">
       <button
@@ -223,9 +238,20 @@ function ThreadDrawer({
               )}
             </div>
           </div>
-          <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
-            <CloseIcon className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-2">
+            {profile && (
+              <LeadStatusControl
+                profileId={profile.id}
+                status={profile.status}
+                onChanged={() => data.refresh()}
+                selectClassName="w-36"
+                selectButtonClassName="h-8 px-2 text-xs"
+              />
+            )}
+            <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
+              <CloseIcon className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
 
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">

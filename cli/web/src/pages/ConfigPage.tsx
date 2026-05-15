@@ -40,8 +40,9 @@ import {
   CircleSlash,
   Loader2,
   Puzzle,
+  Play,
 } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   api,
   type ComposioConnectedAccount,
@@ -151,23 +152,6 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
   return connector.sourceExists
     ? "Refreshes the local agent setup task and prompt for building the real connector. It does not fabricate demo lead data."
     : "Creates a local setup task for the agent/operator to build the webhook, poller, import command, or bridge.";
-}
-
-function connectorActionLabel(connector: SourceConnectorStatus, busy: boolean): string {
-  if (busy) {
-    if (connector.initializeBehavior === "local_messages_import") return "Importing";
-    if (connector.initializeBehavior === "composio_social_setup") {
-      return connector.sourceExists ? "Syncing social accounts" : "Preparing Composio";
-    }
-    return connector.sourceExists ? "Refreshing" : "Creating task";
-  }
-  if (connector.initializeBehavior === "local_messages_import") {
-    return connector.sourceExists ? "Re-import messages" : "Import messages";
-  }
-  if (connector.initializeBehavior === "composio_social_setup") {
-    return connector.sourceExists ? "Sync social accounts" : "Set up Composio";
-  }
-  return connector.sourceExists ? "Refresh setup task" : "Create setup task";
 }
 
 const TOOLKIT_PAGE_SIZE = 24;
@@ -794,17 +778,12 @@ function ComposioPanel() {
 }
 
 function SourceConnectorSettingsPanel() {
+  const navigate = useNavigate();
   const [data, setData] = useState<SourceConnectorsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
   const [composioAccounts, setComposioAccounts] = useState<ComposioConnectedAccount[]>([]);
   const [composioReady, setComposioReady] = useState<boolean>(false);
-  const [lastSyncSummary, setLastSyncSummary] = useState<{
-    total_new?: number;
-    total_fetched?: number;
-    tick_at?: string;
-  } | null>(null);
   const [fbPages, setFbPages] = useState<Array<{
     id: string;
     name: string;
@@ -884,27 +863,37 @@ function SourceConnectorSettingsPanel() {
     }
   }, [hasFacebookAccount, loadFbPages]);
 
-  const initialize = async (connector: SourceConnectorStatus) => {
-    setBusyId(connector.id);
+  const runPrompt = async (connector: SourceConnectorStatus) => {
+    setRunningPromptId(connector.id);
     try {
-      const next = connector.sourceExists
-        ? await api.refreshSourceConnector(connector.id)
-        : await api.scaffoldSourceConnector(connector.id);
-      setData(next);
-      const refresh = (next as unknown as { refresh?: { total_new?: number; total_fetched?: number; tick_at?: string } }).refresh;
-      if (refresh && connector.initializeBehavior === "composio_social_setup") {
-        setLastSyncSummary(refresh);
-        void loadComposio();
+      // Always resolve the freshest prompt text (the source_prompt_for output
+      // can drift if config changes). Prompt is already on the connector row,
+      // but a roundtrip guarantees the canonical contract is current.
+      const prompt = (connector.prompt || "").trim();
+      if (!prompt) {
+        setRunningPromptId(null);
+        return;
       }
+      const ts = String(Date.now());
+      const seedText = `Source connector: ${connector.label} (${connector.id})\n\n${prompt}`;
+      try {
+        window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, seedText);
+      } catch {
+        // sessionStorage disabled — fall back to navigating without seed; the
+        // user can still paste from clipboard via the secondary button.
+      }
+      navigate(`/chat?new=${ts}&seed=${ts}`);
     } finally {
-      setBusyId(null);
+      setRunningPromptId(null);
     }
   };
 
-  const copyPrompt = async (connector: SourceConnectorStatus) => {
-    await navigator.clipboard.writeText(connector.prompt);
-    setCopiedId(connector.id);
-    window.setTimeout(() => setCopiedId(null), 1600);
+  const copyPromptText = async (connector: SourceConnectorStatus) => {
+    try {
+      await navigator.clipboard.writeText(connector.prompt);
+    } catch {
+      // clipboard not available — silently skip; primary path is run.
+    }
   };
 
   const connectors = data?.connectors ?? [];
@@ -1047,11 +1036,6 @@ function SourceConnectorSettingsPanel() {
                         )}
                       </div>
                     )}
-                    {lastSyncSummary && (
-                      <div className="mt-2 text-xs text-muted-foreground">
-                        Last sync: {lastSyncSummary.total_new ?? 0} new / {lastSyncSummary.total_fetched ?? 0} fetched
-                      </div>
-                    )}
                   </>
                 )}
               </div>
@@ -1060,22 +1044,24 @@ function SourceConnectorSettingsPanel() {
               <Badge variant="outline">{connector.ownerAgent}</Badge>
               {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
               <Button
-                variant={connector.sourceExists ? "outline" : "default"}
+                variant="default"
                 size="sm"
                 className="ml-auto"
-                onClick={() => void initialize(connector)}
-                disabled={busyId === connector.id}
+                onClick={() => void runPrompt(connector)}
+                disabled={runningPromptId === connector.id}
+                aria-label={`Run setup prompt for ${connector.label}`}
               >
-                {connectorActionLabel(connector, busyId === connector.id)}
+                <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                {runningPromptId === connector.id ? "Opening chat…" : "Run prompt"}
               </Button>
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => void copyPrompt(connector)}
-                aria-label={`Copy setup prompt for ${connector.label}`}
+                onClick={() => void copyPromptText(connector)}
+                aria-label={`Copy setup prompt text for ${connector.label}`}
+                title="Copy prompt text"
               >
                 <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                {copiedId === connector.id ? "Copied" : "Prompt"}
               </Button>
             </div>
           </li>
@@ -1408,6 +1394,550 @@ function CrmIntegrationSettingsPanel() {
   );
 }
 
+interface ChannelsPanelProps {
+  config: Record<string, unknown> | null;
+  setConfig: (next: Record<string, unknown>) => void;
+}
+
+function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+  const [envVars, setEnvVars] = useState<Record<string, { is_set: boolean; redacted_value: string | null }>>({});
+  const [connectors, setConnectors] = useState<SourceConnectorsResponse | null>(null);
+  const [composioAccounts, setComposioAccounts] = useState<ComposioConnectedAccount[]>([]);
+  const [botTokenInput, setBotTokenInput] = useState("");
+  const [savingBotToken, setSavingBotToken] = useState(false);
+  const [channelEdits, setChannelEdits] = useState<Record<string, string>>({});
+  const [savingChannel, setSavingChannel] = useState<string | null>(null);
+  const [savingWhatsapp, setSavingWhatsapp] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      const env = await api.getEnvVars();
+      setEnvVars(env as unknown as Record<string, { is_set: boolean; redacted_value: string | null }>);
+    } catch {
+      // env endpoint failing is non-fatal; UI degrades to "not configured"
+    }
+    try {
+      setConnectors(await api.getSourceConnectors());
+    } catch { /* ignore */ }
+    try {
+      const status = await api.getComposioStatus();
+      if (status.valid) {
+        const conns = await api.getComposioConnections();
+        const body = (conns.data as { items?: ComposioConnectedAccount[] } | ComposioConnectedAccount[]) ?? [];
+        setComposioAccounts(Array.isArray(body) ? body : body.items ?? []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  const agents = useMemo(() => {
+    const hub = (config?.["agent_hub"] as Record<string, unknown> | undefined) ?? {};
+    const list = (hub["agents"] as Array<Record<string, unknown>> | undefined) ?? [];
+    return list.map((agent) => {
+      const meta = (agent.metadata as Record<string, unknown> | undefined) ?? {};
+      return {
+        id: String(agent.id ?? ""),
+        name: String(agent.name ?? agent.id ?? ""),
+        enabled: Boolean(agent.enabled),
+        tokenEnv: String(meta.telegram_bot_token_env ?? ""),
+        channelEnv: String(meta.telegram_target_env ?? ""),
+      };
+    });
+  }, [config]);
+
+  const botTokenSet = Boolean(envVars["TELEGRAM_BOT_TOKEN"]?.is_set);
+  const botTokenPreview = envVars["TELEGRAM_BOT_TOKEN"]?.redacted_value ?? "";
+
+  const saveBotToken = async () => {
+    if (!botTokenInput.trim()) return;
+    setSavingBotToken(true);
+    try {
+      await api.setEnvVar("TELEGRAM_BOT_TOKEN", botTokenInput.trim());
+      setBotTokenInput("");
+      await reload();
+      showToast("Telegram bot token saved", "success");
+    } catch (err) {
+      showToast(`Failed to save token: ${String(err)}`, "error");
+    } finally {
+      setSavingBotToken(false);
+    }
+  };
+
+  const saveChannelFor = async (key: string) => {
+    const value = (channelEdits[key] ?? "").trim();
+    setSavingChannel(key);
+    try {
+      if (!value) {
+        await api.deleteEnvVar(key);
+      } else {
+        await api.setEnvVar(key, value);
+      }
+      setChannelEdits((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      await reload();
+      showToast("Channel saved", "success");
+    } catch (err) {
+      showToast(`Failed: ${String(err)}`, "error");
+    } finally {
+      setSavingChannel(null);
+    }
+  };
+
+  const startSetupChat = (label: string, prompt: string) => {
+    const ts = String(Date.now());
+    const seedText = `${label}\n\n${prompt}`;
+    try { window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, seedText); } catch { /* ignore */ }
+    navigate(`/chat?new=${ts}&seed=${ts}`);
+  };
+
+  const appleConnector = connectors?.connectors?.find((c) => c.id === "apple-messages");
+  const appleConnected = appleConnector?.state === "connected" || appleConnector?.state === "import_only";
+
+  const whatsappAccount = composioAccounts.find(
+    (a) => (a.toolkit?.slug ?? "").toLowerCase().includes("whatsapp"),
+  );
+  const imessageAccount = composioAccounts.find(
+    (a) => (a.toolkit?.slug ?? "").toLowerCase().includes("imessage"),
+  );
+
+  const whatsappCfg = (config?.["whatsapp"] as Record<string, unknown> | undefined) ?? {};
+  const whatsappPrefix = String(whatsappCfg["reply_prefix"] ?? "");
+  const [whatsappPrefixInput, setWhatsappPrefixInput] = useState<string | null>(null);
+  const effectivePrefix = whatsappPrefixInput ?? whatsappPrefix;
+
+  const saveWhatsappPrefix = async () => {
+    if (!config) return;
+    setSavingWhatsapp(true);
+    try {
+      const next = { ...config } as Record<string, unknown>;
+      const wa = { ...(next.whatsapp as Record<string, unknown> | undefined ?? {}) };
+      if (effectivePrefix === "") {
+        delete wa.reply_prefix;
+      } else {
+        wa.reply_prefix = effectivePrefix;
+      }
+      next.whatsapp = wa;
+      await api.saveConfig(next);
+      setConfig(next);
+      setWhatsappPrefixInput(null);
+      showToast("WhatsApp settings saved", "success");
+    } catch (err) {
+      showToast(`Failed: ${String(err)}`, "error");
+    } finally {
+      setSavingWhatsapp(false);
+    }
+  };
+
+  return (
+    <section className="space-y-8">
+      <header>
+        <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+          <MessageCircle className="h-4 w-4 text-primary" aria-hidden="true" />
+          Channels
+        </h2>
+        <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
+          Where messages flow in and out. Set tokens, route agents to channels, and configure send/receive for Telegram, iMessage, and WhatsApp.
+        </p>
+      </header>
+
+      {/* Telegram */}
+      <div className="rounded-lg border border-border/60 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">Telegram</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">Inbound DMs, channel chats, and per-agent routing.</p>
+          </div>
+          <Badge variant={botTokenSet ? "success" : "outline"}>
+            {botTokenSet ? "Bot token set" : "No bot token"}
+          </Badge>
+        </div>
+
+        <div className="mt-3">
+          <label className="block text-xs font-medium text-foreground/80">Bot token</label>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            From <span className="font-mono">@BotFather</span>. Stored as <span className="font-mono">TELEGRAM_BOT_TOKEN</span> in your env.
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <Input
+              type="password"
+              autoComplete="off"
+              placeholder={botTokenSet ? botTokenPreview || "•••••••• (currently set)" : "123456789:ABCdef..."}
+              value={botTokenInput}
+              onChange={(e) => setBotTokenInput(e.target.value)}
+              className="h-8 text-sm"
+            />
+            <Button size="sm" onClick={() => void saveBotToken()} disabled={savingBotToken || !botTokenInput.trim()}>
+              {savingBotToken ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <div className="text-xs font-medium text-foreground/80">Per-agent channel routing</div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            One chat/topic per agent. Paste a Telegram chat ID (negative for groups) or run <span className="font-mono">/elevate pair</span> in the chat.
+          </p>
+          <div className="mt-2 divide-y divide-border/40 rounded-md border border-border/40">
+            {agents.length === 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground/80">No agents configured.</div>
+            )}
+            {agents.map((agent) => {
+              const currentPreview = envVars[agent.channelEnv]?.redacted_value ?? "";
+              const currentSet = Boolean(envVars[agent.channelEnv]?.is_set);
+              const editing = channelEdits[agent.channelEnv] !== undefined;
+              const inputValue = editing ? channelEdits[agent.channelEnv] : "";
+              return (
+                <div key={agent.id} className="flex items-center gap-2 px-3 py-2">
+                  <div className="min-w-[8rem] flex-shrink-0">
+                    <div className="text-sm font-medium text-foreground">{agent.name}</div>
+                    {!agent.enabled && <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">disabled</span>}
+                  </div>
+                  <Input
+                    className="h-7 flex-1 text-xs font-mono"
+                    placeholder={currentSet ? currentPreview || "(set)" : "-1001234567890"}
+                    value={inputValue}
+                    onChange={(e) => setChannelEdits((p) => ({ ...p, [agent.channelEnv]: e.target.value }))}
+                  />
+                  {editing ? (
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={() => void saveChannelFor(agent.channelEnv)}
+                      disabled={savingChannel === agent.channelEnv}
+                    >
+                      {savingChannel === agent.channelEnv ? "…" : "Save"}
+                    </Button>
+                  ) : currentSet ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setChannelEdits((p) => ({ ...p, [agent.channelEnv]: "" }))}
+                    >
+                      Change
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setChannelEdits((p) => ({ ...p, [agent.channelEnv]: "" }))}
+                    >
+                      Set
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              startSetupChat(
+                "Channel setup: Telegram",
+                "Help me wire up Telegram for Elevate. I want to test that my bot can receive messages, route to the right agent (executive-assistant by default), and send replies back. Walk me through pairing and verify with a test message.",
+              )
+            }
+          >
+            <Play className="h-3.5 w-3.5" />
+            Setup chat
+          </Button>
+          <Link
+            to="/env"
+            className="inline-flex h-8 items-center gap-2 rounded-sm border border-border bg-card px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            All Telegram env vars
+          </Link>
+        </div>
+      </div>
+
+      {/* iMessage */}
+      <div className="rounded-lg border border-border/60 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">iMessage</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">Mac Messages: read history, contacts, conversation context. Sending uses Apple Messages or a Composio bridge.</p>
+          </div>
+          <Badge variant={appleConnected ? "success" : "outline"}>
+            {appleConnected ? "Connected" : (appleConnector?.state ?? "Not set up")}
+          </Badge>
+        </div>
+
+        <div className="mt-3 space-y-2 text-xs">
+          <div className="flex items-center justify-between gap-3 rounded-md border border-border/40 px-3 py-2">
+            <div>
+              <div className="font-medium text-foreground">Receive (read Messages DB)</div>
+              <div className="text-muted-foreground/80">Local sync from <span className="font-mono">~/Library/Messages/chat.db</span></div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                startSetupChat(
+                  "Channel setup: iMessage receive",
+                  appleConnector?.prompt ||
+                    "Help me wire iMessage so Elevate can read my Mac Messages history into the local message index. Walk me through Full Disk Access for the Elevate binary and run a first sync.",
+                )
+              }
+            >
+              <Play className="h-3.5 w-3.5" />
+              Setup chat
+            </Button>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-md border border-border/40 px-3 py-2">
+            <div>
+              <div className="font-medium text-foreground">Send</div>
+              <div className="text-muted-foreground/80">
+                {imessageAccount ? "Composio iMessage account connected" : "Native AppleScript send (built-in) or connect Composio for cloud sending"}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                startSetupChat(
+                  "Channel setup: iMessage send",
+                  "Set up iMessage sending. My default is AppleScript on this Mac (so Messages.app needs to be running and signed in). Walk me through verifying it works with a test send to one of my contacts. If I should use Composio instead, tell me when.",
+                )
+              }
+            >
+              <Play className="h-3.5 w-3.5" />
+              Setup chat
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* WhatsApp */}
+      <div className="rounded-lg border border-border/60 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">WhatsApp</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">Inbound and outbound WhatsApp via Composio (WhatsApp Business / Cloud API).</p>
+          </div>
+          <Badge variant={whatsappAccount ? "success" : "outline"}>
+            {whatsappAccount ? "Connected" : "Not connected"}
+          </Badge>
+        </div>
+
+        <div className="mt-3">
+          <label className="block text-xs font-medium text-foreground/80">Reply prefix</label>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Prepended to every outgoing WhatsApp message. Default is &quot;▲ *Elevate*&quot;. Empty string disables it.
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <Input
+              className="h-8 text-sm font-mono"
+              placeholder="▲ *Elevate*"
+              value={effectivePrefix}
+              onChange={(e) => setWhatsappPrefixInput(e.target.value)}
+            />
+            <Button
+              size="sm"
+              onClick={() => void saveWhatsappPrefix()}
+              disabled={savingWhatsapp || whatsappPrefixInput === null}
+            >
+              {savingWhatsapp ? "…" : "Save"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              startSetupChat(
+                "Channel setup: WhatsApp",
+                "Help me wire WhatsApp send/receive for Elevate via Composio. I want one connected number that can receive messages into Elevate and send replies. Walk me through what I need (Business account, phone number, webhook) and verify with a test message.",
+              )
+            }
+          >
+            <Play className="h-3.5 w-3.5" />
+            Setup chat
+          </Button>
+          <Link
+            to="/settings#composio"
+            className="inline-flex h-8 items-center gap-2 rounded-sm border border-border bg-card px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Plug className="h-3.5 w-3.5" />
+            Composio integrations
+          </Link>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+interface MemoryPanelProps {
+  config: Record<string, unknown> | null;
+  setConfig: (next: Record<string, unknown>) => void;
+}
+
+function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
+  const { showToast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    if (config) setDraft(structuredClone(config));
+  }, [config]);
+
+  if (!draft) {
+    return <p className="text-sm text-muted-foreground">Loading…</p>;
+  }
+
+  const get = (path: string): unknown => getNestedValue(draft, path);
+  const set = (path: string, value: unknown) => setDraft(setNestedValue(draft, path, value) as Record<string, unknown>);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(config);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.saveConfig(draft);
+      setConfig(draft);
+      showToast("Memory settings saved", "success");
+    } catch (err) {
+      showToast(`Failed: ${String(err)}`, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const memoryEnabled = Boolean(get("memory.memory_enabled"));
+  const userProfileEnabled = Boolean(get("memory.user_profile_enabled"));
+  const provider = String(get("memory.provider") ?? "");
+  const memoryCharLimit = Number(get("memory.memory_char_limit") ?? 2200);
+  const userCharLimit = Number(get("memory.user_char_limit") ?? 1375);
+
+  const autoExtract = Boolean(get("plugins.elevate-memory-store.auto_extract"));
+  const turnJournal = Boolean(get("plugins.elevate-memory-store.turn_journal_enabled"));
+  const dailyOrganize = Boolean(get("plugins.elevate-memory-store.daily_organize_enabled"));
+  const graphRecall = Boolean(get("plugins.elevate-memory-store.graph_recall_enabled"));
+  const recentRecall = Boolean(get("plugins.elevate-memory-store.recent_recall_enabled"));
+  const embeddingEnabled = Boolean(get("plugins.elevate-memory-store.embedding_enabled"));
+
+  return (
+    <section className="space-y-6">
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <Brain className="h-4 w-4 text-primary" aria-hidden="true" />
+            Memory
+          </h2>
+          <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
+            What Elevate remembers between sessions. Curated memory is injected into the system prompt; the memory store is the durable backing index.
+          </p>
+        </div>
+        <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
+          <Save className="h-3.5 w-3.5" />
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </header>
+
+      <div className="rounded-lg border border-border/60 p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-foreground">Curated memory (injected into prompt)</h3>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Enable curated memory</span>
+          <Switch checked={memoryEnabled} onCheckedChange={(v) => set("memory.memory_enabled", v)} />
+        </label>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Include user profile</span>
+          <Switch checked={userProfileEnabled} onCheckedChange={(v) => set("memory.user_profile_enabled", v)} />
+        </label>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-muted-foreground">Memory char limit</label>
+            <Input
+              type="number"
+              className="mt-1 h-8 text-sm"
+              value={memoryCharLimit}
+              onChange={(e) => set("memory.memory_char_limit", Number(e.target.value) || 0)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground">User profile char limit</label>
+            <Input
+              type="number"
+              className="mt-1 h-8 text-sm"
+              value={userCharLimit}
+              onChange={(e) => set("memory.user_char_limit", Number(e.target.value) || 0)}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs text-muted-foreground">External provider</label>
+          <select
+            className="mt-1 h-8 w-full rounded-md border border-border bg-background px-2 text-sm"
+            value={provider}
+            onChange={(e) => set("memory.provider", e.target.value)}
+          >
+            <option value="">Built-in only</option>
+            <option value="openviking">OpenViking</option>
+            <option value="mem0">Mem0</option>
+            <option value="hindsight">Hindsight</option>
+            <option value="holographic">Holographic</option>
+            <option value="retaindb">RetainDB</option>
+            <option value="byterover">Byterover</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-border/60 p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-foreground">Memory store (durable index)</h3>
+        <p className="text-xs text-muted-foreground">
+          Local SQLite-backed memory store at <span className="font-mono">$ELEVATE_HOME/memory_store.db</span>.
+        </p>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Auto-extract facts from each turn</span>
+          <Switch checked={autoExtract} onCheckedChange={(v) => set("plugins.elevate-memory-store.auto_extract", v)} />
+        </label>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Turn-by-turn journal</span>
+          <Switch checked={turnJournal} onCheckedChange={(v) => set("plugins.elevate-memory-store.turn_journal_enabled", v)} />
+        </label>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Daily organize (compress + cluster)</span>
+          <Switch checked={dailyOrganize} onCheckedChange={(v) => set("plugins.elevate-memory-store.daily_organize_enabled", v)} />
+        </label>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Recent recall (last few turns)</span>
+          <Switch checked={recentRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.recent_recall_enabled", v)} />
+        </label>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Graph recall (concept neighbors)</span>
+          <Switch checked={graphRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.graph_recall_enabled", v)} />
+        </label>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Embedding-based recall</span>
+          <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} />
+        </label>
+      </div>
+    </section>
+  );
+}
+
 interface PluginsPanelProps {
   config: Record<string, unknown>;
   setConfig: (next: Record<string, unknown>) => void;
@@ -1611,8 +2141,8 @@ export default function ConfigPage() {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("");
-  const [activePane, setActivePane] = useState<"config" | "composio" | "connectors" | "crm" | "setup">("config");
-  const [showAdvanced, setShowAdvanced] = useState(true);
+  const [activePane, setActivePane] = useState<"config" | "channels" | "memory" | "composio" | "connectors" | "crm" | "setup">("channels");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { toast, showToast } = useToast();
@@ -1630,6 +2160,8 @@ export default function ConfigPage() {
     // the pane that hosts the section before scroll-into-view tries to
     // resolve the anchor.
     const PANE_BY_HASH: Record<string, typeof activePane> = {
+      channels: "channels",
+      memory: "memory",
       connectors: "connectors",
       composio: "composio",
       crm: "crm",
@@ -1882,9 +2414,11 @@ export default function ConfigPage() {
   ];
 
   const integrationItems = [
-    { id: "composio", pane: "composio" as const, label: "Composio", icon: <Plug className="h-4 w-4" /> },
-    { id: "connectors", pane: "connectors" as const, label: "Source connectors", icon: <Network className="h-4 w-4" /> },
+    { id: "channels", pane: "channels" as const, label: "Channels", icon: <MessageCircle className="h-4 w-4" /> },
+    { id: "memory", pane: "memory" as const, label: "Memory", icon: <Brain className="h-4 w-4" /> },
+    { id: "connectors", pane: "connectors" as const, label: "Sources", icon: <Network className="h-4 w-4" /> },
     { id: "crm", pane: "crm" as const, label: "CRM", icon: <Users className="h-4 w-4" /> },
+    { id: "composio", pane: "composio" as const, label: "Composio", icon: <Plug className="h-4 w-4" /> },
     { id: "setup", pane: "setup" as const, label: "Setup commands", icon: <Wrench className="h-4 w-4" /> },
   ];
 
@@ -1894,9 +2428,18 @@ export default function ConfigPage() {
       : integrationItems.find((i) => i.pane === activePane)?.label ?? "Settings";
 
   return (
-    <div className="flex h-dvh flex-col justify-center md:flex-row">
+    <div className="flex h-dvh flex-col justify-center md:flex-row md:pt-[3.25rem]">
       <Toast toast={toast} />
       <input ref={fileInputRef} type="file" accept=".json,.yaml,.yml" className="hidden" onChange={handleImport} />
+
+      {/* Desktop drag-region spacer — matches chat title bar height so macOS
+          traffic lights have breathing room and the page header doesn't crash
+          into the very top of the window. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-x-0 top-0 hidden h-[3.25rem] md:block"
+        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+      />
 
       {/* Mobile top bar */}
       <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2 md:hidden">
@@ -1983,57 +2526,8 @@ export default function ConfigPage() {
             </div>
           </div>
 
-          {/* Config categories */}
-          <nav className="flex flex-col gap-0.5 px-2" aria-label="Settings categories">
-            {sidebarItems.map((item) => {
-              const isActive = !isSearching && activePane === "config" && activeCategory === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  aria-current={isActive ? "page" : undefined}
-                  onClick={() => {
-                    setSearchQuery("");
-                    setActivePane("config");
-                    setActiveCategory(item.id);
-                    setMobileNavOpen(false);
-                  }}
-                  className={`
-                    flex min-h-[36px] items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-sm
-                    transition-colors
-                    ${isActive
-                      ? "bg-foreground/[0.08] text-foreground font-medium"
-                      : "text-foreground/85 hover:text-foreground hover:bg-foreground/[0.04]"
-                    }
-                  `}
-                >
-                  <span className={isActive ? "text-foreground" : "text-foreground/70"} aria-hidden="true">{item.icon}</span>
-                  <span className="flex-1 truncate">{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Advanced toggle */}
-          <div className="px-3 pt-2">
-            <button
-              type="button"
-              aria-pressed={showAdvanced}
-              onClick={() => setShowAdvanced((v) => !v)}
-              className="flex w-full min-h-[36px] items-center justify-between rounded-md px-3 py-1.5 text-sm text-muted-foreground/70 transition-colors hover:text-foreground hover:bg-foreground/[0.04]"
-            >
-              <span>{showAdvanced ? "Hide advanced" : "Show advanced"}</span>
-              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
-          </div>
-
-          {/* Divider */}
-          <div className="mx-3 my-3 border-t border-border/50" />
-          <div className="px-5 pb-2 text-xs font-medium text-foreground/70">
-            Integrations
-          </div>
-
-          <nav className="flex flex-col gap-0.5 px-2" aria-label="Integrations">
+          {/* Primary navigation */}
+          <nav className="flex flex-col gap-0.5 px-2" aria-label="Settings">
             {integrationItems.map((item) => {
               const isActive = activePane === item.pane;
               return (
@@ -2061,12 +2555,67 @@ export default function ConfigPage() {
               );
             })}
           </nav>
+
+          {/* Advanced (schema-driven) categories — collapsed by default */}
+          <div className="mx-3 my-3 border-t border-border/50" />
+          <div className="px-3">
+            <button
+              type="button"
+              aria-expanded={showAdvanced}
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="flex w-full min-h-[36px] items-center justify-between rounded-md px-3 py-1.5 text-sm text-muted-foreground/80 transition-colors hover:text-foreground hover:bg-foreground/[0.04]"
+            >
+              <span className="flex items-center gap-2">
+                <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                Advanced settings
+              </span>
+              <span className="text-xs">{showAdvanced ? "Hide" : "Show"}</span>
+            </button>
+          </div>
+
+          {showAdvanced && (
+            <nav className="mt-1 flex flex-col gap-0.5 px-2" aria-label="Advanced settings categories">
+              {sidebarItems.map((item) => {
+                const isActive = !isSearching && activePane === "config" && activeCategory === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    aria-current={isActive ? "page" : undefined}
+                    onClick={() => {
+                      setSearchQuery("");
+                      setActivePane("config");
+                      setActiveCategory(item.id);
+                      setMobileNavOpen(false);
+                    }}
+                    className={`
+                      flex min-h-[32px] items-center gap-2.5 rounded-md px-3 py-1 text-left text-[13px]
+                      transition-colors
+                      ${isActive
+                        ? "bg-foreground/[0.08] text-foreground font-medium"
+                        : "text-foreground/75 hover:text-foreground hover:bg-foreground/[0.04]"
+                      }
+                    `}
+                  >
+                    <span className={isActive ? "text-foreground" : "text-foreground/60"} aria-hidden="true">{item.icon}</span>
+                    <span className="flex-1 truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </nav>
+          )}
         </div>
       </aside>
 
       {/* ---- Content ---- */}
       <div className="flex-1 overflow-y-auto min-w-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <div className="mx-auto max-w-4xl px-4 py-6 md:px-12 md:py-8">
+
+          {/* ---- Channels pane ---- */}
+          {activePane === "channels" && config && <ChannelsPanel config={config} setConfig={setConfig} />}
+
+          {/* ---- Memory pane ---- */}
+          {activePane === "memory" && config && <MemoryPanel config={config} setConfig={setConfig} />}
 
           {/* ---- Composio pane ---- */}
           {activePane === "composio" && <ComposioPanel />}

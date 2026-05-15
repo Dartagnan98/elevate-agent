@@ -76,6 +76,8 @@ import type {
   CronJob,
   CronJobCreateRequest,
   SkillInfo,
+  SkillTreeResponse,
+  SkillFileResponse,
   BlobResponse,
   ToolsetInfo,
   SessionSearchResponse,
@@ -669,6 +671,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, enabled }),
     }),
+  getSkillTree: (name: string) =>
+    fetchJSON<SkillTreeResponse>(`/api/skills/${encodeURIComponent(name)}/tree`),
+  getSkillFile: (name: string, path?: string) => {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+    return fetchJSON<SkillFileResponse>(`/api/skills/${encodeURIComponent(name)}/file${qs}`);
+  },
   getToolsets: () => fetchJSON<ToolsetInfo[]>("/api/tools/toolsets"),
 
   // Session search (FTS5)

@@ -2025,6 +2025,29 @@ export interface SkillInfo {
   enabled: boolean;
 }
 
+export interface SkillTreeNode {
+  name: string;
+  type: "file" | "dir";
+  path: string;
+  children?: SkillTreeNode[];
+}
+
+export interface SkillTreeResponse {
+  name: string;
+  root?: string;
+  tree: SkillTreeNode[];
+  error?: string;
+}
+
+export interface SkillFileResponse {
+  name: string;
+  path: string;
+  size?: number;
+  content?: string;
+  binary?: boolean;
+  error?: string;
+}
+
 export interface BlobResponse {
   blob: Blob;
   contentType: string;

@@ -105,6 +105,20 @@ export class GatewayClient {
     return this.on(ANY as GatewayEventName, cb);
   }
 
+  /**
+   * Replay a batch of events through the same listener pipeline that
+   * live websocket frames use. Used by session.resume to fan out the
+   * server-side ring buffer when the client reattaches to a session
+   * that kept running while the UI was looking at another chat.
+   */
+  replayEvents(events: GatewayEvent[]): void {
+    for (const ev of events) {
+      if (!ev || typeof ev.type !== "string") continue;
+      for (const cb of this.listeners.get(ev.type) ?? []) cb(ev);
+      for (const cb of this.listeners.get(ANY) ?? []) cb(ev);
+    }
+  }
+
   async connect(token?: string): Promise<void> {
     if (this._state === "open") return;
     if (this._state === "connecting" && this.connectPromise) {

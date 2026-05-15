@@ -85,7 +85,7 @@ export function useRealEstateHubData(): HubData {
     }
 
     void Promise.allSettled([
-      includeSourceInbox ? api.getSourceInbox(200) : Promise.resolve(null),
+      includeSourceInbox ? api.getSourceInbox(5000) : Promise.resolve(null),
       includeAdminTaskData ? api.getAdminDealTasks({ status: "open", limit: 200 }) : Promise.resolve(null),
       includeAdminTaskData ? api.getAdminActionRuns({ limit: 200 }) : Promise.resolve(null),
     ]).then(([sourceInboxResult, dealTasksResult, actionRunsResult]) => {

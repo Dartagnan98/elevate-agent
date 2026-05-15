@@ -1,14 +1,34 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router-dom";
-import { CalendarDays, Check, Clock, Pause, Pencil, Play, Plus, Trash2, X, Zap } from "lucide-react";
-import { H2 } from "@nous-research/ui/ui/components/typography/h2";
+import {
+  AlertCircle,
+  CalendarDays,
+  Check,
+  ChevronRight,
+  Clock,
+  MessageSquare,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  Search,
+  Send,
+  Trash2,
+  X,
+  Zap,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import type { CronJob } from "@/lib/api";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useToast } from "@/hooks/useToast";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { Toast } from "@/components/Toast";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,11 +36,30 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Segmented } from "@/components/ui/segmented";
 import { useI18n } from "@/i18n";
+import { usePageHeader } from "@/contexts/usePageHeader";
+
+/* ------------------------------------------------------------------ */
+/*  Schedule helpers (unchanged from previous version)                 */
+/* ------------------------------------------------------------------ */
 
 function formatTime(iso?: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   return d.toLocaleString();
+}
+
+function formatRelative(iso?: string | null): string {
+  if (!iso) return "never";
+  const d = new Date(iso);
+  const diff = d.getTime() - Date.now();
+  const abs = Math.abs(diff);
+  const m = Math.round(abs / 60000);
+  if (m < 1) return diff > 0 ? "moments away" : "just now";
+  if (m < 60) return diff > 0 ? `in ${m}m` : `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return diff > 0 ? `in ${h}h` : `${h}h ago`;
+  const days = Math.round(h / 24);
+  return diff > 0 ? `in ${days}d` : `${days}d ago`;
 }
 
 const STATUS_VARIANT: Record<string, "success" | "warning" | "destructive"> = {
@@ -31,7 +70,13 @@ const STATUS_VARIANT: Record<string, "success" | "warning" | "destructive"> = {
   completed: "destructive",
 };
 
-type ScheduleMode = "daily" | "weekdays" | "weekly" | "biweekly" | "monthly" | "custom";
+type ScheduleMode =
+  | "daily"
+  | "weekdays"
+  | "weekly"
+  | "biweekly"
+  | "monthly"
+  | "custom";
 
 const SCHEDULE_OPTIONS: Array<{ label: string; value: ScheduleMode }> = [
   { label: "Daily", value: "daily" },
@@ -118,7 +163,8 @@ function buildSchedule({
     return {
       description: `Every other ${weekday.label} at ${time}`,
       expression: `every 2w on ${weekday.anchor} at ${time}`,
-      helper: "Anchors the first run to the next selected weekday and repeats every 14 days.",
+      helper:
+        "Anchors the first run to the next selected weekday and repeats every 14 days.",
     };
   }
 
@@ -145,7 +191,9 @@ function inferScheduleMode(expr: string): {
   };
   if (!expr) return fallback;
   const trimmed = expr.trim();
-  const biweeklyMatch = trimmed.match(/^every\s+2w\s+on\s+(\w+)\s+at\s+(\d{1,2}):(\d{2})$/i);
+  const biweeklyMatch = trimmed.match(
+    /^every\s+2w\s+on\s+(\w+)\s+at\s+(\d{1,2}):(\d{2})$/i,
+  );
   if (biweeklyMatch) {
     const anchor = biweeklyMatch[1].toLowerCase();
     const weekday = WEEKDAYS.find((day) => day.value === anchor) ?? WEEKDAYS[0];
@@ -163,8 +211,12 @@ function inferScheduleMode(expr: string): {
   const minuteNum = Number(minute);
   const hourNum = Number(hour);
   if (
-    !Number.isFinite(minuteNum) || minuteNum < 0 || minuteNum > 59 ||
-    !Number.isFinite(hourNum) || hourNum < 0 || hourNum > 23 ||
+    !Number.isFinite(minuteNum) ||
+    minuteNum < 0 ||
+    minuteNum > 59 ||
+    !Number.isFinite(hourNum) ||
+    hourNum < 0 ||
+    hourNum > 23 ||
     month !== "*"
   ) {
     return fallback;
@@ -218,7 +270,14 @@ function ScheduleFields({
 }) {
   const { t } = useI18n();
   const schedule = useMemo(
-    () => buildSchedule({ customSchedule, dayOfMonth, dayOfWeek, mode: scheduleMode, time }),
+    () =>
+      buildSchedule({
+        customSchedule,
+        dayOfMonth,
+        dayOfWeek,
+        mode: scheduleMode,
+        time,
+      }),
     [customSchedule, dayOfMonth, dayOfWeek, scheduleMode, time],
   );
   return (
@@ -242,7 +301,9 @@ function ScheduleFields({
 
       {scheduleMode === "custom" ? (
         <div className="grid gap-2">
-          <Label htmlFor={`${idPrefix}-schedule`}>{t.cron.schedulePlaceholder}</Label>
+          <Label htmlFor={`${idPrefix}-schedule`}>
+            {t.cron.schedulePlaceholder}
+          </Label>
           <Input
             id={`${idPrefix}-schedule`}
             placeholder="0 9 * * *"
@@ -308,6 +369,10 @@ function ScheduleFields({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  Inline edit form                                                   */
+/* ------------------------------------------------------------------ */
+
 function EditJobForm({
   job,
   onCancel,
@@ -320,7 +385,10 @@ function EditJobForm({
   const { t } = useI18n();
   const { showToast } = useToast();
   const initial = useMemo(
-    () => inferScheduleMode((job.schedule?.expr as string) || job.schedule_display || ""),
+    () =>
+      inferScheduleMode(
+        (job.schedule?.expr as string) || job.schedule_display || "",
+      ),
     [job.id, job.schedule_display],
   );
   const [name, setName] = useState(job.name ?? "");
@@ -333,7 +401,14 @@ function EditJobForm({
   const [customSchedule, setCustomSchedule] = useState(initial.customSchedule);
   const [saving, setSaving] = useState(false);
   const schedule = useMemo(
-    () => buildSchedule({ customSchedule, dayOfMonth, dayOfWeek, mode: scheduleMode, time }),
+    () =>
+      buildSchedule({
+        customSchedule,
+        dayOfMonth,
+        dayOfWeek,
+        mode: scheduleMode,
+        time,
+      }),
     [customSchedule, dayOfMonth, dayOfWeek, scheduleMode, time],
   );
 
@@ -360,7 +435,7 @@ function EditJobForm({
   };
 
   return (
-    <div className="grid gap-4 px-4 pb-4 pt-3">
+    <div className="grid gap-4">
       <div className="grid gap-2">
         <Label htmlFor={`edit-${job.id}-name`}>{t.cron.nameOptional}</Label>
         <Input
@@ -374,7 +449,7 @@ function EditJobForm({
         <Label htmlFor={`edit-${job.id}-prompt`}>{t.cron.prompt}</Label>
         <textarea
           id={`edit-${job.id}-prompt`}
-          className="flex min-h-[100px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-h-[140px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
         />
@@ -401,8 +476,12 @@ function EditJobForm({
             onValueChange={(v) => setDeliver(v)}
           >
             <SelectOption value="local">{t.cron.delivery.local}</SelectOption>
-            <SelectOption value="telegram">{t.cron.delivery.telegram}</SelectOption>
-            <SelectOption value="discord">{t.cron.delivery.discord}</SelectOption>
+            <SelectOption value="telegram">
+              {t.cron.delivery.telegram}
+            </SelectOption>
+            <SelectOption value="discord">
+              {t.cron.delivery.discord}
+            </SelectOption>
             <SelectOption value="slack">{t.cron.delivery.slack}</SelectOption>
             <SelectOption value="email">{t.cron.delivery.email}</SelectOption>
           </Select>
@@ -422,60 +501,19 @@ function EditJobForm({
   );
 }
 
-export default function CronPage() {
-  const [jobs, setJobs] = useState<CronJob[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchParams, setSearchParams] = useSearchParams();
-  const editParam = searchParams.get("edit");
-  const [editingId, setEditingId] = useState<string | null>(editParam);
-  const { toast, showToast } = useToast();
+/* ------------------------------------------------------------------ */
+/*  Create new job form                                                */
+/* ------------------------------------------------------------------ */
+
+function NewJobForm({
+  onCancel,
+  onCreated,
+}: {
+  onCancel: () => void;
+  onCreated: () => void;
+}) {
   const { t } = useI18n();
-
-  useEffect(() => {
-    if (editParam) {
-      setEditingId(editParam);
-    }
-  }, [editParam]);
-
-  useEffect(() => {
-    if (!editParam || !jobs.length) return;
-    if (!jobs.some((job) => job.id === editParam)) return;
-    requestAnimationFrame(() => {
-      document.getElementById(`cron-job-${editParam}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
-  }, [editParam, jobs]);
-
-  useEffect(() => {
-    if (!jobs.length) return;
-    const hash = window.location.hash;
-    if (!hash.startsWith("#cron-job-")) return;
-    const id = hash.slice(1);
-    requestAnimationFrame(() => {
-      document.getElementById(id)?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
-  }, [jobs]);
-
-  const closeEditor = useCallback(() => {
-    setEditingId(null);
-    if (editParam) {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete("edit");
-          return next;
-        },
-        { replace: true },
-      );
-    }
-  }, [editParam, setSearchParams]);
-
-  // New job form state
+  const { showToast } = useToast();
   const [prompt, setPrompt] = useState("");
   const [scheduleMode, setScheduleMode] = useState<ScheduleMode>("daily");
   const [time, setTime] = useState("09:00");
@@ -485,7 +523,7 @@ export default function CronPage() {
   const [name, setName] = useState("");
   const [deliver, setDeliver] = useState("local");
   const [creating, setCreating] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
+
   const schedule = useMemo(
     () =>
       buildSchedule({
@@ -497,22 +535,6 @@ export default function CronPage() {
       }),
     [customSchedule, dayOfMonth, dayOfWeek, scheduleMode, time],
   );
-
-  const loadJobs = useCallback(() => {
-    api
-      .getCronJobs()
-      .then(setJobs)
-      .catch(() => showToast(t.common.loading, "error"))
-      .finally(() => setLoading(false));
-  }, [showToast, t.common.loading]);
-
-  useEffect(() => {
-    loadJobs();
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") loadJobs();
-    }, 15_000);
-    return () => window.clearInterval(interval);
-  }, [loadJobs]);
 
   const handleCreate = async () => {
     if (!prompt.trim() || !schedule.expression.trim()) {
@@ -528,16 +550,7 @@ export default function CronPage() {
         deliver,
       });
       showToast(t.common.create + " ✓", "success");
-      setPrompt("");
-      setScheduleMode("daily");
-      setTime("09:00");
-      setDayOfWeek("monday");
-      setDayOfMonth("1");
-      setCustomSchedule("0 9 * * *");
-      setName("");
-      setDeliver("local");
-      setShowCreate(false);
-      loadJobs();
+      onCreated();
     } catch (e) {
       showToast(`${t.config.failedToSave}: ${e}`, "error");
     } finally {
@@ -545,6 +558,492 @@ export default function CronPage() {
     }
   };
 
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-2">
+        <Label htmlFor="cron-name">{t.cron.nameOptional}</Label>
+        <Input
+          id="cron-name"
+          placeholder={t.cron.namePlaceholder}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor="cron-prompt">{t.cron.prompt}</Label>
+        <textarea
+          id="cron-prompt"
+          className="flex min-h-[120px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          placeholder={t.cron.promptPlaceholder}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </div>
+
+      <ScheduleFields
+        customSchedule={customSchedule}
+        dayOfMonth={dayOfMonth}
+        dayOfWeek={dayOfWeek}
+        idPrefix="cron"
+        scheduleMode={scheduleMode}
+        setCustomSchedule={setCustomSchedule}
+        setDayOfMonth={setDayOfMonth}
+        setDayOfWeek={setDayOfWeek}
+        setScheduleMode={setScheduleMode}
+        setTime={setTime}
+        time={time}
+      />
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+        <div className="grid gap-2">
+          <Label htmlFor="cron-deliver">{t.cron.deliverTo}</Label>
+          <Select
+            id="cron-deliver"
+            value={deliver}
+            onValueChange={(v) => setDeliver(v)}
+          >
+            <SelectOption value="local">{t.cron.delivery.local}</SelectOption>
+            <SelectOption value="telegram">
+              {t.cron.delivery.telegram}
+            </SelectOption>
+            <SelectOption value="discord">
+              {t.cron.delivery.discord}
+            </SelectOption>
+            <SelectOption value="slack">{t.cron.delivery.slack}</SelectOption>
+            <SelectOption value="email">{t.cron.delivery.email}</SelectOption>
+          </Select>
+        </div>
+        <div className="flex items-end gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={creating}>
+            <X className="h-3.5 w-3.5" />
+            {t.common.cancel}
+          </Button>
+          <Button onClick={handleCreate} disabled={creating}>
+            <Plus className="h-3.5 w-3.5" />
+            {creating ? t.common.creating : t.common.create}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Left rail: job row                                                 */
+/* ------------------------------------------------------------------ */
+
+function JobRailRow({
+  job,
+  selected,
+  onSelect,
+}: {
+  job: CronJob;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const isPaused = job.state === "paused";
+  const isError = job.state === "error";
+  const title = job.name || job.prompt.slice(0, 60);
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`group w-full rounded-md px-2.5 py-2 text-left transition-colors ${
+        selected
+          ? "bg-primary/10 text-foreground"
+          : "hover:bg-foreground/[0.04] text-foreground/90"
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
+            isError
+              ? "bg-destructive"
+              : isPaused
+                ? "bg-warning"
+                : "bg-success"
+          }`}
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <div
+            className={`truncate text-[12px] font-medium leading-tight ${
+              isPaused ? "text-muted-foreground" : ""
+            }`}
+          >
+            {title}
+            {job.prompt.length > 60 && !job.name ? "…" : ""}
+          </div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/80">
+            <Clock className="h-2.5 w-2.5" />
+            <span className="truncate">{job.schedule_display}</span>
+          </div>
+        </div>
+        {isError && (
+          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />
+        )}
+      </div>
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Right detail pane                                                  */
+/* ------------------------------------------------------------------ */
+
+function JobDetail({
+  job,
+  isEditing,
+  onEditToggle,
+  onPauseResume,
+  onTrigger,
+  onDelete,
+  onSaved,
+  onCancelEdit,
+}: {
+  job: CronJob;
+  isEditing: boolean;
+  onEditToggle: () => void;
+  onPauseResume: () => void;
+  onTrigger: () => void;
+  onDelete: () => void;
+  onSaved: () => void;
+  onCancelEdit: () => void;
+}) {
+  const { t } = useI18n();
+  const isPaused = job.state === "paused";
+
+  return (
+    <div className="flex flex-1 flex-col overflow-y-auto">
+      {/* Header */}
+      <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur">
+        <div className="flex items-start gap-3 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="truncate text-base font-medium">
+                {job.name || job.prompt.slice(0, 60)}
+                {!job.name && job.prompt.length > 60 ? "…" : ""}
+              </h2>
+              <Badge variant={STATUS_VARIANT[job.state] ?? "secondary"}>
+                {job.state}
+              </Badge>
+              {job.deliver && job.deliver !== "local" && (
+                <Badge variant="outline">{job.deliver}</Badge>
+              )}
+            </div>
+            <p className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <CalendarDays className="h-3 w-3" />
+              <span className="font-mono">{job.schedule_display}</span>
+            </p>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              title={isEditing ? t.common.cancel : "Edit"}
+              aria-label={isEditing ? t.common.cancel : "Edit"}
+              onClick={onEditToggle}
+            >
+              {isEditing ? (
+                <X className="h-4 w-4" />
+              ) : (
+                <Pencil className="h-4 w-4" />
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title={isPaused ? t.cron.resume : t.cron.pause}
+              aria-label={isPaused ? t.cron.resume : t.cron.pause}
+              onClick={onPauseResume}
+            >
+              {isPaused ? (
+                <Play className="h-4 w-4 text-success" />
+              ) : (
+                <Pause className="h-4 w-4 text-warning" />
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title={t.cron.triggerNow}
+              aria-label={t.cron.triggerNow}
+              onClick={onTrigger}
+            >
+              <Zap className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title={t.common.delete}
+              aria-label={t.common.delete}
+              onClick={onDelete}
+            >
+              <Trash2 className="h-4 w-4 text-destructive" />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 px-5 py-5">
+        {isEditing ? (
+          <EditJobForm
+            job={job}
+            onCancel={onCancelEdit}
+            onSaved={onSaved}
+          />
+        ) : (
+          <>
+            {/* Meta grid */}
+            <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <MetaCell
+                icon={<Clock className="h-3 w-3" />}
+                label={t.cron.last}
+                value={formatTime(job.last_run_at)}
+                hint={
+                  job.last_run_at ? formatRelative(job.last_run_at) : undefined
+                }
+              />
+              <MetaCell
+                icon={<CalendarDays className="h-3 w-3" />}
+                label={t.cron.next}
+                value={formatTime(job.next_run_at)}
+                hint={
+                  job.next_run_at ? formatRelative(job.next_run_at) : undefined
+                }
+              />
+              <MetaCell
+                icon={<Send className="h-3 w-3" />}
+                label={t.cron.deliverTo}
+                value={job.deliver || "local"}
+              />
+              {job.agent && (
+                <MetaCell
+                  icon={<MessageSquare className="h-3 w-3" />}
+                  label="Agent"
+                  value={job.agent}
+                />
+              )}
+            </div>
+
+            {job.last_error && (
+              <div className="mb-5 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <div className="min-w-0 break-words">{job.last_error}</div>
+              </div>
+            )}
+
+            {/* Prompt */}
+            <section>
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                <MessageSquare className="h-3 w-3" />
+                {t.cron.prompt}
+              </div>
+              <pre className="whitespace-pre-wrap rounded-md border border-border bg-card/50 px-3 py-3 text-[12.5px] leading-relaxed text-foreground/90 font-sans">
+                {job.prompt}
+              </pre>
+            </section>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MetaCell({
+  icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-card/40 px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <div className="mt-1 truncate text-[12.5px] text-foreground">
+        {value}
+      </div>
+      {hint && (
+        <div className="text-[10px] text-muted-foreground/70">{hint}</div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page                                                               */
+/* ------------------------------------------------------------------ */
+
+export default function CronPage() {
+  const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const editParam = searchParams.get("edit");
+  const [selectedId, setSelectedId] = useState<string | null>(editParam);
+  const [editingId, setEditingId] = useState<string | null>(editParam);
+  const [showCreate, setShowCreate] = useState(false);
+  const [search, setSearch] = useState("");
+  const { toast, showToast } = useToast();
+  const { t } = useI18n();
+  const { setAfterTitle, setEnd } = usePageHeader();
+
+  /* ---- Sync selected/editing with ?edit= deep link ---- */
+  useEffect(() => {
+    if (editParam) {
+      setSelectedId(editParam);
+      setEditingId(editParam);
+    }
+  }, [editParam]);
+
+  const closeEditor = useCallback(() => {
+    setEditingId(null);
+    if (editParam) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("edit");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [editParam, setSearchParams]);
+
+  /* ---- Load jobs ---- */
+  const loadJobs = useCallback(() => {
+    api
+      .getCronJobs()
+      .then((next) => {
+        setJobs(next);
+        // Auto-select first job if nothing selected
+        if (next.length > 0 && !selectedId) {
+          setSelectedId(next[0].id);
+        }
+      })
+      .catch(() => showToast(t.common.loading, "error"))
+      .finally(() => setLoading(false));
+  }, [selectedId, showToast, t.common.loading]);
+
+  useEffect(() => {
+    loadJobs();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadJobs();
+    }, 15_000);
+    return () => window.clearInterval(interval);
+  }, [loadJobs]);
+
+  /* ---- Filter ---- */
+  const lowerSearch = search.trim().toLowerCase();
+  const filteredJobs = useMemo(() => {
+    if (!lowerSearch) return jobs;
+    return jobs.filter(
+      (job) =>
+        (job.name ?? "").toLowerCase().includes(lowerSearch) ||
+        job.prompt.toLowerCase().includes(lowerSearch) ||
+        job.schedule_display.toLowerCase().includes(lowerSearch),
+    );
+  }, [jobs, lowerSearch]);
+
+  /* ---- Group jobs by status for rail sections ---- */
+  const activeJobs = useMemo(
+    () => filteredJobs.filter((j) => j.state !== "paused" && j.state !== "completed"),
+    [filteredJobs],
+  );
+  const pausedJobs = useMemo(
+    () => filteredJobs.filter((j) => j.state === "paused"),
+    [filteredJobs],
+  );
+
+  const selectedJob = useMemo(
+    () => jobs.find((j) => j.id === selectedId) ?? null,
+    [jobs, selectedId],
+  );
+
+  /* ---- Page header (count + search + new) ---- */
+  const enabledCount = jobs.filter((j) => j.state !== "paused").length;
+
+  useLayoutEffect(() => {
+    if (loading) {
+      setAfterTitle(null);
+      setEnd(null);
+      return;
+    }
+    setAfterTitle(
+      <span className="whitespace-nowrap text-xs text-muted-foreground">
+        {enabledCount}/{jobs.length} active
+      </span>,
+    );
+    setEnd(
+      <div className="flex items-center gap-2">
+        <div className="relative w-full min-w-0 sm:max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            className="h-8 pl-8 pr-7 text-xs"
+            placeholder={t.common.search}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search && (
+            <button
+              type="button"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              onClick={() => setSearch("")}
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+        <Button
+          size="sm"
+          variant={showCreate ? "outline" : "default"}
+          onClick={() => {
+            setShowCreate((v) => !v);
+            if (!showCreate) {
+              setEditingId(null);
+            }
+          }}
+        >
+          {showCreate ? (
+            <>
+              <X className="h-3.5 w-3.5" />
+              {t.common.cancel}
+            </>
+          ) : (
+            <>
+              <Plus className="h-3.5 w-3.5" />
+              {t.cron.newJob}
+            </>
+          )}
+        </Button>
+      </div>,
+    );
+    return () => {
+      setAfterTitle(null);
+      setEnd(null);
+    };
+  }, [
+    enabledCount,
+    jobs.length,
+    loading,
+    search,
+    setAfterTitle,
+    setEnd,
+    showCreate,
+    t,
+  ]);
+
+  /* ---- Actions ---- */
   const handlePauseResume = async (job: CronJob) => {
     try {
       const isPaused = job.state === "paused";
@@ -590,6 +1089,12 @@ export default function CronPage() {
             `${t.common.delete}: "${job?.name || (job?.prompt ?? "").slice(0, 30) || id}"`,
             "success",
           );
+          // If deleted the selected one, clear or move to next
+          setSelectedId((prev) => {
+            if (prev !== id) return prev;
+            const remaining = jobs.filter((j) => j.id !== id);
+            return remaining[0]?.id ?? null;
+          });
           loadJobs();
         } catch (e) {
           showToast(`${t.status.error}: ${e}`, "error");
@@ -600,9 +1105,12 @@ export default function CronPage() {
     ),
   });
 
+  /* ---- Loading ---- */
   if (loading) {
     return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">{t.common.loading}</p>
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">
+        {t.common.loading}
+      </p>
     );
   }
 
@@ -611,7 +1119,7 @@ export default function CronPage() {
     : null;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       <Toast toast={toast} />
 
       <DeleteConfirmDialog
@@ -627,238 +1135,189 @@ export default function CronPage() {
         loading={jobDelete.isDeleting}
       />
 
-      {/* Jobs list header + new job toggle */}
-      <div className="flex items-center justify-between gap-3">
-        <H2
-          variant="sm"
-          className="flex items-center gap-2 text-muted-foreground"
+      {/* ============ Two-pane shell ============ */}
+      <div className="grid min-h-[calc(100vh-12rem)] grid-cols-1 gap-0 rounded-md border border-border bg-card md:grid-cols-[280px_minmax(0,1fr)]">
+        {/* ---- Left rail ---- */}
+        <aside
+          aria-label={t.cron.scheduledJobs}
+          className="flex flex-col border-b border-border md:border-b-0 md:border-r"
         >
-          <Clock className="h-4 w-4" />
-          {t.cron.scheduledJobs} ({jobs.length})
-        </H2>
-        <Button
-          size="sm"
-          variant={showCreate ? "outline" : "default"}
-          onClick={() => setShowCreate((v) => !v)}
-        >
-          {showCreate ? (
-            <>
-              <X className="h-3.5 w-3.5" />
-              Cancel
-            </>
-          ) : (
-            <>
-              <Plus className="h-3.5 w-3.5" />
-              {t.cron.newJob}
-            </>
-          )}
-        </Button>
-      </div>
-
-      {/* Create new job form (collapsed by default) */}
-      {showCreate && (
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Plus className="h-4 w-4" />
-            {t.cron.newJob}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4">
-            <div className="grid gap-2">
-              <Label htmlFor="cron-name">{t.cron.nameOptional}</Label>
-              <Input
-                id="cron-name"
-                placeholder={t.cron.namePlaceholder}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="cron-prompt">{t.cron.prompt}</Label>
-              <textarea
-                id="cron-prompt"
-                className="flex min-h-[80px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder={t.cron.promptPlaceholder}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-              />
-            </div>
-
-            <ScheduleFields
-              customSchedule={customSchedule}
-              dayOfMonth={dayOfMonth}
-              dayOfWeek={dayOfWeek}
-              idPrefix="cron"
-              scheduleMode={scheduleMode}
-              setCustomSchedule={setCustomSchedule}
-              setDayOfMonth={setDayOfMonth}
-              setDayOfWeek={setDayOfWeek}
-              setScheduleMode={setScheduleMode}
-              setTime={setTime}
-              time={time}
-            />
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,0.5fr)]">
-              <div className="grid gap-2">
-                <Label htmlFor="cron-deliver">{t.cron.deliverTo}</Label>
-                <Select
-                  id="cron-deliver"
-                  value={deliver}
-                  onValueChange={(v) => setDeliver(v)}
-                >
-                  <SelectOption value="local">
-                    {t.cron.delivery.local}
-                  </SelectOption>
-                  <SelectOption value="telegram">
-                    {t.cron.delivery.telegram}
-                  </SelectOption>
-                  <SelectOption value="discord">
-                    {t.cron.delivery.discord}
-                  </SelectOption>
-                  <SelectOption value="slack">
-                    {t.cron.delivery.slack}
-                  </SelectOption>
-                  <SelectOption value="email">
-                    {t.cron.delivery.email}
-                  </SelectOption>
-                </Select>
-              </div>
-
-              <div className="flex items-end">
-                <Button
-                  onClick={handleCreate}
-                  disabled={creating}
-                  className="w-full"
-                >
-                  <Plus className="h-3 w-3" />
-                  {creating ? t.common.creating : t.common.create}
-                </Button>
-              </div>
+          <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+            <div className="flex items-center gap-2 text-[11px] font-medium tracking-normal text-muted-foreground">
+              <Clock className="h-3 w-3" />
+              <span>{t.cron.scheduledJobs}</span>
+              <span className="text-muted-foreground/60">({jobs.length})</span>
             </div>
           </div>
-        </CardContent>
-      </Card>
-      )}
 
-      {/* Jobs list */}
-      <div className="flex flex-col gap-3">
-        {jobs.length === 0 && (
-          <p className="px-1 py-1 text-xs text-muted-foreground/80">
-            {t.cron.noJobs}
-          </p>
-        )}
+          <div className="flex-1 overflow-y-auto px-1 py-2">
+            {/* Create entry */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowCreate(true);
+                setEditingId(null);
+              }}
+              className={`mb-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12px] transition-colors ${
+                showCreate
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground"
+              }`}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>{t.cron.newJob}</span>
+            </button>
 
-        {jobs.map((job) => {
-          const isEditing = editingId === job.id;
-          return (
-            <Card key={job.id} id={`cron-job-${job.id}`}>
-              <CardContent className="flex items-center gap-4 py-4">
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-medium text-sm truncate">
-                      {job.name ||
-                        job.prompt.slice(0, 60) +
-                          (job.prompt.length > 60 ? "..." : "")}
-                    </span>
-                    <Badge variant={STATUS_VARIANT[job.state] ?? "secondary"}>
-                      {job.state}
-                    </Badge>
-                    {job.deliver && job.deliver !== "local" && (
-                      <Badge variant="outline">{job.deliver}</Badge>
-                    )}
-                  </div>
-                  {job.name && (
-                    <p className="text-xs text-muted-foreground truncate mb-1">
-                      {job.prompt.slice(0, 100)}
-                      {job.prompt.length > 100 ? "..." : ""}
+            <JobRailSection
+              label="Active"
+              items={activeJobs}
+              selectedId={selectedId}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setShowCreate(false);
+              }}
+              defaultOpen
+            />
+            <JobRailSection
+              label="Paused"
+              items={pausedJobs}
+              selectedId={selectedId}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setShowCreate(false);
+              }}
+              defaultOpen={pausedJobs.length > 0 && activeJobs.length === 0}
+            />
+
+            {filteredJobs.length === 0 && (
+              <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
+                {lowerSearch ? "No jobs match your search." : t.cron.noJobs}
+              </p>
+            )}
+          </div>
+        </aside>
+
+        {/* ---- Right pane ---- */}
+        <section className="flex min-w-0 flex-col">
+          {showCreate ? (
+            <div className="flex flex-1 flex-col overflow-y-auto">
+              <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur">
+                <div className="flex items-start gap-3 px-5 py-4">
+                  <div className="min-w-0 flex-1">
+                    <h2 className="flex items-center gap-2 text-base font-medium">
+                      <Plus className="h-4 w-4" />
+                      {t.cron.newJob}
+                    </h2>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Schedule a recurring agent run.
                     </p>
-                  )}
-                  <div className="flex flex-col gap-1 text-xs text-muted-foreground lg:flex-row lg:flex-wrap lg:items-center lg:gap-x-4">
-                    <span className="font-mono truncate">{job.schedule_display}</span>
-                    <span className="flex flex-wrap gap-x-4 gap-y-1">
-                      <span>
-                        {t.cron.last}: {formatTime(job.last_run_at)}
-                      </span>
-                      <span>
-                        {t.cron.next}: {formatTime(job.next_run_at)}
-                      </span>
-                    </span>
                   </div>
-                  {job.last_error && (
-                    <p className="text-xs text-destructive mt-1">
-                      {job.last_error}
-                    </p>
-                  )}
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-1 shrink-0">
                   <Button
                     variant="ghost"
                     size="icon"
-                    title={isEditing ? t.common.cancel : "Edit"}
-                    aria-label={isEditing ? t.common.cancel : "Edit"}
-                    onClick={() => (isEditing ? closeEditor() : setEditingId(job.id))}
+                    aria-label={t.common.cancel}
+                    onClick={() => setShowCreate(false)}
                   >
-                    {isEditing ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title={job.state === "paused" ? t.cron.resume : t.cron.pause}
-                    aria-label={
-                      job.state === "paused" ? t.cron.resume : t.cron.pause
-                    }
-                    onClick={() => handlePauseResume(job)}
-                  >
-                    {job.state === "paused" ? (
-                      <Play className="h-4 w-4 text-success" />
-                    ) : (
-                      <Pause className="h-4 w-4 text-warning" />
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title={t.cron.triggerNow}
-                    aria-label={t.cron.triggerNow}
-                    onClick={() => handleTrigger(job)}
-                  >
-                    <Zap className="h-4 w-4" />
-                  </Button>
-
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title={t.common.delete}
-                    aria-label={t.common.delete}
-                    onClick={() => jobDelete.requestDelete(job.id)}
-                  >
-                    <Trash2 className="h-4 w-4 text-destructive" />
+                    <X className="h-4 w-4" />
                   </Button>
                 </div>
-              </CardContent>
-              {isEditing && (
-                <div className="border-t border-border bg-card">
-                  <EditJobForm
-                    job={job}
-                    onCancel={closeEditor}
-                    onSaved={() => {
-                      closeEditor();
-                      loadJobs();
-                    }}
-                  />
-                </div>
-              )}
-            </Card>
-          );
-        })}
+              </div>
+              <div className="px-5 py-5">
+                <NewJobForm
+                  onCancel={() => setShowCreate(false)}
+                  onCreated={() => {
+                    setShowCreate(false);
+                    loadJobs();
+                  }}
+                />
+              </div>
+            </div>
+          ) : selectedJob ? (
+            <JobDetail
+              job={selectedJob}
+              isEditing={editingId === selectedJob.id}
+              onEditToggle={() => {
+                if (editingId === selectedJob.id) {
+                  closeEditor();
+                } else {
+                  setEditingId(selectedJob.id);
+                }
+              }}
+              onPauseResume={() => handlePauseResume(selectedJob)}
+              onTrigger={() => handleTrigger(selectedJob)}
+              onDelete={() => jobDelete.requestDelete(selectedJob.id)}
+              onSaved={() => {
+                closeEditor();
+                loadJobs();
+              }}
+              onCancelEdit={closeEditor}
+            />
+          ) : (
+            <div className="flex flex-1 items-center justify-center px-6 py-12">
+              <p className="text-xs text-muted-foreground">
+                {jobs.length === 0
+                  ? "No cron jobs yet. Use + New cron job to create one."
+                  : "Select a job from the rail to view its details."}
+              </p>
+            </div>
+          )}
+        </section>
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Left rail section (Active / Paused)                                */
+/* ------------------------------------------------------------------ */
+
+function JobRailSection({
+  label,
+  items,
+  selectedId,
+  onSelect,
+  defaultOpen,
+}: {
+  label: string;
+  items: CronJob[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-medium tracking-wide text-muted-foreground/70 hover:text-foreground transition-colors"
+      >
+        <ChevronRight
+          className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <span className="uppercase">{label}</span>
+        <span className="text-muted-foreground/40">({items.length})</span>
+      </button>
+      {open && (
+        <ul className="mt-0.5 space-y-px">
+          {items.map((job) => (
+            <li key={job.id}>
+              <JobRailRow
+                job={job}
+                selected={selectedId === job.id}
+                onSelect={() => onSelect(job.id)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

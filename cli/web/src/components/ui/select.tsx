@@ -7,6 +7,7 @@ export function Select({
   onValueChange,
   children,
   className,
+  buttonClassName,
   id,
   disabled,
 }: SelectProps) {
@@ -95,6 +96,7 @@ export function Select({
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70 focus-visible:border-ring/40",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "cursor-pointer",
+          buttonClassName,
         )}
       >
         <span className={cn("truncate", !selectedOption && "text-muted-foreground")}>
@@ -180,6 +182,7 @@ interface SelectProps {
   onValueChange?: (value: string) => void;
   children?: React.ReactNode;
   className?: string;
+  buttonClassName?: string;
   id?: string;
   disabled?: boolean;
 }

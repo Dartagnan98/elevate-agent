@@ -12,16 +12,27 @@ import {
   Circle,
   ExternalLink,
   Loader2,
+  Save,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
+  AgentHubAgent,
   AgentSetupSnapshot,
   OAuthProvider,
   TelegramApprovedEntry,
   TelegramPendingEntry,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
+import {
+  AgentConfigEditor,
+  AgentTelegramLaneEditor,
+  type AgentEditPatch,
+  type SkillEntry,
+  type ToolsetEntry,
+} from "@/components/agent-hub/AgentConfigEditor";
 import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
@@ -87,9 +98,13 @@ function staticModelsFor(providerId: string): string[] {
 
 type AgentWizardStepId =
   | "models"
+  | "tts"
+  | "terminal"
+  | "agent_settings"
   | "memory"
   | "inbound"
   | "tools"
+  | "skills"
   | "outbound"
   | "subagents";
 
@@ -103,45 +118,73 @@ type AgentWizardStep = {
 const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
   {
     id: "models",
-    eyebrow: "Step 1 of 6",
+    eyebrow: "Step 1 of 10",
     title: "Brain",
     subtitle:
       "Sign in to a model provider, then pick which one the agent thinks with. Same auth state as the CLI — if `elevate auth add anthropic` is done, you'll see Anthropic connected below.",
   },
   {
+    id: "tts",
+    eyebrow: "Step 2 of 10",
+    title: "Voice (TTS)",
+    subtitle:
+      "Optional. Give the agent a voice for read-aloud, voice notes, and audio replies. Edge TTS is free; ElevenLabs / OpenAI TTS / Gemini sound the best.",
+  },
+  {
+    id: "terminal",
+    eyebrow: "Step 3 of 10",
+    title: "Terminal backend",
+    subtitle:
+      "Where the agent runs shell commands. Local runs on this Mac. Pick Docker / Modal / SSH / Daytona / Singularity if you want the agent's shell isolated or remote.",
+  },
+  {
+    id: "agent_settings",
+    eyebrow: "Step 4 of 10",
+    title: "Agent settings",
+    subtitle:
+      "Tune the runtime: max iterations per turn, tool progress verbosity, when to compress context, and when sessions auto-reset.",
+  },
+  {
     id: "memory",
-    eyebrow: "Step 2 of 6",
+    eyebrow: "Step 5 of 10",
     title: "Memory store",
     subtitle:
       "Where long-term memory lives. Local SQLite is zero-config and runs on this Mac. Pick Supabase later if you want memory shared across devices.",
   },
   {
     id: "inbound",
-    eyebrow: "Step 3 of 6",
+    eyebrow: "Step 6 of 10",
     title: "How the agent hears you",
     subtitle:
-      "Pick every surface you want to reach the agent from — CLI is always on. Telegram and iMessage are the most common. Skip anything you don't use.",
+      "Pick every surface you want to reach the agent from — CLI is always on. Telegram and iMessage are the most common. 17 platforms supported — open \"More platforms\" for Signal, Matrix, Email, SMS, Feishu, WeCom, QQ Bot, BlueBubbles, and webhooks.",
   },
   {
     id: "tools",
-    eyebrow: "Step 4 of 6",
+    eyebrow: "Step 7 of 10",
     title: "APIs + tools",
     subtitle:
-      "Optional. Image generation (Nano Banana) lights up /generate, /edit, /restore. Composio plugs in 100+ pre-wired tools — Gmail, Calendar, Slack, GitHub, Notion.",
+      "Optional. Image generation (Nano Banana) lights up /generate, /edit, /restore. Composio plugs in 100+ pre-wired tools — Gmail, Calendar, Slack, GitHub, Notion. Toolsets show what's installed and configured below.",
+  },
+  {
+    id: "skills",
+    eyebrow: "Step 8 of 10",
+    title: "Skills",
+    subtitle:
+      "Reusable workflows the agent can run on command — research, follow-up, lead-pull, weekly report. Browse what's installed, see what each one does, flip them on/off. Disabled skills won't be picked by autopilot but you can still call them by name.",
   },
   {
     id: "outbound",
-    eyebrow: "Step 5 of 6",
+    eyebrow: "Step 9 of 10",
     title: "How the agent sends messages",
     subtitle:
-      "Pick which channels the agent can write to. For bots and webhooks (Telegram, Discord, WhatsApp, Slack) the same credentials from Step 3 handle outbound — flip the channel off here to make the agent read-only on it. iMessage outbound uses Messages.app on this Mac.",
+      "Pick which channels the agent can write to. For bots and webhooks (Telegram, Discord, WhatsApp, Slack) the same credentials from Step 6 handle outbound — flip the channel off here to make the agent read-only on it. iMessage outbound uses Messages.app on this Mac.",
   },
   {
     id: "subagents",
-    eyebrow: "Step 6 of 6",
-    title: "Sub-agents",
+    eyebrow: "Step 10 of 10",
+    title: "Specialist agents",
     subtitle:
-      "Opt-in. Spin up the specialist PTY agents (Executive Assistant + Admin + Outreach + Ads + Marketing + Social Media) so the council runs alongside the main agent. Off by default for solo runtimes.",
+      "Pick which Agent Hub agents run alongside the main agent. Each one gets its own role, prompt, skills, toolsets, and (optional) Telegram lane — configure them inline below.",
   },
 ];
 
@@ -553,6 +596,16 @@ export function AgentOnboardingWizard({
                 </WizardSection>
 
                 <WizardSection
+                  title="Or paste API keys"
+                  hint="For providers that don't have OAuth, or to override an OAuth login with a raw key. Writes to ~/.elevate/.env."
+                >
+                  <ApiKeysPanel
+                    onError={(msg) => setError(msg)}
+                    onSuccess={() => undefined}
+                  />
+                </WizardSection>
+
+                <WizardSection
                   title="Pick the brain"
                   hint="Which connected provider + which model id the agent should use as its primary."
                 >
@@ -644,6 +697,33 @@ export function AgentOnboardingWizard({
                   )}
                 </WizardSection>
               </>
+            )}
+
+            {step.id === "tts" && (
+              <WizardSection
+                title="Text-to-Speech provider"
+                hint="Optional. Edge TTS works without a key. ElevenLabs / OpenAI / Gemini sound natural — paste the matching key."
+              >
+                <TtsBrowser />
+              </WizardSection>
+            )}
+
+            {step.id === "terminal" && (
+              <WizardSection
+                title="Terminal backend"
+                hint="The shell environment your agent runs commands in. Local is fine for most operators. Remote backends let the agent run in a sandbox or on another machine."
+              >
+                <TerminalBrowser />
+              </WizardSection>
+            )}
+
+            {step.id === "agent_settings" && (
+              <WizardSection
+                title="Runtime knobs"
+                hint="Defaults are sensible — only change if you know why. 90 iterations, all tool progress, 50% compression threshold, daily reset at 4am local."
+              >
+                <AgentSettingsBrowser />
+              </WizardSection>
             )}
 
             {step.id === "memory" && (
@@ -818,6 +898,13 @@ export function AgentOnboardingWizard({
                   <SlackSetupPanel draft={draft} updateField={updateField} />
                 </ChannelToggle>
 
+                <WizardSection
+                  title="More messaging platforms"
+                  hint="Signal, Matrix, Mattermost, Email, SMS, DingTalk, Feishu, WeCom (+ self-built callback), Weixin, QQ Bot, BlueBubbles, generic webhooks. Each one writes to the same env vars the CLI would."
+                >
+                  <ExtendedChannelsBrowser />
+                </WizardSection>
+
                 <ConnectedAgentsRail oauthProviders={oauthProviders ?? []} />
               </>
             )}
@@ -902,6 +989,24 @@ export function AgentOnboardingWizard({
                     />
                   </div>
                 </WizardSection>
+
+                <WizardSection
+                  title="Toolsets"
+                  hint="Toolsets are bundles of tools the agent can call directly (web search, image generation, email reader, calendar, MCP servers). Each one shows whether it's enabled on the CLI runtime and whether its env keys are configured."
+                >
+                  <ToolsetsBrowser />
+                </WizardSection>
+              </>
+            )}
+
+            {step.id === "skills" && (
+              <>
+                <WizardSection
+                  title="Installed skills"
+                  hint="Skills are reusable workflows (research, follow-up, lead-pull, weekly report). Browse what's installed, see what each one does, flip them on/off. Disabled skills won't be picked by autopilot but you can still call them by name."
+                >
+                  <SkillsBrowser />
+                </WizardSection>
               </>
             )}
 
@@ -965,31 +1070,10 @@ export function AgentOnboardingWizard({
 
             {step.id === "subagents" && (
               <WizardSection
-                title="cortextos sub-agents"
-                hint="Optional. Specialist PTY agents (Executive Assistant coordinates; Admin runs deal files; Outreach handles follow-up; Ads runs paid; Marketing owns listings + email; Social Media owns organic) run alongside the main agent for parallel work."
+                title="Agent Hub roster"
+                hint="Configure every Agent Hub agent inline: enable, skills, toolsets, platforms, system prompt, and per-agent Telegram bot. No /hub redirect — everything stays in setup."
               >
-                <label className="flex items-center gap-2 text-[13px] text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={draft.subagentsEnabled}
-                    onChange={(e) => updateField("subagentsEnabled", e.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-border accent-primary"
-                  />
-                  Enable sub-agents
-                </label>
-                {draft.subagentsEnabled && (
-                  <div className="mt-3">
-                    <WizardSelect
-                      label="Pack"
-                      value={draft.subagentsPack}
-                      onChange={(v) => updateField("subagentsPack", v)}
-                      options={[
-                        { value: "cortextos_default", label: "Default council (Executive Assistant + 5 specialists)" },
-                        { value: "cortextos_minimal", label: "Minimal (Executive Assistant only)" },
-                      ]}
-                    />
-                  </div>
-                )}
+                <AgentHubRoster />
               </WizardSection>
             )}
           </div>
@@ -1095,36 +1179,41 @@ function SlackTestButton({
   );
 }
 
-// Lists peer agents that already have a Telegram bot configured. Shown
-// inside TelegramPairingPanel so the operator can see "@ctrl_gary_bot is
-// already wired to gary" before pasting a new token — answers the question
-// "which bots already have Telegram?" without leaving the wizard.
+// Lists every Agent Hub agent that already has a Telegram bot wired up.
+// Pulls /api/agent-hub (lite) and surfaces any agent whose telegramLane is
+// configured. Shown inside TelegramPairingPanel so the operator sees every
+// configured bot before pasting a new token.
+type PeerRailRow = {
+  key: string;
+  name: string;
+  role: string;
+  tokenPreview: string;
+};
+
 function TelegramPeerRail() {
-  const [peers, setPeers] = useState<
-    Array<{
-      org: string;
-      name: string;
-      telegram?: {
-        configured: boolean;
-        botHandle: string;
-        chatId: string;
-        tokenPreview: string;
-        source: string;
-      };
-    }>
-  >([]);
+  const [rows, setRows] = useState<PeerRailRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     api
-      .getAgentPeers()
+      .getAgentHub({ lite: true })
       .then((resp) => {
         if (cancelled) return;
-        setPeers(resp.peers ?? []);
+        const next: PeerRailRow[] = [];
+        for (const a of resp.agents ?? []) {
+          if (!a.telegramLane?.configured) continue;
+          next.push({
+            key: a.id,
+            name: a.name || a.id,
+            role: a.role || "",
+            tokenPreview: a.telegramLane.tokenConfigured ? "configured" : "lane only",
+          });
+        }
+        setRows(next);
       })
       .catch(() => {
-        /* silent — the rail is purely informational */
+        /* silent — rail is purely informational */
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -1134,86 +1223,78 @@ function TelegramPeerRail() {
     };
   }, []);
 
-  const tgPeers = useMemo(
-    () => peers.filter((p) => p.telegram?.configured),
-    [peers],
-  );
-
-  if (loading || tgPeers.length === 0) return null;
+  if (loading || rows.length === 0) return null;
 
   return (
     <section className="rounded-md border border-border bg-card/40 px-3 py-2.5">
       <header className="mb-1.5">
         <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
-          Bots already on this Mac
+          Agent Hub bots already configured
         </span>
       </header>
       <ul className="space-y-1">
-        {tgPeers.map((p) => (
+        {rows.map((r) => (
           <li
-            key={`${p.org}/${p.name}`}
+            key={r.key}
             className="flex items-center justify-between gap-3 text-[11.5px] leading-4"
           >
             <span className="min-w-0 truncate">
-              <span className="text-foreground">{p.name}</span>
-              <span className="text-muted-foreground/70"> · {p.org}</span>
-              {p.telegram?.botHandle && (
-                <span className="ml-1 text-muted-foreground">@{p.telegram.botHandle}</span>
+              <span className="text-foreground">{r.name}</span>
+              {r.role && (
+                <span className="text-muted-foreground/70"> · {r.role}</span>
               )}
             </span>
             <span className="shrink-0 font-mono-ui text-[10.5px] tracking-wide text-muted-foreground/80">
-              {p.telegram?.tokenPreview || "configured"}
+              {r.tokenPreview}
             </span>
           </li>
         ))}
       </ul>
       <p className="mt-1.5 text-[10.5px] leading-4 text-muted-foreground/70">
-        Reuse one of these tokens or paste a fresh BotFather token below.
+        These bots are wired through Agent Hub. Paste a fresh BotFather token below to add a new one.
       </p>
     </section>
   );
 }
 
 // Surfaces the AI peers the operator has wired up alongside this elevate
-// agent — signed-in model providers + Cortex OS-style PTY specialists from
-// $HOME/claudeclaw/orgs. Read-only. Lets the wizard answer "who else is in
-// the room" without forcing the operator into a separate config page.
+// agent — signed-in model providers + the agents the operator has built in
+// the Elevate Agent Hub. Read-only summary; deep config lives on /hub.
 function ConnectedAgentsRail({
   oauthProviders,
 }: {
   oauthProviders: OAuthProvider[];
 }) {
-  const [peers, setPeers] = useState<
-    Array<{
-      org: string;
-      name: string;
-      enabled: boolean;
-      workingDirectory: string;
-      communicationStyle: string;
-      cronCount: number;
-      roleHint: string;
-    }>
-  >([]);
-  const [peersLoading, setPeersLoading] = useState(true);
-  const [peersError, setPeersError] = useState<string | null>(null);
+  const [hubAgents, setHubAgents] = useState<HubAgentRow[]>([]);
+  const [hubLoading, setHubLoading] = useState(true);
+  const [hubError, setHubError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setPeersLoading(true);
+    setHubLoading(true);
     api
-      .getAgentPeers()
+      .getAgentHub({ lite: true })
       .then((resp) => {
         if (cancelled) return;
-        setPeers(resp.peers ?? []);
-        setPeersError(null);
+        setHubAgents(
+          (resp.agents ?? []).map((a) => ({
+            id: a.id,
+            name: a.name || a.id,
+            role: a.role || "",
+            description: a.description || "",
+            enabled: Boolean(a.enabled),
+            status: a.status || "ready",
+          })),
+        );
+        setHubError(null);
       })
       .catch((err) => {
         if (cancelled) return;
-        setPeers([]);
-        setPeersError(errorMessage(err, "Failed to load Cortex OS peers."));
+        setHubAgents([]);
+        setHubError(errorMessage(err, "Failed to load Agent Hub."));
       })
       .finally(() => {
-        if (!cancelled) setPeersLoading(false);
+        if (!cancelled) setHubLoading(false);
       });
     return () => {
       cancelled = true;
@@ -1227,13 +1308,21 @@ function ConnectedAgentsRail({
 
   return (
     <section className="rounded-md border border-border bg-card/40 px-4 py-3 backdrop-blur-sm">
-      <header className="mb-3">
-        <h3 className="text-[13.5px] font-semibold text-foreground">
-          Agents already connected
-        </h3>
-        <p className="mt-0.5 text-[11.5px] leading-5 text-muted-foreground">
-          Other AI surfaces wired up on this Mac. Read-only — manage them from the CLI or their own config files.
-        </p>
+      <header className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-[13.5px] font-semibold text-foreground">
+            Already in your stack
+          </h3>
+          <p className="mt-0.5 text-[11.5px] leading-5 text-muted-foreground">
+            Model providers signed in + agents you've built in the Agent Hub.
+          </p>
+        </div>
+        <a
+          href="/hub"
+          className="shrink-0 text-[11.5px] text-primary underline-offset-2 hover:underline"
+        >
+          Open Agent Hub →
+        </a>
       </header>
       <div className="grid gap-4 md:grid-cols-2">
         <div>
@@ -1263,58 +1352,1634 @@ function ConnectedAgentsRail({
         </div>
         <div>
           <h4 className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
-            Cortex OS specialists
+            Agent Hub agents
           </h4>
-          {peersLoading ? (
+          {hubLoading ? (
             <p className="mt-2 text-[12px] text-muted-foreground/80">Loading…</p>
-          ) : peersError ? (
+          ) : hubError ? (
             <p className="mt-2 text-[12px] text-muted-foreground/80">
-              {peersError}
+              {hubError}
             </p>
-          ) : peers.length === 0 ? (
+          ) : hubAgents.length === 0 ? (
             <p className="mt-2 text-[12px] text-muted-foreground/80">
-              No peers found under <code>~/claudeclaw/orgs</code>. Set <code>ELEVATE_PEERS_ROOT</code> to point at a different orgs directory.
+              No agents yet. Build one on{" "}
+              <a href="/hub" className="text-primary underline-offset-2 hover:underline">
+                /hub
+              </a>
+              .
             </p>
           ) : (
             <ul className="mt-2 space-y-1.5">
-              {peers.map((peer) => (
-                <li
-                  key={`${peer.org}/${peer.name}`}
-                  className="rounded-md border border-border/50 bg-background/40 px-3 py-2 text-[12px]"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-foreground">
-                      {peer.name}
-                    </span>
-                    <span
-                      className={cn(
-                        "inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em]",
-                        peer.enabled ? "text-primary" : "text-muted-foreground/60",
-                      )}
-                    >
-                      {peer.enabled ? (
-                        <CheckCircle2 className="h-3 w-3" />
-                      ) : (
-                        <Circle className="h-3 w-3" />
-                      )}
-                      {peer.enabled ? "enabled" : "disabled"}
-                    </span>
-                  </div>
-                  {peer.roleHint && (
-                    <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-                      {peer.roleHint}
-                    </p>
-                  )}
-                  <p className="mt-0.5 font-mono-ui text-[10px] uppercase tracking-[0.16em] text-muted-foreground/60">
-                    {peer.org} · {peer.cronCount} cron{peer.cronCount === 1 ? "" : "s"}
-                  </p>
-                </li>
+              {hubAgents.map((agent) => (
+                <AgentHubAgentRow
+                  key={agent.id}
+                  agent={agent}
+                  onChange={(patch) =>
+                    setHubAgents((prev) =>
+                      prev.map((a) =>
+                        a.id === agent.id ? { ...a, ...patch } : a,
+                      ),
+                    )
+                  }
+                />
               ))}
             </ul>
           )}
         </div>
       </div>
     </section>
+  );
+}
+
+type HubAgentRow = {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  enabled: boolean;
+  status: string;
+};
+
+// Per-row enable toggle + inline edit link. Toggle hits api.updateAgent so the
+// operator can flip an agent on/off without leaving the wizard; deeper config
+// (skills, toolsets, prompt) still lives on /hub.
+function AgentHubAgentRow({
+  agent,
+  onChange,
+}: {
+  agent: HubAgentRow;
+  onChange: (patch: Partial<HubAgentRow>) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleToggle = async (next: boolean) => {
+    setSaving(true);
+    setErr(null);
+    const prev = agent.enabled;
+    onChange({ enabled: next });
+    try {
+      await api.updateAgent(agent.id, { enabled: next });
+    } catch (e) {
+      onChange({ enabled: prev });
+      setErr(errorMessage(e, "Toggle failed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <li className="rounded-md border border-border/50 bg-background/40 px-3 py-2 text-[12px]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium text-foreground truncate">
+          {agent.name}
+        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em]",
+              agent.enabled ? "text-primary" : "text-muted-foreground/60",
+            )}
+          >
+            {agent.enabled ? (
+              <CheckCircle2 className="h-3 w-3" />
+            ) : (
+              <Circle className="h-3 w-3" />
+            )}
+            {agent.enabled ? agent.status : "disabled"}
+          </span>
+          <Switch
+            checked={agent.enabled}
+            disabled={saving}
+            onCheckedChange={handleToggle}
+          />
+        </div>
+      </div>
+      {agent.role && (
+        <p className="mt-0.5 text-[11px] text-muted-foreground/80 truncate">
+          {agent.role}
+        </p>
+      )}
+      {agent.description && (
+        <p className="mt-0.5 text-[11px] text-muted-foreground/60 line-clamp-2">
+          {agent.description}
+        </p>
+      )}
+      {err && (
+        <p className="mt-1 text-[11px] text-destructive">{err}</p>
+      )}
+    </li>
+  );
+}
+
+// Full inline Agent Hub roster — Step 6 of the wizard. Lets the operator pick
+// which agents run alongside the main one and configure each one (skills,
+// toolsets, platforms, prompt, telegram lane) without ever leaving the wizard.
+function AgentHubRoster() {
+  const [agents, setAgents] = useState<AgentHubAgent[] | null>(null);
+  const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [toolsets, setToolsets] = useState<ToolsetEntry[]>([]);
+  const [platforms, setPlatforms] = useState<string[]>([]);
+  const [envVars, setEnvVars] = useState<Record<string, { is_set: boolean; redacted_value: string | null }>>({});
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [savingConfigId, setSavingConfigId] = useState<string | null>(null);
+  const [savingTelegramId, setSavingTelegramId] = useState<string | null>(null);
+  const [tokenDrafts, setTokenDrafts] = useState<Record<string, string>>({});
+  const [laneDrafts, setLaneDrafts] = useState<Record<string, string>>({});
+  const [rowError, setRowError] = useState<Record<string, string | null>>({});
+  const [rowToast, setRowToast] = useState<Record<string, string | null>>({});
+
+  const refresh = useCallback(async () => {
+    try {
+      const [hub, skillsResp, toolsetsResp, envResp] = await Promise.all([
+        api.getAgentHub({ includeSkills: true, includeToolsets: true }),
+        api.getSkills(),
+        api.getToolsets(),
+        api.getEnvVars(),
+      ]);
+      setAgents(hub.agents ?? []);
+      setPlatforms((hub.platforms ?? []).map((p) => p.name));
+      setSkills(
+        skillsResp.map((s) => ({
+          name: s.name,
+          category: s.category ?? "",
+          description: s.description ?? "",
+        })),
+      );
+      setToolsets(
+        toolsetsResp.map((t) => ({
+          name: t.name,
+          label: t.label ?? t.name,
+          description: t.description ?? "",
+        })),
+      );
+      const envMap: Record<string, { is_set: boolean; redacted_value: string | null }> = {};
+      for (const [key, info] of Object.entries(envResp)) {
+        envMap[key] = {
+          is_set: Boolean(info?.is_set),
+          redacted_value: info?.redacted_value ?? null,
+        };
+      }
+      setEnvVars(envMap);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(errorMessage(e, "Failed to load Agent Hub."));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const onConfigSave = async (agentId: string, patch: AgentEditPatch) => {
+    setSavingConfigId(agentId);
+    setRowError((prev) => ({ ...prev, [agentId]: null }));
+    setRowToast((prev) => ({ ...prev, [agentId]: null }));
+    try {
+      await api.updateAgent(agentId, patch);
+      setRowToast((prev) => ({ ...prev, [agentId]: "Saved" }));
+      await refresh();
+    } catch (e) {
+      setRowError((prev) => ({
+        ...prev,
+        [agentId]: errorMessage(e, "Failed to save agent"),
+      }));
+    } finally {
+      setSavingConfigId(null);
+    }
+  };
+
+  const onTelegramLaneSave = async (agent: AgentHubAgent) => {
+    const tokenValue = tokenDrafts[agent.id]?.trim() ?? "";
+    const laneValue = laneDrafts[agent.id]?.trim() ?? "";
+    const tokenEnv = agent.telegramLane?.tokenEnv;
+    const targetEnv = agent.telegramLane?.targetEnv;
+    if (!tokenEnv || !targetEnv) {
+      setRowError((prev) => ({
+        ...prev,
+        [agent.id]: "Agent has no Telegram env keys configured.",
+      }));
+      return;
+    }
+    if (!tokenValue && !laneValue) return;
+    setSavingTelegramId(agent.id);
+    setRowError((prev) => ({ ...prev, [agent.id]: null }));
+    setRowToast((prev) => ({ ...prev, [agent.id]: null }));
+    try {
+      if (tokenValue) await api.setEnvVar(tokenEnv, tokenValue);
+      if (laneValue) await api.setEnvVar(targetEnv, laneValue);
+      setTokenDrafts((prev) => ({ ...prev, [agent.id]: "" }));
+      setLaneDrafts((prev) => ({ ...prev, [agent.id]: "" }));
+      setRowToast((prev) => ({ ...prev, [agent.id]: "Telegram lane saved" }));
+      await refresh();
+    } catch (e) {
+      setRowError((prev) => ({
+        ...prev,
+        [agent.id]: errorMessage(e, "Failed to save Telegram lane"),
+      }));
+    } finally {
+      setSavingTelegramId(null);
+    }
+  };
+
+  const placeholderFor = (key: string | undefined, fallback: string): string => {
+    if (!key) return fallback;
+    const info = envVars[key];
+    if (info?.is_set && info.redacted_value) return info.redacted_value;
+    return fallback;
+  };
+
+  if (loading && !agents) {
+    return (
+      <div className="flex items-center justify-center gap-2 rounded-md border border-border/60 bg-card/30 px-3 py-4 text-[12px] text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span>Loading Agent Hub roster…</span>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+        <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+        {loadError}
+      </div>
+    );
+  }
+
+  if (!agents || agents.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-4 text-[12px] text-muted-foreground">
+        No Agent Hub agents yet. The main agent ships by default — you can build
+        additional specialists from this section once setup finishes.
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-3">
+      {agents.map((agent) => {
+        const lane = agent.telegramLane;
+        const tokenPlaceholder = placeholderFor(
+          lane?.tokenEnv,
+          "BotFather token",
+        );
+        const lanePlaceholder = placeholderFor(
+          lane?.targetEnv,
+          "Chat ID or chat:topic",
+        );
+        const tokenValue = tokenDrafts[agent.id] ?? "";
+        const laneValue = laneDrafts[agent.id] ?? "";
+        const errMsg = rowError[agent.id];
+        const toastMsg = rowToast[agent.id];
+        return (
+          <article
+            key={agent.id}
+            className="rounded-md border border-border/60 bg-background/40 px-3 py-3"
+          >
+            <header className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-[13px] font-semibold text-foreground truncate">
+                    {agent.name || agent.id}
+                  </h4>
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em]",
+                      agent.enabled
+                        ? "text-primary"
+                        : "text-muted-foreground/60",
+                    )}
+                  >
+                    {agent.enabled ? (
+                      <CheckCircle2 className="h-3 w-3" />
+                    ) : (
+                      <Circle className="h-3 w-3" />
+                    )}
+                    {agent.enabled ? agent.status : "disabled"}
+                  </span>
+                </div>
+                {agent.role && (
+                  <p className="mt-0.5 text-[11px] text-muted-foreground/80 truncate">
+                    {agent.role}
+                  </p>
+                )}
+                {agent.description && (
+                  <p className="mt-0.5 text-[11px] text-muted-foreground/60 line-clamp-2">
+                    {agent.description}
+                  </p>
+                )}
+              </div>
+            </header>
+            <div className="mt-3 grid gap-2">
+              <AgentConfigEditor
+                agent={agent}
+                availableSkills={skills}
+                availableToolsets={toolsets}
+                availablePlatforms={platforms}
+                saving={savingConfigId === agent.id}
+                onSave={(patch) => onConfigSave(agent.id, patch)}
+              />
+              {lane && (
+                <AgentTelegramLaneEditor
+                  agent={agent}
+                  tokenValue={tokenValue}
+                  laneValue={laneValue}
+                  tokenPlaceholder={tokenPlaceholder}
+                  lanePlaceholder={lanePlaceholder}
+                  onTokenChange={(v) =>
+                    setTokenDrafts((prev) => ({ ...prev, [agent.id]: v }))
+                  }
+                  onLaneChange={(v) =>
+                    setLaneDrafts((prev) => ({ ...prev, [agent.id]: v }))
+                  }
+                  onSave={() => void onTelegramLaneSave(agent)}
+                  saving={savingTelegramId === agent.id}
+                />
+              )}
+            </div>
+            {errMsg && (
+              <p className="mt-2 text-[11px] text-destructive">{errMsg}</p>
+            )}
+            {!errMsg && toastMsg && (
+              <p className="mt-2 text-[11px] text-primary">{toastMsg}</p>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+type ApiKeyField = {
+  envKey: string;
+  label: string;
+  description: string;
+  docsUrl?: string;
+  placeholder?: string;
+};
+
+const API_KEY_FIELDS: ApiKeyField[] = [
+  {
+    envKey: "OPENAI_API_KEY",
+    label: "OpenAI",
+    description: "GPT-4o, GPT-5, o1/o3, embeddings.",
+    docsUrl: "https://platform.openai.com/api-keys",
+    placeholder: "sk-...",
+  },
+  {
+    envKey: "OPENROUTER_API_KEY",
+    label: "OpenRouter",
+    description: "One key, 100+ models. Falls back when others rate-limit.",
+    docsUrl: "https://openrouter.ai/keys",
+    placeholder: "sk-or-...",
+  },
+  {
+    envKey: "ANTHROPIC_API_KEY",
+    label: "Anthropic API",
+    description: "Claude Opus/Sonnet/Haiku via raw API key (no subscription).",
+    docsUrl: "https://console.anthropic.com/settings/keys",
+    placeholder: "sk-ant-...",
+  },
+  {
+    envKey: "AZURE_OPENAI_API_KEY",
+    label: "Azure OpenAI",
+    description: "Enterprise/region-locked OpenAI deployments.",
+    docsUrl: "https://learn.microsoft.com/azure/ai-services/openai/",
+    placeholder: "azure key",
+  },
+  {
+    envKey: "AZURE_OPENAI_ENDPOINT",
+    label: "Azure endpoint",
+    description: "https://{resource}.openai.azure.com",
+    placeholder: "https://your-resource.openai.azure.com",
+  },
+  {
+    envKey: "VOYAGE_API_KEY",
+    label: "Voyage AI",
+    description: "Voyage embeddings — small + high-quality.",
+    docsUrl: "https://docs.voyageai.com/docs/api-key-and-installation",
+    placeholder: "pa-...",
+  },
+  {
+    envKey: "COHERE_API_KEY",
+    label: "Cohere",
+    description: "Cohere embeddings + reranker.",
+    docsUrl: "https://dashboard.cohere.com/api-keys",
+    placeholder: "cohere key",
+  },
+];
+
+// Password-style inputs for raw API keys. Shows "Already set — …last4 (paste to
+// replace)" when ~/.elevate/.env already has the value, so the operator doesn't
+// have to wonder whether their key is wired up.
+function ApiKeysPanel({
+  onError,
+  onSuccess,
+}: {
+  onError: (msg: string) => void;
+  onSuccess: (msg: string) => void;
+}) {
+  type EnvMap = Record<string, { is_set: boolean; redacted_value: string | null }>;
+  const [envMap, setEnvMap] = useState<EnvMap>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const resp = await api.getEnvVars();
+      const next: EnvMap = {};
+      for (const field of API_KEY_FIELDS) {
+        const info = resp[field.envKey];
+        next[field.envKey] = {
+          is_set: Boolean(info?.is_set),
+          redacted_value: info?.redacted_value ?? null,
+        };
+      }
+      setEnvMap(next);
+    } catch (e) {
+      onError(errorMessage(e, "Could not load env keys"));
+    } finally {
+      setLoading(false);
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleSave = async (field: ApiKeyField) => {
+    const value = drafts[field.envKey]?.trim() ?? "";
+    if (!value) {
+      onError(`Paste a value for ${field.label} first.`);
+      return;
+    }
+    setSaving(field.envKey);
+    try {
+      await api.setEnvVar(field.envKey, value);
+      setDrafts((prev) => ({ ...prev, [field.envKey]: "" }));
+      onSuccess(`${field.label} saved.`);
+      await refresh();
+    } catch (e) {
+      onError(errorMessage(e, `Failed to save ${field.label}`));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const handleClear = async (field: ApiKeyField) => {
+    if (!confirm(`Remove ${field.label} from ~/.elevate/.env?`)) return;
+    setSaving(field.envKey);
+    try {
+      await api.deleteEnvVar(field.envKey);
+      setDrafts((prev) => ({ ...prev, [field.envKey]: "" }));
+      onSuccess(`${field.label} removed.`);
+      await refresh();
+    } catch (e) {
+      onError(errorMessage(e, `Failed to clear ${field.label}`));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <div className="space-y-2.5">
+      {loading && Object.keys(envMap).length === 0 ? (
+        <p className="text-[12px] text-muted-foreground/80">Loading…</p>
+      ) : (
+        API_KEY_FIELDS.map((field) => {
+          const state = envMap[field.envKey];
+          const draftVal = drafts[field.envKey] ?? "";
+          const isSaving = saving === field.envKey;
+          const last4 =
+            state?.redacted_value
+              ? state.redacted_value.replace(/^[•*]+/g, "").slice(-4)
+              : "";
+          return (
+            <div
+              key={field.envKey}
+              className="rounded-md border border-border/60 bg-background/40 px-3 py-2.5"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[12.5px] font-medium text-foreground">
+                      {field.label}
+                    </span>
+                    {state?.is_set && (
+                      <span className="inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-primary">
+                        <CheckCircle2 className="h-3 w-3" />
+                        set
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground/80">
+                    {field.description}
+                  </p>
+                  {state?.is_set && last4 && (
+                    <p className="mt-0.5 text-[11px] text-muted-foreground/70">
+                      Already set — <code className="font-mono-ui text-foreground/80">…{last4}</code>
+                      <span className="opacity-80"> (paste below to replace)</span>
+                    </p>
+                  )}
+                </div>
+                {field.docsUrl && (
+                  <a
+                    href={field.docsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0 inline-flex items-center gap-1 text-[11px] text-primary underline-offset-2 hover:underline"
+                    title={`Get a ${field.label} key`}
+                  >
+                    Get key
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={field.placeholder || "paste key"}
+                  value={draftVal}
+                  onChange={(e) =>
+                    setDrafts((prev) => ({
+                      ...prev,
+                      [field.envKey]: e.target.value,
+                    }))
+                  }
+                  className="flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 font-mono-ui text-[11.5px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+                <Button
+                  size="sm"
+                  variant="default"
+                  disabled={isSaving || !draftVal.trim()}
+                  onClick={() => handleSave(field)}
+                  className="h-7 text-[11.5px]"
+                >
+                  {isSaving ? (
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  ) : null}
+                  Save
+                </Button>
+                {state?.is_set && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={isSaving}
+                    onClick={() => handleClear(field)}
+                    className="h-7 text-[11.5px]"
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// Full installed skills browser — groups by category, shows descriptions,
+// surfaces the enable/disable toggle backed by ~/.elevate/config.yaml.
+// Mirrors `elevate skills list` + `elevate skills toggle <name>`.
+function SkillsBrowser() {
+  const [skills, setSkills] = useState<
+    Array<{ name: string; category: string; description: string; enabled: boolean }> | null
+  >(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [savingName, setSavingName] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      const resp = await api.getSkills();
+      setSkills(
+        resp.map((s) => ({
+          name: s.name,
+          category: s.category || "uncategorized",
+          description: s.description || "",
+          enabled: s.enabled,
+        })),
+      );
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(errorMessage(e, "Failed to load skills"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleToggle = async (name: string, next: boolean) => {
+    setSavingName(name);
+    const previous = skills;
+    setSkills((prev) =>
+      prev
+        ? prev.map((s) => (s.name === name ? { ...s, enabled: next } : s))
+        : prev,
+    );
+    try {
+      await api.toggleSkill(name, next);
+    } catch (e) {
+      setSkills(previous);
+      setLoadError(errorMessage(e, `Toggle ${name} failed`));
+    } finally {
+      setSavingName(null);
+    }
+  };
+
+  const grouped = useMemo(() => {
+    type Row = { name: string; category: string; description: string; enabled: boolean };
+    if (!skills) return [] as Array<{ category: string; entries: Row[] }>;
+    const needle = query.trim().toLowerCase();
+    const filtered: Row[] = needle
+      ? skills.filter(
+          (s) =>
+            s.name.toLowerCase().includes(needle) ||
+            s.description.toLowerCase().includes(needle) ||
+            s.category.toLowerCase().includes(needle),
+        )
+      : skills;
+    const map = new Map<string, Row[]>();
+    for (const s of filtered) {
+      const key = s.category || "uncategorized";
+      const arr = map.get(key) ?? [];
+      arr.push(s);
+      map.set(key, arr);
+    }
+    return [...map.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([category, entries]) => ({
+        category,
+        entries: entries.sort((x, y) => x.name.localeCompare(y.name)),
+      }));
+  }, [skills, query]);
+
+  if (loading && !skills) {
+    return (
+      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Loading installed skills…
+      </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+        <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+        {loadError}
+      </div>
+    );
+  }
+  if (!skills || skills.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-4 text-[12px] text-muted-foreground">
+        No skills installed. Run <code>elevate skills install</code> from the CLI to add one.
+      </div>
+    );
+  }
+
+  const enabledCount = skills.filter((s) => s.enabled).length;
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-baseline gap-2 text-[11.5px] text-muted-foreground">
+          <span className="tabular-nums text-foreground">{enabledCount}</span>
+          <span>of {skills.length} enabled</span>
+        </div>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter skills…"
+          className="h-7 w-44 rounded-md border border-border bg-background px-2 text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70"
+        />
+      </div>
+      <div className="grid gap-3">
+        {grouped.map(({ category, entries }) => (
+          <div key={category} className="grid gap-1">
+            <h4 className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+              {category}
+            </h4>
+            <ul className="grid gap-1.5">
+              {entries.map((skill) => (
+                <li
+                  key={skill.name}
+                  className="flex items-start justify-between gap-3 rounded-md border border-border/60 bg-background/40 px-3 py-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <code className="!bg-transparent !p-0 font-mono-ui text-[12px] font-medium text-foreground">
+                        /{skill.name}
+                      </code>
+                      {!skill.enabled && (
+                        <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/60">
+                          disabled
+                        </span>
+                      )}
+                    </div>
+                    {skill.description && (
+                      <p className="mt-0.5 text-[11.5px] leading-5 text-muted-foreground/80">
+                        {skill.description}
+                      </p>
+                    )}
+                  </div>
+                  <Switch
+                    checked={skill.enabled}
+                    disabled={savingName === skill.name}
+                    onCheckedChange={(v) => void handleToggle(skill.name, v)}
+                  />
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Toolset registry browser. Mirrors `elevate setup tools` → toolset multi-select
+// with the same labels + descriptions sourced from `_get_effective_configurable_toolsets`.
+// Read-only for now: a toggle would need a backend write to
+// `config.platform_toolsets[cli]` which doesn't have an endpoint yet.
+function ToolsetsBrowser() {
+  const [toolsets, setToolsets] = useState<
+    Array<{
+      name: string;
+      label: string;
+      description: string;
+      enabled: boolean;
+      configured: boolean;
+      tools: string[];
+    }> | null
+  >(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      const resp = await api.getToolsets();
+      setToolsets(
+        resp.map((t) => ({
+          name: t.name,
+          label: t.label || t.name,
+          description: t.description || "",
+          enabled: t.enabled,
+          configured: t.configured,
+          tools: t.tools ?? [],
+        })),
+      );
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(errorMessage(e, "Failed to load toolsets"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const filtered = useMemo(() => {
+    if (!toolsets) return [] as NonNullable<typeof toolsets>;
+    const needle = query.trim().toLowerCase();
+    if (!needle) return toolsets;
+    return toolsets.filter(
+      (t) =>
+        t.name.toLowerCase().includes(needle) ||
+        t.label.toLowerCase().includes(needle) ||
+        t.description.toLowerCase().includes(needle) ||
+        t.tools.some((tool) => tool.toLowerCase().includes(needle)),
+    );
+  }, [toolsets, query]);
+
+  if (loading && !toolsets) {
+    return (
+      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Loading toolsets…
+      </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+        <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+        {loadError}
+      </div>
+    );
+  }
+  if (!toolsets || toolsets.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border/60 bg-background/40 px-3 py-4 text-[12px] text-muted-foreground">
+        No toolsets registered.
+      </div>
+    );
+  }
+
+  const enabledCount = toolsets.filter((t) => t.enabled).length;
+  const configuredCount = toolsets.filter((t) => t.configured).length;
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-baseline gap-3 text-[11.5px] text-muted-foreground">
+          <span>
+            <span className="tabular-nums text-foreground">{enabledCount}</span>{" "}
+            of {toolsets.length} enabled
+          </span>
+          <span>
+            <span className="tabular-nums text-foreground">{configuredCount}</span>{" "}
+            configured
+          </span>
+        </div>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter toolsets…"
+          className="h-7 w-44 rounded-md border border-border bg-background px-2 text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70"
+        />
+      </div>
+      <ul className="grid gap-1.5">
+        {filtered.map((t) => (
+          <li
+            key={t.name}
+            className="rounded-md border border-border/60 bg-background/40 px-3 py-2"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[12.5px] font-medium text-foreground">
+                    {t.label}
+                  </span>
+                  <code className="!bg-transparent !p-0 font-mono-ui text-[10.5px] text-muted-foreground/70">
+                    {t.name}
+                  </code>
+                  {t.enabled ? (
+                    <span className="inline-flex items-center gap-1 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-primary">
+                      <CheckCircle2 className="h-3 w-3" />
+                      enabled
+                    </span>
+                  ) : (
+                    <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/60">
+                      disabled
+                    </span>
+                  )}
+                  {!t.configured && t.enabled && (
+                    <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-warning">
+                      needs keys
+                    </span>
+                  )}
+                </div>
+                {t.description && (
+                  <p className="mt-0.5 text-[11.5px] leading-5 text-muted-foreground/80">
+                    {t.description}
+                  </p>
+                )}
+                {t.tools.length > 0 && (
+                  <details className="mt-1.5">
+                    <summary className="cursor-pointer text-[10.5px] uppercase tracking-wide text-muted-foreground/60 hover:text-foreground">
+                      {t.tools.length} tools
+                    </summary>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {t.tools.map((tool) => (
+                        <code
+                          key={tool}
+                          className="rounded-sm bg-muted/40 px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
+                        >
+                          {tool}
+                        </code>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <p className="text-[10.5px] leading-5 text-muted-foreground/60">
+        Toolset enable/disable + per-toolset API key prompts ship in the next slice. For now, use <code>elevate setup tools</code> in the CLI.
+      </p>
+    </div>
+  );
+}
+
+// =========================================================================
+// TTS, Terminal, Agent settings, and extended-channel registries.
+//
+// Each one mirrors the matching `_setup_*` flow in cli/elevate_cli/setup.py
+// (see web/docs/cli-setup-questionnaire.md for the exact prompt mapping).
+// We avoid bloating the central AgentSetupDraft for these optional sections —
+// they save inline via `api.saveConfig` (config.yaml) + `api.setEnvVar`
+// (env vars) the same way the CLI prompts do.
+// =========================================================================
+
+type TtsProvider = {
+  id: string;
+  label: string;
+  envVars: Array<{ key: string; prompt: string; password?: boolean }>;
+  hint?: string;
+};
+
+const TTS_PROVIDERS: TtsProvider[] = [
+  { id: "edge", label: "Edge TTS (free, local)", envVars: [], hint: "Microsoft Edge TTS — free, no key required. Decent quality, sounds robotic next to ElevenLabs." },
+  { id: "elevenlabs", label: "ElevenLabs", envVars: [{ key: "ELEVENLABS_API_KEY", prompt: "ElevenLabs API key", password: true }], hint: "Best voice quality. Pay-per-character." },
+  { id: "openai", label: "OpenAI TTS", envVars: [{ key: "VOICE_TOOLS_OPENAI_KEY", prompt: "OpenAI API key for TTS", password: true }], hint: "tts-1 / tts-1-hd. Same key plane as ChatGPT." },
+  { id: "xai", label: "xAI", envVars: [{ key: "XAI_API_KEY", prompt: "xAI API key for TTS", password: true }] },
+  { id: "minimax", label: "MiniMax", envVars: [{ key: "MINIMAX_API_KEY", prompt: "MiniMax API key for TTS", password: true }] },
+  { id: "mistral", label: "Mistral Voxtral", envVars: [{ key: "MISTRAL_API_KEY", prompt: "Mistral API key for TTS", password: true }] },
+  { id: "gemini", label: "Google Gemini", envVars: [{ key: "GEMINI_API_KEY", prompt: "Gemini API key for TTS", password: true }] },
+  { id: "neutts", label: "NeuTTS (local)", envVars: [], hint: "Local model. Requires espeak-ng + NeuTTS deps — install via the CLI." },
+  { id: "kittentts", label: "KittenTTS (local)", envVars: [], hint: "Local model. Install via the CLI first." },
+];
+
+// TTS provider picker + per-provider env vars. Mirrors `_setup_tts_provider`.
+function TtsBrowser() {
+  const [provider, setProvider] = useState<string>("");
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+  const [envSet, setEnvSet] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([api.getConfig(), api.getEnvVars()])
+      .then(([config, envs]) => {
+        if (cancelled) return;
+        const tts = (config?.tts as Record<string, unknown>) ?? {};
+        setProvider(String(tts.provider ?? ""));
+        const setMap: Record<string, boolean> = {};
+        for (const p of TTS_PROVIDERS) {
+          for (const v of p.envVars) {
+            setMap[v.key] = Boolean((envs as Record<string, { is_set?: boolean }>)[v.key]?.is_set);
+          }
+        }
+        setEnvSet(setMap);
+      })
+      .catch((e) => !cancelled && setError(errorMessage(e, "Failed to load TTS config")));
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const current = await api.getConfig();
+      const ttsCfg = { ...(current.tts as Record<string, unknown> ?? {}), provider };
+      await api.saveConfig({ ...current, tts: ttsCfg });
+      for (const v of (TTS_PROVIDERS.find((p) => p.id === provider)?.envVars ?? [])) {
+        const value = envValues[v.key]?.trim();
+        if (value) {
+          await api.setEnvVar(v.key, value);
+          setEnvSet((m) => ({ ...m, [v.key]: true }));
+        }
+      }
+      setEnvValues({});
+      setToast("Saved.");
+      setTimeout(() => setToast(null), 1800);
+    } catch (e) {
+      setError(errorMessage(e, "Save failed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const active = TTS_PROVIDERS.find((p) => p.id === provider);
+
+  return (
+    <div className="grid gap-3">
+      <WizardSelect
+        label="TTS provider"
+        value={provider}
+        onChange={setProvider}
+        options={[
+          { value: "", label: "— skip (no voice) —" },
+          ...TTS_PROVIDERS.map((p) => ({ value: p.id, label: p.label })),
+        ]}
+      />
+      {active?.hint && (
+        <p className="text-[11.5px] leading-5 text-muted-foreground/80">{active.hint}</p>
+      )}
+      {active && active.envVars.length > 0 && (
+        <div className="grid gap-3">
+          {active.envVars.map((v) => (
+            <WizardField
+              key={v.key}
+              label={v.prompt}
+              value={envValues[v.key] ?? ""}
+              onChange={(val) => setEnvValues((m) => ({ ...m, [v.key]: val }))}
+              placeholder={envSet[v.key] ? "Already set — paste to replace" : "Paste key"}
+              type={v.password ? "password" : "text"}
+              fullWidth
+              hint={envSet[v.key] ? `Stored in ${v.key}. Leave blank to keep it.` : undefined}
+            />
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-3">
+        <Button size="sm" onClick={handleSave} disabled={saving} className="h-8">
+          {saving ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1" />}
+          Save voice settings
+        </Button>
+        {toast && <span className="text-[11.5px] text-success">{toast}</span>}
+        {error && <span className="text-[11.5px] text-destructive">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
+// Terminal backend picker. Mirrors `_setup_terminal_backend`.
+// =========================================================================
+
+const TERMINAL_BACKENDS = [
+  { id: "local", label: "Local (this Mac)", hint: "Agent runs shell commands directly on this machine." },
+  { id: "docker", label: "Docker", hint: "Isolated container per session." },
+  { id: "modal", label: "Modal", hint: "Cloud-hosted ephemeral compute. Pay per second." },
+  { id: "ssh", label: "SSH", hint: "Remote server. Bring your own host + key." },
+  { id: "daytona", label: "Daytona", hint: "Managed dev environments." },
+  { id: "singularity", label: "Singularity / Apptainer", hint: "Linux-only HPC containers." },
+];
+
+function TerminalBrowser() {
+  const [backend, setBackend] = useState<string>("local");
+  const [cwd, setCwd] = useState<string>("");
+  const [dockerImage, setDockerImage] = useState<string>("");
+  const [enableSudo, setEnableSudo] = useState<boolean>(false);
+  const [sudoPassword, setSudoPassword] = useState<string>("");
+  const [sshHost, setSshHost] = useState<string>("");
+  const [sshUser, setSshUser] = useState<string>("");
+  const [sshPort, setSshPort] = useState<string>("");
+  const [sshKey, setSshKey] = useState<string>("");
+  const [daytonaImage, setDaytonaImage] = useState<string>("");
+  const [envSet, setEnvSet] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([api.getConfig(), api.getEnvVars()])
+      .then(([config, envs]) => {
+        if (cancelled) return;
+        const term = (config?.terminal as Record<string, unknown>) ?? {};
+        setBackend(String(term.backend ?? "local"));
+        setCwd(String(term.cwd ?? ""));
+        setDockerImage(String(term.docker_image ?? ""));
+        setDaytonaImage(String(term.daytona_image ?? ""));
+        const keys = ["SUDO_PASSWORD", "TERMINAL_SSH_HOST", "TERMINAL_SSH_USER", "TERMINAL_SSH_PORT", "TERMINAL_SSH_KEY", "DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"];
+        const setMap: Record<string, boolean> = {};
+        for (const k of keys) setMap[k] = Boolean((envs as Record<string, { is_set?: boolean }>)[k]?.is_set);
+        setEnvSet(setMap);
+        setEnableSudo(Boolean(setMap.SUDO_PASSWORD));
+      })
+      .catch((e) => !cancelled && setError(errorMessage(e, "Failed to load terminal config")));
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const current = await api.getConfig();
+      const term: Record<string, unknown> = { ...(current.terminal as Record<string, unknown> ?? {}), backend };
+      if (backend === "local" && cwd.trim()) term.cwd = cwd.trim();
+      if (backend === "docker" && dockerImage.trim()) term.docker_image = dockerImage.trim();
+      if (backend === "daytona" && daytonaImage.trim()) term.daytona_image = daytonaImage.trim();
+      await api.saveConfig({ ...current, terminal: term });
+      if (backend === "local" && enableSudo && sudoPassword.trim()) {
+        await api.setEnvVar("SUDO_PASSWORD", sudoPassword.trim());
+      }
+      if (backend === "ssh") {
+        if (sshHost.trim()) await api.setEnvVar("TERMINAL_SSH_HOST", sshHost.trim());
+        if (sshUser.trim()) await api.setEnvVar("TERMINAL_SSH_USER", sshUser.trim());
+        if (sshPort.trim() && sshPort.trim() !== "22") await api.setEnvVar("TERMINAL_SSH_PORT", sshPort.trim());
+        if (sshKey.trim()) await api.setEnvVar("TERMINAL_SSH_KEY", sshKey.trim());
+      }
+      setToast("Saved.");
+      setTimeout(() => setToast(null), 1800);
+    } catch (e) {
+      setError(errorMessage(e, "Save failed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="grid gap-3">
+      <WizardSelect
+        label="Backend"
+        value={backend}
+        onChange={setBackend}
+        options={TERMINAL_BACKENDS.map((b) => ({ value: b.id, label: b.label }))}
+      />
+      {TERMINAL_BACKENDS.find((b) => b.id === backend)?.hint && (
+        <p className="text-[11.5px] leading-5 text-muted-foreground/80">
+          {TERMINAL_BACKENDS.find((b) => b.id === backend)?.hint}
+        </p>
+      )}
+      {backend === "local" && (
+        <>
+          <WizardField label="Messaging working directory" value={cwd} onChange={setCwd} placeholder="/Users/you/projects" fullWidth />
+          <label className="flex items-center gap-2 text-[12.5px] text-foreground">
+            <input type="checkbox" checked={enableSudo} onChange={(e) => setEnableSudo(e.target.checked)} className="h-3.5 w-3.5 rounded border-border accent-primary" />
+            Enable sudo support (stores password for apt install, etc.)
+          </label>
+          {enableSudo && (
+            <WizardField
+              label="Sudo password"
+              value={sudoPassword}
+              onChange={setSudoPassword}
+              placeholder={envSet.SUDO_PASSWORD ? "Already set — paste to replace" : ""}
+              type="password"
+              fullWidth
+              hint={envSet.SUDO_PASSWORD ? "Stored in SUDO_PASSWORD. Leave blank to keep it." : undefined}
+            />
+          )}
+        </>
+      )}
+      {backend === "docker" && (
+        <WizardField label="Docker image" value={dockerImage} onChange={setDockerImage} placeholder="elevate/runtime:latest" fullWidth />
+      )}
+      {backend === "ssh" && (
+        <div className="grid gap-3 md:grid-cols-2">
+          <WizardField label="SSH host" value={sshHost} onChange={setSshHost} placeholder="server.example.com" fullWidth hint={envSet.TERMINAL_SSH_HOST ? "Stored. Leave blank to keep it." : undefined} />
+          <WizardField label="SSH user" value={sshUser} onChange={setSshUser} placeholder="elevate" fullWidth hint={envSet.TERMINAL_SSH_USER ? "Stored." : undefined} />
+          <WizardField label="SSH port" value={sshPort} onChange={setSshPort} placeholder="22" fullWidth hint={envSet.TERMINAL_SSH_PORT ? "Stored." : undefined} />
+          <WizardField label="SSH private key path" value={sshKey} onChange={setSshKey} placeholder="~/.ssh/id_ed25519" fullWidth hint={envSet.TERMINAL_SSH_KEY ? "Stored." : undefined} />
+        </div>
+      )}
+      {backend === "daytona" && (
+        <WizardField label="Sandbox image" value={daytonaImage} onChange={setDaytonaImage} placeholder="ubuntu:24.04" fullWidth />
+      )}
+      {(backend === "modal" || backend === "singularity") && (
+        <p className="text-[11.5px] leading-5 text-muted-foreground/80">
+          {backend === "modal"
+            ? "Modal credentials (MODAL_TOKEN_ID + MODAL_TOKEN_SECRET) — run elevate setup terminal in the CLI for the secure prompt."
+            : "Singularity / Apptainer (Linux only) — set the container image via elevate setup terminal."}
+        </p>
+      )}
+      <div className="flex items-center gap-3">
+        <Button size="sm" onClick={handleSave} disabled={saving} className="h-8">
+          {saving ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1" />}
+          Save terminal settings
+        </Button>
+        {toast && <span className="text-[11.5px] text-success">{toast}</span>}
+        {error && <span className="text-[11.5px] text-destructive">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
+// Agent settings. Mirrors `_setup_agent_settings`.
+// =========================================================================
+
+function AgentSettingsBrowser() {
+  const [maxTurns, setMaxTurns] = useState<string>("90");
+  const [toolProgress, setToolProgress] = useState<string>("all");
+  const [compressionThreshold, setCompressionThreshold] = useState<string>("0.50");
+  const [sessionResetMode, setSessionResetMode] = useState<string>("both");
+  const [idleMinutes, setIdleMinutes] = useState<string>("1440");
+  const [atHour, setAtHour] = useState<string>("4");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getConfig().then((config) => {
+      if (cancelled) return;
+      const agent = (config?.agent as Record<string, unknown>) ?? {};
+      const display = (config?.display as Record<string, unknown>) ?? {};
+      const compression = (config?.compression as Record<string, unknown>) ?? {};
+      const reset = (config?.session_reset as Record<string, unknown>) ?? {};
+      setMaxTurns(String(agent.max_turns ?? "90"));
+      setToolProgress(String(display.tool_progress ?? "all"));
+      setCompressionThreshold(String(compression.threshold ?? "0.50"));
+      setSessionResetMode(String(reset.mode ?? "both"));
+      setIdleMinutes(String(reset.idle_minutes ?? "1440"));
+      setAtHour(String(reset.at_hour ?? "4"));
+      setLoaded(true);
+    }).catch((e) => !cancelled && setError(errorMessage(e, "Failed to load")));
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const current = await api.getConfig();
+      const compressionThresholdNum = Number(compressionThreshold);
+      const payload: Record<string, unknown> = {
+        ...current,
+        agent: { ...(current.agent as Record<string, unknown> ?? {}), max_turns: Number(maxTurns) || 90 },
+        display: { ...(current.display as Record<string, unknown> ?? {}), tool_progress: toolProgress },
+        compression: {
+          ...(current.compression as Record<string, unknown> ?? {}),
+          threshold: Number.isFinite(compressionThresholdNum) ? compressionThresholdNum : 0.5,
+          enabled: true,
+        },
+        session_reset: {
+          ...(current.session_reset as Record<string, unknown> ?? {}),
+          mode: sessionResetMode,
+          idle_minutes: Number(idleMinutes) || 1440,
+          at_hour: Number(atHour) || 4,
+        },
+      };
+      await api.saveConfig(payload);
+      setToast("Saved.");
+      setTimeout(() => setToast(null), 1800);
+    } catch (e) {
+      setError(errorMessage(e, "Save failed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!loaded) {
+    return (
+      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading agent settings…
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-3 md:grid-cols-2">
+        <WizardField
+          label="Max iterations per turn"
+          value={maxTurns}
+          onChange={setMaxTurns}
+          placeholder="90"
+          fullWidth
+          hint="How many tool-use rounds the agent gets before stopping. 90 is the default."
+        />
+        <WizardSelect
+          label="Tool progress mode"
+          value={toolProgress}
+          onChange={setToolProgress}
+          options={[
+            { value: "off", label: "off — silent" },
+            { value: "new", label: "new — only first call" },
+            { value: "all", label: "all — every call (default)" },
+            { value: "verbose", label: "verbose — every call + payloads" },
+          ]}
+        />
+        <WizardField
+          label="Compression threshold (0.50-0.95)"
+          value={compressionThreshold}
+          onChange={setCompressionThreshold}
+          placeholder="0.50"
+          fullWidth
+          hint="When context fills past this fraction, older messages compress automatically."
+        />
+        <WizardSelect
+          label="Session reset mode"
+          value={sessionResetMode}
+          onChange={setSessionResetMode}
+          options={[
+            { value: "both", label: "Inactivity + daily (default)" },
+            { value: "idle", label: "Inactivity only" },
+            { value: "daily", label: "Daily only" },
+            { value: "none", label: "Never auto-reset" },
+          ]}
+        />
+        {(sessionResetMode === "both" || sessionResetMode === "idle") && (
+          <WizardField label="Inactivity timeout (minutes)" value={idleMinutes} onChange={setIdleMinutes} placeholder="1440" fullWidth />
+        )}
+        {(sessionResetMode === "both" || sessionResetMode === "daily") && (
+          <WizardField label="Daily reset hour (0-23, local time)" value={atHour} onChange={setAtHour} placeholder="4" fullWidth />
+        )}
+      </div>
+      <div className="flex items-center gap-3">
+        <Button size="sm" onClick={handleSave} disabled={saving} className="h-8">
+          {saving ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1" />}
+          Save agent settings
+        </Button>
+        {toast && <span className="text-[11.5px] text-success">{toast}</span>}
+        {error && <span className="text-[11.5px] text-destructive">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+// =========================================================================
+// Extended messaging platforms. Mirrors the 12 CLI `_setup_<platform>` flows
+// that aren't covered by the dedicated Telegram / iMessage / Discord /
+// WhatsApp / Slack panels above. Each entry lists exactly the env vars the
+// CLI saves via `save_env_value`.
+// =========================================================================
+
+type ExtendedChannel = {
+  id: string;
+  label: string;
+  hint: string;
+  docs?: { href: string; label: string };
+  envVars: Array<{ key: string; prompt: string; placeholder?: string; password?: boolean }>;
+};
+
+const EXTENDED_CHANNELS: ExtendedChannel[] = [
+  {
+    id: "signal",
+    label: "Signal",
+    hint: "Bridge via signal-cli running on this Mac (or a server). Start it with REST API on :8080.",
+    docs: { href: "https://github.com/AsamK/signal-cli", label: "signal-cli docs" },
+    envVars: [
+      { key: "SIGNAL_HTTP_URL", prompt: "HTTP URL", placeholder: "http://127.0.0.1:8080" },
+      { key: "SIGNAL_ACCOUNT", prompt: "Account number (E.164)", placeholder: "+15551234567" },
+      { key: "SIGNAL_ALLOWED_USERS", prompt: "Allowed users (E.164, comma-separated)", placeholder: "+15555550100,+15555550101" },
+      { key: "SIGNAL_GROUP_ALLOWED_USERS", prompt: "Allowed group IDs (or * for all)", placeholder: "*" },
+    ],
+  },
+  {
+    id: "matrix",
+    label: "Matrix",
+    hint: "Open standard. Self-host Synapse or use matrix.org. Optional E2EE.",
+    docs: { href: "https://matrix.org/", label: "Matrix docs" },
+    envVars: [
+      { key: "MATRIX_HOMESERVER", prompt: "Homeserver URL", placeholder: "https://matrix.example.org" },
+      { key: "MATRIX_ACCESS_TOKEN", prompt: "Access token (or leave blank for password)", password: true },
+      { key: "MATRIX_USER_ID", prompt: "User ID", placeholder: "@bot:example.org" },
+      { key: "MATRIX_PASSWORD", prompt: "Password (only if no access token)", password: true },
+      { key: "MATRIX_ALLOWED_USERS", prompt: "Allowed user IDs (comma-separated)" },
+      { key: "MATRIX_HOME_ROOM", prompt: "Home room ID" },
+      { key: "MATRIX_ENCRYPTION", prompt: "Enable E2EE (true/false)", placeholder: "false" },
+    ],
+  },
+  {
+    id: "mattermost",
+    label: "Mattermost",
+    hint: "Slack-alternative for teams. Self-hosted or cloud.",
+    docs: { href: "https://docs.mattermost.com/", label: "Mattermost docs" },
+    envVars: [
+      { key: "MATTERMOST_URL", prompt: "Server URL", placeholder: "https://mm.example.com" },
+      { key: "MATTERMOST_TOKEN", prompt: "Bot token", password: true },
+      { key: "MATTERMOST_ALLOWED_USERS", prompt: "Allowed user IDs (comma-separated)" },
+      { key: "MATTERMOST_HOME_CHANNEL", prompt: "Home channel ID" },
+    ],
+  },
+  {
+    id: "email",
+    label: "Email (IMAP + SMTP)",
+    hint: "Inbound + outbound via IMAP/SMTP. Gmail: enable 2FA and create an App Password.",
+    docs: { href: "https://support.google.com/accounts/answer/185833", label: "Gmail App Passwords" },
+    envVars: [
+      { key: "EMAIL_ADDRESS", prompt: "Email address", placeholder: "you@gmail.com" },
+      { key: "EMAIL_PASSWORD", prompt: "Email password / App Password", password: true },
+      { key: "EMAIL_IMAP_HOST", prompt: "IMAP host", placeholder: "imap.gmail.com" },
+      { key: "EMAIL_SMTP_HOST", prompt: "SMTP host", placeholder: "smtp.gmail.com" },
+      { key: "EMAIL_ALLOWED_USERS", prompt: "Allowed sender emails (comma-separated)" },
+    ],
+  },
+  {
+    id: "sms",
+    label: "SMS (Twilio)",
+    hint: "Inbound + outbound SMS via Twilio.",
+    docs: { href: "https://console.twilio.com/", label: "Twilio Console" },
+    envVars: [
+      { key: "TWILIO_ACCOUNT_SID", prompt: "Twilio Account SID", placeholder: "AC…" },
+      { key: "TWILIO_AUTH_TOKEN", prompt: "Twilio Auth Token", password: true },
+      { key: "TWILIO_PHONE_NUMBER", prompt: "Twilio phone number (E.164)", placeholder: "+15551234567" },
+      { key: "SMS_ALLOWED_USERS", prompt: "Allowed phone numbers (E.164, comma-separated)" },
+      { key: "SMS_HOME_CHANNEL", prompt: "Home channel phone number" },
+    ],
+  },
+  {
+    id: "dingtalk",
+    label: "DingTalk",
+    hint: "Alibaba's enterprise messenger.",
+    envVars: [
+      { key: "DINGTALK_CLIENT_ID", prompt: "AppKey (Client ID)" },
+      { key: "DINGTALK_CLIENT_SECRET", prompt: "AppSecret (Client Secret)", password: true },
+    ],
+  },
+  {
+    id: "feishu",
+    label: "Feishu / Lark",
+    hint: "ByteDance enterprise messenger.",
+    docs: { href: "https://open.feishu.cn/app", label: "Feishu open platform" },
+    envVars: [
+      { key: "FEISHU_APP_ID", prompt: "App ID" },
+      { key: "FEISHU_APP_SECRET", prompt: "App Secret", password: true },
+      { key: "FEISHU_DOMAIN", prompt: "Domain (feishu or lark)", placeholder: "feishu" },
+      { key: "FEISHU_CONNECTION_MODE", prompt: "Connection mode (websocket or webhook)", placeholder: "websocket" },
+      { key: "FEISHU_ALLOWED_USERS", prompt: "Allowed user IDs (comma-separated)" },
+      { key: "FEISHU_GROUP_POLICY", prompt: "Group policy (mention or disabled)", placeholder: "mention" },
+      { key: "FEISHU_HOME_CHANNEL", prompt: "Home chat ID" },
+    ],
+  },
+  {
+    id: "wecom",
+    label: "WeCom (Enterprise WeChat)",
+    hint: "Tencent's enterprise messenger.",
+    envVars: [
+      { key: "WECOM_BOT_ID", prompt: "Bot ID" },
+      { key: "WECOM_SECRET", prompt: "Secret", password: true },
+      { key: "WECOM_ALLOWED_USERS", prompt: "Allowed user IDs (comma-separated)" },
+      { key: "WECOM_HOME_CHANNEL", prompt: "Home chat ID" },
+      { key: "WECOM_DM_POLICY", prompt: "DM policy (open / pairing / disabled)", placeholder: "pairing" },
+    ],
+  },
+  {
+    id: "wecom_callback",
+    label: "WeCom Callback (self-built app)",
+    hint: "WeCom self-built app with HTTP callback. Listens on its own port.",
+    envVars: [
+      { key: "WECOM_CALLBACK_CORP_ID", prompt: "Corp ID" },
+      { key: "WECOM_CALLBACK_CORP_SECRET", prompt: "Corp Secret", password: true },
+      { key: "WECOM_CALLBACK_AGENT_ID", prompt: "Agent ID" },
+      { key: "WECOM_CALLBACK_TOKEN", prompt: "Callback Token", password: true },
+      { key: "WECOM_CALLBACK_ENCODING_AES_KEY", prompt: "Encoding AES Key", password: true },
+      { key: "WECOM_CALLBACK_PORT", prompt: "Callback server port", placeholder: "8645" },
+      { key: "WECOM_CALLBACK_ALLOWED_USERS", prompt: "Allowed user IDs (comma-separated)" },
+    ],
+  },
+  {
+    id: "weixin",
+    label: "Weixin / WeChat",
+    hint: "Personal WeChat account. QR login in the CLI writes WEIXIN_ACCOUNT_ID + WEIXIN_TOKEN.",
+    envVars: [
+      { key: "WEIXIN_ACCOUNT_ID", prompt: "Account ID (from QR login)" },
+      { key: "WEIXIN_TOKEN", prompt: "Token (from QR login)", password: true },
+      { key: "WEIXIN_BASE_URL", prompt: "Base URL (optional)" },
+      { key: "WEIXIN_ALLOWED_USERS", prompt: "Allowed user IDs (comma-separated)" },
+      { key: "WEIXIN_DM_POLICY", prompt: "DM policy (pairing / open / allowlist / disabled)", placeholder: "pairing" },
+      { key: "WEIXIN_GROUP_POLICY", prompt: "Group policy (disabled / open / listed)", placeholder: "disabled" },
+      { key: "WEIXIN_GROUP_ALLOWED_USERS", prompt: "Allowed group chat IDs (comma-separated)" },
+      { key: "WEIXIN_HOME_CHANNEL", prompt: "Home channel (user ID)" },
+    ],
+  },
+  {
+    id: "qqbot",
+    label: "QQ Bot",
+    hint: "QQ bot account. Use the QQ Open Platform to register.",
+    docs: { href: "https://q.qq.com/", label: "QQ Open Platform" },
+    envVars: [
+      { key: "QQ_APP_ID", prompt: "App ID" },
+      { key: "QQ_CLIENT_SECRET", prompt: "App Secret", password: true },
+      { key: "QQ_ALLOWED_USERS", prompt: "Allowed user OpenIDs (comma-separated)" },
+      { key: "QQBOT_HOME_CHANNEL", prompt: "Home channel OpenID" },
+    ],
+  },
+  {
+    id: "webhooks",
+    label: "Generic webhooks",
+    hint: "Inbound HTTP webhook listener with shared HMAC secret. Run the gateway to expose the endpoint.",
+    envVars: [
+      { key: "WEBHOOK_PORT", prompt: "Webhook listener port", placeholder: "8644" },
+      { key: "WEBHOOK_SECRET", prompt: "Global HMAC secret", password: true },
+      { key: "WEBHOOK_ENABLED", prompt: "Enabled (true/false)", placeholder: "true" },
+    ],
+  },
+];
+
+function ExtendedChannelsBrowser() {
+  const [envState, setEnvState] = useState<Record<string, boolean>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [openIds, setOpenIds] = useState<Set<string>>(new Set());
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getEnvVars().then((envs) => {
+      if (cancelled) return;
+      const map: Record<string, boolean> = {};
+      for (const c of EXTENDED_CHANNELS) {
+        for (const v of c.envVars) {
+          map[v.key] = Boolean((envs as Record<string, { is_set?: boolean }>)[v.key]?.is_set);
+        }
+      }
+      setEnvState(map);
+    }).catch((e) => !cancelled && setError(errorMessage(e, "Failed to load env vars")));
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggle = (id: string) => {
+    setOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const saveChannel = async (channel: ExtendedChannel) => {
+    setSavingId(channel.id);
+    setError(null);
+    try {
+      for (const v of channel.envVars) {
+        const value = drafts[v.key]?.trim();
+        if (value) {
+          await api.setEnvVar(v.key, value);
+          setEnvState((m) => ({ ...m, [v.key]: true }));
+        }
+      }
+      setDrafts((prev) => {
+        const next = { ...prev };
+        for (const v of channel.envVars) delete next[v.key];
+        return next;
+      });
+      setToast(`${channel.label} saved.`);
+      setTimeout(() => setToast(null), 1800);
+    } catch (e) {
+      setError(errorMessage(e, `Save ${channel.label} failed`));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const configuredCount = (c: ExtendedChannel) =>
+    c.envVars.filter((v) => envState[v.key]).length;
+
+  return (
+    <div className="grid gap-2">
+      <p className="text-[11.5px] leading-5 text-muted-foreground/80">
+        12 more platforms supported by the CLI. Expand any one to paste credentials — saved directly to your <code>.env</code>.
+      </p>
+      <ul className="grid gap-1.5">
+        {EXTENDED_CHANNELS.map((c) => {
+          const isOpen = openIds.has(c.id);
+          const set = configuredCount(c);
+          const total = c.envVars.length;
+          const isSaving = savingId === c.id;
+          return (
+            <li key={c.id} className="rounded-md border border-border/60 bg-background/40">
+              <button
+                type="button"
+                onClick={() => toggle(c.id)}
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-muted/30"
+              >
+                <div className="flex flex-col">
+                  <span className="text-[12.5px] font-medium text-foreground">{c.label}</span>
+                  <span className="text-[11px] text-muted-foreground/80">{c.hint}</span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {set > 0 && (
+                    <Badge variant={set === total ? "success" : "outline"} className="text-[10.5px]">
+                      {set}/{total} set
+                    </Badge>
+                  )}
+                  <span className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+                    {isOpen ? "hide" : "configure"}
+                  </span>
+                </div>
+              </button>
+              {isOpen && (
+                <div className="border-t border-border/60 px-3 py-3 grid gap-3">
+                  {c.docs && (
+                    <a href={c.docs.href} target="_blank" rel="noreferrer noopener" className="inline-flex w-fit items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline">
+                      {c.docs.label} <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                  {c.envVars.map((v) => (
+                    <WizardField
+                      key={v.key}
+                      label={v.prompt}
+                      value={drafts[v.key] ?? ""}
+                      onChange={(val) => setDrafts((m) => ({ ...m, [v.key]: val }))}
+                      placeholder={envState[v.key] ? "Already set — paste to replace" : (v.placeholder ?? "")}
+                      type={v.password ? "password" : "text"}
+                      fullWidth
+                      hint={envState[v.key] ? `Stored in ${v.key}. Leave blank to keep it.` : undefined}
+                    />
+                  ))}
+                  <div className="flex items-center gap-3">
+                    <Button size="sm" onClick={() => saveChannel(c)} disabled={isSaving} className="h-8">
+                      {isSaving ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1" />}
+                      Save {c.label}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {toast && <p className="text-[11.5px] text-success">{toast}</p>}
+      {error && <p className="text-[11.5px] text-destructive">{error}</p>}
+    </div>
   );
 }
 
@@ -1987,12 +3652,16 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
               <button
                 key={slug || t.name || Math.random()}
                 type="button"
-                onClick={() => slug && !connected && !busy && connect(slug)}
-                disabled={!slug || connected || busy}
+                onClick={() => slug && !busy && connect(slug)}
+                disabled={!slug || busy}
+                aria-label={
+                  connected
+                    ? `Add another ${t.name ?? slug} connection`
+                    : `Connect ${t.name ?? slug}`
+                }
                 className={cn(
                   "flex items-center justify-between gap-2 rounded-md border border-border bg-card/60 px-3 py-1.5 text-left text-[12px] transition-colors",
-                  !connected && !busy && "hover:border-primary/40 hover:bg-primary/5",
-                  connected && "opacity-60",
+                  !busy && "hover:border-primary/40 hover:bg-primary/5",
                 )}
               >
                 <span className="flex min-w-0 items-center gap-2">
@@ -2007,11 +3676,16 @@ function ComposioConnectionsInline({ keyPresent }: { keyPresent: boolean }) {
                     <span className="h-4 w-4 shrink-0 rounded-sm bg-muted/40" />
                   )}
                   <span className="truncate">{t.name ?? slug}</span>
+                  {connected && (
+                    <CheckCircle2 className="h-3 w-3 shrink-0 text-primary" />
+                  )}
                 </span>
-                {connected ? (
-                  <span className="text-[10.5px] uppercase tracking-wide text-primary">connected</span>
-                ) : busy ? (
+                {busy ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                ) : connected ? (
+                  <span className="text-[10.5px] uppercase tracking-wide text-primary">
+                    add another
+                  </span>
                 ) : (
                   <span className="text-[10.5px] uppercase tracking-wide text-muted-foreground">
                     connect

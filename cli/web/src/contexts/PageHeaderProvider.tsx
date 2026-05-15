@@ -22,7 +22,8 @@ export function PageHeaderProvider({
 }) {
   const { pathname } = useLocation();
   const { t } = useI18n();
-  const [titleOverride, setTitleOverride] = useState<string | null>(null);
+  const [titleOverride, setTitleOverride] = useState<ReactNode | null>(null);
+  const [beforeTitle, setBeforeTitle] = useState<ReactNode>(null);
   const [afterTitle, setAfterTitle] = useState<ReactNode>(null);
   const [end, setEnd] = useState<ReactNode>(null);
 
@@ -31,6 +32,7 @@ export function PageHeaderProvider({
   /* eslint-disable react-hooks/set-state-in-effect */
   useLayoutEffect(() => {
     setTitleOverride(null);
+    setBeforeTitle(null);
     setAfterTitle(null);
     setEnd(null);
   }, [pathname]);
@@ -40,29 +42,33 @@ export function PageHeaderProvider({
     () => resolvePageTitle(pathname, t, pluginTabs),
     [pathname, t, pluginTabs],
   );
-  const displayTitle = titleOverride ?? defaultTitle;
+  const displayTitle: ReactNode = titleOverride ?? defaultTitle;
 
-  const isChatRoute = pathname === "/chat" || pathname === "/chat/";
   const isConfigRoute = pathname === "/config" || pathname === "/config/";
+  const isChatRoute = pathname === "/" || pathname.startsWith("/chat");
 
   const value = useMemo(
     () => ({
       setAfterTitle,
+      setBeforeTitle,
       setEnd,
       setTitle: setTitleOverride,
+      sidebarCollapsed,
+      onShowSidebar,
     }),
-    [],
+    [sidebarCollapsed, onShowSidebar],
   );
 
   return (
     <PageHeaderContext.Provider value={value}>
       <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        {!isChatRoute && !isConfigRoute && (
+        {!isConfigRoute && !isChatRoute && (
           <header
             className={cn(
               "z-1 w-full shrink-0",
-              "box-border h-11 min-h-11",
-              "bg-background",
+              "box-border",
+              isChatRoute ? "h-11 min-h-11" : "h-16 min-h-16",
+              isChatRoute ? "bg-[var(--chat-bg)]" : "bg-background",
               "overflow-hidden",
             )}
             role="banner"
@@ -70,8 +76,9 @@ export function PageHeaderProvider({
           >
             <div
               className={cn(
-                "flex h-full w-full min-w-0 items-center gap-3 pr-3 sm:pr-6",
-                sidebarCollapsed ? "pl-20" : "pl-3 sm:pl-6",
+                "flex h-full w-full min-w-0 items-center gap-4",
+                isChatRoute ? "py-1.5 px-4 sm:px-6" : "py-3 pr-5 sm:pr-10",
+                !isChatRoute && (sidebarCollapsed ? "pl-20" : "pl-5 sm:pl-10"),
               )}
             >
               {sidebarCollapsed && onShowSidebar && (
@@ -81,35 +88,51 @@ export function PageHeaderProvider({
                   aria-label="Show sidebar"
                   style={NO_DRAG_REGION}
                   className={cn(
-                    "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+                    "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
                     "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                   )}
                 >
-                  <PanelLeftOpen className="h-4 w-4" />
+                  <PanelLeftOpen className="h-3.5 w-3.5" />
                 </button>
               )}
 
-              <div
-                className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
-                style={NO_DRAG_REGION}
-              >
-                <h1
-                  className="min-w-0 truncate text-sm font-semibold tracking-normal text-midground"
-                >
-                  {displayTitle}
-                </h1>
-                {afterTitle}
-              </div>
-
-              {end ? (
+              {isChatRoute ? (
                 <div
-                  className="flex min-w-0 shrink-0 justify-end"
+                  className="mx-auto flex w-full min-w-0 max-w-[52rem] items-center gap-2 sm:gap-3"
                   style={NO_DRAG_REGION}
                 >
+                  {beforeTitle}
+                  <h1 className="min-w-0 truncate text-[0.95rem] font-semibold leading-6 tracking-[-0.005em] text-[var(--chat-text)]">
+                    {displayTitle}
+                  </h1>
                   {end}
+                  {afterTitle}
                 </div>
-              ) : null}
+              ) : (
+                <>
+                  <div className="flex min-w-0 flex-1 items-center gap-4">
+                    <div
+                      className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
+                      style={NO_DRAG_REGION}
+                    >
+                      {beforeTitle}
+                      <h1 className="min-w-0 truncate text-[0.95rem] font-semibold leading-6 tracking-[-0.005em] text-midground">
+                        {displayTitle}
+                      </h1>
+                      {afterTitle}
+                    </div>
+                  </div>
+                  {end ? (
+                    <div
+                      className="flex min-w-0 shrink-0 justify-end"
+                      style={NO_DRAG_REGION}
+                    >
+                      {end}
+                    </div>
+                  ) : null}
+                </>
+              )}
             </div>
           </header>
         )}

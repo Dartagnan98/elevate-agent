@@ -10,8 +10,8 @@ const HOST = "127.0.0.1";
 const HOME = os.homedir();
 const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/hub";
 const EMBEDDED_CHAT =
-  process.env.ELEVATE_DESKTOP_EMBEDDED_CHAT === "1" ||
-  process.env.ELEVATE_DASHBOARD_TUI === "1";
+  process.env.ELEVATE_DESKTOP_EMBEDDED_CHAT !== "0" &&
+  process.env.ELEVATE_DASHBOARD_TUI !== "0";
 const DEFAULT_PATH = [
   path.join(HOME, ".elevate", "bin"),
   path.join(HOME, ".local", "bin"),
@@ -284,8 +284,6 @@ function createMenu() {
         { label: "Setup", accelerator: "CmdOrCtrl+3", click: () => loadAppPath("/desktop-setup") },
         { label: "Tasks", accelerator: "CmdOrCtrl+4", click: () => loadAppPath("/tasks") },
         { label: "Memory", accelerator: "CmdOrCtrl+5", click: () => loadAppPath("/memory") },
-        { type: "separator" },
-        { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => mainWindow?.reload() },
       ],
     },
     {
@@ -341,6 +339,20 @@ function createWindow() {
 
   mainWindow.on("page-title-updated", (event) => {
     event.preventDefault();
+  });
+
+  // Native chat apps (Claude, Codex, ChatGPT desktop) don't let you
+  // refresh the window — a refresh would blow away in-memory chat
+  // state and force a reconnect/re-render dance. Swallow Cmd+R /
+  // Ctrl+R / F5 so users get the same "close-and-reopen-only" feel.
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const key = (input.key || "").toLowerCase();
+    const isReloadCombo =
+      (key === "r" && (input.meta || input.control)) || key === "f5";
+    if (isReloadCombo) {
+      event.preventDefault();
+    }
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

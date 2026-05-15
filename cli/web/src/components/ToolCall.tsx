@@ -33,6 +33,7 @@ export interface ToolEntry {
   status: "running" | "done" | "error";
   startedAt: number;
   completedAt?: number;
+  messageId?: string;
 }
 
 const STATUS_TONE: Record<ToolEntry["status"], string> = {

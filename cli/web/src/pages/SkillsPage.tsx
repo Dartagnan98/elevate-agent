@@ -1,93 +1,43 @@
-import { useEffect, useLayoutEffect, useState, useMemo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   BriefcaseBusiness,
   CheckCircle2,
-  Package,
-  Search,
-  Megaphone,
-  Route,
-  Users,
-  Wrench,
-  X,
-  Cpu,
-  Globe,
-  Shield,
+  ChevronRight,
+  Code2,
   Eye,
+  FileText,
+  Folder,
+  FolderOpen,
+  Megaphone,
+  MoreVertical,
+  Package,
   Paintbrush,
-  Brain,
-  Blocks,
-  Code,
-  Zap,
-  Filter,
+  Route,
+  Search,
+  Sparkles,
+  Users,
+  X,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { SkillInfo, ToolsetInfo } from "@/lib/api";
+import type { SkillInfo, SkillTreeNode } from "@/lib/api";
 import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Markdown } from "@/components/Markdown";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 
 /* ------------------------------------------------------------------ */
-/*  Types & helpers                                                    */
+/*  Workflow flow cards (kept compact above the tree)                  */
 /* ------------------------------------------------------------------ */
-
-const CATEGORY_LABELS: Record<string, string> = {
-  mlops: "MLOps",
-  "mlops/cloud": "MLOps / Cloud",
-  "mlops/evaluation": "MLOps / Evaluation",
-  "mlops/inference": "MLOps / Inference",
-  "mlops/models": "MLOps / Models",
-  "mlops/training": "MLOps / Training",
-  "mlops/vector-databases": "MLOps / Vector DBs",
-  mcp: "MCP",
-  "red-teaming": "Red Teaming",
-  ocr: "OCR",
-  p5js: "p5.js",
-  ai: "AI",
-  ux: "UX",
-  ui: "UI",
-};
-
-function prettyCategory(
-  raw: string | null | undefined,
-  generalLabel: string,
-): string {
-  if (!raw) return generalLabel;
-  if (CATEGORY_LABELS[raw]) return CATEGORY_LABELS[raw];
-  return raw
-    .split(/[-_/]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-const TOOLSET_ICONS: Record<
-  string,
-  React.ComponentType<{ className?: string }>
-> = {
-  computer: Cpu,
-  web: Globe,
-  security: Shield,
-  vision: Eye,
-  design: Paintbrush,
-  ai: Brain,
-  integration: Blocks,
-  code: Code,
-  automation: Zap,
-};
-
-function toolsetIcon(
-  name: string,
-): React.ComponentType<{ className?: string }> {
-  const lower = name.toLowerCase();
-  for (const [key, icon] of Object.entries(TOOLSET_ICONS)) {
-    if (lower.includes(key)) return icon;
-  }
-  return Wrench;
-}
 
 const REAL_ESTATE_WORKFLOWS = [
   {
@@ -127,16 +77,798 @@ const REAL_ESTATE_WORKFLOWS = [
   },
 ] as const;
 
-function WorkflowSkillCard({
-  onToggle,
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+const PERSONAL_CATEGORIES = new Set<string | null>([null, "general", ""]);
+
+function isBuiltInSkill(skill: SkillInfo): boolean {
+  // Built-in skills ship inside ~/.elevate (Anthropic-distributed). Personal
+  // skills come from external dirs and almost always have a category set.
+  return PERSONAL_CATEGORIES.has(skill.category ?? null);
+}
+
+function fileIcon(name: string) {
+  if (name === "SKILL.md") return Sparkles;
+  if (name.endsWith(".md")) return FileText;
+  return FileText;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page                                                               */
+/* ------------------------------------------------------------------ */
+
+export default function SkillsPage() {
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string>("SKILL.md");
+  const [trees, setTrees] = useState<Record<string, SkillTreeNode[]>>({});
+  const [loadingTree, setLoadingTree] = useState<string | null>(null);
+  const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set());
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [fileContent, setFileContent] = useState<string>("");
+  const [fileLoading, setFileLoading] = useState(false);
+  const [viewMode, setViewMode] = useState<"render" | "raw">("render");
+  const [togglingSkills, setTogglingSkills] = useState<Set<string>>(new Set());
+  const [showWorkflows, setShowWorkflows] = useState(false);
+  const { toast, showToast } = useToast();
+  const { t } = useI18n();
+  const { setAfterTitle, setEnd } = usePageHeader();
+
+  /* ---- Initial load ---- */
+  useEffect(() => {
+    api
+      .getSkills()
+      .then((s) => {
+        setSkills(s);
+        if (s.length > 0 && !selectedSkill) {
+          const first = [...s].sort((a, b) => a.name.localeCompare(b.name))[0];
+          if (first) {
+            setSelectedSkill(first.name);
+            setExpandedSkills(new Set([first.name]));
+          }
+        }
+      })
+      .catch(() => showToast(t.common.loading, "error"))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ---- Lazy-load the tree for a skill ---- */
+  const loadTree = useCallback(
+    async (name: string) => {
+      if (trees[name]) return;
+      setLoadingTree(name);
+      try {
+        const res = await api.getSkillTree(name);
+        setTrees((prev) => ({ ...prev, [name]: res.tree || [] }));
+      } catch {
+        setTrees((prev) => ({ ...prev, [name]: [] }));
+      } finally {
+        setLoadingTree((current) => (current === name ? null : current));
+      }
+    },
+    [trees],
+  );
+
+  /* ---- Load file content for the currently selected leaf ---- */
+  useEffect(() => {
+    if (!selectedSkill) {
+      setFileContent("");
+      return;
+    }
+    setFileLoading(true);
+    api
+      .getSkillFile(selectedSkill, selectedPath)
+      .then((res) => {
+        if (res.binary) {
+          setFileContent(`*(binary file — ${res.size ?? 0} bytes)*`);
+        } else if (res.error) {
+          setFileContent(`*${res.error}*`);
+        } else {
+          setFileContent(res.content ?? "");
+        }
+      })
+      .catch(() => setFileContent("*Failed to load file*"))
+      .finally(() => setFileLoading(false));
+  }, [selectedSkill, selectedPath]);
+
+  /* ---- When a skill is expanded for the first time, pull its tree ---- */
+  useEffect(() => {
+    if (selectedSkill && !trees[selectedSkill]) {
+      loadTree(selectedSkill);
+    }
+  }, [selectedSkill, trees, loadTree]);
+
+  /* ---- Toggle skill enable/disable ---- */
+  const handleToggleSkill = async (skill: SkillInfo) => {
+    setTogglingSkills((prev) => new Set(prev).add(skill.name));
+    try {
+      await api.toggleSkill(skill.name, !skill.enabled);
+      setSkills((prev) =>
+        prev.map((s) =>
+          s.name === skill.name ? { ...s, enabled: !s.enabled } : s,
+        ),
+      );
+      showToast(
+        `${skill.name} ${skill.enabled ? t.common.disabled : t.common.enabled}`,
+        "success",
+      );
+    } catch {
+      showToast(`${t.common.failedToToggle} ${skill.name}`, "error");
+    } finally {
+      setTogglingSkills((prev) => {
+        const next = new Set(prev);
+        next.delete(skill.name);
+        return next;
+      });
+    }
+  };
+
+  /* ---- Derived data ---- */
+  const lowerSearch = search.trim().toLowerCase();
+  const isSearching = lowerSearch.length > 0;
+
+  const filteredSkills = useMemo(() => {
+    if (!isSearching) return skills;
+    return skills.filter(
+      (s) =>
+        s.name.toLowerCase().includes(lowerSearch) ||
+        s.description.toLowerCase().includes(lowerSearch) ||
+        (s.category ?? "").toLowerCase().includes(lowerSearch),
+    );
+  }, [skills, isSearching, lowerSearch]);
+
+  const personalSkills = useMemo(
+    () =>
+      filteredSkills
+        .filter((s) => !isBuiltInSkill(s))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [filteredSkills],
+  );
+  const builtInSkills = useMemo(
+    () =>
+      filteredSkills
+        .filter(isBuiltInSkill)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [filteredSkills],
+  );
+
+  const skillsByName = useMemo(
+    () => new Map(skills.map((skill) => [skill.name, skill])),
+    [skills],
+  );
+  const enabledCount = skills.filter((s) => s.enabled).length;
+  const activeSkill = selectedSkill ? skillsByName.get(selectedSkill) : null;
+
+  /* ---- Page header ---- */
+  useLayoutEffect(() => {
+    if (loading) {
+      setAfterTitle(null);
+      setEnd(null);
+      return;
+    }
+    setAfterTitle(
+      <span className="whitespace-nowrap text-xs text-muted-foreground">
+        {t.skills.enabledOf
+          .replace("{enabled}", String(enabledCount))
+          .replace("{total}", String(skills.length))}
+      </span>,
+    );
+    setEnd(
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setShowWorkflows((v) => !v)}
+          className={`hidden sm:inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
+            showWorkflows
+              ? "border-primary/40 bg-primary/10 text-primary"
+              : "border-border bg-card text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Route className="h-3 w-3" />
+          Flows
+        </button>
+        <div className="relative w-full min-w-0 sm:max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            className="h-8 pl-8 pr-7 text-xs"
+            placeholder={t.common.search}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search && (
+            <button
+              type="button"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              onClick={() => setSearch("")}
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+      </div>,
+    );
+    return () => {
+      setAfterTitle(null);
+      setEnd(null);
+    };
+  }, [
+    enabledCount,
+    loading,
+    search,
+    setAfterTitle,
+    setEnd,
+    showWorkflows,
+    skills.length,
+    t,
+  ]);
+
+  /* ---- Helpers ---- */
+  const handleSelectSkill = (name: string, path = "SKILL.md") => {
+    setSelectedSkill(name);
+    setSelectedPath(path);
+    setExpandedSkills((prev) => {
+      const next = new Set(prev);
+      next.add(name);
+      return next;
+    });
+    if (!trees[name]) loadTree(name);
+  };
+
+  const toggleSkillExpansion = (name: string) => {
+    setExpandedSkills((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+        if (!trees[name]) loadTree(name);
+      }
+      return next;
+    });
+  };
+
+  const toggleFolder = (skillName: string, path: string) => {
+    const key = `${skillName}::${path}`;
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  /* ---- Loading ---- */
+  if (loading) {
+    return (
+      <p className="px-1 py-1 text-xs text-muted-foreground/80">
+        Loading skills…
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Toast toast={toast} />
+
+      {showWorkflows && (
+        <section className="rounded-md border border-border bg-card p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <Route className="h-3.5 w-3.5 text-primary" />
+              Real estate workflows
+            </div>
+            <Badge variant="outline">
+              {enabledCount}/{skills.length} enabled
+            </Badge>
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {REAL_ESTATE_WORKFLOWS.map((workflow) => (
+              <WorkflowFlowCard
+                key={workflow.key}
+                workflow={workflow}
+                skillsByName={skillsByName}
+                togglingSkills={togglingSkills}
+                onToggle={handleToggleSkill}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ============ Two-pane shell ============ */}
+      <div className="grid min-h-[calc(100vh-12rem)] grid-cols-1 gap-0 rounded-md border border-border bg-card md:grid-cols-[280px_minmax(0,1fr)]">
+        {/* ---- Left tree rail ---- */}
+        <aside
+          aria-label={t.skills.title}
+          className="flex flex-col border-b border-border md:border-b-0 md:border-r"
+        >
+          <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+            <div className="flex items-center gap-2 text-[11px] font-medium tracking-normal text-muted-foreground">
+              <Package className="h-3 w-3" />
+              <span>{t.skills.title}</span>
+              <span className="text-muted-foreground/60">
+                ({skills.length})
+              </span>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-1 py-2">
+            <TreeSection
+              label="Personal skills"
+              items={personalSkills}
+              skillsByName={skillsByName}
+              trees={trees}
+              loadingTree={loadingTree}
+              expandedSkills={expandedSkills}
+              expandedFolders={expandedFolders}
+              selectedSkill={selectedSkill}
+              selectedPath={selectedPath}
+              togglingSkills={togglingSkills}
+              onSelectSkill={handleSelectSkill}
+              onToggleExpand={toggleSkillExpansion}
+              onToggleFolder={toggleFolder}
+              onToggleEnable={handleToggleSkill}
+              isSearching={isSearching}
+              defaultOpen={true}
+            />
+            <TreeSection
+              label="Built-in skills"
+              items={builtInSkills}
+              skillsByName={skillsByName}
+              trees={trees}
+              loadingTree={loadingTree}
+              expandedSkills={expandedSkills}
+              expandedFolders={expandedFolders}
+              selectedSkill={selectedSkill}
+              selectedPath={selectedPath}
+              togglingSkills={togglingSkills}
+              onSelectSkill={handleSelectSkill}
+              onToggleExpand={toggleSkillExpansion}
+              onToggleFolder={toggleFolder}
+              onToggleEnable={handleToggleSkill}
+              isSearching={isSearching}
+              defaultOpen={false}
+            />
+
+            {filteredSkills.length === 0 && (
+              <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
+                {isSearching ? t.skills.noSkillsMatch : t.skills.noSkills}
+              </p>
+            )}
+          </div>
+        </aside>
+
+        {/* ---- Right detail pane ---- */}
+        <section className="flex min-w-0 flex-col">
+          {activeSkill ? (
+            <SkillDetail
+              skill={activeSkill}
+              filePath={selectedPath}
+              fileContent={fileContent}
+              fileLoading={fileLoading}
+              viewMode={viewMode}
+              setViewMode={setViewMode}
+              toggling={togglingSkills.has(activeSkill.name)}
+              onToggleEnable={() => handleToggleSkill(activeSkill)}
+            />
+          ) : (
+            <div className="flex flex-1 items-center justify-center px-6 py-12">
+              <p className="text-xs text-muted-foreground">
+                Select a skill from the rail to view its contents.
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Left rail: a section (Personal / Built-in)                         */
+/* ------------------------------------------------------------------ */
+
+interface TreeSectionProps {
+  label: string;
+  items: SkillInfo[];
+  skillsByName: Map<string, SkillInfo>;
+  trees: Record<string, SkillTreeNode[]>;
+  loadingTree: string | null;
+  expandedSkills: Set<string>;
+  expandedFolders: Set<string>;
+  selectedSkill: string | null;
+  selectedPath: string;
+  togglingSkills: Set<string>;
+  onSelectSkill: (name: string, path?: string) => void;
+  onToggleExpand: (name: string) => void;
+  onToggleFolder: (skillName: string, path: string) => void;
+  onToggleEnable: (skill: SkillInfo) => void;
+  isSearching: boolean;
+  defaultOpen: boolean;
+}
+
+function TreeSection(props: TreeSectionProps) {
+  const {
+    label,
+    items,
+    trees,
+    loadingTree,
+    expandedSkills,
+    expandedFolders,
+    selectedSkill,
+    selectedPath,
+    onSelectSkill,
+    onToggleExpand,
+    onToggleFolder,
+    isSearching,
+    defaultOpen,
+  } = props;
+  const [open, setOpen] = useState(defaultOpen || isSearching);
+
+  useEffect(() => {
+    if (isSearching) setOpen(true);
+  }, [isSearching]);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-medium tracking-wide text-muted-foreground/70 hover:text-foreground transition-colors"
+      >
+        <ChevronRight
+          className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <span className="uppercase">{label}</span>
+        <span className="text-muted-foreground/40">({items.length})</span>
+      </button>
+      {open && (
+        <ul className="mt-0.5 space-y-px">
+          {items.map((skill) => {
+            const isExpanded = expandedSkills.has(skill.name);
+            const tree = trees[skill.name];
+            const isSelected = selectedSkill === skill.name;
+            const isLoadingTree = loadingTree === skill.name;
+            return (
+              <li key={skill.name}>
+                <SkillRailRow
+                  skill={skill}
+                  selected={isSelected && selectedPath === "SKILL.md"}
+                  expanded={isExpanded}
+                  onSelect={() => onSelectSkill(skill.name, "SKILL.md")}
+                  onToggleExpand={() => onToggleExpand(skill.name)}
+                />
+                {isExpanded && (
+                  <div className="ml-6 mt-0.5 mb-1 border-l border-border/60 pl-2">
+                    {isLoadingTree && !tree && (
+                      <div className="py-1 text-[10px] text-muted-foreground">
+                        Loading…
+                      </div>
+                    )}
+                    {tree && tree.length === 0 && (
+                      <div className="py-1 text-[10px] text-muted-foreground/70">
+                        No files
+                      </div>
+                    )}
+                    {tree && tree.length > 0 && (
+                      <FileTreeList
+                        nodes={tree}
+                        skillName={skill.name}
+                        expandedFolders={expandedFolders}
+                        selectedSkill={selectedSkill}
+                        selectedPath={selectedPath}
+                        onSelectFile={(path) => onSelectSkill(skill.name, path)}
+                        onToggleFolder={(path) =>
+                          onToggleFolder(skill.name, path)
+                        }
+                      />
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SkillRailRow({
+  skill,
+  selected,
+  expanded,
+  onSelect,
+  onToggleExpand,
+}: {
+  skill: SkillInfo;
+  selected: boolean;
+  expanded: boolean;
+  onSelect: () => void;
+  onToggleExpand: () => void;
+}) {
+  const handleRowClick = () => {
+    if (expanded) {
+      onToggleExpand();
+    } else {
+      onSelect();
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleRowClick}
+      aria-expanded={expanded}
+      className={`group flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left transition-colors ${
+        selected
+          ? "bg-foreground/10 text-foreground"
+          : "text-foreground/85 hover:bg-foreground/5"
+      }`}
+    >
+      <span
+        className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/70 group-hover:text-foreground"
+        aria-hidden
+      >
+        <ChevronRight
+          className={`h-3 w-3 transition-transform ${expanded ? "rotate-90" : ""}`}
+        />
+      </span>
+      <Sparkles
+        className={`h-3 w-3 shrink-0 ${
+          skill.enabled ? "text-primary" : "text-muted-foreground/50"
+        }`}
+      />
+      <span
+        className={`min-w-0 flex-1 truncate text-[12px] ${
+          skill.enabled
+            ? "text-foreground"
+            : "text-muted-foreground line-through decoration-muted-foreground/40"
+        }`}
+      >
+        {skill.name}
+      </span>
+    </button>
+  );
+}
+
+function FileTreeList({
+  nodes,
+  skillName,
+  expandedFolders,
+  selectedSkill,
+  selectedPath,
+  onSelectFile,
+  onToggleFolder,
+}: {
+  nodes: SkillTreeNode[];
+  skillName: string;
+  expandedFolders: Set<string>;
+  selectedSkill: string | null;
+  selectedPath: string;
+  onSelectFile: (path: string) => void;
+  onToggleFolder: (path: string) => void;
+}) {
+  return (
+    <ul className="space-y-px">
+      {nodes.map((node) => {
+        if (node.type === "dir") {
+          const key = `${skillName}::${node.path}`;
+          const open = expandedFolders.has(key);
+          return (
+            <li key={node.path}>
+              <button
+                type="button"
+                onClick={() => onToggleFolder(node.path)}
+                className="group flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-foreground/80 hover:bg-foreground/5"
+              >
+                {open ? (
+                  <FolderOpen className="h-3 w-3 shrink-0 text-muted-foreground" />
+                ) : (
+                  <Folder className="h-3 w-3 shrink-0 text-muted-foreground" />
+                )}
+                <span className="truncate text-[11.5px]">{node.name}</span>
+                <ChevronRight
+                  className={`ml-auto h-3 w-3 text-muted-foreground/60 transition-transform ${
+                    open ? "rotate-90" : ""
+                  }`}
+                />
+              </button>
+              {open && node.children && node.children.length > 0 && (
+                <div className="ml-3 mt-0.5 border-l border-border/40 pl-2">
+                  <FileTreeList
+                    nodes={node.children}
+                    skillName={skillName}
+                    expandedFolders={expandedFolders}
+                    selectedSkill={selectedSkill}
+                    selectedPath={selectedPath}
+                    onSelectFile={onSelectFile}
+                    onToggleFolder={onToggleFolder}
+                  />
+                </div>
+              )}
+            </li>
+          );
+        }
+
+        const Icon = fileIcon(node.name);
+        const isSelected =
+          selectedSkill === skillName && selectedPath === node.path;
+        const isSkillMd = node.name === "SKILL.md";
+        return (
+          <li key={node.path}>
+            <button
+              type="button"
+              onClick={() => onSelectFile(node.path)}
+              className={`group flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors ${
+                isSelected
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-foreground/75 hover:bg-foreground/5"
+              }`}
+            >
+              <Icon
+                className={`h-3 w-3 shrink-0 ${
+                  isSkillMd ? "text-primary" : "text-muted-foreground"
+                }`}
+              />
+              <span className="truncate text-[11.5px]">{node.name}</span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Right pane: skill detail + markdown preview                        */
+/* ------------------------------------------------------------------ */
+
+function SkillDetail({
+  skill,
+  filePath,
+  fileContent,
+  fileLoading,
+  viewMode,
+  setViewMode,
+  toggling,
+  onToggleEnable,
+}: {
+  skill: SkillInfo;
+  filePath: string;
+  fileContent: string;
+  fileLoading: boolean;
+  viewMode: "render" | "raw";
+  setViewMode: (v: "render" | "raw") => void;
+  toggling: boolean;
+  onToggleEnable: () => void;
+}) {
+  const trigger = useMemo(() => {
+    return skill.enabled ? "Slash command + auto" : "Disabled";
+  }, [skill.enabled]);
+
+  const addedBy = skill.category || "Local";
+
+  return (
+    <div className="flex flex-1 flex-col">
+      {/* Header */}
+      <header className="flex items-start justify-between gap-4 border-b border-border px-5 pb-3 pt-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h2 className="truncate text-base font-semibold text-foreground">
+              {skill.name}
+            </h2>
+            {!skill.enabled && (
+              <Badge variant="outline" className="text-[10px]">
+                Disabled
+              </Badge>
+            )}
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-[11px] sm:max-w-md">
+            <span className="text-muted-foreground">Added by</span>
+            <span className="text-muted-foreground">Trigger</span>
+            <span className="font-mono-ui text-foreground">{addedBy}</span>
+            <span className="font-mono-ui text-foreground">{trigger}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={skill.enabled}
+            onCheckedChange={onToggleEnable}
+            disabled={toggling}
+          />
+          <button
+            type="button"
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
+            aria-label="More"
+          >
+            <MoreVertical className="h-4 w-4" />
+          </button>
+        </div>
+      </header>
+
+      {/* Description block */}
+      <div className="border-b border-border px-5 py-3">
+        <div className="text-[11px] font-medium text-muted-foreground">
+          Description
+        </div>
+        <p className="mt-1 text-xs leading-relaxed text-foreground/85">
+          {skill.description || "No description provided."}
+        </p>
+      </div>
+
+      {/* Path crumb + render/raw toggle */}
+      <div className="flex items-center justify-between gap-2 border-b border-border px-5 py-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-mono-ui text-muted-foreground">
+          <FileText className="h-3 w-3" />
+          <span>{filePath}</span>
+        </div>
+        <div className="flex items-center gap-1 rounded-md border border-border bg-card p-0.5">
+          <button
+            type="button"
+            onClick={() => setViewMode("render")}
+            className={`flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] transition-colors ${
+              viewMode === "render"
+                ? "bg-foreground/10 text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+            aria-label="Render markdown"
+          >
+            <Eye className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("raw")}
+            className={`flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] transition-colors ${
+              viewMode === "raw"
+                ? "bg-foreground/10 text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+            aria-label="Show raw"
+          >
+            <Code2 className="h-3 w-3" />
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-5 py-4">
+        {fileLoading ? (
+          <p className="text-xs text-muted-foreground">Loading…</p>
+        ) : viewMode === "render" ? (
+          <div className="rounded-md border border-border bg-card/40 p-4">
+            <Markdown content={stripFrontmatter(fileContent)} />
+          </div>
+        ) : (
+          <pre className="rounded-md border border-border bg-card/60 p-4 text-xs font-mono leading-relaxed text-foreground/90 whitespace-pre-wrap break-words">
+            {fileContent}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Workflow flow card (compact)                                       */
+/* ------------------------------------------------------------------ */
+
+function WorkflowFlowCard({
+  workflow,
   skillsByName,
   togglingSkills,
-  workflow,
+  onToggle,
 }: {
-  onToggle: (skill: SkillInfo) => void;
+  workflow: (typeof REAL_ESTATE_WORKFLOWS)[number];
   skillsByName: Map<string, SkillInfo>;
   togglingSkills: Set<string>;
-  workflow: (typeof REAL_ESTATE_WORKFLOWS)[number];
+  onToggle: (skill: SkillInfo) => void;
 }) {
   const Icon = workflow.icon;
   const present = workflow.names
@@ -169,7 +901,9 @@ function WorkflowSkillCard({
                 {skill.name}
               </div>
               <div className="mt-0.5 flex items-center gap-1 text-[0.65rem] text-muted-foreground">
-                {skill.enabled && <CheckCircle2 className="h-3 w-3 text-success" />}
+                {skill.enabled && (
+                  <CheckCircle2 className="h-3 w-3 text-success" />
+                )}
                 {skill.enabled ? "Enabled" : "Disabled"}
               </div>
             </div>
@@ -197,523 +931,12 @@ function WorkflowSkillCard({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Component                                                          */
+/*  Utilities                                                          */
 /* ------------------------------------------------------------------ */
 
-export default function SkillsPage() {
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [toolsets, setToolsets] = useState<ToolsetInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [view, setView] = useState<"skills" | "toolsets">("skills");
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
-  const [togglingSkills, setTogglingSkills] = useState<Set<string>>(new Set());
-  const { toast, showToast } = useToast();
-  const { t } = useI18n();
-  const { setAfterTitle, setEnd } = usePageHeader();
-
-  useEffect(() => {
-    Promise.all([api.getSkills(), api.getToolsets()])
-      .then(([s, tsets]) => {
-        setSkills(s);
-        setToolsets(tsets);
-      })
-      .catch(() => showToast(t.common.loading, "error"))
-      .finally(() => setLoading(false));
-  }, []);
-
-  /* ---- Toggle skill ---- */
-  const handleToggleSkill = async (skill: SkillInfo) => {
-    setTogglingSkills((prev) => new Set(prev).add(skill.name));
-    try {
-      await api.toggleSkill(skill.name, !skill.enabled);
-      setSkills((prev) =>
-        prev.map((s) =>
-          s.name === skill.name ? { ...s, enabled: !s.enabled } : s,
-        ),
-      );
-      showToast(
-        `${skill.name} ${skill.enabled ? t.common.disabled : t.common.enabled}`,
-        "success",
-      );
-    } catch {
-      showToast(`${t.common.failedToToggle} ${skill.name}`, "error");
-    } finally {
-      setTogglingSkills((prev) => {
-        const next = new Set(prev);
-        next.delete(skill.name);
-        return next;
-      });
-    }
-  };
-
-  /* ---- Derived data ---- */
-  const lowerSearch = search.toLowerCase();
-  const isSearching = search.trim().length > 0;
-
-  const searchMatchedSkills = useMemo(() => {
-    if (!isSearching) return [];
-    return skills.filter(
-      (s) =>
-        s.name.toLowerCase().includes(lowerSearch) ||
-        s.description.toLowerCase().includes(lowerSearch) ||
-        (s.category ?? "").toLowerCase().includes(lowerSearch),
-    );
-  }, [skills, isSearching, lowerSearch]);
-
-  const activeSkills = useMemo(() => {
-    if (isSearching) return [];
-    if (!activeCategory)
-      return [...skills].sort((a, b) => a.name.localeCompare(b.name));
-    return skills
-      .filter((s) =>
-        activeCategory === "__none__"
-          ? !s.category
-          : s.category === activeCategory,
-      )
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [skills, activeCategory, isSearching]);
-
-  const allCategories = useMemo(() => {
-    const cats = new Map<string, number>();
-    for (const s of skills) {
-      const key = s.category || "__none__";
-      cats.set(key, (cats.get(key) || 0) + 1);
-    }
-    return [...cats.entries()]
-      .sort((a, b) => {
-        if (a[0] === "__none__") return -1;
-        if (b[0] === "__none__") return 1;
-        return a[0].localeCompare(b[0]);
-      })
-      .map(([key, count]) => ({
-        key,
-        name: prettyCategory(key === "__none__" ? null : key, t.common.general),
-        count,
-      }));
-  }, [skills, t]);
-
-  const enabledCount = skills.filter((s) => s.enabled).length;
-  const skillsByName = useMemo(
-    () => new Map(skills.map((skill) => [skill.name, skill])),
-    [skills],
-  );
-
-  useLayoutEffect(() => {
-    if (loading) {
-      setAfterTitle(null);
-      setEnd(null);
-      return;
-    }
-    setAfterTitle(
-      <span className="whitespace-nowrap text-xs text-muted-foreground">
-        {t.skills.enabledOf
-          .replace("{enabled}", String(enabledCount))
-          .replace("{total}", String(skills.length))}
-      </span>,
-    );
-    setEnd(
-      <div className="relative w-full min-w-0 sm:max-w-xs">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-        <Input
-          className="h-8 pl-8 pr-7 text-xs"
-          placeholder={t.common.search}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        {search && (
-          <button
-            type="button"
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            onClick={() => setSearch("")}
-          >
-            <X className="h-3 w-3" />
-          </button>
-        )}
-      </div>,
-    );
-    return () => {
-      setAfterTitle(null);
-      setEnd(null);
-    };
-  }, [
-    enabledCount,
-    loading,
-    search,
-    setAfterTitle,
-    setEnd,
-    skills.length,
-    t,
-  ]);
-
-  const filteredToolsets = useMemo(() => {
-    return toolsets.filter(
-      (ts) =>
-        !search ||
-        ts.name.toLowerCase().includes(lowerSearch) ||
-        ts.label.toLowerCase().includes(lowerSearch) ||
-        ts.description.toLowerCase().includes(lowerSearch),
-    );
-  }, [toolsets, search, lowerSearch]);
-
-  /* ---- Loading ---- */
-  if (loading) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading skills…</p>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-4">
-      <Toast toast={toast} />
-
-      <section className="rounded-md border border-border bg-card p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-            <Route className="h-3.5 w-3.5 text-primary" />
-            Real estate workflows
-          </div>
-          <Badge variant="outline">
-            {enabledCount}/{skills.length} enabled
-          </Badge>
-        </div>
-        <div className="mt-3 grid gap-3 lg:grid-cols-4">
-          {REAL_ESTATE_WORKFLOWS.map((workflow) => (
-            <WorkflowSkillCard
-              key={workflow.key}
-              workflow={workflow}
-              skillsByName={skillsByName}
-              togglingSkills={togglingSkills}
-              onToggle={handleToggleSkill}
-            />
-          ))}
-        </div>
-      </section>
-
-      {/* ═══════════════ Filter panel + Content ═══════════════ */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-4">
-        {/* ---- Filter panel ---- */}
-        <aside
-          aria-label={t.skills.title}
-          className="sm:w-56 sm:shrink-0"
-        >
-          <div className="sm:sticky sm:top-0">
-            <div
-              className={`
-                flex flex-col
-                rounded-md border border-border bg-card
-              `}
-            >
-              {/* Filter heading */}
-              <div className="hidden sm:flex items-center gap-2 px-3 py-2 border-b border-border">
-                <Filter className="h-3 w-3 text-muted-foreground" />
-                <span className="text-[0.68rem] font-medium tracking-normal text-muted-foreground">
-                  {t.skills.filters}
-                </span>
-              </div>
-
-              {/* View switch (Skills / Toolsets) */}
-              <div className="flex sm:flex-col gap-1 overflow-x-auto sm:overflow-x-visible scrollbar-none p-2">
-                <PanelItem
-                  icon={Package}
-                  label={`${t.skills.all} (${skills.length})`}
-                  active={view === "skills" && !isSearching}
-                  onClick={() => {
-                    setView("skills");
-                    setActiveCategory(null);
-                    setSearch("");
-                  }}
-                />
-                <PanelItem
-                  icon={Wrench}
-                  label={`${t.skills.toolsets} (${toolsets.length})`}
-                  active={view === "toolsets"}
-                  onClick={() => {
-                    setView("toolsets");
-                    setSearch("");
-                  }}
-                />
-              </div>
-
-              {/* Category sub-filters (only for Skills view) */}
-              {view === "skills" && !isSearching && allCategories.length > 0 && (
-                <div className="hidden sm:flex flex-col border-t border-border">
-                  <div className="px-3 pt-2 pb-1 text-[0.68rem] font-medium tracking-normal text-muted-foreground/70">
-                    {t.skills.categories}
-                  </div>
-                  <div className="flex flex-col p-2 pt-1 gap-px max-h-[calc(100vh-340px)] overflow-y-auto">
-                    {allCategories.map(({ key, name, count }) => {
-                      const isActive = activeCategory === key;
-
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() =>
-                            setActiveCategory(isActive ? null : key)
-                          }
-                          className={`
-                            group flex items-center gap-2 px-2 py-1
-                            rounded-md text-left text-[11px] cursor-pointer
-                            transition-colors
-                            ${
-                              isActive
-                                ? "bg-foreground/10 text-foreground"
-                                : "text-muted-foreground hover:text-foreground hover:bg-foreground/5"
-                            }
-                          `}
-                        >
-                          <span className="flex-1 truncate">{name}</span>
-                          <span
-                            className={`text-[10px] tabular-nums ${
-                              isActive
-                                ? "text-foreground/60"
-                                : "text-muted-foreground/50"
-                            }`}
-                          >
-                            {count}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </aside>
-
-        {/* ---- Content ---- */}
-        <div className="flex-1 min-w-0">
-          {isSearching ? (
-            /* Search results */
-            <Card>
-              <CardHeader className="py-3 px-4">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Search className="h-4 w-4" />
-                    {t.skills.title}
-                  </CardTitle>
-                  <Badge variant="secondary" className="text-[10px]">
-                    {t.skills.resultCount
-                      .replace("{count}", String(searchMatchedSkills.length))
-                      .replace(
-                        "{s}",
-                        searchMatchedSkills.length !== 1 ? "s" : "",
-                      )}
-                  </Badge>
-                </div>
-              </CardHeader>
-              <CardContent className="px-4 pb-4">
-                {searchMatchedSkills.length === 0 ? (
-                  <p className="px-1 py-1 text-xs text-muted-foreground/80">
-                    {t.skills.noSkillsMatch}
-                  </p>
-                ) : (
-                  <div className="grid gap-1">
-                    {searchMatchedSkills.map((skill) => (
-                      <SkillRow
-                        key={skill.name}
-                        skill={skill}
-                        toggling={togglingSkills.has(skill.name)}
-                        onToggle={() => handleToggleSkill(skill)}
-                        noDescriptionLabel={t.skills.noDescription}
-                      />
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          ) : view === "skills" ? (
-            /* Skills list */
-            <Card>
-              <CardHeader className="py-3 px-4">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Package className="h-4 w-4" />
-                    {activeCategory
-                      ? prettyCategory(
-                          activeCategory === "__none__" ? null : activeCategory,
-                          t.common.general,
-                        )
-                      : t.skills.all}
-                  </CardTitle>
-                  <Badge variant="secondary" className="text-[10px]">
-                    {t.skills.skillCount
-                      .replace("{count}", String(activeSkills.length))
-                      .replace("{s}", activeSkills.length !== 1 ? "s" : "")}
-                  </Badge>
-                </div>
-              </CardHeader>
-              <CardContent className="px-4 pb-4">
-                {activeSkills.length === 0 ? (
-                  <p className="px-1 py-1 text-xs text-muted-foreground/80">
-                    {skills.length === 0
-                      ? t.skills.noSkills
-                      : t.skills.noSkillsMatch}
-                  </p>
-                ) : (
-                  <div className="grid gap-1">
-                    {activeSkills.map((skill) => (
-                      <SkillRow
-                        key={skill.name}
-                        skill={skill}
-                        toggling={togglingSkills.has(skill.name)}
-                        onToggle={() => handleToggleSkill(skill)}
-                        noDescriptionLabel={t.skills.noDescription}
-                      />
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          ) : (
-            /* Toolsets grid */
-            <>
-              {filteredToolsets.length === 0 ? (
-                <p className="px-1 py-1 text-xs text-muted-foreground/80">
-                  {t.skills.noToolsetsMatch}
-                </p>
-              ) : (
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {filteredToolsets.map((ts) => {
-                    const TsIcon = toolsetIcon(ts.name);
-                    const labelText =
-                      ts.label.replace(/^[\p{Emoji}\s]+/u, "").trim() ||
-                      ts.name;
-
-                    return (
-                      <Card key={ts.name} className="relative">
-                        <CardContent className="py-4">
-                          <div className="flex items-start gap-3">
-                            <TsIcon className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" />
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="font-medium text-sm">
-                                  {labelText}
-                                </span>
-                                <Badge
-                                  variant={ts.enabled ? "success" : "outline"}
-                                  className="text-[10px]"
-                                >
-                                  {ts.enabled
-                                    ? t.common.active
-                                    : t.common.inactive}
-                                </Badge>
-                              </div>
-                              <p className="text-xs text-muted-foreground mb-2">
-                                {ts.description}
-                              </p>
-                              {ts.enabled && !ts.configured && (
-                                <p className="text-[10px] text-[var(--color-warning)]/80 mb-2">
-                                  {t.skills.setupNeeded}
-                                </p>
-                              )}
-                              {ts.tools.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {ts.tools.map((tool) => (
-                                    <Badge
-                                      key={tool}
-                                      variant="secondary"
-                                      className="text-[10px] font-mono"
-                                    >
-                                      {tool}
-                                    </Badge>
-                                  ))}
-                                </div>
-                              )}
-                              {ts.tools.length === 0 && (
-                                <span className="text-[10px] text-muted-foreground/60">
-                                  {ts.enabled
-                                    ? t.skills.toolsetLabel.replace(
-                                        "{name}",
-                                        ts.name,
-                                      )
-                                    : t.skills.disabledForCli}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SkillRow({
-  skill,
-  toggling,
-  onToggle,
-  noDescriptionLabel,
-}: SkillRowProps) {
-  return (
-    <div className="group flex items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
-      <div className="pt-0.5 shrink-0">
-        <Switch
-          checked={skill.enabled}
-          onCheckedChange={onToggle}
-          disabled={toggling}
-        />
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-0.5">
-          <span
-            className={`font-mono-ui text-sm ${
-              skill.enabled ? "text-foreground" : "text-muted-foreground"
-            }`}
-          >
-            {skill.name}
-          </span>
-        </div>
-        <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2">
-          {skill.description || noDescriptionLabel}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function PanelItem({ active, icon: Icon, label, onClick }: PanelItemProps) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`
-        group flex items-center gap-2 px-2.5 py-1.5
-        text-[0.7rem] font-medium tracking-normal normal-case
-        rounded-md text-left cursor-pointer whitespace-nowrap
-        transition-colors
-        ${
-          active
-            ? "bg-foreground/90 text-background"
-            : "text-muted-foreground hover:text-foreground hover:bg-foreground/10"
-        }
-      `}
-    >
-      <Icon className="h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1 truncate">{label}</span>
-    </button>
-  );
-}
-
-interface PanelItemProps {
-  active: boolean;
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  onClick: () => void;
-}
-
-interface SkillRowProps {
-  noDescriptionLabel: string;
-  onToggle: () => void;
-  skill: SkillInfo;
-  toggling: boolean;
+function stripFrontmatter(text: string): string {
+  if (!text.startsWith("---")) return text;
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) return text;
+  return text.slice(end + 4).replace(/^\s*\n/, "");
 }

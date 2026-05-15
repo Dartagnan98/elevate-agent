@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Lock, Play, Copy, RefreshCw, Plus, Pencil, Trash2, X } from "lucide-react";
+import { Loader2, CheckCircle2, Circle, AlertTriangle, ExternalLink, Sparkles, Link as LinkIcon, Play, Copy, RefreshCw, Plus, Pencil, Trash2, X } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
@@ -31,16 +31,9 @@ const DEFAULT_AUTO_REPLY_TEMPLATE =
   "Hey {{firstName}} — thanks for reaching out. What's the property address or area you're looking at?";
 
 type LeadsSetupDraft = {
-  metaProvider: string;
-  metaAuthMethod: string;
   metaMcpEndpoint: string;
   metaMcpToken: string;
-  metaAdAccountId: string;
-  metaPageId: string;
-  metaFormIds: string;
-  googleProvider: string;
   googleDeveloperToken: string;
-  googleCustomerId: string;
   webhookUrl: string;
   webhookSecret: string;
   autoReplyEnabled: boolean;
@@ -55,16 +48,9 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
   const webhookVal = (byKey.get("website_form_webhook")?.value ?? {}) as Record<string, unknown>;
   const policyVal = (byKey.get("auto_reply_policy")?.value ?? {}) as Record<string, unknown>;
   return {
-    metaProvider: String(byKey.get("meta_lead_ads")?.provider ?? "") || "",
-    metaAuthMethod: String(metaVal.authMethod ?? "mcp"),
     metaMcpEndpoint: String(metaVal.mcpEndpoint ?? "https://mcp.pipeboard.co/meta-ads-mcp"),
     metaMcpToken: String(metaVal.mcpToken ?? ""),
-    metaAdAccountId: String(metaVal.adAccountId ?? ""),
-    metaPageId: String(metaVal.pageId ?? ""),
-    metaFormIds: Array.isArray(metaVal.formIds) ? (metaVal.formIds as string[]).join(", ") : String(metaVal.formIds ?? ""),
-    googleProvider: String(byKey.get("google_lead_forms")?.provider ?? "") || "",
     googleDeveloperToken: String(googleVal.developerToken ?? ""),
-    googleCustomerId: String(googleVal.customerId ?? ""),
     webhookUrl: String(webhookVal.url ?? ""),
     webhookSecret: String(webhookVal.secret ?? ""),
     autoReplyEnabled: Boolean(policyVal.enabled ?? false),
@@ -73,52 +59,32 @@ function leadsDraftFromSnapshot(snapshot: LeadsSetupSnapshot): LeadsSetupDraft {
   };
 }
 
-function splitList(value: string): string[] {
-  return value
-    .split(/[,\n]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
 function buildItemUpdates(draft: LeadsSetupDraft): LeadsSetupItemUpdate[] {
-  const metaReady = ((): boolean => {
-    if (draft.metaAuthMethod === "mcp") {
-      return Boolean(draft.metaMcpEndpoint.trim() && draft.metaMcpToken.trim());
-    }
-    return Boolean(
-      draft.metaProvider.trim() &&
-        (draft.metaAdAccountId.trim() || draft.metaPageId.trim() || draft.metaFormIds.trim()),
-    );
-  })();
-  const googleReady = Boolean(
-    draft.googleProvider.trim() && draft.googleDeveloperToken.trim() && draft.googleCustomerId.trim(),
-  );
+  // Meta: one Pipeboard token is enough — Pipeboard's MCP auto-discovers
+  // ad accounts, pages, and lead forms.
+  const metaReady = Boolean(draft.metaMcpEndpoint.trim() && draft.metaMcpToken.trim());
+  // Google: developer token alone — the CLI auto-discovers customer ID
+  // and campaign IDs via `google-ads-list-accessible-customers`.
+  const googleReady = Boolean(draft.googleDeveloperToken.trim());
   const webhookReady = draft.webhookUrl.trim();
   const policyReady = Boolean(draft.autoReplyTemplate.trim()) || !draft.autoReplyEnabled;
   return [
     {
       key: "meta_lead_ads",
       status: (metaReady ? "configured" : "missing") as AdminSetupItemStatus,
-      provider:
-        draft.metaAuthMethod === "mcp"
-          ? "meta_ads_mcp"
-          : draft.metaProvider.trim() || null,
+      provider: metaReady ? "meta_ads_mcp" : null,
       value: {
-        authMethod: draft.metaAuthMethod,
+        authMethod: "mcp",
         mcpEndpoint: draft.metaMcpEndpoint.trim(),
         mcpToken: draft.metaMcpToken,
-        adAccountId: draft.metaAdAccountId.trim(),
-        pageId: draft.metaPageId.trim(),
-        formIds: splitList(draft.metaFormIds),
       },
     },
     {
       key: "google_lead_forms",
       status: (googleReady ? "configured" : "missing") as AdminSetupItemStatus,
-      provider: draft.googleProvider.trim() || null,
+      provider: googleReady ? "google_ads" : null,
       value: {
         developerToken: draft.googleDeveloperToken,
-        customerId: draft.googleCustomerId.trim(),
       },
     },
     {
@@ -339,7 +305,7 @@ const LEADS_WIZARD_STEPS: LeadsWizardStep[] = [
     eyebrow: "Step 2 of 5",
     title: "Google Lead Forms",
     subtitle:
-      "Skip if you don't run Google Ads. Developer token + customer ID is enough — Leads auto-discovers your campaigns.",
+      "Skip if you don't run Google Ads. One developer token is enough — Elevate's CLI auto-discovers your customer ID and campaigns.",
   },
   {
     id: "webhook",
@@ -566,110 +532,46 @@ function LeadsOnboardingWizard({
           <div className="onboarding-rise-delay-3 mt-8 flex flex-col gap-4">
             {step.id === "meta" && (
               <>
-                <WizardSelect
-                  label="Auth method"
-                  value={draft.metaAuthMethod}
-                  onChange={(v) => updateField("metaAuthMethod", v)}
-                  options={[
-                    { value: "mcp", label: "Pipeboard Meta Ads MCP (recommended)" },
-                    { value: "webhook", label: "Page-token webhook (legacy)" },
-                  ]}
-                />
-                {draft.metaAuthMethod === "mcp" ? (
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="MCP endpoint URL"
-                      value={draft.metaMcpEndpoint}
-                      onChange={(v) => updateField("metaMcpEndpoint", v)}
-                      placeholder="https://mcp.pipeboard.co/meta-ads-mcp"
-                      fullWidth
-                      helper="Pre-filled with Pipeboard's hosted MCP. They handle the Facebook OAuth + Marketing API plumbing — you just paste a token."
-                    />
-                    <WizardField
-                      label="Pipeboard API token"
-                      value={draft.metaMcpToken}
-                      onChange={(v) => updateField("metaMcpToken", v)}
-                      placeholder="••••••••"
-                      type="password"
-                      fullWidth
-                      helper={
-                        <>
-                          Get one at{" "}
-                          <a
-                            href="https://pipeboard.co/api-tokens"
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="text-primary underline-offset-2 hover:underline"
-                          >
-                            pipeboard.co/api-tokens
-                          </a>{" "}
-                          (OAuth Facebook there once, copy token back).
-                        </>
-                      }
-                    />
-                  </div>
-                ) : (
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="Provider name"
-                      value={draft.metaProvider}
-                      onChange={(v) => updateField("metaProvider", v)}
-                      placeholder="Meta Business Manager"
-                    />
-                    <WizardField
-                      label="Ad account ID"
-                      value={draft.metaAdAccountId}
-                      onChange={(v) => updateField("metaAdAccountId", v)}
-                      placeholder="act_1234567890"
-                    />
-                    <WizardField
-                      label="Page ID"
-                      value={draft.metaPageId}
-                      onChange={(v) => updateField("metaPageId", v)}
-                      placeholder="987654321"
-                    />
-                    <WizardField
-                      label="Lead form IDs (comma-separated)"
-                      value={draft.metaFormIds}
-                      onChange={(v) => updateField("metaFormIds", v)}
-                      placeholder="form_001, form_002"
-                    />
-                    <div className="md:col-span-2 flex items-start gap-3 rounded-md border border-border bg-card/60 px-4 py-3 backdrop-blur-sm">
-                      <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <p className="text-[12.5px] leading-5 text-muted-foreground">
-                        Direct path: register your own Facebook App, grant via Lead Access Manager, and stand up a webhook endpoint.{" "}
+                <div className="grid gap-4 md:grid-cols-2">
+                  <WizardField
+                    label="MCP endpoint URL"
+                    value={draft.metaMcpEndpoint}
+                    onChange={(v) => updateField("metaMcpEndpoint", v)}
+                    placeholder="https://mcp.pipeboard.co/meta-ads-mcp"
+                    fullWidth
+                    helper="Pre-filled with Pipeboard's hosted MCP. They handle the Facebook OAuth + Marketing API plumbing — you just paste a token."
+                  />
+                  <WizardField
+                    label="Pipeboard API token"
+                    value={draft.metaMcpToken}
+                    onChange={(v) => updateField("metaMcpToken", v)}
+                    placeholder="••••••••"
+                    type="password"
+                    fullWidth
+                    helper={
+                      <>
+                        Get one at{" "}
                         <a
-                          href="https://www.facebook.com/business/help/1456422242197840"
+                          href="https://pipeboard.co/api-tokens"
                           target="_blank"
                           rel="noreferrer noopener"
                           className="text-primary underline-offset-2 hover:underline"
                         >
-                          Meta's guide →
-                        </a>
-                      </p>
-                    </div>
-                  </div>
-                )}
+                          pipeboard.co/api-tokens
+                        </a>{" "}
+                        (OAuth Facebook there once, copy token back). Ad accounts, pages, and lead forms are auto-discovered.
+                      </>
+                    }
+                  />
+                </div>
                 <p className="text-[11.5px] text-muted-foreground/80">
-                  All fields optional — skip Meta entirely if you don't run lead-form ads.
+                  Optional — skip Meta entirely if you don't run Facebook / Instagram lead-form ads.
                 </p>
               </>
             )}
 
             {step.id === "google" && (
               <div className="grid gap-4 md:grid-cols-2">
-                <WizardField
-                  label="Provider name"
-                  value={draft.googleProvider}
-                  onChange={(v) => updateField("googleProvider", v)}
-                  placeholder="Google Ads"
-                />
-                <WizardField
-                  label="Customer ID"
-                  value={draft.googleCustomerId}
-                  onChange={(v) => updateField("googleCustomerId", v)}
-                  placeholder="123-456-7890"
-                />
                 <WizardField
                   label="Developer token"
                   value={draft.googleDeveloperToken}
@@ -688,12 +590,12 @@ function LeadsOnboardingWizard({
                       >
                         Google Ads → Tools → API Center
                       </a>
-                      .
+                      . The CLI auto-discovers your customer ID and campaign IDs from this token.
                     </>
                   }
                 />
                 <p className="md:col-span-2 text-[11.5px] text-muted-foreground/80">
-                  All fields optional — skip Google entirely if you don't run lead-form ads.
+                  Optional — skip Google entirely if you don't run Google Ads lead-form extensions.
                 </p>
               </div>
             )}
@@ -1190,35 +1092,6 @@ function WizardField({
   );
 }
 
-function WizardSelect({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <label className="block min-w-0 md:col-span-2">
-      <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 function ItemCard({
   title,
   description,
@@ -1669,115 +1542,53 @@ export function LeadsSetupLaunch({
 
       <ItemCard
         title="Meta Lead Ads (optional)"
-        description="Skip if you don't run Facebook / Instagram lead-form ads. Auth via Pipeboard Meta Ads MCP (recommended — one token, no webhook plumbing) or the legacy page-token webhook."
+        description="Skip if you don't run Facebook / Instagram lead-form ads. One Pipeboard token — ad accounts, pages, and lead forms are auto-discovered."
         status={metaItem?.status ?? "missing"}
       >
-        <label className="block text-[11.5px] text-muted-foreground">
-          <span className="mb-0.5 block">Auth method</span>
-          <select
-            value={draft.metaAuthMethod}
-            onChange={(e) => updateField("metaAuthMethod", e.target.value)}
-            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12.5px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+        <FieldRow
+          label="MCP endpoint URL"
+          value={draft.metaMcpEndpoint}
+          onChange={(v) => updateField("metaMcpEndpoint", v)}
+          placeholder="https://mcp.pipeboard.co/meta-ads-mcp"
+        />
+        <FieldRow
+          label="Pipeboard API token"
+          value={draft.metaMcpToken}
+          onChange={(v) => updateField("metaMcpToken", v)}
+          placeholder="••••••••"
+          type="password"
+        />
+        <div className="flex flex-wrap items-center gap-3 text-[11.5px]">
+          <a
+            href="https://pipeboard.co/api-tokens"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
           >
-            <option value="mcp">Pipeboard Meta Ads MCP (recommended)</option>
-            <option value="webhook">Page-token webhook (legacy)</option>
-          </select>
-        </label>
-        {draft.metaAuthMethod === "mcp" ? (
-          <>
-            <FieldRow
-              label="MCP endpoint URL"
-              value={draft.metaMcpEndpoint}
-              onChange={(v) => updateField("metaMcpEndpoint", v)}
-              placeholder="https://mcp.pipeboard.co/meta-ads-mcp"
-            />
-            <FieldRow
-              label="Pipeboard API token"
-              value={draft.metaMcpToken}
-              onChange={(v) => updateField("metaMcpToken", v)}
-              placeholder="••••••••"
-              type="password"
-            />
-            <div className="flex flex-wrap items-center gap-3 text-[11.5px]">
-              <a
-                href="https://pipeboard.co/api-tokens"
-                target="_blank"
-                rel="noreferrer noopener"
-                className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
-              >
-                Get Pipeboard token (OAuth Facebook) <ExternalLink className="h-3 w-3" />
-              </a>
-              <a
-                href="https://github.com/pipeboard-co/meta-ads-mcp"
-                target="_blank"
-                rel="noreferrer noopener"
-                className="inline-flex items-center gap-1 text-muted-foreground underline-offset-2 hover:underline hover:text-foreground"
-              >
-                Install guide <ExternalLink className="h-3 w-3" />
-              </a>
-            </div>
-          </>
-        ) : (
-          <>
-            <FieldRow
-              label="Provider name (free text)"
-              value={draft.metaProvider}
-              onChange={(v) => updateField("metaProvider", v)}
-              placeholder="Meta Business Manager"
-            />
-            <FieldRow
-              label="Ad account ID"
-              value={draft.metaAdAccountId}
-              onChange={(v) => updateField("metaAdAccountId", v)}
-              placeholder="act_1234567890"
-            />
-            <FieldRow
-              label="Page ID"
-              value={draft.metaPageId}
-              onChange={(v) => updateField("metaPageId", v)}
-              placeholder="987654321"
-            />
-            <FieldRow
-              label="Lead form IDs (comma separated)"
-              value={draft.metaFormIds}
-              onChange={(v) => updateField("metaFormIds", v)}
-              placeholder="form_001, form_002"
-            />
-            <a
-              href="https://business.facebook.com/leadgen_central"
-              target="_blank"
-              rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 text-[11.5px] text-primary underline-offset-2 hover:underline"
-            >
-              Open Meta Lead Ads Manager <ExternalLink className="h-3 w-3" />
-            </a>
-          </>
-        )}
+            Get Pipeboard token (OAuth Facebook) <ExternalLink className="h-3 w-3" />
+          </a>
+          <a
+            href="https://github.com/pipeboard-co/meta-ads-mcp"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center gap-1 text-muted-foreground underline-offset-2 hover:underline hover:text-foreground"
+          >
+            Install guide <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
       </ItemCard>
 
       <ItemCard
         title="Google Lead Form Ads (optional)"
-        description="Skip if you don't run Google Ads. Developer token + customer ID is enough — Elevate auto-discovers your campaigns."
+        description="Skip if you don't run Google Ads. One developer token — Elevate's CLI auto-discovers your customer ID and campaigns."
         status={googleItem?.status ?? "missing"}
       >
-        <FieldRow
-          label="Provider name"
-          value={draft.googleProvider}
-          onChange={(v) => updateField("googleProvider", v)}
-          placeholder="Google Ads"
-        />
         <FieldRow
           label="Developer token"
           value={draft.googleDeveloperToken}
           onChange={(v) => updateField("googleDeveloperToken", v)}
           placeholder="abcDEF123-xyz"
           type="password"
-        />
-        <FieldRow
-          label="Customer ID"
-          value={draft.googleCustomerId}
-          onChange={(v) => updateField("googleCustomerId", v)}
-          placeholder="123-456-7890"
         />
         <a
           href="https://developers.google.com/google-ads/api/docs/get-started/dev-token"
@@ -1852,8 +1663,8 @@ export function LeadsSetupLaunch({
       <div className="sticky bottom-2 z-10 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card/95 px-3 py-2 backdrop-blur">
         <div className="text-[11.5px] text-muted-foreground">
           {leadSourcesReady
-            ? "At least one lead source is ready."
-            : "Need at least one lead source connected before the gate lifts."}
+            ? "Lead source ready (CRM and/or ads connector)."
+            : "Need at least one lead source connected — CRM, Meta, Google, or website webhook."}
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => void save()} disabled={saving || completing}>

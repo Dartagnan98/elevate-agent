@@ -206,6 +206,11 @@ html .font-courier {
 .elevate-page-shell code {
   border-radius: 0.25rem;
   background: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
+  /* Inline code chips were rendering near-black on near-black because the
+     foreground color inherited from a dimmed parent (e.g. text-muted-foreground
+     on a setup-step list). Force a readable contrast via the canonical
+     foreground token so chips like `chat:write` stay legible everywhere. */
+  color: var(--foreground);
   padding-inline: 0.35em;
   padding-block: 0.12em;
 }

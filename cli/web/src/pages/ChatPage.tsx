@@ -128,6 +128,9 @@ interface SessionCreateResponse {
 
 interface SessionResumeResponse extends SessionCreateResponse {
   messages?: GatewayTranscriptMessage[];
+  running?: boolean;
+  replay_events?: GatewayEvent[];
+  replay_seq?: number;
 }
 
 type ChatRole = "assistant" | "system" | "tool" | "user";
@@ -905,18 +908,21 @@ function buildActivityTimeline({
   activityTrace,
   artifacts,
   busy,
-  statusText,
   tools,
 }: {
   activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
-  statusText: string;
   tools: ToolEntry[];
 }): ActivityTimelineItem[] {
   const items: ActivityTimelineItem[] = [];
 
   for (const trace of activityTrace) {
+    // The digest header ("Working for Xs") already communicates that
+    // we're busy — surfacing generic "status" traces below it just
+    // duplicates the message. Only push substantive reasoning /
+    // thinking content into the timeline.
+    if (trace.kind === "status") continue;
     const label = displayStatusText(trace.text).trim();
     if (!label || isGenericActivityText(label)) continue;
     items.push({
@@ -956,18 +962,6 @@ function buildActivityTimeline({
     });
   }
 
-  if (!items.length) {
-    const label = displayStatusText(statusText || "Working...") || "Working on the request";
-    items.push({
-      createdAt: Date.now(),
-      details: [],
-      id: "current-work",
-      kind: "status",
-      label,
-      status: busy ? "running" : "done",
-    });
-  }
-
   return items
     .sort((a, b) => a.createdAt - b.createdAt)
     .filter((item, index, sorted) => {
@@ -977,43 +971,6 @@ function buildActivityTimeline({
     .slice(-8);
 }
 
-function isTerminalTool(tool: ToolEntry): boolean {
-  const haystack = `${tool.name} ${tool.context ?? ""} ${tool.preview ?? ""}`.toLowerCase();
-  return toolKind(tool) === "run" || /\b(terminal|bash|shell|exec|command)\b/.test(haystack);
-}
-
-function isSubagentTool(tool: ToolEntry): boolean {
-  const haystack = `${tool.name} ${tool.context ?? ""} ${tool.preview ?? ""}`.toLowerCase();
-  return /\b(subagent|sub-agent|delegate|delegation|agent)\b/.test(haystack);
-}
-
-function runningWorkTitle(tools: ToolEntry[], subagents: SubagentEntry[], busy: boolean): string {
-  const runningTools = tools.filter((tool) => tool.status === "running");
-  const terminals = runningTools.filter(isTerminalTool);
-  const activeSubagents = subagents.filter((subagent) => subagent.status === "running");
-  const otherTools = runningTools.filter(
-    (tool) => !isTerminalTool(tool) && !isSubagentTool(tool),
-  );
-
-  const parts = [
-    terminals.length ? plural(terminals.length, "terminal") : "",
-    activeSubagents.length ? plural(activeSubagents.length, "subagent") : "",
-    otherTools.length ? plural(otherTools.length, "tool") : "",
-  ].filter(Boolean);
-
-  return parts.length ? `Running ${parts.join(" · ")}` : busy ? "Agent working" : "Ready";
-}
-
-function runningToolLine(tool: ToolEntry): string {
-  return compactLine(tool.preview || tool.context || tool.name, tool.name).slice(0, 130);
-}
-
-function runningSubagentLine(subagent: SubagentEntry): string {
-  return compactLine(
-    subagent.preview || subagent.goal || subagent.subagent_id,
-    subagent.model || "subagent",
-  ).slice(0, 130);
-}
 
 function progressIntentLabel(text: string): string {
   const clean = displayStatusText(text).trim();
@@ -1576,6 +1533,8 @@ export default function ChatPage() {
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
   const newChatId = searchParams.get("new");
+  const seedKey = searchParams.get("seed");
+  const seededRef = useRef(false);
   const [version, setVersion] = useState(0);
   const gw = useMemo(
     () => getSharedChatGateway(version),
@@ -1603,7 +1562,10 @@ export default function ChatPage() {
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
-  const [subagents, setSubagents] = useState<SubagentEntry[]>([]);
+  // Subagent panel is no longer rendered (consolidated into the assistant
+  // activity digest), but event handlers still call setSubagents so we
+  // keep the setter alive without holding render state.
+  const [, setSubagents] = useState<SubagentEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
@@ -2531,9 +2493,33 @@ export default function ChatPage() {
         } else if (!resumeId && !historyHydratedRef.current) {
           setMessages([]);
         }
-        if (!pendingAfterResume) {
-          // Same fix as the api.getSessionMessages path: clear busy when
-          // the server-confirmed transcript shows no pending turn.
+        const stillRunning =
+          "running" in created &&
+          (created as SessionResumeResponse).running === true;
+
+        // Replay events from the server-side ring buffer. The ring only
+        // ever holds in-flight events — server-side, the ring is cleared
+        // on message.complete, so a completed turn never replays. That
+        // keeps reattach silent: the hydrated transcript is the visible
+        // state, and replay only contributes the partial assistant turn
+        // (message.start + deltas, tool.start cards) that's still mid-
+        // flight. Listener closures filter on activeSessionRef so events
+        // route to the right session.
+        const resumed = created as SessionResumeResponse;
+        if (
+          Array.isArray(resumed.replay_events) &&
+          resumed.replay_events.length > 0
+        ) {
+          gw.replayEvents(resumed.replay_events);
+        }
+
+        if (stillRunning) {
+          // Mid-turn on the server side. Keep the spinner up; live
+          // frames continue from where the replay left off. No status
+          // banner — reattach should be visually identical to the
+          // moment the user left, only forward progress should appear.
+          setBusy(true);
+        } else if (!pendingAfterResume) {
           setBusy(false);
           setStatusText("Ready");
         }
@@ -2546,11 +2532,11 @@ export default function ChatPage() {
 
     return () => {
       cancelled = true;
-      const active = activeSessionRef.current;
       unsubs.forEach((unsub) => unsub());
-      if (active && gw.state === "open") {
-        void gw.request("session.close", { session_id: active }, 3_000).catch(() => {});
-      }
+      // Route/tab changes must detach from the live session, not close it.
+      // Closing here tears down the in-memory gateway session while a turn may
+      // still be running, which makes work appear to stop and prevents reliable
+      // reattachment by persisted session id.
     };
   }, [
     addActivityTrace,
@@ -2932,6 +2918,24 @@ export default function ChatPage() {
     [addArtifacts, appendMessage, artifacts, busy, gw, messages, selectedAgent, sessionId, state, submitGatewayPrompt],
   );
 
+  useEffect(() => {
+    if (seededRef.current) return;
+    if (!seedKey || !sessionId || state !== "open" || busy) return;
+    if (typeof window === "undefined") return;
+    let raw: string | null = null;
+    try {
+      raw = window.sessionStorage.getItem(`elevate:chat-seed:${seedKey}`);
+    } catch {
+      raw = null;
+    }
+    if (!raw) return;
+    seededRef.current = true;
+    try {
+      window.sessionStorage.removeItem(`elevate:chat-seed:${seedKey}`);
+    } catch {}
+    void submitPrompt(raw);
+  }, [busy, seedKey, sessionId, state, submitPrompt]);
+
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     void submitPrompt(input);
@@ -3064,10 +3068,24 @@ export default function ChatPage() {
   const canPickModel = state === "open" && !!sessionId;
   const visibleMessages = useMemo(
     () =>
-      messages.filter((message) =>
-        shouldKeepTranscriptMessage(message.role, message.content),
-      ),
-    [messages],
+      messages.filter((message) => {
+        if (shouldKeepTranscriptMessage(message.role, message.content)) {
+          return true;
+        }
+        // Keep an in-flight assistant turn visible even before any
+        // text streams, so its activity digest ("Working for Xs" +
+        // thinking/reasoning trace + tool cards) is on screen while
+        // the model is actually reasoning — not just after it finishes.
+        if (message.role !== "assistant") return false;
+        if (message.status === "streaming") return true;
+        const hasActivity = activityTrace.some(
+          (trace) => trace.messageId === message.id,
+        );
+        if (hasActivity) return true;
+        const hasTools = tools.some((tool) => tool.messageId === message.id);
+        return hasTools;
+      }),
+    [activityTrace, messages, tools],
   );
   const artifactsByMessage = useMemo(() => {
     const grouped = new Map<string, ArtifactEntry[]>();
@@ -3262,7 +3280,7 @@ export default function ChatPage() {
           )}
         >
           <div
-            className="relative h-11 shrink-0 px-4 sm:px-6"
+            className="relative h-11 shrink-0 px-4 sm:px-6 lg:mt-2"
             style={{ WebkitAppRegion: "drag" } as CSSProperties}
           >
             {sidebarCollapsed && onShowSidebar ? (
@@ -3277,7 +3295,7 @@ export default function ChatPage() {
               </button>
             ) : null}
             <div
-              className="mx-auto flex h-full w-full min-w-0 max-w-[52rem] items-center gap-2 sm:gap-3"
+              className="flex h-full w-full min-w-0 items-center gap-2 sm:gap-3"
               style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
             >
               {folderLabel ? (
@@ -3325,7 +3343,6 @@ export default function ChatPage() {
                       busy={isStreaming && busy}
                       message={message}
                       onOpenArtifact={openArtifactPreview}
-                      statusText={isStreaming ? statusText : undefined}
                       tools={turnTools}
                       turnArtifacts={turnArtifacts}
                     />
@@ -3389,19 +3406,6 @@ export default function ChatPage() {
               </div>
             )}
             <div className="mx-auto w-full max-w-[52rem]">
-              <RunningWorkStrip
-                busy={busy}
-                onInterrupt={interruptCurrentTurn}
-                subagents={subagents}
-                tools={tools}
-              />
-              <WorkingStatusPill
-                busy={busy}
-                onInterrupt={interruptCurrentTurn}
-                statusText={statusText}
-                subagents={subagents}
-                tools={tools}
-              />
               <QueuedInputStrip
                 busy={busy}
                 onRemove={removeQueuedInput}
@@ -3729,150 +3733,6 @@ function AttachmentChipStrip({
   );
 }
 
-function WorkingStatusPill({
-  busy,
-  onInterrupt,
-  statusText,
-  subagents,
-  tools,
-}: {
-  busy: boolean;
-  onInterrupt(): void;
-  statusText: string;
-  subagents: SubagentEntry[];
-  tools: ToolEntry[];
-}) {
-  if (!busy) return null;
-  const runningTools = tools.filter((tool) => tool.status === "running");
-  const runningSubagents = subagents.filter((s) => s.status === "running");
-  if (runningTools.length > 0 || runningSubagents.length > 0) return null;
-
-  return (
-    <div className="mb-2 flex items-center gap-2 rounded-md bg-[var(--chat-surface-soft)] px-3 py-2 text-[0.78rem] text-[var(--chat-muted-strong)]">
-      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--chat-accent)]" />
-      <span className="min-w-0 flex-1 truncate">
-        {displayStatusText(statusText || "Working...")}
-      </span>
-      <button
-        aria-label="Stop the current response"
-        type="button"
-        onClick={onInterrupt}
-        title="Stop the current response"
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface)] hover:text-[var(--chat-text)]"
-      >
-        <span className="h-2 w-2 rounded-[0.15rem] bg-current" />
-      </button>
-    </div>
-  );
-}
-
-function RunningWorkStrip({
-  busy,
-  onInterrupt,
-  subagents,
-  tools,
-}: {
-  busy: boolean;
-  onInterrupt(): void;
-  subagents: SubagentEntry[];
-  tools: ToolEntry[];
-}) {
-  const [open, setOpen] = useState(false);
-  const runningTools = tools.filter((tool) => tool.status === "running");
-  const runningSubagents = subagents.filter((subagent) => subagent.status === "running");
-  const visible = runningTools.length > 0 || runningSubagents.length > 0;
-  if (!visible) return null;
-
-  const terminalTools = runningTools.filter(isTerminalTool);
-  const otherTools = runningTools.filter((tool) => !isTerminalTool(tool));
-  const title = runningWorkTitle(runningTools, runningSubagents, busy);
-  const rows = [
-    ...terminalTools.map((tool) => ({
-      detail: runningToolLine(tool),
-      icon: SquareTerminal,
-      id: tool.id,
-      label: tool.name,
-      tone: "terminal" as const,
-    })),
-    ...runningSubagents.map((subagent) => ({
-      detail: runningSubagentLine(subagent),
-      icon: Bot,
-      id: subagent.id,
-      label: subagent.goal || "Subagent",
-      tone: "agent" as const,
-    })),
-    ...otherTools.map((tool) => ({
-      detail: runningToolLine(tool),
-      icon: Wrench,
-      id: tool.id,
-      label: tool.name,
-      tone: "tool" as const,
-    })),
-  ].slice(0, 6);
-
-  return (
-    <div className="mb-2 overflow-hidden rounded-lg bg-[var(--chat-surface)] shadow-[inset_0_0_0_1px_var(--chat-border-strong)]">
-      <div className="flex min-h-11 items-center gap-2 px-3 py-2">
-        <button
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left text-[0.86rem] text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
-        >
-          <SquareTerminal className="h-4 w-4 shrink-0 opacity-75" />
-          <span className="min-w-0 truncate font-medium">{title}</span>
-          {runningSubagents.length > 0 && (
-            <span className="hidden shrink-0 rounded-sm bg-[var(--chat-surface-soft)] px-2 py-0.5 text-[0.66rem] text-[var(--chat-muted)] sm:inline-flex">
-              {plural(runningSubagents.length, "subagent")}
-            </span>
-          )}
-        </button>
-
-        <button
-          aria-label="Stop running work"
-          type="button"
-          onClick={onInterrupt}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
-          title="Stop the current response"
-        >
-          <span className="h-2.5 w-2.5 rounded-[0.18rem] bg-current" />
-        </button>
-
-        <button
-          aria-label={open ? "Hide running work details" : "Show running work details"}
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
-        >
-          <ChevronDown
-            className={cn("h-4 w-4 transition-transform", open && "rotate-180")}
-          />
-        </button>
-      </div>
-
-      {open && rows.length > 0 && (
-        <div className="border-t border-[var(--chat-border)] px-3 pb-2 pt-1.5">
-          <div className="space-y-1">
-            {rows.map((row) => {
-              const Icon = row.icon;
-              return (
-                <div
-                  key={row.id}
-                  className="flex min-h-7 items-center gap-2 rounded-md px-2 py-1 text-[0.76rem] text-[var(--chat-muted-strong)]"
-                >
-                  <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                  <span className="shrink-0 font-medium">{row.label}</span>
-                  <span className="min-w-0 flex-1 truncate text-[var(--chat-muted)]">
-                    {row.detail}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 type ComposerSegment =
   | { text: string; type: "text" }
@@ -4197,7 +4057,6 @@ function MessageRow({
   busy,
   message,
   onOpenArtifact,
-  statusText,
   tools,
   turnArtifacts,
 }: {
@@ -4207,7 +4066,6 @@ function MessageRow({
   busy?: boolean;
   message: ChatMessage;
   onOpenArtifact(artifact: ArtifactEntry): void;
-  statusText?: string;
   tools?: ToolEntry[];
   turnArtifacts?: ArtifactEntry[];
 }) {
@@ -4226,16 +4084,14 @@ function MessageRow({
   return (
     <article
       className={cn(
-        "group flex w-full",
-        isUser ? "flex-row-reverse text-right" : "text-left",
+        "group flex w-full text-left",
         isAssistant && "pt-3 first:pt-0",
       )}
     >
       <div
         className={cn(
-          "min-w-0 flex-1",
-          isUser && "flex justify-end",
-          !isUser && "max-w-[74ch]",
+          "min-w-0 flex-1 max-w-[74ch]",
+          isUser && "flex flex-col items-end",
         )}
       >
         {isAssistant && (tools?.length || activityTrace?.length) ? (
@@ -4243,7 +4099,6 @@ function MessageRow({
             activityTrace={activityTrace ?? []}
             artifacts={turnArtifacts ?? []}
             busy={!!busy}
-            statusText={statusText ?? ""}
             tools={tools ?? []}
           />
         ) : null}
@@ -4272,7 +4127,7 @@ function MessageRow({
           ) : (
             <>
               {isUser && message.attachments && message.attachments.length > 0 ? (
-                <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+                <div className="mb-2 flex flex-wrap justify-start gap-1.5">
                   {message.attachments.map((att, idx) => {
                     const Icon = attachmentIconFor(att.mediaType, att.name);
                     return (
@@ -4322,19 +4177,17 @@ function ChatActivityDigest({
   activityTrace,
   artifacts,
   busy,
-  statusText,
   tools,
 }: {
   activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
-  statusText: string;
   tools: ToolEntry[];
 }) {
   const [open, setOpen] = useState(false);
   const timeline = useMemo(
-    () => buildActivityTimeline({ activityTrace, artifacts, busy, statusText, tools }),
-    [activityTrace, artifacts, busy, statusText, tools],
+    () => buildActivityTimeline({ activityTrace, artifacts, busy, tools }),
+    [activityTrace, artifacts, busy, tools],
   );
   const show = busy || tools.length > 0 || activityTrace.length > 0;
   if (!show) return null;
