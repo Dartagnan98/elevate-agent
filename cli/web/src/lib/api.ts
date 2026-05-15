@@ -84,6 +84,9 @@ import type {
   OAuthStartResponse,
   OAuthSubmitResponse,
   OAuthPollResponse,
+  TelegramPairStartResponse,
+  TelegramPairListResponse,
+  TelegramPairApproveResponse,
   DashboardThemesResponse,
   PluginManifestResponse,
 } from "./api-types";
@@ -565,6 +568,32 @@ export const api = {
     );
   },
 
+  // Telegram pairing ritual (wizard step 3)
+  startTelegramPairing: async (botToken: string) => {
+    const token = await getSessionToken();
+    return fetchJSON<TelegramPairStartResponse>("/api/telegram/pair/start", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [SESSION_HEADER]: token,
+      },
+      body: JSON.stringify({ bot_token: botToken }),
+    });
+  },
+  listTelegramPairings: () =>
+    fetchJSON<TelegramPairListResponse>("/api/telegram/pair/pending"),
+  approveTelegramPairing: async (code: string, setHome = false) => {
+    const token = await getSessionToken();
+    return fetchJSON<TelegramPairApproveResponse>("/api/telegram/pair/approve", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [SESSION_HEADER]: token,
+      },
+      body: JSON.stringify({ code, set_home: setHome }),
+    });
+  },
+
   // Gateway / update actions
   startGateway: () =>
     fetchJSON<ActionResponse>("/api/gateway/start", { method: "POST" }),
@@ -989,6 +1018,30 @@ export const api = {
         body: JSON.stringify({ action: "refresh", sourceId }),
       },
     ),
+  runSourceConnectorPrompt: (sourceId: string) =>
+    fetchJSON<SourceConnectorsResponse & {
+      refresh?: { tick_at: string; total_new: number; total_fetched: number; toolkits: Array<Record<string, unknown>> };
+      run?: {
+        sourceId: string;
+        wired: boolean;
+        execution: "server_inline" | "agent_task_dispatched";
+        prompt: string;
+        next_action_for_operator: string | null;
+        outcome: {
+          kind: "ok" | "error" | "needs_operator" | "dispatched";
+          message: string;
+          recordCounts: { contacts: number; conversations: number; messages: number };
+          lastError: string | null;
+          authStatus: string | null;
+          nextOperatorStep: string | null;
+          sourceDir: string | null;
+        };
+      };
+    }>("/api/source-connectors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "run-prompt", sourceId }),
+    }),
   getIntegrations: () => fetchJSON<IntegrationSettingsResponse>("/api/integrations"),
   saveIntegrations: (crm: CrmIntegrationForm) =>
     fetchJSON<IntegrationSettingsResponse>("/api/integrations", {

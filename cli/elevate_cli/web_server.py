@@ -1143,6 +1143,117 @@ async def start_gateway_action():
     }
 
 
+@app.post("/api/telegram/pair/start")
+async def start_telegram_pairing(request: Request):
+    """Save the bot token, switch unauthorized DMs to pairing mode, restart gateway.
+
+    Drives the web wizard's Telegram pairing ritual — same effect as running
+    ``elevate gateway setup`` then ``elevate gateway start`` from the CLI. After
+    this returns, the gateway will reload with the new token and the bot will
+    reply with a pairing code on the first DM from an unknown user.
+    """
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    bot_token = str(body.get("bot_token") or "").strip()
+    if not bot_token:
+        raise HTTPException(status_code=400, detail="bot_token is required")
+    if not _looks_like_telegram_bot_token(bot_token):
+        raise HTTPException(
+            status_code=400,
+            detail="Token doesn't match Telegram's BotFather format (<id>:<secret>)",
+        )
+
+    _sync_executive_telegram_aliases("TELEGRAM_BOT_TOKEN", bot_token)
+    save_env_value("TELEGRAM_BOT_TOKEN", bot_token)
+    save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "pair")
+
+    try:
+        proc = _spawn_elevate_action(["gateway", "restart"], "gateway-restart")
+    except Exception as exc:
+        _log.exception("Failed to spawn gateway restart during telegram pair start")
+        raise HTTPException(status_code=500, detail=f"Failed to restart gateway: {exc}")
+
+    return {
+        "ok": True,
+        "action": "gateway-restart",
+        "pid": proc.pid,
+    }
+
+
+@app.get("/api/telegram/pair/pending")
+async def list_telegram_pairings():
+    """Return pending pairing codes plus already-approved users.
+
+    The wizard polls this after restarting the gateway. As soon as the user DMs
+    /start to the bot, an unauthorized-DM handler mints a code, and this
+    endpoint surfaces ``{code, user_id, user_name, age_minutes}`` so the wizard
+    can offer a one-click approval.
+    """
+    try:
+        from gateway.pairing import PairingStore
+        store = PairingStore()
+        pending = store.list_pending("telegram")
+        approved = store.list_approved("telegram")
+    except Exception as exc:
+        _log.exception("Failed to list telegram pairings")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"pending": pending, "approved": approved}
+
+
+@app.post("/api/telegram/pair/approve")
+async def approve_telegram_pairing(request: Request):
+    """Approve a pairing code minted by the bot.
+
+    Equivalent to ``elevate pairing approve telegram <code>`` plus the
+    post-approval bookkeeping that ``_telegram_startup_preflight`` does in the
+    CLI: merge the user's id into ``TELEGRAM_ALLOWED_USERS``, flip
+    ``TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR`` back to ``ignore`` so strangers
+    can't keep minting codes, and optionally pin the user as the home channel.
+    """
+    _require_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    code = str(body.get("code") or "").strip()
+    set_home = bool(body.get("set_home"))
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required")
+
+    try:
+        from gateway.pairing import PairingStore
+        store = PairingStore()
+        result = store.approve_code("telegram", code)
+    except Exception as exc:
+        _log.exception("Failed to approve telegram pairing")
+        raise HTTPException(status_code=500, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Code not found or expired")
+
+    user_id = str(result.get("user_id") or "").strip()
+    user_name = str(result.get("user_name") or "").strip()
+
+    if user_id:
+        existing = str(get_env_value("TELEGRAM_ALLOWED_USERS") or "").strip()
+        existing_ids = [v.strip() for v in existing.split(",") if v.strip()]
+        if user_id not in existing_ids:
+            existing_ids.append(user_id)
+            save_env_value("TELEGRAM_ALLOWED_USERS", ",".join(existing_ids))
+        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "ignore")
+        if set_home:
+            _sync_executive_telegram_aliases("TELEGRAM_HOME_CHANNEL", user_id)
+            save_env_value("TELEGRAM_HOME_CHANNEL", user_id)
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "user_name": user_name,
+    }
+
+
 @app.post("/api/elevate/update")
 async def update_elevate():
     """Kick off ``elevate update`` in the background."""

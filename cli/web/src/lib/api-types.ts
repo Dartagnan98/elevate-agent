@@ -2130,6 +2130,40 @@ export interface OAuthPollResponse {
   expires_at?: number | null;
 }
 
+// ── Telegram pairing types ─────────────────────────────────────────────
+
+export interface TelegramPairStartResponse {
+  ok: boolean;
+  action: string;
+  pid: number;
+}
+
+export interface TelegramPendingEntry {
+  platform: string;
+  code: string;
+  user_id: string;
+  user_name: string;
+  age_minutes: number;
+}
+
+export interface TelegramApprovedEntry {
+  platform: string;
+  user_id: string;
+  user_name: string;
+  approved_at: number;
+}
+
+export interface TelegramPairListResponse {
+  pending: TelegramPendingEntry[];
+  approved: TelegramApprovedEntry[];
+}
+
+export interface TelegramPairApproveResponse {
+  ok: boolean;
+  user_id: string;
+  user_name: string;
+}
+
 // ── Dashboard theme types ──────────────────────────────────────────────
 
 export interface DashboardThemeSummary {
