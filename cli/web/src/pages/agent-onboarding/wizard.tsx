@@ -2393,7 +2393,11 @@ function TelegramConnectedCard({
   const [status, setStatus] = useState<Status | null>(null);
   const [editing, setEditing] = useState(false);
   const [allowedUsers, setAllowedUsers] = useState(draft.telegramAllowedUsers);
-  const [homeChannel, setHomeChannel] = useState(draft.telegramHomeChannel);
+  // homeChannel and the legacy chatId both map to TELEGRAM_HOME_CHANNEL --
+  // fall back to chatId so an older snapshot still pre-fills the input.
+  const [homeChannel, setHomeChannel] = useState(
+    draft.telegramHomeChannel || draft.telegramChatId,
+  );
   const [dmBehavior, setDmBehavior] = useState<string>(draft.telegramDmBehavior || "pair");
   const [allowAll, setAllowAll] = useState(draft.telegramAllowAllUsers);
   const [busy, setBusy] = useState(false);
@@ -2408,11 +2412,20 @@ function TelegramConnectedCard({
         if (cancelled) return;
         setStatus(resp);
         setAllowedUsers(resp.allowedUsers || draft.telegramAllowedUsers);
-        setHomeChannel(resp.homeChannel || draft.telegramHomeChannel);
+        setHomeChannel(
+          resp.homeChannel || draft.telegramHomeChannel || draft.telegramChatId,
+        );
         setDmBehavior(resp.dmBehavior || draft.telegramDmBehavior || "pair");
         setAllowAll(resp.allowAllUsers || draft.telegramAllowAllUsers);
       } catch (e) {
         if (!cancelled) {
+          const raw = errorMessage(e, "Could not fetch bot identity");
+          // The new /api/channels/telegram/status route requires a server
+          // restart. Before it lands, the SPA catchall returns index.html
+          // which trips the JSON parser. Detect that and show a calmer
+          // hint instead of "getMe failed".
+          const looksLikeStaleServer =
+            raw.includes("<!doctype") || raw.includes("Unexpected token '<'");
           setStatus({
             configured: true,
             tokenPreview: draft.telegramSecretPreview,
@@ -2420,7 +2433,9 @@ function TelegramConnectedCard({
             homeChannel: draft.telegramHomeChannel,
             dmBehavior: draft.telegramDmBehavior,
             allowAllUsers: draft.telegramAllowAllUsers,
-            error: errorMessage(e, "Could not fetch bot identity"),
+            error: looksLikeStaleServer
+              ? "Restart elevate web to load the live bot identity probe."
+              : raw,
           });
         }
       }
