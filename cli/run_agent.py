@@ -1697,6 +1697,33 @@ class AIAgent:
         if self._api_turn_deadline_s <= 0:
             self._api_turn_deadline_s = 0.0  # disabled
 
+        # Minimum interval (seconds) between gateway-bound lifecycle status
+        # heartbeats of the *same category*.  _emit_status fans every
+        # per-API-call "⏳ Sending request…" to status_callback; an agentic
+        # turn loops one API call per tool round, so a 46-iteration task
+        # would push ~46 of them.  In the CLI/TUI that's a status pill that
+        # overwrites in place (invisible repetition) — but the gateway has
+        # no overwrite, so each becomes its own Telegram message (a flood).
+        # This throttles same-category repeats on the callback path only;
+        # distinct state changes still pass immediately and the CLI _vprint
+        # path is never throttled.  0/empty/<=0 disables (legacy behavior).
+        # Override: agent.status_heartbeat_min_interval in config.yaml or
+        # ELEVATE_STATUS_HEARTBEAT_INTERVAL env (seconds).
+        _raw_status_throttle = _agent_section.get("status_heartbeat_min_interval", None)
+        if _raw_status_throttle is None:
+            _raw_status_throttle = os.getenv("ELEVATE_STATUS_HEARTBEAT_INTERVAL")
+        try:
+            self._status_throttle_s = (
+                30.0 if _raw_status_throttle is None else float(_raw_status_throttle)
+            )
+        except (TypeError, ValueError):
+            self._status_throttle_s = 30.0
+        if self._status_throttle_s <= 0:
+            self._status_throttle_s = 0.0  # disabled
+        self._status_last_message: Optional[str] = None
+        self._status_last_category: Optional[str] = None
+        self._status_last_emit_ts: float = 0.0
+
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
         # Configuration via config.yaml (compression section)
@@ -2278,6 +2305,32 @@ class AIAgent:
             and getattr(self, "platform", "") == "cli"
         )
 
+    @staticmethod
+    def _status_category_key(message: str) -> str:
+        """Collapse a status line to a stable category for throttle dedupe.
+
+        Strips the leading status glyph, any trailing detail (the first
+        ``(...)``/`` — ...``/`` - ...`` segment) and all digits, so that
+        recurring heartbeats normalize to the same key regardless of their
+        per-occurrence counters:
+
+        ``⏳ Sending request…``                              → ``sending request``
+        ``⏳ Retrying in 4.0s (attempt 2/3)...``            → ``retrying in .s``
+        ``⏳ Still working... (10 min elapsed — ...)``       → ``still working``
+
+        A genuinely new state yields a *different* key, so distinct
+        transitions are never collapsed — only same-category repeats are.
+        """
+        s = (message or "").strip()
+        # Drop leading non-alphanumeric run (emoji + spaces + punctuation).
+        s = s.lstrip("⏳⚡🔐🔄⚠️✅❌🔀🟢… .\t")
+        for _sep in (" — ", " - ", " ("):
+            _idx = s.find(_sep)
+            if _idx != -1:
+                s = s[:_idx]
+        s = re.sub(r"\d+", "", s)
+        return s.strip(" .…\t").lower()
+
     def _emit_status(self, message: str) -> None:
         """Emit a lifecycle status message to both CLI and gateway channels.
 
@@ -2292,6 +2345,14 @@ class AIAgent:
         ``status_callback``.  Non-quiet callers (incl. headless cron, where
         retry/fallback notices belong in the log) still print as before.
 
+        The ``status_callback`` (gateway) path is additionally throttled by
+        ``_status_throttle_s``: an exact consecutive duplicate, or a repeat of
+        the same *category* (see :meth:`_status_category_key`) within the
+        window, is dropped so the per-API-call heartbeat cannot flood a
+        gateway with no status-overwrite (e.g. Telegram).  A changed category
+        always passes immediately, and the CLI ``_vprint`` path is never
+        throttled.  Throttle disabled when ``_status_throttle_s <= 0``.
+
         This helper never raises — exceptions are swallowed so it cannot
         interrupt the retry/fallback logic.
         """
@@ -2302,10 +2363,29 @@ class AIAgent:
             except Exception:
                 pass
         if self.status_callback:
-            try:
-                self.status_callback("lifecycle", message)
-            except Exception:
-                logger.debug("status_callback error in _emit_status", exc_info=True)
+            _do_emit = True
+            _throttle = getattr(self, "_status_throttle_s", 0.0)
+            if _throttle and _throttle > 0:
+                try:
+                    _now = time.monotonic()
+                    _cat = self._status_category_key(message)
+                    _last_ts = getattr(self, "_status_last_emit_ts", 0.0)
+                    _within = (_now - _last_ts) < _throttle
+                    if _within and message == getattr(self, "_status_last_message", None):
+                        _do_emit = False  # exact consecutive dupe
+                    elif _within and _cat and _cat == getattr(self, "_status_last_category", None):
+                        _do_emit = False  # same recurring category within window
+                    if _do_emit:
+                        self._status_last_message = message
+                        self._status_last_category = _cat
+                        self._status_last_emit_ts = _now
+                except Exception:
+                    _do_emit = True  # never let the throttle swallow a status
+            if _do_emit:
+                try:
+                    self.status_callback("lifecycle", message)
+                except Exception:
+                    logger.debug("status_callback error in _emit_status", exc_info=True)
 
     def _emit_error(self, message: str) -> None:
         """Emit a terminal error to the gateway as a persistent transcript message.
