@@ -94,6 +94,14 @@ declare global {
       register: typeof registerPlugin;
       registerSlot: typeof registerSlot;
     };
+    // Legacy Hermes-era global names. Shipped plugin bundles
+    // (example-dashboard, strike-freedom-cockpit) still read these; keep
+    // them aliased to the Elevate globals until those bundles are rebuilt.
+    __HERMES_PLUGIN_SDK__?: unknown;
+    __HERMES_PLUGINS__?: {
+      register: typeof registerPlugin;
+      registerSlot: typeof registerSlot;
+    };
   }
 }
 
@@ -146,4 +154,11 @@ export function exposePluginSDK() {
     // Hooks
     useI18n,
   };
+
+  // Backward-compat: shipped plugin bundles still destructure the legacy
+  // Hermes globals. Without these aliases every route throws
+  // "Cannot destructure property 'React' of 'SDK' as it is undefined"
+  // and the plugin system (incl. the strike-freedom-cockpit slot) is dead.
+  window.__HERMES_PLUGINS__ = window.__ELEVATE_PLUGINS__;
+  window.__HERMES_PLUGIN_SDK__ = window.__ELEVATE_PLUGIN_SDK__;
 }

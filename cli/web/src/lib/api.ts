@@ -53,6 +53,7 @@ import type {
   ComposioToolkitDetails,
   ThreadContextResponse,
   SourceInboxResponse,
+  SourceInboxSentResponse,
   SourceInboxProfileStatus,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
@@ -1174,6 +1175,13 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profileId, status }),
     }),
+  // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
+  // (status=sent by default). Set includePending=true to also see queued /
+  // sending / retrying / failed for debugging mid-flight rows.
+  getSourceInboxSent: (limit = 100, includePending = false) =>
+    fetchJSON<SourceInboxSentResponse>(
+      `/api/source-inbox/sent?limit=${limit}&include_pending=${includePending ? "true" : "false"}`,
+    ),
   scaffoldSourceConnector: (sourceId: string) =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {
       method: "POST",

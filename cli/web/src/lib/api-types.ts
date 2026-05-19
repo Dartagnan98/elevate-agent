@@ -244,6 +244,7 @@ export interface SourceInboxDraft {
   status: "pending" | "approved" | "skipped" | string;
   approvalRequired: boolean;
   generated: boolean;
+  fallback?: boolean;
   record: SourceRecord;
   skippedAt?: string | null;
   score?: number | null;
@@ -1329,6 +1330,49 @@ export interface SourceInboxResponse {
   drafts: SourceInboxDraft[];
   skippedDrafts?: SourceInboxDraft[];
   privateSearchBuyers?: BuyerWatchlistEntry[];
+}
+
+export interface SourceInboxSentItem {
+  id: string;
+  idempotencyKey: string;
+  sourceId: string;
+  threadId: string;
+  taskId: string;
+  channel: string;
+  status: "queued" | "sending" | "sent" | "retrying" | "failed" | string;
+  attempts: number;
+  nextRetryAt?: string | null;
+  lastError?: string | null;
+  providerMessageId?: string | null;
+  attemptId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  payload: {
+    draft_text?: string;
+    recipient?: {
+      person_name?: string | null;
+      contact_id?: string | null;
+      conversation_id?: string | null;
+      phone?: string | null;
+      email?: string | null;
+      social_handle?: string | null;
+    };
+    channel_meta?: {
+      toolkit?: string | null;
+      account_id?: string | null;
+      [k: string]: unknown;
+    };
+    source_id?: string;
+    thread_id?: string;
+    task_id?: string;
+    [k: string]: unknown;
+  };
+}
+
+export interface SourceInboxSentResponse {
+  items: SourceInboxSentItem[];
+  limit: number;
+  includePending: boolean;
 }
 
 export interface CrmIntegrationForm {

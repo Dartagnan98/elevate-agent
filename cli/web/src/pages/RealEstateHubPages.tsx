@@ -768,6 +768,13 @@ function draftWhen(draft: SourceInboxDraft): string {
   return draft.latestAt ? isoTimeAgo(draft.latestAt) : "unsynced";
 }
 
+// Canned template fallback (server: _fallback_draft_for_thread). Not a real
+// AI draft — excluded from bulk/select-all approve so the operator must
+// approve each one individually (Codex interim safeguard, 2026-05-18).
+function isFallbackDraft(draft: SourceInboxDraft): boolean {
+  return draft.fallback === true;
+}
+
 function DraftMessagesBoard({
   data,
   drafts: draftsOverride,
@@ -802,8 +809,12 @@ function DraftMessagesBoard({
 
   const drafts = allDrafts.filter((d) => !dismissedIds.has(d.id));
   const visibleDrafts = showAll ? drafts : drafts.slice(0, pageSize);
-  const selectedVisible = visibleDrafts.filter((d) => selectedIds.has(d.id));
-  const allVisibleSelected = visibleDrafts.length > 0 && selectedVisible.length === visibleDrafts.length;
+  // Fallback templates require an explicit individual approve — keep them
+  // out of every bulk path (select-all + Approve/Skip N).
+  const selectableVisibleDrafts = visibleDrafts.filter((d) => !isFallbackDraft(d));
+  const selectedVisible = selectableVisibleDrafts.filter((d) => selectedIds.has(d.id));
+  const allVisibleSelected =
+    selectableVisibleDrafts.length > 0 && selectedVisible.length === selectableVisibleDrafts.length;
 
   const profileByThreadId = useMemo(() => {
     const map = new Map<string, SourceInboxProfile>();
@@ -1007,16 +1018,19 @@ function DraftMessagesBoard({
 
   const toggleSelectAll = useCallback(() => {
     setSelectedIds((current) => {
-      if (visibleDrafts.length > 0 && visibleDrafts.every((d) => current.has(d.id))) {
+      if (
+        selectableVisibleDrafts.length > 0 &&
+        selectableVisibleDrafts.every((d) => current.has(d.id))
+      ) {
         const next = new Set(current);
-        visibleDrafts.forEach((d) => next.delete(d.id));
+        selectableVisibleDrafts.forEach((d) => next.delete(d.id));
         return next;
       }
       const next = new Set(current);
-      visibleDrafts.forEach((d) => next.add(d.id));
+      selectableVisibleDrafts.forEach((d) => next.add(d.id));
       return next;
     });
-  }, [visibleDrafts]);
+  }, [selectableVisibleDrafts]);
 
   const runBulk = useCallback(
     async (action: "approve" | "skip") => {
@@ -1248,11 +1262,23 @@ function DraftMessagesBoard({
                             </span>
                           </>
                         )}
-                        {draft.generated && (
+                        {isFallbackDraft(draft) ? (
                           <>
                             <span aria-hidden className="opacity-50">·</span>
-                            <span className="text-muted-foreground/70">suggested</span>
+                            <span
+                              className="inline-flex items-center rounded-md border border-warning/45 bg-warning/12 px-1.5 py-0.5 text-warning"
+                              title="Canned template, not an AI-generated draft. Review before sending — excluded from bulk approve."
+                            >
+                              Template — not AI
+                            </span>
                           </>
+                        ) : (
+                          draft.generated && (
+                            <>
+                              <span aria-hidden className="opacity-50">·</span>
+                              <span className="text-muted-foreground/70">suggested</span>
+                            </>
+                          )
                         )}
                       </div>
                       <p
