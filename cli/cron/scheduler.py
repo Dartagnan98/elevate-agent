@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -1338,6 +1339,7 @@ delivery should be sent.
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
         _cron_context = contextvars.copy_context()
+        _cron_turn_started_at = time.monotonic()
         _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
         try:
@@ -1403,6 +1405,84 @@ delivery should be sent.
         if not isinstance(result, dict):
             raise RuntimeError(
                 f"agent.run_conversation returned {type(result).__name__} instead of dict: {result!r}"
+            )
+
+        # Emit a per-turn usage row for this cron run so the cost/latency of
+        # scheduled work is visible (same ledger the gateway/telegram path
+        # uses, just source="cron"). Offloaded to a fire-and-forget daemon
+        # thread: SessionDB.record_turn_usage uses a 1.0s busy timeout with up
+        # to ~15 retry-sleeps, so a synchronous write could add real latency to
+        # the cron job under SQLite contention even though exceptions are
+        # caught. The thread guarantees the job's return path is never delayed;
+        # a telemetry failure (incl. cross-thread SQLite) is logged and dropped.
+        #
+        # The thread does NOT reuse this run's `_session_db` handle. The job's
+        # `finally` calls `_session_db.close()` on the main thread, which would
+        # close the sqlite connection out from under an in-flight write on the
+        # daemon thread (use-after-close). Instead we pass only the db *path*
+        # and let record_gateway_turn open + own + close its own connection on
+        # that file. SessionDB is WAL + 1.0s busy timeout + jittered retry, so
+        # two independent connections to the same file is the supported,
+        # contention-safe pattern (Codex review, 2026-05-19).
+        try:
+            import threading as _threading
+
+            _cron_latency_ms = int(
+                max(0.0, time.monotonic() - _cron_turn_started_at) * 1000
+            )
+            _cron_usage_db_path = (
+                getattr(_session_db, "db_path", None) if _session_db else None
+            )
+            # Telemetry is strictly best-effort. The offloaded thread opens its
+            # OWN connection from this path, so it must be a real filesystem
+            # path. If the session store has no real db_path (uninitialised, or
+            # a test double), skip the emit rather than spawn a thread that
+            # would either touch the wrong file or collapse onto a mock.
+            # NOTE: must be a concrete str/Path — MagicMock auto-provides
+            # __fspath__ so it spuriously satisfies os.PathLike.
+            if not isinstance(_cron_usage_db_path, (str, Path)):
+                logger.debug(
+                    "Job '%s': cron usage emit skipped (no real session db_path)",
+                    job_id,
+                )
+            else:
+                def _emit_cron_usage(
+                    _result=result,
+                    _sid=_cron_session_id,
+                    _lat=_cron_latency_ms,
+                    _dbpath=_cron_usage_db_path,
+                    _jid=job_id,
+                ):
+                    try:
+                        from gateway.usage_ledger import record_gateway_turn
+
+                        record_gateway_turn(
+                            agent_result=_result,
+                            session_id=_sid,
+                            session_key=_sid,
+                            message_id=_sid,
+                            source="cron",
+                            latency_ms=_lat,
+                            session_db=None,
+                            db_path=_dbpath,
+                        )
+                    except Exception as _ledger_exc:
+                        logger.debug(
+                            "Job '%s': cron usage ledger write skipped: %s",
+                            _jid,
+                            _ledger_exc,
+                        )
+
+                _threading.Thread(
+                    target=_emit_cron_usage,
+                    name=f"cron-usage-{job_id}",
+                    daemon=True,
+                ).start()
+        except Exception as _ledger_spawn_exc:
+            logger.debug(
+                "Job '%s': cron usage ledger thread not started: %s",
+                job_id,
+                _ledger_spawn_exc,
             )
 
         final_response = result.get("final_response", "") or ""

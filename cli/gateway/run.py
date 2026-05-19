@@ -1378,30 +1378,44 @@ class GatewayRunner:
                 )
 
         if not self.adapters and not self._failed_platforms:
+            # Nothing connected AND nothing queued for reconnection. This only
+            # happens for non-retryable errors (retryable failures are always
+            # queued above), so shut the gateway down cleanly.
             self._exit_reason = adapter.fatal_error_message or "All messaging adapters disconnected"
             if adapter.fatal_error_retryable:
+                # Defensive: a retryable error reached here without being
+                # queued (e.g. no platform_config). Stay up — the reconnect
+                # watcher idles harmlessly and a clean restart can recover.
+                logger.error(
+                    "No connected messaging platforms remain and none could be "
+                    "queued for reconnection. Shutting down gateway for service restart."
+                )
                 self._exit_with_failure = True
-                logger.error("No connected messaging platforms remain. Shutting down gateway for service restart.")
             else:
                 logger.error("No connected messaging platforms remain. Shutting down gateway cleanly.")
             await self.stop()
         elif not self.adapters and self._failed_platforms:
-            # All platforms are down and queued for background reconnection.
-            # If the error is retryable, exit with failure so systemd Restart=on-failure
-            # can restart the process. Otherwise stay alive and keep retrying in background.
-            if adapter.fatal_error_retryable:
-                self._exit_reason = adapter.fatal_error_message or "All messaging platforms failed with retryable errors"
-                self._exit_with_failure = True
-                logger.error(
-                    "All messaging platforms failed with retryable errors. "
-                    "Shutting down gateway for service restart (systemd will retry)."
-                )
-                await self.stop()
-            else:
-                logger.warning(
-                    "No connected messaging platforms remain, but %d platform(s) queued for reconnection",
-                    len(self._failed_platforms),
-                )
+            # All platforms are down but queued for background reconnection.
+            #
+            # A transient network/DNS blip must NOT exit the gateway. The
+            # always-running _platform_reconnect_watcher (started
+            # unconditionally in start()) keeps retrying with capped backoff
+            # and re-establishes every queued platform when connectivity
+            # returns — exactly like Telegram's own in-poll self-heal, just at
+            # the supervisor level. Exiting here only to have launchd relaunch
+            # via --replace is strictly worse: it SIGTERMs the WhatsApp bridge,
+            # drops in-flight agent work, and re-inits everything, all to
+            # recover from a blip the in-process watcher would have ridden out.
+            #
+            # So we stay alive for retryable failures and let the watcher do
+            # its job. (Non-retryable failures were never queued, so they
+            # cannot reach this branch.)
+            logger.warning(
+                "No connected messaging platforms remain, but %d platform(s) "
+                "queued for reconnection — keeping gateway alive; the reconnect "
+                "watcher will re-establish them when the network returns.",
+                len(self._failed_platforms),
+            )
 
     def _request_clean_exit(self, reason: str) -> None:
         self._exit_cleanly = True

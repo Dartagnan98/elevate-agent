@@ -328,6 +328,44 @@ _RE_AKA          = re.compile(
     r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)',
     re.IGNORECASE,
 )
+# Single capitalized word (e.g. "Elevate", "Oura") and code/identifier tokens
+# (backticked, dotted, or snake/kebab-cased) — used as a lower-precision
+# fallback so lowercase prose facts still yield co-occurrence relations.
+_RE_CAP_WORD     = re.compile(r'\b([A-Z][A-Za-z0-9]{2,})\b')
+_RE_BACKTICK     = re.compile(r'`([^`]+)`')
+_RE_IDENTIFIER   = re.compile(r'\b([A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+)+)\b')
+_RE_WORD_TOKEN   = re.compile(r'[A-Za-z0-9]{3,}')
+# Common English / boilerplate words that must never become graph entities.
+_ENTITY_STOPWORDS = {
+    "the", "and", "are", "can", "did", "does", "for", "how", "its", "not",
+    "our", "out", "the", "was", "what", "when", "where", "who", "why", "with",
+    "you", "your", "this", "that", "they", "them", "then", "than", "from",
+    "have", "has", "had", "will", "would", "should", "could", "may", "might",
+    "must", "into", "over", "only", "also", "but", "use", "used", "uses",
+    "via", "per", "etc", "see", "like", "want", "wants", "need", "needs",
+    "user", "users", "get", "got", "make", "made", "set", "add", "added",
+    "run", "ran", "start", "stop", "done", "new", "old", "all", "any",
+    "because", "while", "after", "before", "start", "starts", "started",
+    "prefer", "prefers", "preferred", "dislikes", "dislike", "do", "doing",
+    "be", "been", "being", "is", "of", "in", "on", "to", "as", "at", "by",
+    "or", "if", "an", "a", "no", "yes", "up", "out", "one", "two", "core",
+    "about", "were", "never", "ever", "just", "very", "much", "more",
+    "most", "some", "such", "same", "each", "both", "few", "many", "other",
+    "there", "their", "these", "those", "here", "now", "still", "even",
+    "back", "down", "off", "again", "once", "around", "between", "during",
+    "without", "within", "across", "upon", "unless", "until", "though",
+    "however", "instead", "rather", "every", "anything", "something",
+    "nothing", "everyone", "someone", "anyone", "thing", "things", "way",
+    "ways", "stuff", "kind", "sort", "lot", "lots", "bit", "part", "parts",
+}
+
+# Opaque token that gates the destructive daily relation-graph maintenance.
+# It is intentionally NOT exported and NOT derivable from any recall/hot-path
+# code. The only legitimate caller (the daily-gated maintenance entrypoint in
+# elevate_cli.memory_maintenance) imports it explicitly. Any caller that does
+# not pass this exact object hits a hard guard and the prune is refused, so it
+# is structurally impossible to trigger from search/probe/related/recall.
+DAILY_MAINTENANCE_TOKEN = object()
 
 
 def _clamp_trust(value: float) -> float:
@@ -2917,6 +2955,183 @@ class MemoryStore:
         self.record_memory_event("memory.relation_backfill.complete", detail=result)
         return result
 
+    def prune_and_compact_relations(
+        self,
+        *,
+        daily_maintenance_token: object,
+        max_delete: int = 5000,
+        batch_size: int = 500,
+        incremental_vacuum_pages: int = 2000,
+    ) -> dict:
+        """Bounded, idempotent daily prune of *orphaned* memory_relations rows.
+
+        DAILY MAINTENANCE ONLY. This is destructive and MUST NOT be reachable
+        from the recall/hot path. The caller is required to pass the module's
+        ``DAILY_MAINTENANCE_TOKEN`` sentinel by identity; nothing on the
+        search/probe/related/recall path holds that object, so a wrong/absent
+        token raises immediately and prunes nothing.
+
+        Conservative by design — only ONE provably-safe row class is removed:
+
+        (a) Orphaned source rows: ``source_type='fact'`` whose ``source_id`` no
+            longer exists in ``facts``, or ``source_type='chunk'`` whose
+            ``source_id`` no longer exists in ``memory_chunks``. The
+            ``entities`` FK only cascades on entity ids, never on
+            ``source_id``, so these relations are genuinely dangling — their
+            originating content is gone, so they must not keep contributing
+            phantom corroboration to recall. Rows with an empty ``source_type``
+            or ``source_id`` <= 0 are NEVER touched (cannot prove orphaned →
+            prune nothing).
+
+        Cross-source dedup is DELIBERATELY NOT performed. ``related_entities``
+        ranks by ``SUM(r.weight)`` and ``COUNT(*)`` over *all*
+        ``memory_relations`` rows for an entity pair (see the ``relation_rows``
+        query), so the same edge appearing under N distinct
+        ``(source_type, source_id)`` pairs is N-fold corroboration *signal*,
+        not redundancy. Collapsing those rows to one would silently down-rank
+        every multi-source edge. (Flagged by an independent Codex review,
+        2026-05-19, before this ever shipped.)
+
+        Bound: at most ``max_delete`` rows are removed per run, in committed
+        batches of ``batch_size`` (each batch is its own small transaction that
+        respects the connection ``busy_timeout``). A single pass therefore
+        cannot stall the gateway.
+
+        Space reclaim is NOT done here. ``PRAGMA auto_vacuum=INCREMENTAL`` only
+        takes effect after a full ``VACUUM`` rebuild on a db created with
+        ``auto_vacuum=0`` (which this one was), so ``incremental_vacuum`` is a
+        no-op on the existing file. We set the pragma forward-only (harmless;
+        future rebuilds get incremental reclaim) but do NOT claim space was
+        freed. Real reclamation of the bloated ``memory_relations`` pages needs
+        a full offline ``VACUUM`` with the gateway stopped — that is an
+        explicit deferred maintenance step, not something this live-safe path
+        does.
+
+        Idempotent: a second consecutive run finds nothing to delete and is a
+        no-op.
+        """
+        # --- Hot-path guard: structurally un-triggerable from recall ---------
+        if daily_maintenance_token is not DAILY_MAINTENANCE_TOKEN:
+            raise PermissionError(
+                "prune_and_compact_relations is daily-maintenance only and "
+                "cannot be invoked without the daily-maintenance token "
+                "(this code path is unreachable from recall/search/probe)"
+            )
+
+        max_delete = max(0, int(max_delete))
+        batch_size = max(1, min(int(batch_size), max_delete or 1))
+        incremental_vacuum_pages = max(0, int(incremental_vacuum_pages))
+
+        started = time.time()
+        deleted_orphans = 0
+        deleted_dups = 0
+        budget = max_delete
+
+        with self._lock:
+            before_row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM memory_relations"
+            ).fetchone()
+            before_count = int(before_row["c"] or 0) if before_row else 0
+
+            # (a) Orphaned fact/chunk source rows, bounded batches.
+            for src_type, src_table, src_key in (
+                ("fact", "facts", "fact_id"),
+                ("chunk", "memory_chunks", "chunk_id"),
+            ):
+                while budget > 0:
+                    take = min(batch_size, budget)
+                    ids = [
+                        int(r["relation_id"])
+                        for r in self._conn.execute(
+                            f"""
+                            SELECT r.relation_id
+                            FROM memory_relations r
+                            WHERE r.source_type = ?
+                              AND r.source_id > 0
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM {src_table} t
+                                  WHERE t.{src_key} = r.source_id
+                              )
+                            LIMIT ?
+                            """,
+                            (src_type, take),
+                        ).fetchall()
+                    ]
+                    if not ids:
+                        break
+                    placeholders = ",".join("?" * len(ids))
+                    self._conn.execute(
+                        f"DELETE FROM memory_relations WHERE relation_id IN ({placeholders})",
+                        ids,
+                    )
+                    self._conn.commit()
+                    deleted_orphans += len(ids)
+                    budget -= len(ids)
+                    if len(ids) < take:
+                        break
+
+            # NOTE: cross-source dedup intentionally removed — see docstring.
+            # `related_entities` aggregates SUM(weight)/COUNT(*) across all
+            # rows for an entity pair, so multi-source rows are corroboration
+            # signal, not redundancy; collapsing them corrupts recall ranking.
+            # `deleted_dups` stays 0 (kept only for result-schema stability).
+
+            # Forward-only auto_vacuum hint. On a db created with
+            # auto_vacuum=0 this does NOT reclaim anything until a full
+            # offline VACUUM rebuild runs (SQLite semantics), so
+            # incremental_vacuum below is a harmless no-op on the existing
+            # file. Setting the pragma is safe and lets a future offline
+            # rebuild use incremental reclaim. Real reclamation of the bloated
+            # pages is a DEFERRED gateway-stopped `VACUUM`, not done here — we
+            # do not claim space was freed.
+            try:
+                self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            except sqlite3.Error:
+                pass
+            vacuum_ok = True
+            try:
+                if incremental_vacuum_pages > 0:
+                    self._conn.execute(
+                        f"PRAGMA incremental_vacuum({incremental_vacuum_pages})"
+                    )
+                    self._conn.commit()
+            except sqlite3.Error as exc:
+                vacuum_ok = False
+                logger.debug("incremental_vacuum skipped: %s", exc)
+
+            after_row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM memory_relations"
+            ).fetchone()
+            after_count = int(after_row["c"] or 0) if after_row else 0
+
+        total_deleted = deleted_orphans + deleted_dups
+        result = {
+            "ran": True,
+            "relations_before": before_count,
+            "relations_after": after_count,
+            "deleted_orphans": deleted_orphans,
+            "deleted_duplicates": deleted_dups,
+            "deleted_total": total_deleted,
+            "max_delete": max_delete,
+            "batch_size": batch_size,
+            "bound_hit": total_deleted >= max_delete and max_delete > 0,
+            "incremental_vacuum_pages": incremental_vacuum_pages,
+            "incremental_vacuum_ok": vacuum_ok,
+            # Honest: no space is reclaimed on this auto_vacuum=0 db until a
+            # deferred offline full VACUUM runs (gateway stopped).
+            "space_reclaimed": False,
+            "reclaim_note": "deferred: offline VACUUM required (gateway stopped)",
+            "noop": total_deleted == 0,
+            "seconds": round(time.time() - started, 3),
+        }
+        try:
+            self.record_memory_event(
+                "memory.relations_maintenance.complete", detail=result
+            )
+        except Exception:
+            pass
+        return result
+
     def memory_hygiene_report(self, limit: int = 20) -> dict:
         """Return memory maintenance candidates: duplicates, stale, popular, source gaps, contradictions."""
         limit = max(1, int(limit))
@@ -3094,11 +3309,20 @@ class MemoryStore:
     def _extract_entities(self, text: str) -> list[str]:
         """Extract entity candidates from text using simple regex rules.
 
-        Rules applied (in order):
+        High-precision rules (always applied):
         1. Capitalized multi-word phrases  e.g. "John Doe"
         2. Double-quoted terms             e.g. "Python"
         3. Single-quoted terms             e.g. 'pytest'
         4. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
+
+        Fallback rules (applied only when the high-precision rules yield
+        fewer than 2 entities, so co-occurrence relations can still form for
+        lowercase prose / preference notes — these became the dominant memory
+        content shape and silently froze the relation graph otherwise):
+        5. Backticked code/identifier tokens   e.g. `tasks`, reads.py
+        6. Dotted/underscore/kebab identifiers  e.g. source.json, record_counts
+        7. Single capitalized words            e.g. Elevate, Oura
+        8. Salient lowercase word tokens (stopword-filtered, length >= 4)
 
         Returns a deduplicated list preserving first-seen order.
         """
@@ -3123,6 +3347,28 @@ class MemoryStore:
         for m in _RE_AKA.finditer(text):
             _add(m.group(1))
             _add(m.group(2))
+
+        # High-precision rules were enough — keep historical behavior intact.
+        if len(candidates) >= 2:
+            return candidates
+
+        # Fallback: surface salient code/identifier/proper tokens so prose
+        # facts produce >= 2 entities and the co-occurrence relation upsert
+        # (which requires >= 2 distinct entities) is reachable again.
+        for m in _RE_BACKTICK.finditer(text):
+            _add(m.group(1))
+
+        for m in _RE_IDENTIFIER.finditer(text):
+            _add(m.group(1))
+
+        for m in _RE_CAP_WORD.finditer(text):
+            _add(m.group(1))
+
+        if len(candidates) < 2:
+            for m in _RE_WORD_TOKEN.finditer(text):
+                token = m.group(0)
+                if len(token) >= 4 and token.lower() not in _ENTITY_STOPWORDS:
+                    _add(token)
 
         return candidates
 

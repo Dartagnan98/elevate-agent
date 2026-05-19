@@ -698,6 +698,127 @@ class TestRunJobSessionPersistence:
         assert call_args[0][1] == "cron_complete"
         fake_db.close.assert_called_once()
 
+    def test_run_job_emits_cron_usage_turn_row(self, tmp_path):
+        """Completing a cron turn must write exactly one turn_usage row with
+        source='cron' and the token/latency fields populated.
+
+        The ledger write is offloaded to a fire-and-forget daemon thread that
+        opens its OWN SessionDB on the same temp file (never the live state.db,
+        never the job's `_session_db` handle — that one is closed by run_job's
+        finally on the main thread). So the test must wait for that thread to
+        land the row rather than read synchronously: it joins the named
+        `cron-usage-<job_id>` thread and then polls the ledger to a deadline.
+        """
+        import threading
+        import time as _time
+        from pathlib import Path
+
+        from elevate_state import SessionDB as _RealSessionDB
+
+        db_path = Path(tmp_path) / "state.db"
+
+        # Every SessionDB(...) construction inside run_job AND inside the
+        # offloaded ledger thread gets its own real connection bound to the
+        # temp file. WAL + 1.0s busy timeout makes concurrent independent
+        # connections to one file the supported pattern, so this mirrors prod.
+        def _db_factory(*_a, **_k):
+            return _RealSessionDB(db_path=db_path)
+
+        job = {
+            "id": "usage-job",
+            "name": "usage test",
+            "prompt": "do scheduled work",
+        }
+
+        with patch("cron.scheduler._elevate_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("elevate_state.SessionDB", side_effect=_db_factory), \
+             patch(
+                 "elevate_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {
+                "final_response": "done",
+                "provider": "openrouter",
+                "model": "test-model",
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "total_tokens": 1540,
+                "cache_read_tokens": 800,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "api_calls": 2,
+                "estimated_cost_usd": 0.0042,
+                "cost_status": "estimated",
+                "cost_source": "pricing_table",
+                "status": "ok",
+            }
+
+            # The real AIAgent.__init__ registers its session row in the
+            # session DB (so the turn_usage.session_id FK resolves). Mirror
+            # that here since the agent itself is mocked. Use a throwaway
+            # connection on the same file and close it immediately.
+            def _construct(*args, **kwargs):
+                sid = kwargs.get("session_id")
+                if sid:
+                    seed = _RealSessionDB(db_path=db_path)
+                    try:
+                        seed.create_session(session_id=sid, source="cron")
+                    finally:
+                        seed.close()
+                return mock_agent
+
+            mock_agent_cls.side_effect = _construct
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "done"
+
+        # Fast-path: join the offloaded ledger thread if it's still alive.
+        for t in threading.enumerate():
+            if t.name == "cron-usage-usage-job":
+                t.join(timeout=10.0)
+
+        # Robust path: the row is written cross-thread, so poll the ledger
+        # (fresh connection) until it shows up or we hit the deadline.
+        deadline = _time.monotonic() + 10.0
+        cron_rows: list = []
+        while _time.monotonic() < deadline:
+            verify_db = _RealSessionDB(db_path=db_path)
+            try:
+                rows = verify_db.recent_turn_usage(limit=10)
+            finally:
+                verify_db.close()
+            cron_rows = [r for r in rows if r.get("source") == "cron"]
+            if cron_rows:
+                break
+            _time.sleep(0.05)
+
+        assert len(cron_rows) == 1, f"expected exactly 1 cron row, got {cron_rows}"
+
+        row = cron_rows[0]
+        assert row["source"] == "cron"
+        assert row["input_tokens"] == 1200
+        assert row["output_tokens"] == 340
+        assert row["total_tokens"] == 1540
+        assert row["cache_read_tokens"] == 800
+        assert row["api_calls"] == 2
+        assert row["latency_ms"] >= 0
+        assert row["provider"] == "openrouter"
+        assert row["model"] == "test-model"
+        assert row["session_id"].startswith("cron_usage-job_")
+        assert row["status"] == "ok"
+
     def _make_run_job_patches(self, tmp_path):
         """Common patches for run_job tests."""
         fake_db = MagicMock()

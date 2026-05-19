@@ -214,6 +214,52 @@ def organize_holographic_journal(
     }
 
 
+def _prune_relation_graph(runtime_config: dict, plugin_config: dict) -> dict | None:
+    """Run the bounded memory_relations prune + incremental vacuum.
+
+    Helper for the daily path only. Returns the store result dict, or None if
+    the prune could not be set up (never raises into the daily loop).
+    """
+    max_delete = _parse_int(
+        plugin_config.get("relations_prune_max_delete"), 5000, minimum=0
+    )
+    if max_delete <= 0:
+        return {"ran": False, "reason": "relations prune disabled (max_delete<=0)"}
+    batch_size = _parse_int(
+        plugin_config.get("relations_prune_batch_size"), 500, minimum=1
+    )
+    vacuum_pages = _parse_int(
+        plugin_config.get("relations_incremental_vacuum_pages"), 2000, minimum=0
+    )
+    try:
+        from plugins.memory.holographic import HolographicMemoryProvider
+        from plugins.memory.holographic.store import DAILY_MAINTENANCE_TOKEN
+
+        provider = HolographicMemoryProvider(config=plugin_config)
+        provider.initialize(MAINTENANCE_SESSION_ID)
+    except Exception as exc:
+        logger.debug("Relation prune setup failed: %s", exc)
+        return None
+    try:
+        store = getattr(provider, "_store", None)
+        if store is None:
+            return None
+        return store.prune_and_compact_relations(
+            daily_maintenance_token=DAILY_MAINTENANCE_TOKEN,
+            max_delete=max_delete,
+            batch_size=batch_size,
+            incremental_vacuum_pages=vacuum_pages,
+        )
+    except Exception as exc:
+        logger.debug("Relation prune failed: %s", exc)
+        return {"ran": False, "reason": f"error: {exc}"}
+    finally:
+        try:
+            provider.shutdown()
+        except Exception:
+            pass
+
+
 def run_due_daily_memory_maintenance(
     *,
     config: dict | None = None,
@@ -249,6 +295,16 @@ def run_due_daily_memory_maintenance(
         drain=True,
         max_batches=_parse_int(plugin_config.get("daily_organize_max_batches"), 50, minimum=1),
     )
+
+    # Bounded relation-graph prune + incremental space reclaim. This is the
+    # ONLY call site: run_due_daily_memory_maintenance is daily-gated (one run
+    # per target_day) and is never on the per-turn or per-recall hot path. The
+    # destructive store method additionally hard-guards on an opaque token that
+    # no recall code holds, so it is structurally un-triggerable elsewhere.
+    relations_result = _prune_relation_graph(runtime_config, plugin_config)
+    if relations_result is not None:
+        result["relations_maintenance"] = relations_result
+
     state.update(
         {
             "last_daily_run_day": target_day,

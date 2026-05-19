@@ -11,6 +11,7 @@ import json
 import math
 import os
 import struct
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -108,16 +109,46 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 class BaseEmbeddingClient:
     provider = "base"
 
+    # Bounded per-process memoization. Recall embeds the *same* query string
+    # multiple times within a single turn (fact lane + document lane +
+    # verifier), each previously a separate network round-trip on the
+    # request thread. Memoizing the identical-input -> identical-vector
+    # mapping collapses those to one call with zero behavior change.
+    _embed_cache_max = 256
+
     def __init__(self, model: str, dimensions: int | None = None) -> None:
         self.model = model
         self.dimensions = dimensions
+        self._embed_cache: dict[str, EmbeddingResult] = {}
+        self._embed_cache_lock = threading.Lock()
 
     @property
     def label(self) -> str:
         return f"{self.provider}:{self.model}"
 
-    def embed(self, text: str) -> EmbeddingResult:
+    def _embed_uncached(self, text: str) -> EmbeddingResult:
         raise NotImplementedError
+
+    def embed(self, text: str) -> EmbeddingResult:
+        key = text
+        lock = getattr(self, "_embed_cache_lock", None)
+        if lock is None:
+            # Defensive: subclass that bypassed BaseEmbeddingClient.__init__.
+            return self._embed_uncached(text)
+        with lock:
+            hit = self._embed_cache.get(key)
+        if hit is not None:
+            return hit
+        # Network/compute happens OUTSIDE the lock so the background
+        # prefetch thread and the request thread never serialize on it.
+        result = self._embed_uncached(text)
+        with lock:
+            self._embed_cache[key] = result
+            if len(self._embed_cache) > self._embed_cache_max:
+                # dict preserves insertion order — drop the oldest entries.
+                for stale in list(self._embed_cache)[: -self._embed_cache_max]:
+                    self._embed_cache.pop(stale, None)
+        return result
 
     def embed_many(self, texts: list[str]) -> list[EmbeddingResult]:
         return [self.embed(text) for text in texts]
@@ -150,7 +181,7 @@ class OpenAIEmbeddingClient(BaseEmbeddingClient):
             self.provider = "openai_compatible"
         self._client = OpenAI(**kwargs)
 
-    def embed(self, text: str) -> EmbeddingResult:
+    def _embed_uncached(self, text: str) -> EmbeddingResult:
         return self.embed_many([text])[0]
 
     def embed_many(self, texts: list[str]) -> list[EmbeddingResult]:
@@ -183,7 +214,7 @@ class OllamaEmbeddingClient(BaseEmbeddingClient):
         super().__init__(model=model)
         self.base_url = base_url.rstrip("/")
 
-    def embed(self, text: str) -> EmbeddingResult:
+    def _embed_uncached(self, text: str) -> EmbeddingResult:
         data = json.dumps({"model": self.model, "prompt": text}).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/api/embeddings",
@@ -222,7 +253,7 @@ class HashEmbeddingClient(BaseEmbeddingClient):
     def __init__(self, model: str = "hash-test-256", dimensions: int = 256) -> None:
         super().__init__(model=model, dimensions=dimensions)
 
-    def embed(self, text: str) -> EmbeddingResult:
+    def _embed_uncached(self, text: str) -> EmbeddingResult:
         dim = int(self.dimensions or 256)
         vector = [0.0] * dim
         for token in text.lower().split():
@@ -272,7 +303,7 @@ class LocalMiniLMEmbeddingClient(BaseEmbeddingClient):
         except Exception as exc:
             raise EmbeddingError(f"local MiniLM model load failed: {exc}") from exc
 
-    def embed(self, text: str) -> EmbeddingResult:
+    def _embed_uncached(self, text: str) -> EmbeddingResult:
         try:
             vector_obj = self._model.encode(
                 text,

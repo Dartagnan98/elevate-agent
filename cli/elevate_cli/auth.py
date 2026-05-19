@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import shutil
 import shlex
 import ssl
@@ -679,9 +680,46 @@ def _auth_lock_path() -> Path:
 _auth_lock_holder = threading.local()
 
 @contextmanager
-def _auth_store_lock(timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS):
-    """Cross-process advisory lock for auth.json reads+writes.  Reentrant."""
-    # Reentrant: if this thread already holds the lock, just yield.
+def _auth_store_lock(
+    timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS,
+    *,
+    shared: bool = False,
+):
+    """Cross-process advisory lock for auth.json.  Reentrant.
+
+    Reader/writer split:
+      * ``shared=False`` (default — UNCHANGED behavior for every existing
+        call site): exclusive ``LOCK_EX``.  Any caller that reads-then-writes
+        under the same lock MUST use this so it never has to upgrade a held
+        shared lock (``LOCK_SH`` → ``LOCK_EX`` is not atomic under POSIX
+        ``flock`` and would race a second writer).
+      * ``shared=True``: shared ``LOCK_SH`` for genuinely read-only callers.
+        Multiple shared holders run concurrently across processes; a shared
+        holder still blocks an exclusive writer and vice-versa.
+
+    Reentrancy semantics (per thread, via ``threading.local``):
+      * Nested acquisition while this thread already holds the lock is a
+        refcount no-op — it does NOT touch the OS lock.
+      * The effective OS lock mode is whatever the OUTERMOST acquisition
+        took.  An exclusive holder that nests a ``shared=True`` request
+        stays EXCLUSIVE (never downgrades — a downgrade mid-critical-section
+        would let another writer in while this thread still intends to
+        write).  A shared holder that nests a ``shared=False`` request does
+        NOT upgrade; it stays SHARED.  Therefore every read-then-write
+        caller takes the OUTER lock as exclusive (``shared=False``), which
+        all current RMW call sites already do — the nested
+        ``_read_codex_tokens(_lock=False)`` style is unaffected because it
+        passes ``_lock=False`` and never re-enters this CM at all.
+
+    Windows (``msvcrt``) note: ``msvcrt.locking`` has no shared-lock mode,
+    so on Windows ``shared`` is ignored and the lock is always exclusive.
+    Correct (just less concurrent) — matches the pre-split behavior there.
+
+    The 15s timeout + ``TimeoutError`` contract is preserved for both modes.
+    """
+    # Reentrant: if this thread already holds the lock, just yield.  The OS
+    # lock mode is fixed by the outermost acquisition; nested calls (of
+    # either mode) are a pure refcount bump.  No downgrade, no upgrade.
     if getattr(_auth_lock_holder, "depth", 0) > 0:
         _auth_lock_holder.depth += 1
         try:
@@ -708,11 +746,16 @@ def _auth_store_lock(timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS):
 
     with lock_path.open("r+" if msvcrt else "a+") as lock_file:
         deadline = time.time() + max(1.0, timeout_seconds)
+        if fcntl:
+            flock_flag = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
         while True:
             try:
                 if fcntl:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock_file.fileno(), flock_flag | fcntl.LOCK_NB)
                 else:
+                    # msvcrt has no shared mode — always exclusive (correct,
+                    # just serializes readers too). Behavior is identical to
+                    # the pre-reader/writer-split Windows path.
                     lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
                 break
@@ -741,9 +784,32 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     if not auth_file.exists():
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
-    try:
-        raw = json.loads(auth_file.read_text())
-    except Exception:
+    # The store is rewritten via tmp-file + os.replace + chmod by
+    # _save_auth_store().  A concurrent reader can momentarily lose the read
+    # (EINTR, a transient PermissionError during the writer's chmod window,
+    # or json.loads landing mid-rename on some filesystems).  Swallowing that
+    # straight into an empty store turns a *present* credential into a
+    # false "No Codex credentials stored" until the next call retries.
+    # Retry the read a few times with jittered backoff before giving up —
+    # only fall back to the empty store if the file stays unreadable.
+    raw = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(5):
+        try:
+            raw = json.loads(auth_file.read_text())
+            break
+        except Exception as exc:  # noqa: BLE001 - transient FS/parse race
+            last_exc = exc
+            if not auth_file.exists():
+                return {"version": AUTH_STORE_VERSION, "providers": {}}
+            if attempt < 4:
+                time.sleep(random.uniform(0.02, 0.12))
+                continue
+    if raw is None:
+        logger.debug(
+            "auth store unreadable after retries (%s) — returning empty store",
+            last_exc,
+        )
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     if isinstance(raw, dict) and (
@@ -2096,7 +2162,14 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     Raises AuthError if no Codex tokens are stored.
     """
     if _lock:
-        with _auth_store_lock():
+        # Pure read — take the SHARED lock so concurrent codex-token reads
+        # (the cron hot path) no longer serialize behind each other or
+        # behind unrelated readers. A writer (_save_codex_tokens / refresh)
+        # still takes LOCK_EX and mutually excludes this. When called with
+        # _lock=False the caller already holds the EXCLUSIVE lock for a
+        # read-then-write sequence (resolve_codex_runtime_credentials), so
+        # there is no shared→exclusive upgrade.
+        with _auth_store_lock(shared=True):
             auth_store = _load_auth_store()
     else:
         auth_store = _load_auth_store()
@@ -4197,7 +4270,10 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
         # overwrites it to "nous".  If the user picks "Skip (keep current)"
         # during model selection below, we restore this so the user's previous
         # provider (e.g. openrouter) is preserved.
-        with _auth_store_lock():
+        # Read-only snapshot — no write inside this block (the write happens
+        # in the separate exclusive block below). Shared lock is correct and
+        # cannot upgrade since it is released before the EX block opens.
+        with _auth_store_lock(shared=True):
             _prior_store = _load_auth_store()
             prior_active_provider = _prior_store.get("active_provider")
 

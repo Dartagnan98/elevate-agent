@@ -1676,6 +1676,27 @@ class AIAgent:
             _api_retries = 3
         self._api_max_retries = _api_retries
 
+        # Absolute cumulative wall-clock budget for ONE API-call sequence
+        # (all retries for a single turn). The non-stream stale detector
+        # only guards an individual request; every retry resets it, so a
+        # run of hung calls can burn far past any single timeout (observed
+        # in production: 2063s on a 6-msg / 17k-token turn before giving
+        # up). This ceiling bounds the cumulative dead time regardless of
+        # how many retries reset the per-call detector. 0/empty/<=0 or a
+        # local endpoint disables it. Override: agent.api_turn_deadline in
+        # config.yaml or ELEVATE_API_TURN_DEADLINE env (seconds).
+        _raw_turn_deadline = _agent_section.get("api_turn_deadline", None)
+        if _raw_turn_deadline is None:
+            _raw_turn_deadline = os.getenv("ELEVATE_API_TURN_DEADLINE")
+        try:
+            self._api_turn_deadline_s = (
+                1200.0 if _raw_turn_deadline is None else float(_raw_turn_deadline)
+            )
+        except (TypeError, ValueError):
+            self._api_turn_deadline_s = 1200.0
+        if self._api_turn_deadline_s <= 0:
+            self._api_turn_deadline_s = 0.0  # disabled
+
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
         # Configuration via config.yaml (compression section)
@@ -2264,13 +2285,22 @@ class AIAgent:
         visible regardless of verbose/quiet mode.  Gateway consumers receive
         it through ``status_callback("lifecycle", ...)``.
 
+        The stdout fan-out is suppressed for a *quiet embedded/library* caller
+        with no interactive sink (no ``_print_fn``, stdout not a TTY, e.g. a
+        non-CLI gateway/embedded turn): those callers expect quiet mode to be
+        truly silent on stdout and own their own rendering via
+        ``status_callback``.  Non-quiet callers (incl. headless cron, where
+        retry/fallback notices belong in the log) still print as before.
+
         This helper never raises — exceptions are swallowed so it cannot
         interrupt the retry/fallback logic.
         """
-        try:
-            self._vprint(f"{self.log_prefix}{message}", force=True)
-        except Exception:
-            pass
+        _stdout_silent = self.quiet_mode and not self._should_start_quiet_spinner()
+        if not _stdout_silent:
+            try:
+                self._vprint(f"{self.log_prefix}{message}", force=True)
+            except Exception:
+                pass
         if self.status_callback:
             try:
                 self.status_callback("lifecycle", message)
@@ -9514,6 +9544,19 @@ class AIAgent:
             except Exception:
                 pass
 
+        # Absolute per-turn deadline (see __init__). Anchored on the monotonic
+        # clock — this measures a *duration*, so it must be immune to
+        # wall-clock steps (NTP/DST) and is the correct clock for an
+        # elapsed-time budget. Computed ONCE here, OUTSIDE the outer agentic
+        # loop, so neither a tool round nor a length/compression continuation
+        # (which `continue` back into this loop) can re-anchor it — the budget
+        # bounds the whole cumulative turn, not a single API call's retries.
+        # Local endpoints are exempt (no SLA).
+        _turn_budget = self._api_turn_deadline_s
+        if _turn_budget and self.base_url and is_local_endpoint(self.base_url):
+            _turn_budget = 0.0
+        _turn_deadline_mono0 = time.monotonic() if _turn_budget else None
+
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
@@ -9811,7 +9854,41 @@ class AIAgent:
             response = None  # Guard against UnboundLocalError if all retries fail
             api_kwargs = None  # Guard against UnboundLocalError in except handler
 
+            # _turn_budget / _turn_deadline_mono0 are anchored ONCE above the
+            # outer agentic loop (see there) so continuations cannot reset the
+            # cumulative-turn budget. Do NOT re-anchor here.
+
             while retry_count < max_retries:
+                # Cumulative wall-clock backstop. Every retry/reset path in
+                # this loop re-enters here, so one guard at the loop top
+                # bounds total dead time no matter how many resets occurred.
+                if _turn_deadline_mono0 is not None and (
+                    time.monotonic() - _turn_deadline_mono0
+                ) >= _turn_budget:
+                    _elapsed = time.monotonic() - _turn_deadline_mono0
+                    _dl_msg = (
+                        f"API call sequence exceeded the per-turn wall-clock "
+                        f"budget ({_turn_budget:.0f}s; elapsed {_elapsed:.0f}s, "
+                        f"{retry_count} retr{'y' if retry_count == 1 else 'ies'}). "
+                        f"Aborting to avoid a multi-retry dead run."
+                    )
+                    self._vprint(f"{self.log_prefix}⏱️  {_dl_msg}", force=True)
+                    try:
+                        self._emit_status(f"⏱️ {_dl_msg}")
+                    except Exception:
+                        pass
+                    try:
+                        self._persist_session(messages, conversation_history)
+                    except Exception:
+                        pass
+                    return {
+                        "final_response": f"⏱️ {_dl_msg}",
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": _dl_msg,
+                    }
                 # ── Nous Portal rate limit guard ──────────────────────
                 # If another session already recorded that Nous is rate-
                 # limited, skip the API call entirely.  Each attempt
@@ -9923,6 +10000,20 @@ class AIAgent:
                         from unittest.mock import Mock
                         if isinstance(getattr(self, "client", None), Mock):
                             _use_streaming = False
+
+                    # ── Pre-first-byte heartbeat (#5) ─────────────────────
+                    # The dispatch→first-byte window is a watchdog blind
+                    # spot: nothing is emitted between here and the first
+                    # stream delta, so the UI sits on "initializing" and the
+                    # only backstop is the #2 per-turn wall-clock deadline.
+                    # Emit one cheap signal right before the blocking call so
+                    # the UI/watchdog gets a sign of life during dispatch.
+                    # Exception-safe (mirrors the #2 guard); fires once per
+                    # API-call attempt, never in a loop.
+                    try:
+                        self._emit_status("⏳ Sending request…")
+                    except Exception:
+                        pass
 
                     if _use_streaming:
                         response = self._interruptible_streaming_api_call(
