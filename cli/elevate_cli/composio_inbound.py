@@ -673,7 +673,38 @@ def _walk_two_step(
         args = {**msgs_default, "conversation_id": cid}
         m_resp = composio_client.execute_tool(msgs_slug, account_id, args, user_id=account_user_id)
         if not m_resp.get("ok"):
-            _log.warning("composio_inbound[%s/%s]: messages failed for %s: %s", toolkit, account_id, cid, m_resp.get("error"))
+            status = m_resp.get("status")
+            if isinstance(status, int) and status >= 500:
+                # 5xx survived composio_client's retry budget. Do NOT silently
+                # `continue` — that lets the conversation fall through to a
+                # generic canned draft downstream. Emit a sentinel record so
+                # the thread stays visible but is marked draft-unavailable.
+                # `direction="system"` (not "inbound") makes the fallback
+                # generator in source_connectors skip it (the
+                # `direction != "inbound"` guard, ~L2386).
+                _log.warning(
+                    "composio_inbound[%s/%s]: messages 5xx-exhausted for %s: %s — marking draft-unavailable",
+                    toolkit, account_id, cid, m_resp.get("error"),
+                )
+                sentinel = _normalize(
+                    {"id": f"unavailable-{cid}", "body": "", "ts": _now_iso()},
+                    toolkit,
+                    account_id,
+                    conversation_id_override=str(cid),
+                )
+                sentinel["direction"] = "system"
+                sentinel["messages_unavailable"] = True
+                sentinel["status"] = "messages_unavailable"
+                sentinel["inbound_count"] = 0
+                sentinel["unavailable_reason"] = m_resp.get("error") or f"HTTP {status}"
+                out.append(sentinel)
+            else:
+                # 4xx (auth/permission/not-found) is permanent — keep prior
+                # behaviour: log it and move on.
+                _log.warning(
+                    "composio_inbound[%s/%s]: messages 4xx-permanent for %s: %s",
+                    toolkit, account_id, cid, m_resp.get("error"),
+                )
             continue
         items = _resolve_path(m_resp.get("data") or {}, msgs_path) or []
         fetched += len(items)

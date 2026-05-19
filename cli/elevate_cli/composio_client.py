@@ -13,6 +13,12 @@ import os
 from typing import Any, Optional
 
 import httpx
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from elevate_cli.config import load_env, save_env_value
 
@@ -20,6 +26,23 @@ from elevate_cli.config import load_env, save_env_value
 COMPOSIO_BASE_URL = "https://backend.composio.dev"
 COMPOSIO_API_KEY_ENV = "COMPOSIO_API_KEY"
 DEFAULT_TIMEOUT = 15.0
+# Transient upstream (5xx) and connection/timeout failures get a few quick
+# retries. These run inside cron jobs with idle watchdogs, so cap total wall
+# time well under ~30s: 3 attempts, exp backoff (1s, 2s) capped at 4s.
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_WAIT_MAX = 4.0
+
+
+class _RetryableUpstream(Exception):
+    """Raised for retryable upstream conditions (5xx) so tenacity backs off.
+
+    Carries the structured payload so the final return contract is preserved
+    even when retries are exhausted.
+    """
+
+    def __init__(self, payload: dict[str, Any]):
+        super().__init__(payload.get("error") or "retryable upstream error")
+        self.payload = payload
 
 
 def _read_api_key() -> str:
@@ -45,23 +68,25 @@ def _err(message: str, status: int | None = None, raw: Any = None) -> dict[str, 
     return payload
 
 
-def _request(method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict[str, Any]:
-    api_key = _read_api_key()
-    if not api_key:
-        return _err("COMPOSIO_API_KEY is not configured", status=None)
-
-    url = f"{COMPOSIO_BASE_URL.rstrip('/')}{path}"
-    try:
-        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-            resp = client.request(
-                method,
-                url,
-                headers=_headers(api_key),
-                params=params,
-                json=json_body,
-            )
-    except httpx.HTTPError as exc:
-        return _err(f"Network error: {exc}")
+@retry(
+    retry=retry_if_exception_type((httpx.TransportError, _RetryableUpstream)),
+    stop=stop_after_attempt(_RETRY_MAX_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, max=_RETRY_WAIT_MAX),
+    reraise=True,
+)
+def _attempt_request(method: str, url: str, api_key: str, params: dict | None, json_body: dict | None) -> dict[str, Any]:
+    """Single HTTP attempt. Raises to trigger a tenacity retry ONLY for
+    transient failures (connection/timeout transport errors and upstream
+    5xx). 4xx and successful responses return immediately so auth /
+    permission errors surface fast without backoff."""
+    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+        resp = client.request(
+            method,
+            url,
+            headers=_headers(api_key),
+            params=params,
+            json=json_body,
+        )
 
     body: Any
     try:
@@ -71,9 +96,29 @@ def _request(method: str, path: str, *, params: dict | None = None, json_body: d
 
     if resp.status_code >= 400:
         msg = body.get("message") if isinstance(body, dict) else None
-        return _err(msg or f"HTTP {resp.status_code}", status=resp.status_code, raw=body)
+        payload = _err(msg or f"HTTP {resp.status_code}", status=resp.status_code, raw=body)
+        if resp.status_code >= 500:
+            raise _RetryableUpstream(payload)
+        return payload
 
     return {"ok": True, "data": body, "status": resp.status_code}
+
+
+def _request(method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict[str, Any]:
+    api_key = _read_api_key()
+    if not api_key:
+        return _err("COMPOSIO_API_KEY is not configured", status=None)
+
+    url = f"{COMPOSIO_BASE_URL.rstrip('/')}{path}"
+    try:
+        return _attempt_request(method, url, api_key, params, json_body)
+    except _RetryableUpstream as exc:
+        # 5xx persisted after _RETRY_MAX_ATTEMPTS — surface the structured
+        # payload (status preserved) so callers can distinguish exhausted
+        # transient failures from permanent 4xx.
+        return exc.payload
+    except httpx.HTTPError as exc:
+        return _err(f"Network error: {exc}")
 
 
 def set_api_key(value: str) -> dict[str, Any]:

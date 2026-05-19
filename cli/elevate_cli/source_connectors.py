@@ -817,6 +817,7 @@ def _draft_from_task(source: JsonRecord, record: JsonRecord, state: JsonRecord |
         "status": str(state.get("status") or record.get("status") or "pending"),
         "approvalRequired": bool(record.get("approval_required", True)),
         "generated": False,
+        "fallback": False,
         "record": _list_record_snapshot(record),
     }
 
@@ -841,6 +842,7 @@ def _draft_from_thread(source: JsonRecord, thread: JsonRecord) -> JsonRecord:
         "status": "pending",
         "approvalRequired": True,
         "generated": True,
+        "fallback": True,
         "record": thread.get("record") or {},
     }
 
