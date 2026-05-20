@@ -847,13 +847,63 @@ def _get_max_concurrent_children() -> int:
     return _DEFAULT_MAX_CONCURRENT_CHILDREN
 
 
-def _get_child_timeout() -> float:
-    """Read delegation.child_timeout_seconds from config.
+def _get_child_timeout(toolsets: Optional[List[str]] = None) -> float:
+    """Read delegation.child_timeout_seconds from config, optionally
+    overridden per-toolset via delegation.timeout_by_toolset.
+
+    When ``toolsets`` is provided, scan ``delegation.timeout_by_toolset``
+    (a dict of prefix-glob → seconds) for any pattern matching any of the
+    child's enabled toolsets.  Take the MAX across matches — a child loaded
+    with both a browser skill (long timeout) and a small helper skill (short
+    timeout) gets the long one.  Falls back to ``child_timeout_seconds``
+    when no toolset matches or no per-toolset config is set.
+
+    Example config:
+        delegation:
+          child_timeout_seconds: 600
+          timeout_by_toolset:
+            skyslope_*: 1800
+            lofty_*: 1800
+            browser_*: 1800
+            playwright_*: 1800
+            showingtime_*: 1800
+            composio_*: 900
 
     Returns the number of seconds a single child agent is allowed to run
     before being considered stuck.  Default: 600 s (10 minutes).
     """
     cfg = _load_config()
+
+    # Per-toolset override: scan delegation.timeout_by_toolset for any
+    # prefix that matches any of the child's enabled toolsets.  Use the
+    # MAX so a long-running skill (e.g. browser_*) wins over a short one.
+    if toolsets:
+        ts_map = cfg.get("timeout_by_toolset")
+        if isinstance(ts_map, dict) and ts_map:
+            from fnmatch import fnmatchcase as _fn
+
+            best: Optional[float] = None
+            for ts_name in toolsets:
+                if not isinstance(ts_name, str):
+                    continue
+                for pattern, raw in ts_map.items():
+                    if not isinstance(pattern, str):
+                        continue
+                    if _fn(ts_name, pattern) or _fn(ts_name, pattern + "*"):
+                        try:
+                            secs = max(30.0, float(raw))
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "delegation.timeout_by_toolset[%r]=%r is not "
+                                "a valid number; ignoring",
+                                pattern, raw,
+                            )
+                            continue
+                        if best is None or secs > best:
+                            best = secs
+            if best is not None:
+                return best
+
     val = cfg.get("child_timeout_seconds")
     if val is not None:
         try:
@@ -1605,15 +1655,20 @@ def _dump_subagent_timeout_diagnostic(
     duration_seconds: float,
     worker_thread: Optional[threading.Thread],
     goal: str,
+    api_calls: int = 0,
 ) -> Optional[str]:
-    """Write a structured diagnostic dump for a subagent that timed out
-    before making any API call.
+    """Write a structured diagnostic dump for any subagent that timed out.
 
-    See issue #14726: users hit "subagent timed out after 300s with no response"
-    with zero API calls and no way to inspect what happened. This helper
-    writes a dedicated log under ``~/.elevate/logs/subagent-<sid>-<ts>.log``
-    capturing the child's config, system-prompt / tool-schema sizes, activity
-    tracker snapshot, and the worker thread's Python stack at timeout.
+    Originally only fired on 0-API-call hangs (see issue #14726). Now fires
+    on ANY timeout — including mid-tool hangs where the child made multiple
+    API calls before getting stuck in a tool. The api_calls count is in the
+    header so the cause is obvious at a glance:
+      api_calls == 0  → child never reached its first LLM request
+      api_calls > 0   → child hung mid-conversation or inside a tool
+
+    Writes to ``~/.elevate/logs/subagent-timeout-<sid>-<ts>.log`` capturing
+    the child's config, system-prompt / tool-schema sizes, activity tracker
+    snapshot, and the worker thread's Python stack at timeout.
 
     Returns the absolute path to the diagnostic file, or None on failure.
     """
@@ -1646,6 +1701,11 @@ def _dump_subagent_timeout_diagnostic(
         _w(f"  subagent_id:       {subagent_id}")
         _w(f"  configured_timeout: {timeout_seconds}s")
         _w(f"  actual_duration:   {duration_seconds:.2f}s")
+        _w(f"  api_calls_before_timeout: {api_calls}")
+        if api_calls == 0:
+            _w("  cause_class:       pre-first-call (prompt/transport/credential stuck)")
+        else:
+            _w("  cause_class:       mid-conversation (slow API call or hung tool)")
         _w("")
 
         _w("## Goal")
@@ -1729,10 +1789,12 @@ def _dump_subagent_timeout_diagnostic(
         _w("")
 
         _w("## Notes")
-        _w("  This file is written ONLY when a subagent times out with 0 API calls.")
-        _w("  0-API-call timeouts mean the child never reached its first LLM request.")
-        _w("  Common causes: oversized prompt rejected by provider, transport hang,")
-        _w("  credential resolution stuck. See issue #14726 for context.")
+        _w("  Written on every subagent timeout. Check `api_calls_before_timeout` and")
+        _w("  `cause_class` at the top to distinguish pre-first-call hangs (provider")
+        _w("  rejected oversized prompt, transport stuck, credential resolution hung)")
+        _w("  from mid-conversation hangs (slow LLM call, hung tool — e.g. browser_click")
+        _w("  stuck on an offscreen element, network request with no timeout).")
+        _w("  The stack above points at exactly what was on the worker thread.")
 
         dump_path.write_text("\n".join(lines), encoding="utf-8")
         return str(dump_path)
@@ -1933,7 +1995,13 @@ def _run_single_child(
 
         # Run child with a hard timeout to prevent indefinite blocking
         # when the child's API call or tool-level HTTP request hangs.
-        child_timeout = _get_child_timeout()
+        # Pass the child's enabled toolsets so per-toolset overrides
+        # (delegation.timeout_by_toolset) kick in — browser/Skyslope
+        # children get longer budgets than pure-LLM children.
+        _child_toolsets = getattr(child, "enabled_toolsets", None) or []
+        if isinstance(_child_toolsets, (set, tuple)):
+            _child_toolsets = list(_child_toolsets)
+        child_timeout = _get_child_timeout(_child_toolsets)
         _timeout_executor = ThreadPoolExecutor(max_workers=1)
         # Capture the worker thread so the timeout diagnostic can dump its
         # Python stack (see #14726 — 0-API-call hangs are opaque without it).
@@ -1955,7 +2023,44 @@ def _run_single_child(
             except Exception:
                 pass
         try:
-            result = _child_future.result(timeout=child_timeout)
+            # Poll instead of one blocking .result(timeout=child_timeout) call.
+            # A pure blocking wait means the parent thread can't react to its
+            # own _interrupt_requested flag — Ctrl-C / TUI interrupt would have
+            # to wait the FULL child_timeout (up to 30 min for browser skills).
+            # Poll every 1s, check parent interrupt, propagate to child, bail.
+            _poll_deadline = time.monotonic() + float(child_timeout)
+            _poll_interval = 1.0
+            result = None
+            while True:
+                _remaining = _poll_deadline - time.monotonic()
+                if _remaining <= 0:
+                    raise FuturesTimeoutError()
+                # Bail early if parent is interrupted.
+                if (
+                    parent_agent is not None
+                    and getattr(parent_agent, "_interrupt_requested", False) is True
+                ):
+                    try:
+                        if hasattr(child, "interrupt"):
+                            child.interrupt()
+                        elif hasattr(child, "_interrupt_requested"):
+                            child._interrupt_requested = True
+                    except Exception:
+                        pass
+                    # Give the child a brief grace window to wrap up cleanly.
+                    try:
+                        result = _child_future.result(timeout=5.0)
+                    except Exception:
+                        raise KeyboardInterrupt(
+                            "Parent interrupt — child did not exit in 5s"
+                        )
+                    break
+                _step = min(_poll_interval, _remaining)
+                try:
+                    result = _child_future.result(timeout=_step)
+                    break
+                except FuturesTimeoutError:
+                    continue
         except Exception as _timeout_exc:
             # Signal the child to stop so its thread can exit cleanly.
             try:
@@ -1975,9 +2080,12 @@ def _run_single_child(
                 duration,
             )
 
-            # When a subagent times out BEFORE making any API call, dump a
-            # diagnostic to help users (and us) see what the child was doing.
-            # See #14726 — without this, 0-API-call hangs are black boxes.
+            # Dump a diagnostic on ANY subagent timeout. The dump captures the
+            # worker thread's Python stack so we can see what tool was hung.
+            # Previously this only fired on 0-API-call timeouts, which left the
+            # common case (subagent hung MID-tool, e.g. browser_click stuck)
+            # as a black box. The api_calls count is now part of the header
+            # so the cause is easy to distinguish at a glance.
             diagnostic_path: Optional[str] = None
             child_api_calls = 0
             try:
@@ -1985,7 +2093,7 @@ def _run_single_child(
                 child_api_calls = int(_summary.get("api_call_count", 0) or 0)
             except Exception:
                 pass
-            if is_timeout and child_api_calls == 0:
+            if is_timeout:
                 diagnostic_path = _dump_subagent_timeout_diagnostic(
                     child=child,
                     task_index=task_index,
@@ -1993,11 +2101,13 @@ def _run_single_child(
                     duration_seconds=float(duration),
                     worker_thread=_worker_thread_holder.get("t"),
                     goal=goal,
+                    api_calls=child_api_calls,
                 )
                 if diagnostic_path:
                     logger.warning(
-                        "Subagent %d 0-API-call timeout — diagnostic written to %s",
+                        "Subagent %d timeout (api_calls=%d) — diagnostic written to %s",
                         task_index,
+                        child_api_calls,
                         diagnostic_path,
                     )
 

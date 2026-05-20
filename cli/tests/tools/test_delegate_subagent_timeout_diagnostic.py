@@ -234,17 +234,23 @@ class TestDumpSubagentTimeoutDiagnostic:
 
 class TestRunSingleChildTimeoutDump:
     """The timeout branch in _run_single_child must emit the diagnostic
-    dump when api_calls == 0, and must NOT emit it when api_calls > 0."""
+    dump on ANY timeout — both zero-API-call hangs (pre-first-call) and
+    mid-conversation hangs (api_calls > 0). The dump header distinguishes
+    the cause class so users see what kind of hang they hit."""
 
     def _invoke_with_short_timeout(self, child, monkeypatch):
         """Run _run_single_child with a tiny timeout to force the timeout branch."""
         from tools import delegate_tool
-        # Force a 0.3s timeout so the test is fast
-        monkeypatch.setattr(delegate_tool, "_get_child_timeout", lambda: 0.3)
+        # Force a 0.3s timeout so the test is fast. Signature must accept
+        # the optional `toolsets` argument introduced for per-toolset overrides.
+        monkeypatch.setattr(
+            delegate_tool, "_get_child_timeout", lambda toolsets=None: 0.3
+        )
 
         parent = MagicMock()
         parent._touch_activity = MagicMock()
         parent._current_task_id = None
+        parent._interrupt_requested = False
         return delegate_tool._run_single_child(
             task_index=0,
             goal="test goal",
@@ -268,19 +274,27 @@ class TestRunSingleChildTimeoutDump:
         assert "Diagnostic:" in result["error"]
         assert str(dump_path) in result["error"]
 
-    def test_nonzero_api_calls_skips_dump_and_uses_old_message(self, elevate_home, monkeypatch):
+        # The dump header records the api_calls count and cause class.
+        body = dump_path.read_text()
+        assert "api_calls_before_timeout: 0" in body
+        assert "cause_class:       pre-first-call" in body
+
+    def test_nonzero_api_calls_also_writes_dump(self, elevate_home, monkeypatch):
         child = _StubChild(api_call_count=5, hang_seconds=10.0)
         result = self._invoke_with_short_timeout(child, monkeypatch)
 
         assert result["status"] == "timeout"
         assert result["api_calls"] == 5
-        # No diagnostic file should be written for timeouts that made
-        # actual API calls — the old generic "stuck on slow call" message
-        # still applies.
-        assert result.get("diagnostic_path") is None
+        # New behavior: diagnostic dump fires for ANY timeout, including
+        # mid-conversation hangs. The dump header carries the api_calls
+        # count and a `cause_class` label so users see at a glance whether
+        # this was a pre-first-call hang or a mid-call hang.
+        assert result.get("diagnostic_path") is not None
+        dump_path = Path(result["diagnostic_path"])
+        assert dump_path.is_file()
+        body = dump_path.read_text()
+        assert "api_calls_before_timeout: 5" in body
+        assert "cause_class:       mid-conversation" in body
+        # The runtime error string still uses the "stuck on slow call" phrasing
+        # so existing UI surfaces don't regress.
         assert "stuck on a slow API call" in result["error"]
-        # And no subagent-timeout-* file should exist under logs/
-        logs_dir = elevate_home / "logs"
-        if logs_dir.is_dir():
-            dumps = list(logs_dir.glob("subagent-timeout-*.log"))
-            assert dumps == []

@@ -628,16 +628,22 @@ function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
 // happens mid-turn returns a transcript that's missing the user's just-sent
 // message. Anything in the cache whose id isn't in the server response is
 // almost certainly an in-flight message — keep it appended.
+//
+// Match by role+content fingerprint, not by id: server and client generate
+// independent random IDs for the same logical message, so id-based matching
+// incorrectly treats every cached message as "not on server" and appends the
+// entire cache as a duplicate tail.
 function mergeServerWithCache(
   serverMessages: ChatMessage[],
   cached: ChatMessage[] | null,
 ): ChatMessage[] {
   if (!cached?.length) return serverMessages;
-  const serverIds = new Set(serverMessages.map((m) => m.id));
+  const fp = (m: ChatMessage) => `${m.role}:${m.content.slice(0, 200)}`;
+  const serverFingerprints = new Set(serverMessages.map(fp));
   const tail: ChatMessage[] = [];
   for (let i = cached.length - 1; i >= 0; i--) {
     const msg = cached[i];
-    if (serverIds.has(msg.id)) break;
+    if (serverFingerprints.has(fp(msg))) break;
     tail.unshift(msg);
   }
   return tail.length ? [...serverMessages, ...tail] : serverMessages;
@@ -719,19 +725,7 @@ function writeQueue(sessionId: string | null | undefined, items: QueuedInput[]):
   } catch {}
 }
 
-function replaceUrlWithResume(sessionId: string): void {
-  if (typeof window === "undefined" || !sessionId) return;
-  const url = new URL(window.location.href);
-  if (!url.pathname.endsWith("/chat")) return;
-  if (url.searchParams.get("resume") === sessionId) return;
-  url.searchParams.delete("new");
-  url.searchParams.set("resume", sessionId);
-  window.history.replaceState(
-    window.history.state,
-    "",
-    `${url.pathname}?${url.searchParams.toString()}`,
-  );
-}
+
 
 type ProgressState = "done" | "error" | "pending" | "running";
 
@@ -1530,11 +1524,20 @@ function artifactsFromSubagentEvent(
 }
 
 export default function ChatPage() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
   const newChatId = searchParams.get("new");
   const seedKey = searchParams.get("seed");
   const seededRef = useRef(false);
+  // Auto-resume gate. When the user lands on /chat with no ?resume= and no
+  // ?new=, we look up the most-recent TUI session and redirect with
+  // ?resume=<id> instead of minting a fresh session. The bootstrap effect
+  // waits on this gate so it doesn't mint a session before the redirect
+  // lands. Initialized to true when the URL already disambiguates (resume
+  // or new) — no probe needed there.
+  const [autoResumeDecided, setAutoResumeDecided] = useState(
+    Boolean(resumeId || newChatId),
+  );
   const [version, setVersion] = useState(0);
   const gw = useMemo(
     () => getSharedChatGateway(version),
@@ -1889,7 +1892,53 @@ export default function ChatPage() {
     writeQueue(persisted, queuedInputs);
   }, [queuedInputs, sessionId]);
 
+  // Auto-resume probe. When /chat mounts with neither ?resume= nor ?new=,
+  // pull the most-recent active TUI session and redirect into it via
+  // ?resume=<id>. If there is no recent candidate, release the gate so the
+  // bootstrap effect below proceeds with a fresh session.create.
+  // Lifecycle invariant: this effect runs at most once per mount.
   useEffect(() => {
+    if (autoResumeDecided) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { sessions } = await api.getSessions(10, 0, {
+          includeTotal: false,
+        });
+        if (cancelled) return;
+        const now = Date.now() / 1000;
+        // Pick the most-recent TUI session with at least one message
+        // whose last activity was within the past 24h. Anything older
+        // is stale enough that a fresh start is a better default.
+        const recent = sessions.find((s) => {
+          if (s.source !== "tui") return false;
+          if ((s.message_count ?? 0) < 1) return false;
+          const lastActive = s.last_active ?? s.started_at ?? 0;
+          return now - lastActive < 86_400;
+        });
+        if (recent?.id) {
+          // Redirect into the recent session instead of minting a new one.
+          // The effect cleanup will fire and bootstrap will re-run with
+          // resumeId set, taking the normal resume code path.
+          const next = new URLSearchParams(searchParams);
+          next.set("resume", recent.id);
+          setSearchParams(next, { replace: true });
+          return;
+        }
+      } catch {
+        // Network/auth glitch — fall through and let bootstrap create a
+        // fresh session.  The sidebar still lets the user open prior
+        // chats by hand.
+      }
+      if (!cancelled) setAutoResumeDecided(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [autoResumeDecided, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!autoResumeDecided) return;
     let cancelled = false;
     const unsubs: Array<() => void> = [];
 
@@ -2451,9 +2500,10 @@ export default function ChatPage() {
         activeSessionRef.current = created.session_id;
         persistedSessionIdRef.current =
           created.persisted_session_id ?? created.resumed ?? resumeId ?? null;
-        if (!resumeId && persistedSessionIdRef.current) {
-          replaceUrlWithResume(persistedSessionIdRef.current);
-        }
+        // Don't auto-rewrite URL to ?resume= on fresh sessions.
+        // Resume should only happen when the user explicitly picks a
+        // session from the sidebar (which navigates with ?resume=).
+        // Auto-rewrite caused confusing message accumulation across visits.
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
         if (resumeWarning) {
@@ -2542,6 +2592,7 @@ export default function ChatPage() {
     addActivityTrace,
     addArtifacts,
     appendMessage,
+    autoResumeDecided,
     ensureAssistant,
     gw,
     hydrateArtifactsFromMessages,

@@ -864,7 +864,19 @@ function DesktopSidebar({
     api
       .getSessions(SIDEBAR_SESSION_LIMIT, 0, { includeTotal: false })
       .then((resp) => {
-        setSessions(resp.sessions);
+        // Filter out sidebar noise: empty sessions older than 5 min are
+        // almost always abandoned bootstrap leftovers (a /chat visit that
+        // minted a session and never sent a message). They make the sidebar
+        // look like delegation "fan-out" when nothing is actually happening.
+        // Keep brand-new empty sessions for ~5 min so the active one a user
+        // just opened still shows up before their first message lands.
+        const nowSec = Date.now() / 1000;
+        const filtered = resp.sessions.filter((s) => {
+          if ((s.message_count ?? 0) > 0) return true;
+          const startedAt = s.started_at ?? 0;
+          return nowSec - startedAt < 300;
+        });
+        setSessions(filtered);
         setSessionError(false);
       })
       .catch(() => setSessionError(true))
