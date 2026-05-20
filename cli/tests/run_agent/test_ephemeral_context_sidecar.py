@@ -31,6 +31,52 @@ CLI_ROOT = Path(__file__).resolve().parents[2]
 RUN_AGENT_SRC = (CLI_ROOT / "run_agent.py").read_text(encoding="utf-8")
 
 
+class TestSidecarNeverLeaksToDisk:
+    """The sidecar is in-memory-only.  Any place that serializes messages
+    must strip `_ephemeral_context` from user dicts first.  Without these
+    pins, the field silently leaks to ~/.elevate/sessions/session_*.json
+    on every turn — bloating disk and duplicating recalled-memory bytes
+    in a place the commit message says is in-memory only.
+    """
+
+    def test_save_session_log_strips_sidecar_from_user(self) -> None:
+        # Verify the strip is present in _save_session_log's clean loop.
+        # We look for the elif/pop pattern, not just a substring of the
+        # field name — must be inside the build loop, not a comment.
+        assert (
+            'elif msg.get("role") == "user" and "_ephemeral_context" in msg:'
+            in RUN_AGENT_SRC
+        ), (
+            "_save_session_log must strip _ephemeral_context from user "
+            "messages — otherwise the sidecar bytes leak to "
+            "~/.elevate/sessions/session_*.json on every turn"
+        )
+        assert 'msg.pop("_ephemeral_context", None)' in RUN_AGENT_SRC, (
+            "the strip must actually pop the sidecar (defense in depth: "
+            "this substring appears in both the api-loop and session-log "
+            "branches; we require at least one)"
+        )
+
+    def test_session_log_pop_is_inside_save_session_log(self) -> None:
+        # Tighter check: the session-log strip happens between the
+        # _save_session_log signature and the next def.  Without this,
+        # someone could delete the strip and the prior test still passes
+        # because the api-loop pop still exists in the file.
+        idx_def = RUN_AGENT_SRC.index("def _save_session_log(")
+        # Find the next "def " at a lower indent.
+        rest = RUN_AGENT_SRC[idx_def:]
+        next_def_rel = rest.index("\n    def ", 1)
+        body = rest[:next_def_rel]
+        assert (
+            'msg.pop("_ephemeral_context", None)' in body
+            or '"_ephemeral_context" in msg' in body
+        ), (
+            "_save_session_log body must strip _ephemeral_context — "
+            "if the strip moves out of this method, the on-disk JSON "
+            "starts accumulating sidecar bytes again"
+        )
+
+
 class TestSidecarSourceContract:
     """Source-level checks so even non-instantiable refactors keep the wiring."""
 

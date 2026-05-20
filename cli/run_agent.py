@@ -3846,12 +3846,18 @@ class AIAgent:
             return
 
         try:
-            # Clean assistant content for session logs
+            # Clean assistant content for session logs.  Strip the
+            # `_ephemeral_context` sidecar from user messages on the way to
+            # disk — it's in-memory-only by design, and we don't want
+            # recalled memory blocks duplicated on every saved turn.
             cleaned = []
             for msg in messages:
                 if msg.get("role") == "assistant" and msg.get("content"):
                     msg = dict(msg)
                     msg["content"] = self._clean_session_content(msg["content"])
+                elif msg.get("role") == "user" and "_ephemeral_context" in msg:
+                    msg = dict(msg)
+                    msg.pop("_ephemeral_context", None)
                 cleaned.append(msg)
 
             # Guard: never overwrite a larger session log with fewer messages.
