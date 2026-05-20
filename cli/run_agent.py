@@ -3858,11 +3858,14 @@ class AIAgent:
             # This protects against data loss when --resume loads a session whose
             # messages weren't fully written to SQLite — the resumed agent starts
             # with partial history and would otherwise clobber the full JSON log.
+            # Exception: after compression the session_id rotates but the file
+            # stays the same — fewer messages is expected, so allow the write.
             if self.session_log_file.exists():
                 try:
                     existing = json.loads(self.session_log_file.read_text(encoding="utf-8"))
                     existing_count = existing.get("message_count", len(existing.get("messages", [])))
-                    if existing_count > len(cleaned):
+                    existing_sid = existing.get("session_id", "")
+                    if existing_count > len(cleaned) and existing_sid == self.session_id:
                         logging.debug(
                             "Skipping session log overwrite: existing has %d messages, current has %d",
                             existing_count, len(cleaned),
@@ -8170,8 +8173,9 @@ class AIAgent:
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                # Update session_log_file to point to the new session's JSON file
-                self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+                # Keep writing to the ORIGINAL session log file on disk — the
+                # gateway tracks one session per conversation, so spawning a
+                # new JSON file per compression just creates orphan duplicates.
                 self._session_db.create_session(
                     session_id=self.session_id,
                     source=self.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
@@ -9624,6 +9628,30 @@ class AIAgent:
             except Exception:
                 pass
 
+        # Anthropic prompt-cache stability: stash the combined ephemeral
+        # injection (memory prefetch + plugin pre_llm_call context) on the
+        # current-turn user message dict so that, on subsequent turns, the
+        # same bytes get re-attached when this message is no longer the latest.
+        # Without this, the cache_control breakpoint hash at this position
+        # mismatches across turns (turn N sent user+memory, turn N+1 would
+        # send bare user) and every prefix after this point misses.
+        # Stored in-memory only — not persisted to session DB. After a process
+        # restart we lose the sidecar and pay one turn's cache miss, then warm.
+        _ephemeral_injection = ""
+        _inj_parts: list[str] = []
+        if _ext_prefetch_cache:
+            _fenced_mem = build_memory_context_block(_ext_prefetch_cache)
+            if _fenced_mem:
+                _inj_parts.append(_fenced_mem)
+        if _plugin_user_context:
+            _inj_parts.append(_plugin_user_context)
+        if _inj_parts:
+            _ephemeral_injection = "\n\n".join(_inj_parts)
+            if 0 <= current_turn_user_idx < len(messages):
+                _u = messages[current_turn_user_idx]
+                if isinstance(_u, dict) and _u.get("role") == "user":
+                    _u["_ephemeral_context"] = _ephemeral_injection
+
         # Absolute per-turn deadline (see __init__). Anchored on the monotonic
         # clock — this measures a *duration*, so it must be immune to
         # wall-clock steps (NTP/DST) and is the correct clock for an
@@ -9763,23 +9791,25 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                # Inject ephemeral context into the current turn's user message.
-                # Sources: memory manager prefetch + plugin pre_llm_call hooks
-                # with target="user_message" (the default).  Both are
-                # API-call-time only — the original message in `messages` is
-                # never mutated, so nothing leaks into session persistence.
-                if idx == current_turn_user_idx and msg.get("role") == "user":
-                    _injections = []
-                    if _ext_prefetch_cache:
-                        _fenced = build_memory_context_block(_ext_prefetch_cache)
-                        if _fenced:
-                            _injections.append(_fenced)
-                    if _plugin_user_context:
-                        _injections.append(_plugin_user_context)
-                    if _injections:
+                # Inject ephemeral context (memory prefetch + plugin
+                # pre_llm_call hooks) into ANY user message that has it
+                # sidecar-attached.  The current turn's user message gets
+                # its `_ephemeral_context` set above; historical user
+                # messages keep theirs from earlier turns.  Re-attaching
+                # the SAME bytes on every turn is what makes the Anthropic
+                # cache_control prefix stable cross-turn — bare user
+                # messages in turn N+1 would mismatch the turn-N hashes.
+                if msg.get("role") == "user":
+                    _eph = msg.get("_ephemeral_context") or ""
+                    if _eph:
                         _base = api_msg.get("content", "")
                         if isinstance(_base, str):
-                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                            api_msg["content"] = (
+                                _base + "\n\n" + _eph if _base else _eph
+                            )
+                # Never leak the sidecar field to the API.
+                if "_ephemeral_context" in api_msg:
+                    api_msg.pop("_ephemeral_context", None)
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
