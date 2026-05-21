@@ -1271,6 +1271,7 @@ def cmd_browser(args):
     if action == "disable":
         db.uninstall_launch_agent()
         db.set_cdp_config(False)
+        db.set_auto_provision(False)
         db.stop_chrome()
         print("✓ Visible debug browser disabled. Browser tool reverts to headless.")
         return

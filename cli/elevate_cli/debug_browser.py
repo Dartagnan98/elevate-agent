@@ -287,6 +287,70 @@ def set_cdp_config(enabled: bool) -> None:
     save_config(config)
 
 
+def set_auto_provision(enabled: bool) -> None:
+    """Allow or block transparent auto-provisioning by the browser tool.
+
+    ``elevate browser disable`` sets this False so the browser tool stops
+    re-cloning Chrome on the next action. ``setup`` / ``sync`` clear it.
+    """
+    config = load_config()
+    browser_cfg = config.setdefault("browser", {})
+    if not isinstance(browser_cfg, dict):
+        browser_cfg = {}
+        config["browser"] = browser_cfg
+    browser_cfg["debug_auto"] = bool(enabled)
+    save_config(config)
+
+
+def auto_provision_disabled() -> bool:
+    """True only when the user explicitly ran ``elevate browser disable``."""
+    try:
+        config = load_config()
+        browser_cfg = config.get("browser") or {}
+        if isinstance(browser_cfg, dict):
+            return browser_cfg.get("debug_auto") is False
+    except Exception:
+        pass
+    return False
+
+
+def ensure_debug_browser() -> str | None:
+    """Auto-provision the visible debug browser, returning its CDP URL.
+
+    Called transparently by the browser tool when no explicit CDP override
+    is configured. The point: the first browser action just works against a
+    visible, logged-in Chrome — no manual ``elevate browser setup`` step, no
+    stalling while the agent figures out it has no profile.
+
+    - Not macOS / no Chrome / user disabled it -> None (caller falls back to
+      the headless browser).
+    - CDP already up -> CDP_URL.
+    - Debug profile already cloned -> launch the window, return CDP_URL.
+    - No debug profile -> clone the user's Chrome profile, install the
+      LaunchAgent, wire config, launch, return CDP_URL.
+
+    Any failure -> None, so the browser tool degrades to headless instead of
+    breaking. The one-time rsync clone on first use is unavoidable but only
+    happens once; the LaunchAgent keeps the window up afterwards.
+    """
+    try:
+        if not is_supported() or chrome_binary() is None:
+            return None
+        if auto_provision_disabled():
+            return None
+        if cdp_is_up():
+            return CDP_URL
+        if (debug_profile_dir() / "Default").is_dir():
+            return CDP_URL if launch_chrome(wait=True) else None
+        # First run: no debug profile yet. Clone, wire up, launch.
+        clone_profile()
+        install_launch_agent()
+        set_cdp_config(True)
+        return CDP_URL if launch_chrome(wait=True) else None
+    except Exception:
+        return None
+
+
 def setup() -> tuple[bool, str]:
     """Full setup: clone profile, install LaunchAgent, launch, wire config.
 
@@ -308,6 +372,7 @@ def setup() -> tuple[bool, str]:
 
     install_launch_agent()
     set_cdp_config(True)
+    set_auto_provision(True)
 
     if not launch_chrome(wait=True):
         return False, (

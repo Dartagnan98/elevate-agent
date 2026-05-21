@@ -280,9 +280,24 @@ def _get_cdp_override() -> str:
         cfg = read_raw_config()
         browser_cfg = cfg.get("browser", {})
         if isinstance(browser_cfg, dict):
-            return _resolve_cdp_override(str(browser_cfg.get("cdp_url", "") or ""))
+            configured = str(browser_cfg.get("cdp_url", "") or "").strip()
+            if configured:
+                return _resolve_cdp_override(configured)
     except Exception as e:
         logger.debug("Could not read browser.cdp_url from config: %s", e)
+
+    # Nothing configured: on macOS with Chrome installed, auto-provision a
+    # visible, logged-in debug Chrome so the first browser action just works
+    # — clone the user's profile and connect, no manual setup, no stalling.
+    try:
+        from elevate_cli.debug_browser import ensure_debug_browser
+
+        auto = ensure_debug_browser()
+        if auto:
+            logger.info("Auto-provisioned visible debug browser at %s", auto)
+            return _resolve_cdp_override(auto)
+    except Exception as e:
+        logger.debug("Debug browser auto-provision skipped: %s", e)
 
     return ""
 
