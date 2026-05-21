@@ -643,6 +643,38 @@ def run_doctor(args):
             check_ok(f"Seeded {_DHH}/SOUL.md with the default Elevate persona")
             fixed_count += 1
     
+    # Check visible debug browser (macOS only)
+    try:
+        from elevate_cli import debug_browser as _db
+
+        if _db.is_supported() and _db.chrome_binary() is not None:
+            st = _db.status()
+            if st["cdp_up"] and st["cdp_url_config"]:
+                check_ok("Visible debug browser running (agent drives a window you can see)")
+            elif st["debug_profile_exists"]:
+                # Profile already cloned — a lightweight relaunch is safe.
+                check_warn(
+                    "Visible debug browser not running",
+                    "(browser tool would fall back to hidden headless Chromium)",
+                )
+                if should_fix:
+                    _db.install_launch_agent()
+                    _db.set_cdp_config(True)
+                    if _db.launch_chrome(wait=True):
+                        check_ok("Relaunched the visible debug browser")
+                        fixed_count += 1
+                else:
+                    issues.append(
+                        "Visible debug browser is down — run 'elevate doctor --fix'"
+                    )
+            else:
+                check_info(
+                    "Visible debug browser not set up — run 'elevate browser setup' "
+                    "so the agent drives a window you can watch, logged in as you"
+                )
+    except Exception:
+        pass
+
     # Check memory directory
     memories_dir = elevate_home / "memories"
     if memories_dir.exists():

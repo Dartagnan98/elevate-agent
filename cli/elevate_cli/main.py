@@ -1233,6 +1233,69 @@ def cmd_gateway(args):
     gateway_command(args)
 
 
+def cmd_browser(args):
+    """Visible debug-browser commands: setup / sync / status / launch / disable."""
+    from elevate_cli import debug_browser as db
+
+    action = getattr(args, "browser_command", None) or "status"
+
+    if action == "launch":
+        # Invoked by the LaunchAgent — keep output minimal.
+        ok = db.launch_chrome(wait=True)
+        sys.exit(0 if ok else 1)
+
+    if action == "setup":
+        print()
+        print("▲ Visible Browser Setup")
+        print("=" * 50)
+        print(
+            "Cloning your Chrome profile into a visible debug window the\n"
+            "agent can drive — logged into everything you are.\n"
+        )
+        ok, msg = db.setup()
+        print(("✓ " if ok else "✗ ") + msg)
+        sys.exit(0 if ok else 1)
+
+    if action == "sync":
+        print("Re-cloning your Chrome profile into the debug browser ...")
+        try:
+            profile = db.detect_active_profile()
+            db.clone_profile(profile)
+            db.launch_chrome(wait=True)
+            print(f"✓ Synced profile '{db.profile_label(profile)}'.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"✗ Sync failed: {exc}")
+            sys.exit(1)
+        return
+
+    if action == "disable":
+        db.uninstall_launch_agent()
+        db.set_cdp_config(False)
+        db.stop_chrome()
+        print("✓ Visible debug browser disabled. Browser tool reverts to headless.")
+        return
+
+    # default: status
+    st = db.status()
+    print()
+    print("▲ Visible Browser Status")
+    print("=" * 50)
+    for key, label in [
+        ("supported", "Supported on this OS"),
+        ("chrome_installed", "Chrome installed"),
+        ("launch_agent_installed", "LaunchAgent installed"),
+        ("debug_profile_exists", "Debug profile cloned"),
+        ("cdp_up", "Debug Chrome running (CDP)"),
+    ]:
+        mark = "✓" if st.get(key) else "✗"
+        print(f"  {mark} {label}")
+    print(f"  • browser.cdp_url config: {st.get('cdp_url_config') or '(unset)'}")
+    if st.get("active_profile"):
+        print(f"  • active Chrome profile:  {st['active_profile']}")
+    if not st.get("cdp_up"):
+        print("\nRun 'elevate browser setup' to enable the visible browser.")
+
+
 def cmd_whatsapp(args):
     """Set up WhatsApp: choose mode, configure, install bridge, pair via QR."""
     _require_tty("whatsapp")
@@ -7379,6 +7442,32 @@ For more help on a command:
         description="Configure WhatsApp and pair via QR code",
     )
     whatsapp_parser.set_defaults(func=cmd_whatsapp)
+
+    # =========================================================================
+    # browser command — visible debug browser the agent drives as the user
+    # =========================================================================
+    browser_parser = subparsers.add_parser(
+        "browser",
+        help="Set up a visible browser the agent drives, logged in as you",
+        description=(
+            "Manage the visible debug browser. Without this, the agent's "
+            "browser tool runs a hidden headless Chromium you cannot see or "
+            "log into. Setup clones your Chrome profile into a real window "
+            "the agent drives over CDP."
+        ),
+    )
+    browser_parser.add_argument(
+        "browser_command",
+        nargs="?",
+        choices=["setup", "sync", "status", "launch", "disable"],
+        default="status",
+        help=(
+            "setup: clone profile + install + launch | "
+            "sync: re-clone profile to refresh logins | "
+            "status: show state | disable: revert to headless"
+        ),
+    )
+    browser_parser.set_defaults(func=cmd_browser)
 
     # =========================================================================
     # login command
