@@ -1004,7 +1004,11 @@ function isGenericActivityText(text: string): boolean {
     clean === "reasoning..." ||
     clean === "running..." ||
     clean === "ready" ||
-    clean === "done"
+    clean === "done" ||
+    // Transient watchdog heartbeats — fine on the live status line, but
+    // they should never pile up as permanent rows in the Activity panel.
+    clean.startsWith("sending request") ||
+    clean.startsWith("still working")
   );
 }
 
@@ -1833,7 +1837,10 @@ export default function ChatPage() {
     (kind: ActivityTrace["kind"], text: string) => {
       const clean = displayStatusText(text).trim();
       if (!clean) return;
-      if ((kind === "thinking" || kind === "reasoning") && isGenericActivityText(clean)) {
+      if (
+        (kind === "thinking" || kind === "reasoning" || kind === "status") &&
+        isGenericActivityText(clean)
+      ) {
         return;
       }
 
