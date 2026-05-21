@@ -36,6 +36,8 @@ dependencies = [
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
   # Lightweight browser harness/CDP worker
   "websockets>=15.0.1,<16",
+  # PDF rendering + image downscaling for native multimodal attachments
+  "pymupdf>=1.24.0,<2",
 ]
 
 [project.optional-dependencies]

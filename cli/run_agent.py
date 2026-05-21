@@ -3323,6 +3323,26 @@ class AIAgent:
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
+                if isinstance(content, list):
+                    # Multimodal turn — the SQLite `content` column is TEXT,
+                    # so a raw block list would fail to bind.  Persist a
+                    # flattened text form (typed text + [image] markers).
+                    # The live in-memory history and the JSONL session log
+                    # keep the full blocks; only a cold DB-only resume
+                    # degrades to text.
+                    _parts: List[str] = []
+                    for _blk in content:
+                        if isinstance(_blk, str):
+                            _parts.append(_blk)
+                        elif isinstance(_blk, dict):
+                            _bt = _blk.get("type")
+                            if _bt in ("text", "input_text", "output_text"):
+                                _t = _blk.get("text")
+                                if isinstance(_t, str) and _t:
+                                    _parts.append(_t)
+                            elif _bt in ("image_url", "input_image"):
+                                _parts.append("[image]")
+                    content = "\n\n".join(p for p in _parts if p)
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [

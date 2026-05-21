@@ -1,10 +1,12 @@
 import atexit
+import base64
 import collections
 import concurrent.futures
 import contextvars
 import copy
 import json
 import logging
+import mimetypes
 import os
 import queue
 import subprocess
@@ -14,7 +16,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
@@ -1617,6 +1619,221 @@ def _format_file_size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} MB"
 
 
+# ── Native multimodal attachment assembly ─────────────────────────────────
+# Images and PDF pages flow to the model as real content blocks
+# ([{type:"image_url"}, ...]) instead of being pre-analyzed into a text
+# description.  The agent sees the actual pixels — same as a full chat
+# session — and the blocks persist in history so it keeps seeing them on
+# later turns.  Videos and non-PDF binary files still get the text-reference
+# treatment because no model ingests them natively.
+
+_IMAGE_DOWNSCALE_MAX_PX = 2000              # longest edge before downscale
+_IMAGE_INLINE_MAX_BYTES = 10 * 1024 * 1024  # raw cap before we skip-native
+_PDF_PAGE_CAP = 15                          # max PDF pages rendered per file
+_PDF_RENDER_DPI = 150
+
+
+def _img_block(data_url: str) -> dict:
+    return {"type": "image_url", "image_url": {"url": data_url}}
+
+
+def _encode_image_native(path: Path) -> Optional[dict]:
+    """Read an image, downscale if oversized, return an image_url block."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    # Downscale large images via PyMuPDF so the request stays under provider
+    # size limits.  Any failure falls back to the raw bytes untouched.
+    try:
+        import fitz  # PyMuPDF
+
+        ext = path.suffix.lstrip(".").lower() or None
+        doc = fitz.open(stream=raw, filetype=ext)
+        page = doc.load_page(0)
+        rect = page.rect
+        longest = max(rect.width, rect.height) or 1
+        if longest > _IMAGE_DOWNSCALE_MAX_PX or len(raw) > _IMAGE_INLINE_MAX_BYTES:
+            scale = min(1.0, _IMAGE_DOWNSCALE_MAX_PX / longest)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            raw = pix.tobytes("png")
+            mime = "image/png"
+        doc.close()
+    except Exception:
+        pass
+    if len(raw) > _IMAGE_INLINE_MAX_BYTES * 2:
+        return None  # still absurdly large — caller adds a text note instead
+    b64 = base64.b64encode(raw).decode("ascii")
+    return _img_block(f"data:{mime};base64,{b64}")
+
+
+def _render_pdf_native(path: Path) -> tuple[list[dict], str]:
+    """Render a PDF to image blocks (one per page) plus an extracted-text note.
+
+    The agent gets to both *see* every page (layout, figures, signatures)
+    and read its selectable text.  Returns (image_blocks, text_note).
+    """
+    try:
+        import fitz  # PyMuPDF
+
+        doc = fitz.open(str(path))
+    except Exception as e:
+        return [], (
+            f"[User attached PDF {path.name} — could not render it ({e}). "
+            f"Use read_file at {path}.]"
+        )
+    blocks: list[dict] = []
+    text_chunks: list[str] = []
+    total = doc.page_count
+    shown = min(total, _PDF_PAGE_CAP)
+    zoom = _PDF_RENDER_DPI / 72.0
+    for i in range(shown):
+        try:
+            page = doc.load_page(i)
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            png = pix.tobytes("png")
+            b64 = base64.b64encode(png).decode("ascii")
+            blocks.append(_img_block(f"data:image/png;base64,{b64}"))
+            txt = (page.get_text() or "").strip()
+            if txt:
+                text_chunks.append(f"--- page {i + 1} ---\n{txt}")
+        except Exception:
+            continue
+    doc.close()
+    header = (
+        f"[User attached PDF: {path.name} · {total} "
+        f"page{'s' if total != 1 else ''}"
+    )
+    if shown < total:
+        header += (
+            f" · first {shown} rendered as images; read the rest with "
+            f"read_file at {path}"
+        )
+    header += "]"
+    note = header
+    if text_chunks:
+        joined = "\n\n".join(text_chunks)
+        if len(joined) > 120_000:
+            joined = joined[:120_000] + "\n…[text truncated — use read_file for the rest]"
+        note += "\n\nExtracted text:\n" + joined
+    return blocks, note
+
+
+def _build_multimodal_prompt(
+    user_text: str,
+    images: list[str],
+    videos: list[str],
+    files: list[str],
+) -> Any:
+    """Assemble the user turn as native content.
+
+    Returns a plain string when there is nothing visual to show (legacy fast
+    path), or a list of OpenAI-style content blocks
+    ([{type:"text"}, {type:"image_url"}, ...]) when images / PDFs are
+    attached so the model sees them natively.
+    """
+    image_blocks: list[dict] = []
+    text_segments: list[str] = []
+
+    for raw in images or []:
+        p = Path(raw)
+        if not p.exists():
+            continue
+        block = _encode_image_native(p)
+        if block:
+            image_blocks.append(block)
+        else:
+            text_segments.append(
+                f"[User attached an image ({p.name}) too large to inline. "
+                f"Path: {p} — use vision_analyze if needed.]"
+            )
+
+    pdf_files: list[str] = []
+    other_files: list[str] = []
+    for raw in files or []:
+        if Path(raw).suffix.lower() == ".pdf":
+            pdf_files.append(raw)
+        else:
+            other_files.append(raw)
+
+    for raw in pdf_files:
+        p = Path(raw)
+        if not p.exists():
+            text_segments.append(f"[User attached PDF (missing on disk): {raw}]")
+            continue
+        pages, note = _render_pdf_native(p)
+        image_blocks.extend(pages)
+        if note:
+            text_segments.append(note)
+
+    if other_files:
+        files_text = _enrich_with_attached_files("", other_files)
+        if files_text.strip():
+            text_segments.append(files_text)
+
+    if videos:
+        vid_text = _enrich_with_attached_videos("", videos)
+        if vid_text.strip():
+            text_segments.append(vid_text)
+
+    base = user_text or ""
+
+    if not image_blocks:
+        # Nothing visual — return the legacy enriched string.
+        prefix = "\n\n".join(s for s in text_segments if s.strip())
+        if prefix:
+            return f"{prefix}\n\n{base}" if base else prefix
+        return base
+
+    # Visual content present — emit a content-block list.  The FIRST block is
+    # exactly what the user typed (nothing else) so the transcript fingerprint
+    # stays stable across resume — see _content_to_text + mergeServerWithCache.
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": base if base.strip()
+            else "[The user sent the attached file(s) with no message.]",
+        }
+    ]
+    # Attachment notes (PDF page counts, extracted text, inlined files, video
+    # descriptions) ride in a second text block — model context, not echoed
+    # verbatim in the transcript.
+    extra = "\n\n".join(s for s in text_segments if s.strip())
+    if extra:
+        content.append({"type": "text", "text": extra})
+    content.extend(image_blocks)
+    return content
+
+
+def _content_to_text(content: Any) -> str:
+    """Flatten message content to a transcript-display string.
+
+    String content passes through.  For native multimodal content
+    ([{type:"text"}, ...]) this returns the FIRST text block only — which
+    _build_multimodal_prompt guarantees is exactly what the user typed — so
+    the web transcript shows the user's words (attachment chips are carried
+    separately) and the resume fingerprint stays stable.  Never raises on
+    unexpected shapes.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for blk in content:
+            if isinstance(blk, str) and blk.strip():
+                return blk
+            if isinstance(blk, dict) and blk.get("type") in (
+                "text", "input_text", "output_text",
+            ):
+                t = blk.get("text")
+                if isinstance(t, str):
+                    return t
+        return ""
+    return "" if content is None else str(content)
+
+
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -1648,9 +1865,10 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 {"role": "tool", "name": name, "context": _tool_ctx(name, args)}
             )
             continue
-        if not (m.get("content") or "").strip():
+        display = _content_to_text(m.get("content"))
+        if not display.strip():
             continue
-        messages.append({"role": role, "text": m.get("content") or ""})
+        messages.append({"role": role, "text": display})
 
     return messages
 
@@ -2588,9 +2806,11 @@ def _(rid, params: dict) -> dict:
                     return
                 prompt = ctx.message
 
-            prompt = _enrich_with_attached_images(prompt, images) if images else prompt
-            prompt = _enrich_with_attached_videos(prompt, videos) if videos else prompt
-            prompt = _enrich_with_attached_files(prompt, files) if files else prompt
+            # Build the user turn as native multimodal content: images and
+            # PDF pages become real image blocks the model sees directly.
+            # Returns a plain string when nothing visual is attached.
+            if images or videos or files:
+                prompt = _build_multimodal_prompt(prompt, images, videos, files)
 
             def _stream(delta):
                 payload = {"text": delta}
@@ -2602,7 +2822,11 @@ def _(rid, params: dict) -> dict:
                 "conversation_history": list(history),
                 "stream_callback": _stream,
             }
-            if isinstance(persist_user_message, str):
+            # persist_user_message rewrites the stored user-message content
+            # to a clean string.  For a multimodal turn that would drop the
+            # image/PDF blocks from history — the model must keep seeing them
+            # on later turns — so skip the override when prompt is a list.
+            if isinstance(persist_user_message, str) and not isinstance(prompt, list):
                 run_kwargs["persist_user_message"] = persist_user_message
 
             result = agent.run_conversation(prompt, **run_kwargs)
