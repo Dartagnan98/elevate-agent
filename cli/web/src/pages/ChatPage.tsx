@@ -3805,7 +3805,7 @@ export default function ChatPage() {
                     aria-controls="slash-popover-listbox"
                     aria-label="Message Elevate Agent"
                     className={cn(
-                      "relative z-10 max-h-40 min-h-7 w-full resize-none bg-transparent px-2 py-1 text-sm leading-5 outline-none placeholder:text-[var(--chat-muted)]",
+                      "relative z-10 block max-h-40 min-h-7 w-full resize-none bg-transparent px-2 py-1 text-sm leading-5 outline-none placeholder:text-[var(--chat-muted)]",
                       "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
                       input
                         ? "text-transparent"
