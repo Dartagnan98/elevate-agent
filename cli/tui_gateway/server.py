@@ -2924,6 +2924,34 @@ def _(rid, params: dict) -> dict:
                     payload["rendered"] = rendered
                 _emit("message.complete", sid, payload)
 
+                # Auto-generate a session title after the first exchange.
+                # CLI parity: cli.py fires maybe_auto_title here, but the
+                # gateway never did — so dashboard/Electron sessions kept
+                # the raw first prompt (typos and all) as their sidebar
+                # label forever. maybe_auto_title is idempotent: it no-ops
+                # once a title exists or past the first couple exchanges,
+                # so running it on every first-pass turn is safe.
+                if (
+                    followup_rounds == 0
+                    and status == "complete"
+                    and isinstance(raw, str)
+                    and raw.strip()
+                ):
+                    try:
+                        from agent.title_generator import maybe_auto_title
+
+                        maybe_auto_title(
+                            _get_db(),
+                            session.get("session_key"),
+                            text if isinstance(text, str) else "",
+                            raw,
+                            result.get("messages")
+                            if isinstance(result, dict)
+                            else None,
+                        )
+                    except Exception as title_exc:
+                        logger.debug("auto-title skipped: %s", title_exc)
+
                 followup = None
                 if isinstance(result, dict) and status != "interrupted":
                     followup = (
