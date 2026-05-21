@@ -49,6 +49,7 @@ import {
   ShieldAlert,
   Sparkle,
   Sparkles,
+  Square,
   SquareTerminal,
   Wrench,
   X,
@@ -4000,7 +4001,7 @@ export default function ChatPage() {
                     className={cn(
                       "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
                       busy
-                        ? "bg-[var(--chat-text)] text-[var(--chat-bg)]"
+                        ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
                         : canSend
                           ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
                           : "text-[var(--chat-muted)]",
@@ -4011,7 +4012,7 @@ export default function ChatPage() {
                     type={busy ? "button" : "submit"}
                   >
                     {busy ? (
-                      <span className="h-3 w-3 rounded-[0.22rem] bg-current" />
+                      <Square className="h-4 w-4" />
                     ) : (
                       <CornerDownLeft className="h-4 w-4 -translate-y-[1.5px]" />
                     )}
