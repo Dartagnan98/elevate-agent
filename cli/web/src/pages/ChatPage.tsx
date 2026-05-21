@@ -2003,7 +2003,7 @@ export default function ChatPage() {
   // once the user has granted mic permission at least once, so we also
   // refresh after a successful capture and on the OS devicechange event.
   useEffect(() => {
-    if (!voiceCaptureSupported()) return;
+    if (typeof navigator?.mediaDevices?.enumerateDevices !== "function") return;
     let cancelled = false;
 
     const refreshDevices = async () => {
@@ -3474,8 +3474,14 @@ export default function ChatPage() {
   );
 
   const toggleVoiceInput = useCallback(async () => {
-    if (!voiceCaptureSupported()) {
-      setBanner("Voice input is not available in this environment.");
+    // Don't pre-gate on a synchronous capability probe — it can read as
+    // unsupported even when getUserMedia/MediaRecorder actually work in
+    // this Electron build. Just attempt the capture; the try/catch below
+    // surfaces a precise banner if an API really is missing.
+    if (typeof navigator?.mediaDevices?.getUserMedia !== "function") {
+      setBanner(
+        "Microphone capture isn't available here. Make sure the app has mic access in System Settings.",
+      );
       return;
     }
 
@@ -4569,7 +4575,7 @@ function ComposerActionBar({
           <button
             type="button"
             onClick={onToggleVoice}
-            disabled={!voiceSupported || voiceTranscribing}
+            disabled={voiceTranscribing}
             className={cn(
               "inline-flex h-6 w-6 items-center justify-center rounded-sm transition-colors",
               "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
@@ -4578,13 +4584,13 @@ function ComposerActionBar({
                 "bg-[var(--chat-accent-soft)] text-[var(--chat-accent)] hover:bg-[var(--chat-accent-soft)]",
             )}
             title={
-              !voiceSupported
-                ? "Voice input unavailable"
-                : voiceTranscribing
-                  ? "Transcribing..."
-                  : voiceListening
-                    ? "Stop recording"
-                    : "Voice to text"
+              voiceTranscribing
+                ? "Transcribing..."
+                : voiceListening
+                  ? "Stop recording"
+                  : voiceSupported
+                    ? "Voice to text"
+                    : "Voice to text (unavailable here)"
             }
             aria-label="Voice to text"
           >
@@ -4597,11 +4603,9 @@ function ComposerActionBar({
           <button
             type="button"
             onClick={onToggleVoiceMenu}
-            disabled={!voiceSupported}
             className={cn(
               "inline-flex h-6 w-4 items-center justify-center rounded-sm transition-colors",
               "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-              "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent",
               voiceMenuOpen && "text-[var(--chat-text)]",
             )}
             title="Select microphone"
