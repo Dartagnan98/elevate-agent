@@ -1735,6 +1735,14 @@ export default function ChatPage() {
     [activeComposerAgents, selectedAgentId],
   );
 
+  // The agent lane is fixed for the life of a chat: it is applied on the
+  // first turn and stays in force. Once the chat has a user message the
+  // switcher locks so it always reflects which agent is actually running.
+  const agentLocked = useMemo(
+    () => messages.some((message) => message.role === "user"),
+    [messages],
+  );
+
   const appendMessage = useCallback(
     (role: ChatRole, content: string, extras: Partial<ChatMessage> = {}) => {
       const message: ChatMessage = {
@@ -3867,6 +3875,7 @@ export default function ChatPage() {
               </div>
 
               <ComposerActionBar
+                agentLocked={agentLocked}
                 agentMenuOpen={agentMenuOpen}
                 agents={activeComposerAgents}
                 canPickModel={canPickModel}
@@ -4281,6 +4290,7 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
 }
 
 function ComposerActionBar({
+  agentLocked,
   agentMenuOpen,
   agents,
   canPickModel,
@@ -4295,6 +4305,7 @@ function ComposerActionBar({
   voiceListening,
   voiceSupported,
 }: {
+  agentLocked: boolean;
   agentMenuOpen: boolean;
   agents: ComposerAgent[];
   canPickModel: boolean;
@@ -4326,19 +4337,27 @@ function ComposerActionBar({
           <button
             type="button"
             onClick={onToggleAgentMenu}
+            disabled={agentLocked}
             className={cn(
               "inline-flex max-w-[12rem] items-center gap-1.5 text-[0.7rem]",
               "text-[var(--chat-muted-strong)] transition-colors",
-              "hover:text-[var(--chat-text)]",
+              !agentLocked && "hover:text-[var(--chat-text)]",
               agentMenuOpen && "text-[var(--chat-text)]",
+              agentLocked && "cursor-default",
             )}
-            title="Choose agent lane"
+            title={
+              agentLocked
+                ? `Running as ${selectedAgent.name} — start a new chat to switch agents`
+                : "Choose agent lane"
+            }
           >
             <span className="truncate">{selectedAgent.name}</span>
-            <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />
+            {!agentLocked && (
+              <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />
+            )}
           </button>
 
-          {agentMenuOpen && (
+          {agentMenuOpen && !agentLocked && (
             <>
               <div className="fixed inset-0 z-20" onClick={onToggleAgentMenu} />
               <div
