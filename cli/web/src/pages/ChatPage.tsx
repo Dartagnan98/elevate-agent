@@ -4579,10 +4579,15 @@ function buildBreakdownSteps(
 /** A single tool/trace line inside the expanded breakdown. */
 function BreakdownRow({ step }: { step: BreakdownStep }) {
   if (step.type === "trace") {
+    // Reasoning/thinking is the agent narrating its work — show it in full,
+    // wrapping, so the user can actually read the thought instead of a
+    // one-line ellipsed sliver.
     return (
       <div className="flex items-start gap-2 text-xs leading-5 text-[var(--chat-muted)]">
         <Dot className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-70" />
-        <span className="min-w-0 flex-1 truncate">{step.text}</span>
+        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words italic opacity-90">
+          {step.text}
+        </span>
       </div>
     );
   }
