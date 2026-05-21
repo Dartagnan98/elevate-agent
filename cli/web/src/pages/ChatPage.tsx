@@ -5409,6 +5409,24 @@ function ArtifactPreviewPane({
             <div className="h-4 w-1/2 animate-pulse rounded-lg bg-[var(--chat-border)]" />
             <div className="mt-2 flex-1 animate-pulse rounded-md bg-[var(--chat-border)]" />
           </div>
+        ) : error && /\b404\b/.test(error) ? (
+          // The file was referenced by a turn but is no longer on disk
+          // (temp artifact cleaned up, moved, etc). A red alarm box
+          // overstates it — show a quiet "gone" state instead.
+          <div className="flex h-full items-center justify-center p-6">
+            <div className="max-w-sm text-center text-[var(--chat-muted)]">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md bg-[var(--chat-surface)] text-[var(--chat-muted)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+                <FileText className="h-5 w-5" />
+              </div>
+              <div className="mt-3 text-sm font-semibold text-[var(--chat-muted-strong)]">
+                File no longer here
+              </div>
+              <p className="mt-1 text-xs leading-5">
+                This file isn't on disk anymore — it was likely a temporary
+                artifact that got cleaned up.
+              </p>
+            </div>
+          </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center p-6">
             <div className="max-w-sm rounded-md bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_34%,transparent)]">
