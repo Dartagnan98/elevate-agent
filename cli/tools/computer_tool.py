@@ -291,7 +291,7 @@ def _ui_snapshot() -> tuple[bool, str]:
         # A hung osascript is almost always a TCC dialog blocking the call.
         # Latch off so the next call can't spawn another blocking dialog.
         _UI_SNAPSHOT_DISABLED = True
-        return False, _UI_SNAPSHOT_FALLBACK + _route_to_permission("full_disk")
+        return False, _UI_SNAPSHOT_FALLBACK + _route_to_permission("accessibility")
     err = (proc.stderr or "").strip()
     out = (proc.stdout or "").strip()
     # entire-contents failures (Electron apps, missing Accessibility grant)
@@ -301,11 +301,13 @@ def _ui_snapshot() -> tuple[bool, str]:
         detail = err or out
         # Latch ui_snapshot off for the session so it can never re-prompt.
         _UI_SNAPSHOT_DISABLED = True
+        # osascript drives System Events, gated by the Accessibility TCC
+        # permission ("not allowed assistive access") — NOT Full Disk Access.
         return False, (
             f"ui_snapshot could not read the UI tree ({detail}). It is now "
             f"disabled for this session — do NOT retry it. Use action "
             f"'screenshot' + vision_analyze instead; that always works."
-            + _route_to_permission("full_disk")
+            + _route_to_permission("accessibility")
         )
     return True, out
 
