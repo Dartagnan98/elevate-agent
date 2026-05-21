@@ -29,6 +29,7 @@ import {
   ChevronUp,
   Clipboard,
   Command,
+  CornerDownLeft,
   Dot,
   ExternalLink,
   FileCode2,
@@ -44,7 +45,6 @@ import {
   Pin,
   Plug,
   Search,
-  Send,
   ShieldAlert,
   Sparkle,
   Sparkles,
@@ -3756,7 +3756,7 @@ export default function ChatPage() {
                 queuedInputs={queuedInputs}
               />
 
-              <div className="relative rounded-lg bg-[var(--chat-surface-strong)] p-2.5 shadow-[inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-border-strong)]">
+              <div className="relative rounded-xl bg-[var(--chat-surface-strong)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-border)]">
                 <AttachmentChipStrip
                   attachments={attachments}
                   onRemove={removeAttachment}
@@ -3770,7 +3770,7 @@ export default function ChatPage() {
                   onApply={applyComposerCompletion}
                 />
 
-                <div className="relative min-h-14">
+                <div className="relative min-h-20">
                   <ComposerRichInputLayer
                     input={input}
                     layerRef={richLayerRef}
@@ -3781,7 +3781,7 @@ export default function ChatPage() {
                     aria-controls="slash-popover-listbox"
                     aria-label="Message Elevate Agent"
                     className={cn(
-                      "relative z-10 max-h-40 min-h-14 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
+                      "relative z-10 max-h-40 min-h-20 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
                       "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
                       input
                         ? "text-transparent"
@@ -4294,7 +4294,7 @@ function ComposerActionBar({
   voiceSupported: boolean;
 }) {
   return (
-    <div className="mt-2 flex items-center justify-between gap-2 px-2 text-[0.68rem] text-[var(--chat-muted)]">
+    <div className="mt-1.5 flex items-center justify-between gap-2 px-1 text-[0.66rem] text-[var(--chat-muted)]">
       <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto scrollbar-none">
         <button
           type="button"
@@ -4408,12 +4408,12 @@ function ComposerActionBar({
         <button
           aria-label={busy ? "Interrupt response" : "Send message"}
           className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-sm transition-all",
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
             busy
               ? "bg-[var(--chat-text)] text-[var(--chat-bg)]"
               : canSend
-                ? "bg-[var(--chat-text)] text-[var(--chat-bg)] hover:opacity-90"
-                : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]",
+                ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+                : "text-[var(--chat-muted)]",
           )}
           disabled={busy ? state !== "open" : !canSend}
           onClick={busy ? onInterrupt : undefined}
@@ -4423,7 +4423,7 @@ function ComposerActionBar({
           {busy ? (
             <span className="h-3 w-3 rounded-[0.22rem] bg-current" />
           ) : (
-            <Send className="h-4 w-4" />
+            <CornerDownLeft className="h-4 w-4" />
           )}
         </button>
       </div>
