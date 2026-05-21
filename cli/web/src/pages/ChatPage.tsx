@@ -1660,6 +1660,11 @@ export default function ChatPage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const voiceBaseInputRef = useRef("");
+  // Bumped whenever the user cancels a transcription. A capture in flight
+  // compares its epoch on completion and discards a stale result so a
+  // late-arriving server response can't overwrite the composer or re-lock
+  // the mic after the user already bailed out.
+  const transcribeEpochRef = useRef(0);
   const queueDispatchRef = useRef(false);
   const historyHydratedRef = useRef(false);
   const persistedSessionIdRef = useRef<string | null>(null);
@@ -3436,6 +3441,8 @@ export default function ChatPage() {
         setStatusText("No audio captured");
         return;
       }
+      const epoch = ++transcribeEpochRef.current;
+      const stale = () => transcribeEpochRef.current !== epoch;
       setVoiceTranscribing(true);
       setStatusText("Transcribing...");
       try {
@@ -3450,10 +3457,20 @@ export default function ChatPage() {
           reader.readAsDataURL(blob);
         });
 
-        const response = await gw.request<{ text?: string }>("voice.transcribe", {
-          audio: base64,
-          mime: (mimeType || blob.type || "audio/webm").split(";")[0],
-        });
+        // 45s cap, not the 120s default: a short voice clip should never
+        // hold the mic hostage for two minutes if the server stalls.
+        const response = await gw.request<{ text?: string }>(
+          "voice.transcribe",
+          {
+            audio: base64,
+            mime: (mimeType || blob.type || "audio/webm").split(";")[0],
+          },
+          45_000,
+        );
+
+        // User hit the mic again to cancel while this was in flight —
+        // drop the result instead of clobbering the composer.
+        if (stale()) return;
 
         const dictated = (response?.text ?? "").trim();
         if (!dictated) {
@@ -3474,11 +3491,15 @@ export default function ChatPage() {
           target.setSelectionRange(nextInput.length, nextInput.length);
         });
       } catch (error) {
+        if (stale()) return;
         const message = error instanceof Error ? error.message : String(error);
         setBanner(`Voice transcription failed: ${message}`);
         setStatusText("Voice input failed");
       } finally {
-        setVoiceTranscribing(false);
+        // Only the still-current attempt clears the flag. A canceled
+        // attempt already cleared it; clearing again here would be
+        // harmless, but skipping it keeps the canceled path unambiguous.
+        if (!stale()) setVoiceTranscribing(false);
       }
     },
     [gw],
@@ -3507,7 +3528,16 @@ export default function ChatPage() {
       return;
     }
 
-    if (voiceTranscribing) return;
+    // Clicking the mic while it's transcribing cancels the attempt.
+    // Bumping the epoch makes the in-flight transcribeRecording discard
+    // its result, and clearing the flag here unlocks the button
+    // immediately instead of leaving it spinning until the RPC settles.
+    if (voiceTranscribing) {
+      transcribeEpochRef.current += 1;
+      setVoiceTranscribing(false);
+      setStatusText("Voice input canceled");
+      return;
+    }
 
     voiceBaseInputRef.current = input;
     setBanner(null);
@@ -4586,17 +4616,15 @@ function ComposerActionBar({
           <button
             type="button"
             onClick={onToggleVoice}
-            disabled={voiceTranscribing}
             className={cn(
               "inline-flex h-6 w-6 items-center justify-center rounded-sm transition-colors",
               "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-              "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent",
               voiceListening &&
                 "bg-[var(--chat-accent-soft)] text-[var(--chat-accent)] hover:bg-[var(--chat-accent-soft)]",
             )}
             title={
               voiceTranscribing
-                ? "Transcribing..."
+                ? "Cancel transcription"
                 : voiceListening
                   ? "Stop recording"
                   : voiceSupported
