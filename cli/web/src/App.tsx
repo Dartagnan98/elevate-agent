@@ -1556,7 +1556,7 @@ function SidebarSectionLabel({
 
 function sidebarActionClass(active: boolean, primary = false) {
   return cn(
-    "group flex min-h-8 w-full items-center rounded-md px-2 py-1 text-left text-sm",
+    "group flex min-h-7 w-full items-center rounded-md px-2 py-0.5 text-left text-sm",
     "cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
     primary && "font-medium text-[var(--sidebar-text-strong)]",
     active
@@ -1738,13 +1738,13 @@ function SessionListItem({
   if (isRenaming) {
     return (
       <div className={cn(
-        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[34px] lg:rounded-md",
+        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[28px] lg:rounded-md",
         "bg-[var(--sidebar-row-active)]",
       )}>
         <input
           ref={renameRef}
           defaultValue={title}
-          className="min-w-0 flex-1 rounded-md bg-transparent px-2.5 py-2 text-[0.9rem] font-medium leading-5 text-[var(--sidebar-text-active)] outline-none ring-1 ring-[var(--color-primary)] lg:px-2 lg:py-1"
+          className="min-w-0 flex-1 rounded-md bg-transparent px-2.5 py-2 text-[0.9rem] font-medium leading-5 text-[var(--sidebar-text-active)] outline-none ring-1 ring-[var(--color-primary)] lg:px-2 lg:py-0.5"
           onBlur={(event) => onCommitRename?.(session.id, event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") { event.preventDefault(); onCommitRename?.(session.id, event.currentTarget.value); }
@@ -1759,7 +1759,7 @@ function SessionListItem({
     <div
       onContextMenu={(event) => onOpenContextMenu(session, event)}
       className={cn(
-        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[34px] lg:rounded-md",
+        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[28px] lg:rounded-md",
         "transition-colors duration-150",
         active
           ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
@@ -1772,7 +1772,7 @@ function SessionListItem({
           event.preventDefault();
           onOpenSession(session);
         }}
-        className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-1 lg:group-hover:pr-16 lg:group-focus-within:pr-16"
+        className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-0.5 lg:group-hover:pr-16 lg:group-focus-within:pr-16"
       >
         {/* `is_active` is a 25s recency flag, not a turn-running signal — it
             lags a finished turn and misses long ones — so it must not drive a
@@ -1945,12 +1945,12 @@ function AutomationsSection({
             const recentRuns = runs.slice(0, 8);
             return (
               <div key={job.id}>
-              <div className="group/row flex min-h-11 w-full items-center lg:min-h-[34px]">
+              <div className="group/row flex min-h-11 w-full items-center lg:min-h-[28px]">
               <button
                 type="button"
                 onClick={() => onOpenCron(job.id)}
                 className={cn(
-                  "group flex min-h-11 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[34px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                  "group flex min-h-11 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[28px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-0.5",
                   "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                 )}
                 title={`${title} · ${job.schedule_display}${running ? " · running now" : ""}${job.last_error ? ` · ${job.last_error}` : ""}`}
@@ -2018,7 +2018,7 @@ function AutomationsSection({
                       type="button"
                       onClick={() => onOpenSession(session)}
                       className={cn(
-                        "flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[34px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-1",
+                        "flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[28px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-0.5",
                         "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                       )}
                       title={`${runLabel} · ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
@@ -2282,7 +2282,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
                 aria-busy={busy}
                 className={cn(
                   "group relative flex w-full items-center gap-3 lg:gap-2",
-                  "min-h-11 rounded-lg px-2.5 py-2 lg:min-h-8 lg:rounded-md lg:px-2 lg:py-1",
+                  "min-h-11 rounded-lg px-2.5 py-2 lg:min-h-8 lg:rounded-md lg:px-2 lg:py-0.5",
                   "text-[0.92rem] font-medium tracking-normal lg:text-[0.9rem]",
                   "text-left whitespace-nowrap transition-colors cursor-pointer",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
