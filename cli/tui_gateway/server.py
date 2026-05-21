@@ -2063,6 +2063,24 @@ def _(rid, params: dict) -> dict:
             for s in db.list_sessions_rich(source=None, limit=fetch_limit)
             if (s.get("source") or "").strip().lower() in allow
         ][:limit]
+
+        # Self-heal: any listed session that still has no title but has
+        # had at least one real exchange gets titled in the background.
+        # This backfills sessions that predate auto-titling and recovers
+        # from any first-exchange titling failure. backfill_session_title
+        # is idempotent and dedupes concurrent calls, so firing it on
+        # every session.list is safe.
+        try:
+            from agent.title_generator import backfill_session_title
+
+            for s in rows:
+                if not (s.get("title") or "").strip() and int(
+                    s.get("message_count") or 0
+                ) >= 2:
+                    backfill_session_title(db, s["id"])
+        except Exception as title_exc:
+            logger.debug("title backfill skipped: %s", title_exc)
+
         return _ok(
             rid,
             {

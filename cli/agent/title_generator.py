@@ -92,6 +92,81 @@ def auto_title_session(
         logger.debug("Failed to set auto-generated title: %s", e)
 
 
+_backfill_inflight: set = set()
+_backfill_lock = threading.Lock()
+
+
+def _backfill_worker(session_db, session_id: str) -> None:
+    try:
+        # Idempotent: bail if a title already exists.
+        try:
+            if session_db.get_session_title(session_id):
+                return
+        except Exception:
+            return
+
+        # Load the first user→assistant exchange from the DB.
+        try:
+            messages = session_db.get_messages_as_conversation(session_id)
+        except Exception:
+            return
+
+        first_user = next(
+            (m.get("content") for m in messages if m.get("role") == "user" and m.get("content")),
+            None,
+        )
+        first_assistant = next(
+            (
+                m.get("content")
+                for m in messages
+                if m.get("role") == "assistant" and m.get("content")
+            ),
+            None,
+        )
+        if not first_user or not first_assistant:
+            return
+
+        title = generate_title(str(first_user), str(first_assistant))
+        if not title:
+            return
+        try:
+            session_db.set_session_title(session_id, title)
+            logger.debug("Backfilled session title: %s", title)
+        except Exception as e:
+            logger.debug("Failed to set backfilled title: %s", e)
+    finally:
+        with _backfill_lock:
+            _backfill_inflight.discard(session_id)
+
+
+def backfill_session_title(session_db, session_id: str) -> None:
+    """Self-heal: generate a title for an existing untitled session.
+
+    Safe to call repeatedly (e.g. on every session-list fetch). It is
+    idempotent — it no-ops once a title exists — and it dedupes
+    concurrent attempts on the same session via an in-process set so a
+    burst of list requests does not fan out into duplicate LLM calls.
+
+    This is the durable backstop behind ``maybe_auto_title``: if the
+    first-exchange titling ever fails (LLM hiccup) or a session predates
+    the auto-title feature, the next session-list load picks it up.
+    """
+    if not session_db or not session_id:
+        return
+    with _backfill_lock:
+        if session_id in _backfill_inflight:
+            return
+        _backfill_inflight.add(session_id)
+
+    thread = threading.Thread(
+        target=_backfill_worker,
+        args=(session_db, session_id),
+        daemon=True,
+        name="title-backfill",
+    )
+    thread.start()
+
+
 def maybe_auto_title(
     session_db,
     session_id: str,
