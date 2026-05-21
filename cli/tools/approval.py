@@ -1051,11 +1051,14 @@ def check_all_command_guards(command: str, env_type: str,
 PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
 _PERMISSION_MODE_CANON = {m.lower(): m for m in PERMISSION_MODES}
 
-# Tools that only read state — the allowlist for `plan` (read-only) mode.
-# Anything NOT in this set is blocked while plan mode is active.
+# Tools that only read state — the static allowlist for `plan` (read-only)
+# mode. Builtin tools are classified explicitly here. Tools NOT in this set
+# fall through to is_readonly_tool_name() (a leading-verb heuristic) so that
+# read-only MCP / integration tools are also permitted; everything else is
+# blocked while plan mode is active.
 PLAN_MODE_ALLOWED_TOOLS = frozenset({
     "read_file", "search_files", "web_search", "web_extract",
-    "session_search", "todo", "clarify", "memory",
+    "session_search", "todo", "clarify", "memory", "delegate_task",
     "browser_snapshot", "browser_console", "browser_get_images",
     "browser_vision", "ha_get_state", "ha_list_entities",
     "ha_list_services", "feishu_doc_read", "feishu_drive_list_comments",
@@ -1064,6 +1067,49 @@ PLAN_MODE_ALLOWED_TOOLS = frozenset({
     "rl_get_current_config", "rl_get_results", "rl_list_environments",
     "rl_list_runs",
 })
+
+# Leading-verb classification for tools that aren't builtin-classified
+# above (chiefly MCP and integration tools, whose names are registered at
+# runtime). MCP tools are conventionally named ``verb-noun`` / ``verb_noun``.
+_READ_VERBS = frozenset({
+    "get", "list", "search", "read", "fetch", "query", "view", "describe",
+    "show", "find", "lookup", "inspect", "count", "check", "status",
+    "resolve", "snapshot", "screenshot", "console", "logs", "help",
+})
+_WRITE_VERBS = frozenset({
+    "create", "update", "delete", "write", "edit", "send", "post",
+    "remove", "set", "add", "merge", "move", "generate", "export",
+    "upload", "comment", "reply", "run", "start", "stop", "commit",
+    "cancel", "perform", "import", "resize", "copy", "dispatch",
+    "complete", "react", "download", "abort", "call", "click", "fill",
+    "type", "navigate", "press", "scroll", "submit", "publish",
+    "install", "kill", "execute", "open", "close", "switch", "request",
+})
+
+
+def _tool_leading_verb(tool_name: str) -> str:
+    """Return the lowercased leading action verb of a (possibly namespaced)
+    tool name. ``mcp__srv__get-design`` -> ``get``; ``create_folder`` ->
+    ``create``.
+    """
+    base = str(tool_name or "").strip().lower()
+    if "__" in base:
+        base = base.rsplit("__", 1)[-1]
+    tokens = re.split(r"[^a-z0-9]+", base)
+    return next((t for t in tokens if t), "")
+
+
+def is_readonly_tool_name(tool_name: str) -> bool:
+    """Best-effort: does this tool name describe a read-only operation?
+
+    Used in plan mode to permit read-only MCP / integration tools that are
+    not in the static PLAN_MODE_ALLOWED_TOOLS allowlist. Conservative: an
+    unrecognized leading verb is treated as NOT read-only (blocked).
+    """
+    verb = _tool_leading_verb(tool_name)
+    if verb in _WRITE_VERBS:
+        return False
+    return verb in _READ_VERBS
 
 # File-editing tools — gated by check_file_edit_approval().
 FILE_EDIT_TOOLS = frozenset({"write_file", "patch"})

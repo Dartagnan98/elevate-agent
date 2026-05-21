@@ -475,7 +475,11 @@ def _check_permission_gate(name: str, args: dict) -> Optional[str]:
     # Fast path: default / bypassPermissions never block here unless the
     # call is a file edit (which only `default` gates).
     if pmode == "plan":
-        if name not in approval.PLAN_MODE_ALLOWED_TOOLS:
+        allowed = (
+            name in approval.PLAN_MODE_ALLOWED_TOOLS
+            or approval.is_readonly_tool_name(name)
+        )
+        if not allowed:
             return tool_error(
                 f"Plan mode is active (read-only). The tool '{name}' can "
                 "change state, so it is blocked. Keep researching with "
