@@ -2728,10 +2728,28 @@ export default function ChatPage() {
         activeSessionRef.current = created.session_id;
         persistedSessionIdRef.current =
           created.persisted_session_id ?? created.resumed ?? resumeId ?? null;
-        // Don't auto-rewrite URL to ?resume= on fresh sessions.
-        // Resume should only happen when the user explicitly picks a
-        // session from the sidebar (which navigates with ?resume=).
-        // Auto-rewrite caused confusing message accumulation across visits.
+        // Pin a freshly-created (?new=) chat to its persisted id by
+        // rewriting the URL to ?resume=<id>. Re-entering the route later
+        // (browser back, tab switch, sidebar) then reattaches to the live
+        // gateway session instead of minting a new one — which is what
+        // made an in-progress turn's "Working" state vanish on return.
+        // The transcript no longer accumulates across visits: it is keyed
+        // by persisted id and de-duped by historyHydratedRef +
+        // mergeServerWithCache, so the old auto-rewrite hazard is gone.
+        {
+          const pinnedId = persistedSessionIdRef.current;
+          if (pinnedId && !resumeId) {
+            setSearchParams(
+              (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("new");
+                next.set("resume", pinnedId);
+                return next;
+              },
+              { replace: true },
+            );
+          }
+        }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
         if (resumeWarning) {

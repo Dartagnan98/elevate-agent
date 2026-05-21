@@ -1017,7 +1017,7 @@ WHERE message_id IS NOT NULL AND message_id != '';
                 ) AS last_active
             FROM sessions s
             {where_sql}
-            ORDER BY s.started_at DESC
+            ORDER BY last_active DESC
             LIMIT ? OFFSET ?
         """
         params.extend([limit, offset])
@@ -1071,6 +1071,11 @@ WHERE message_id IS NOT NULL AND message_id != '';
                 merged["_lineage_root_id"] = s["id"]
                 projected.append(merged)
             sessions = projected
+
+        # Compression projection swaps in the tip's last_active, which can
+        # break the SQL ordering for projected rows. Re-sort the final list
+        # by recency so the most recently active conversation is always first.
+        sessions.sort(key=lambda s: s.get("last_active") or s.get("started_at") or "", reverse=True)
 
         return sessions
 
