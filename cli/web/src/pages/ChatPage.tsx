@@ -3182,6 +3182,16 @@ export default function ChatPage() {
     (item) => item.status === "ready" && !!item.path,
   );
 
+  // The textarea auto-grows via an inline style.height set on every
+  // keystroke. Programmatic clears (sending a message, switching to a new
+  // chat) don't fire onChange, so without this the box stays stuck at the
+  // last multi-line height — placeholder pinned to the top of a tall box.
+  useEffect(() => {
+    if (input === "" && inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+  }, [input]);
+
   const submitPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
