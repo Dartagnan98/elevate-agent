@@ -392,10 +392,27 @@ def _keep_awake() -> None:
         pass
 
 
+# The Elevate desktop app polls this file's mtime and shows a pulsing
+# screen-edge glow while it is fresh — so the user always sees when the
+# agent is driving their Mac.
+_IN_USE_FLAG = Path.home() / ".elevate" / "computer-use-active"
+
+
+def _signal_in_use() -> None:
+    """Touch the in-use flag file that drives the desktop 'controlling your
+    Mac' glow overlay. Fire-and-forget, called once per computer action."""
+    try:
+        _IN_USE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        _IN_USE_FLAG.write_text(str(int(time.time())))
+    except Exception:
+        pass
+
+
 def computer_tool(args: dict) -> str:
     if sys.platform != "darwin":
         return tool_error("The computer tool is macOS-only.")
     _keep_awake()
+    _signal_in_use()
     action = (args.get("action") or "").strip()
     if action not in _VALID_ACTIONS:
         return tool_error(

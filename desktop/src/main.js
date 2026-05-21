@@ -1,4 +1,12 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  dialog,
+  ipcMain,
+  shell,
+  screen,
+} = require("electron");
 const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -24,7 +32,15 @@ const DEFAULT_PATH = [
 ].join(":");
 
 let mainWindow = null;
+let overlayWindow = null;
+let overlayWatcher = null;
 let backendProcess = null;
+
+// The computer-use tool touches this file on every action. The desktop app
+// polls its mtime and shows the screen-edge glow while it is fresh, so the
+// user always sees when the agent is driving their Mac.
+const COMPUTER_USE_FLAG = path.join(HOME, ".elevate", "computer-use-active");
+const COMPUTER_USE_FRESH_MS = 6000;
 let ownsBackend = false;
 let installProcess = null;
 let backendPort = PREFERRED_PORT;
@@ -364,6 +380,71 @@ function createWindow() {
   });
 }
 
+function createOverlay() {
+  // A frameless, transparent, click-through window that draws a pulsing glow
+  // around the screen while the computer-use tool is active. It floats above
+  // everything (including full-screen apps) and never steals focus or clicks.
+  const display = screen.getPrimaryDisplay();
+  const { x, y, width, height } = display.bounds;
+  overlayWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    show: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    focusable: false,
+    skipTaskbar: true,
+    acceptFirstMouse: false,
+    enableLargerThanScreen: true,
+    backgroundColor: "#00000000",
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  if (process.platform === "darwin") {
+    overlayWindow.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+    });
+  }
+  overlayWindow.loadFile(path.join(__dirname, "overlay.html"));
+  overlayWindow.on("closed", () => {
+    overlayWindow = null;
+  });
+}
+
+function setOverlayVisible(visible) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  if (visible && !overlayWindow.isVisible()) {
+    const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
+    overlayWindow.setBounds({ x, y, width, height });
+    overlayWindow.showInactive();
+  } else if (!visible && overlayWindow.isVisible()) {
+    overlayWindow.hide();
+  }
+}
+
+function startOverlayWatcher() {
+  if (overlayWatcher) return;
+  overlayWatcher = setInterval(() => {
+    let fresh = false;
+    try {
+      const stat = fs.statSync(COMPUTER_USE_FLAG);
+      fresh = Date.now() - stat.mtimeMs < COMPUTER_USE_FRESH_MS;
+    } catch {
+      fresh = false;
+    }
+    setOverlayVisible(fresh);
+  }, 1000);
+}
+
 function loadLocalPage(fileName) {
   if (!mainWindow) return;
   mainWindow.loadFile(path.join(__dirname, fileName));
@@ -377,6 +458,8 @@ function loadAppPath(pathname = START_PATH) {
 async function startDesktop() {
   createWindow();
   createMenu();
+  createOverlay();
+  startOverlayWatcher();
   loadLocalPage("loading.html");
 
   const ready = await ensureBackend();
@@ -444,6 +527,13 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
+  if (overlayWatcher) {
+    clearInterval(overlayWatcher);
+    overlayWatcher = null;
+  }
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.destroy();
+  }
   if (ownsBackend && backendProcess) {
     backendProcess.kill();
   }
