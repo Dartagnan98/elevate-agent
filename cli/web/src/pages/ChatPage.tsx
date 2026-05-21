@@ -897,6 +897,8 @@ function writeQueue(sessionId: string | null | undefined, items: QueuedInput[]):
 type ProgressState = "done" | "error" | "pending" | "running";
 
 interface ProgressSummary {
+  /** Event time used to sort the Activity panel chronologically. */
+  at?: number;
   detail?: string;
   details: string[];
   id: string;
@@ -1085,42 +1087,49 @@ function buildProgressSummaries({
     groups[toolKind(tool)].push(tool);
   }
 
-  const summaries: ProgressSummary[] = [];
+  // Real (already-happened) items each carry an event timestamp so the
+  // panel reads top-to-bottom in the order the turn actually ran —
+  // reasoning and tool groups interleaved by time, not bucketed into a
+  // fixed pipeline order.
+  const real: ProgressSummary[] = [];
 
-  const intentItems = activityTrace
-    .map((trace) => ({ id: trace.id, label: progressIntentLabel(trace.text) }))
-    .filter((item) => item.label);
+  const groupStart = (entries: ToolEntry[]): number => {
+    const starts = entries.map((tool) => tool.startedAt || 0).filter(Boolean);
+    return starts.length ? Math.min(...starts) : 0;
+  };
 
-  intentItems.slice(0, 3).forEach((item, index, visible) => {
-    addProgressSummary(summaries, {
-      details: [],
-      id: item.id,
-      label: item.label,
-      status: busy && index === visible.length - 1 ? "running" : "done",
+  activityTrace
+    .map((trace) => ({
+      at: trace.createdAt || 0,
+      id: trace.id,
+      label: progressIntentLabel(trace.text),
+    }))
+    .filter((item) => item.label)
+    .slice(-3)
+    .forEach((item) => {
+      addProgressSummary(real, {
+        at: item.at,
+        details: [],
+        id: item.id,
+        label: item.label,
+        status: "done",
+      });
     });
-  });
 
-  const current = progressIntentLabel(statusText || "Working...");
-  if (busy && current) {
-    addProgressSummary(summaries, {
-      details: [],
-      id: "current",
-      label: current,
-      status: "running",
-    });
-  }
-
-  if (groups.read.length || groups.search.length) {
-    addProgressSummary(summaries, {
-      details: detailsFor([...groups.read, ...groups.search]),
+  const explore = [...groups.read, ...groups.search];
+  if (explore.length) {
+    addProgressSummary(real, {
+      at: groupStart(explore),
+      details: detailsFor(explore),
       id: "explore",
       label: "Review relevant context",
-      status: summaryStatus([...groups.read, ...groups.search]),
+      status: summaryStatus(explore),
     });
   }
 
   if (groups.edit.length) {
-    addProgressSummary(summaries, {
+    addProgressSummary(real, {
+      at: groupStart(groups.edit),
       details: detailsFor(groups.edit),
       id: "edit",
       label: "Apply focused changes",
@@ -1129,7 +1138,8 @@ function buildProgressSummaries({
   }
 
   if (groups.run.length) {
-    addProgressSummary(summaries, {
+    addProgressSummary(real, {
+      at: groupStart(groups.run),
       details: detailsFor(groups.run),
       id: "run",
       label: "Verify the result",
@@ -1138,7 +1148,8 @@ function buildProgressSummaries({
   }
 
   if (groups.other.length) {
-    addProgressSummary(summaries, {
+    addProgressSummary(real, {
+      at: groupStart(groups.other),
       details: detailsFor(groups.other),
       id: "other",
       label: "Use supporting tools",
@@ -1147,7 +1158,13 @@ function buildProgressSummaries({
   }
 
   if (artifacts.length) {
-    addProgressSummary(summaries, {
+    // Outputs land after the tools that produced them.
+    const lastToolEnd = Math.max(
+      0,
+      ...tools.map((tool) => tool.completedAt ?? tool.startedAt ?? 0),
+    );
+    addProgressSummary(real, {
+      at: lastToolEnd || Date.now(),
       details: artifacts.slice(-8).map((artifact) =>
         compactLine(artifact.detail || artifact.path || artifact.source, artifact.title),
       ),
@@ -1157,9 +1174,28 @@ function buildProgressSummaries({
     });
   }
 
+  real.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+
+  // The live "current" line and the pending checklist always sit at the
+  // bottom — they are what's happening right now and what's still to come.
+  const tail: ProgressSummary[] = [];
+  const current = progressIntentLabel(statusText || "Working...");
+  if (
+    busy &&
+    current &&
+    !real.some((item) => item.label.toLowerCase() === current.toLowerCase())
+  ) {
+    addProgressSummary(tail, {
+      details: [],
+      id: "current",
+      label: current,
+      status: "running",
+    });
+  }
+
   if (busy) {
     if (!groups.edit.length && tools.length > 0) {
-      addProgressSummary(summaries, {
+      addProgressSummary(tail, {
         details: [],
         id: "pending-change",
         label: "Make the needed update",
@@ -1167,14 +1203,14 @@ function buildProgressSummaries({
       });
     }
     if (!groups.run.length) {
-      addProgressSummary(summaries, {
+      addProgressSummary(tail, {
         details: [],
         id: "pending-verify",
         label: "Check that it works",
         status: "pending",
       });
     }
-    addProgressSummary(summaries, {
+    addProgressSummary(tail, {
       details: [],
       id: "pending-wrap",
       label: "Report the result",
@@ -1182,27 +1218,19 @@ function buildProgressSummaries({
     });
   }
 
+  const summaries = [...real, ...tail];
   if (!summaries.length) {
-    summaries.push({
-      details: [],
-      id: "ready",
-      label: "Ready",
-      status: "done",
-    });
+    return [{ details: [], id: "ready", label: "Ready", status: "done" }];
   }
 
-  const runningIndex = summaries.findIndex((summary) => summary.status === "running");
-  if (runningIndex >= 0) {
-    return summaries
-      .map((summary, index) =>
-        index < runningIndex && summary.status === "pending"
-          ? { ...summary, status: "done" as const }
-          : summary,
-      )
-      .slice(0, 5);
+  // Cap the list, but always keep the live tail (current + pending) — drop
+  // the oldest real items first so the panel stays current.
+  const MAX_ROWS = 6;
+  if (summaries.length > MAX_ROWS) {
+    const keepHead = Math.max(0, MAX_ROWS - tail.length);
+    return [...real.slice(real.length - keepHead), ...tail];
   }
-
-  return summaries.slice(0, 5);
+  return summaries;
 }
 
 function activityStartedAt(
