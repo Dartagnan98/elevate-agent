@@ -4561,7 +4561,7 @@ function ChatActivityDigest({
           {!busy && steps.length > 0 && ` · ${plural(steps.length, "step")}`}
           {tokens > 0 ? ` · ${tokens.toLocaleString()} tokens` : ""}
         </span>
-        {steps.length > 0 && (
+        {(busy || steps.length > 0) && (
           <ChevronDown
             className={cn(
               "h-3.5 w-3.5 transition-transform",
@@ -4571,11 +4571,17 @@ function ChatActivityDigest({
         )}
       </button>
 
-      {expanded && steps.length > 0 && (
+      {expanded && (busy || steps.length > 0) && (
         <div className="mt-3 space-y-1.5">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} />
           ))}
+          {busy && (
+            <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted)]">
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+              <span className="italic opacity-70">Thinking...</span>
+            </div>
+          )}
         </div>
       )}
     </section>
