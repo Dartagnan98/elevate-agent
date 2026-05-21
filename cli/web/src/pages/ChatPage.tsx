@@ -29,10 +29,8 @@ import {
   ChevronUp,
   Clipboard,
   Command,
-  Dot,
   ExternalLink,
   FileCode2,
-  FilePen,
   FileText,
   Folder,
   GitBranch,
@@ -43,15 +41,11 @@ import {
   Paperclip,
   Pin,
   Plug,
-  Search,
   Send,
   ShieldAlert,
-  Sparkle,
   Sparkles,
-  SquareTerminal,
   Wrench,
   X,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -1190,30 +1184,6 @@ function buildProgressSummaries({
   }
 
   return summaries.slice(0, 5);
-}
-
-function activityStartedAt(
-  tools: ToolEntry[],
-  traces: ActivityTrace[],
-  fallback = Date.now(),
-): number {
-  const starts = [
-    ...tools.map((tool) => tool.startedAt).filter(Boolean),
-    ...traces.map((trace) => trace.createdAt).filter(Boolean),
-  ];
-  return starts.length ? Math.min(...starts) : fallback;
-}
-
-function activityFinishedAt(tools: ToolEntry[], fallback = Date.now()): number {
-  const ends = tools.map((tool) => tool.completedAt ?? tool.startedAt).filter(Boolean);
-  return ends.length ? Math.max(...ends) : fallback;
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 // Rough live token estimate (~4 chars/token). Exact counts only arrive at
@@ -4510,135 +4480,10 @@ function MessageRow({
   );
 }
 
-/**
- * One row in the per-turn breakdown dropdown — either an individual tool
- * call or a reasoning/thinking step, interleaved chronologically.
- */
-type BreakdownStep =
-  | {
-      type: "tool";
-      id: string;
-      at: number;
-      name: string;
-      context: string;
-      status: ToolEntry["status"];
-      count: number;
-    }
-  | { type: "trace"; id: string; at: number; text: string };
-
-/** Pick a lucide icon for a tool by substring-matching its name. */
-function breakdownToolIcon(name: string): LucideIcon {
-  const n = name.toLowerCase();
-  if (/terminal|bash|shell|run|exec|command/.test(n)) return SquareTerminal;
-  if (/search|grep|glob|find/.test(n)) return Search;
-  if (/write|edit|patch/.test(n)) return FilePen;
-  if (/read|cat|open|view/.test(n)) return FileText;
-  if (/memory/.test(n)) return Brain;
-  return Zap;
-}
-
 function truncatePreview(value: string | undefined, max = 48): string {
   const clean = (value ?? "").replace(/\s+/g, " ").trim();
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max)}…`;
-}
-
-/**
- * Build the chronological list of individual tool calls + reasoning steps
- * for the expanded breakdown. Memory tool calls are excluded — they get
- * their own standalone rows. Consecutive identical tool calls collapse
- * into one row with a `count`.
- */
-function buildBreakdownSteps(
-  tools: ToolEntry[],
-  activityTrace: ActivityTrace[],
-): BreakdownStep[] {
-  const raw: BreakdownStep[] = [];
-
-  for (const tool of tools) {
-    if (tool.name.toLowerCase() === "memory") continue;
-    raw.push({
-      type: "tool",
-      id: tool.id,
-      at: tool.startedAt || 0,
-      name: tool.name,
-      context: tool.context ?? "",
-      status: tool.status,
-      count: 1,
-    });
-  }
-
-  for (const trace of activityTrace) {
-    if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
-    const text = compactLine(trace.text);
-    if (!text) continue;
-    raw.push({ type: "trace", id: trace.id, at: trace.createdAt || 0, text });
-  }
-
-  raw.sort((a, b) => a.at - b.at);
-
-  // Collapse consecutive identical tool calls (same name + context).
-  const merged: BreakdownStep[] = [];
-  for (const step of raw) {
-    const prev = merged[merged.length - 1];
-    if (
-      step.type === "tool" &&
-      prev &&
-      prev.type === "tool" &&
-      prev.name === step.name &&
-      prev.context === step.context
-    ) {
-      prev.count += 1;
-      if (step.status === "error") prev.status = "error";
-      else if (step.status === "running" && prev.status !== "error") {
-        prev.status = "running";
-      }
-      continue;
-    }
-    merged.push({ ...step });
-  }
-  return merged;
-}
-
-/** A single tool/trace line inside the expanded breakdown. */
-function BreakdownRow({ step }: { step: BreakdownStep }) {
-  if (step.type === "trace") {
-    // Reasoning/thinking is the agent narrating its work — show it in full,
-    // wrapping, so the user can actually read the thought instead of a
-    // one-line ellipsed sliver.
-    return (
-      <div className="flex items-start gap-2 text-xs leading-5 text-[var(--chat-muted)]">
-        <Dot className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-70" />
-        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words italic opacity-90">
-          {step.text}
-        </span>
-      </div>
-    );
-  }
-
-  const Icon = breakdownToolIcon(step.name);
-  return (
-    <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted)]">
-      <Icon
-        className={cn(
-          "h-3.5 w-3.5 shrink-0",
-          step.status === "error" && "text-[var(--chat-danger)]",
-          step.status === "running" && "animate-pulse",
-        )}
-      />
-      <span className="shrink-0 font-mono font-medium">{step.name}</span>
-      {step.context && (
-        <span className="min-w-0 flex-1 truncate font-mono opacity-80">
-          {truncatePreview(step.context)}
-        </span>
-      )}
-      {step.count > 1 && (
-        <span className="shrink-0 text-[0.62rem] opacity-70">
-          ×{step.count}
-        </span>
-      )}
-    </div>
-  );
 }
 
 /** A standalone, always-visible row for a memory save. */
@@ -4654,18 +4499,10 @@ function MemorySaveRow({ tool }: { tool: ToolEntry }) {
   );
 }
 
-// Working/worked digest. While a turn streams, the header is the live
-// meter: pulsing accent mark + "Working" + elapsed + running token count,
-// and the breakdown is expanded by default so reasoning (grey) and tool
-// calls scroll in chronologically as they happen. Once the turn completes
-// the same header collapses into "Worked for ..." with the real token
-// count, and the breakdown defaults to collapsed.
+// The "Working … · N tokens" / "Worked for …" activity digest was removed:
+// it was transcript clutter in every state. Only memory-save rows survive,
+// so nothing important is lost.
 function ChatActivityDigest({
-  activityTrace,
-  busy,
-  liveTokens,
-  startedAt,
-  tokenCount,
   tools,
 }: {
   activityTrace: ActivityTrace[];
@@ -4676,100 +4513,19 @@ function ChatActivityDigest({
   tokenCount?: number;
   tools: ToolEntry[];
 }) {
-  // null = follow the default for the current state (open while busy,
-  // collapsed when done). A real boolean = the user toggled it explicitly.
-  const [open, setOpen] = useState<boolean | null>(null);
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!busy) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [busy]);
-
-  const steps = useMemo(
-    () => buildBreakdownSteps(tools, activityTrace),
-    [tools, activityTrace],
-  );
   const memoryTools = useMemo(
     () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
     [tools],
   );
 
-  // Once a turn finishes, the "Worked for … · N steps · N tokens" digest is
-  // just transcript clutter — drop it on completed turns (and in loaded
-  // sessions). Keep only the live "Working …" meter while the turn streams.
-  // Memory-save rows still surface so nothing important is lost.
-  if (!busy) {
-    if (memoryTools.length === 0) return null;
-    return (
-      <section className="border-t border-[var(--chat-border)] pt-4 text-[var(--chat-muted)]">
-        <div className="space-y-1.5">
-          {memoryTools.map((tool) => (
-            <MemorySaveRow key={tool.id} tool={tool} />
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  const show =
-    busy ||
-    tools.length > 0 ||
-    activityTrace.length > 0 ||
-    typeof tokenCount === "number";
-  if (!show) return null;
-
-  const start = startedAt ?? activityStartedAt(tools, activityTrace);
-  const end = busy ? now : activityFinishedAt(tools);
-  const duration = formatDuration(Math.max(0, end - start));
-  const expanded = open ?? busy;
-  const tokens = busy
-    ? liveTokens ?? 0
-    : typeof tokenCount === "number"
-      ? tokenCount
-      : 0;
-
+  if (memoryTools.length === 0) return null;
   return (
     <section className="border-t border-[var(--chat-border)] pt-4 text-[var(--chat-muted)]">
-      {memoryTools.length > 0 && (
-        <div className="mb-3 space-y-1.5">
-          {memoryTools.map((tool) => (
-            <MemorySaveRow key={tool.id} tool={tool} />
-          ))}
-        </div>
-      )}
-
-      <button
-        className="flex items-center gap-2 text-sm text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
-        onClick={() => setOpen(() => !expanded)}
-        type="button"
-      >
-        {busy && (
-          <Sparkle className="h-4 w-4 shrink-0 animate-pulse fill-[var(--chat-accent)] text-[var(--chat-accent)]" />
-        )}
-        <span>
-          {busy ? "Working" : "Worked for"} {duration}
-          {!busy && steps.length > 0 && ` · ${plural(steps.length, "step")}`}
-          {tokens > 0 ? ` · ${tokens.toLocaleString()} tokens` : ""}
-        </span>
-        {(busy || steps.length > 0) && (
-          <ChevronDown
-            className={cn(
-              "h-3.5 w-3.5 transition-transform",
-              expanded && "rotate-180",
-            )}
-          />
-        )}
-      </button>
-
-      {expanded && (busy || steps.length > 0) && (
-        <div className="mt-3 space-y-1.5">
-          {steps.map((step) => (
-            <BreakdownRow key={step.id} step={step} />
-          ))}
-        </div>
-      )}
+      <div className="space-y-1.5">
+        {memoryTools.map((tool) => (
+          <MemorySaveRow key={tool.id} tool={tool} />
+        ))}
+      </div>
     </section>
   );
 }
