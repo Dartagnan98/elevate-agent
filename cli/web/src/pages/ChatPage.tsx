@@ -4727,12 +4727,6 @@ function ChatActivityDigest({
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} />
           ))}
-          {busy && (
-            <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted)]">
-              <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
-              <span className="italic opacity-70">Thinking...</span>
-            </div>
-          )}
         </div>
       )}
     </section>
