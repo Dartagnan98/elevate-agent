@@ -508,9 +508,11 @@ export const api = {
     }),
   clearComposioKey: () =>
     fetchJSON<ComposioStatus>("/api/composio/key", { method: "DELETE" }),
-  getComposioConnections: () =>
+  // Pass ``fresh`` to bypass the server SWR cache — used right after a
+  // connect/delete and on window focus so a just-linked account shows up.
+  getComposioConnections: (fresh = false) =>
     fetchJSON<ComposioApiResult<ComposioConnectedAccount[]>>(
-      "/api/composio/connections",
+      `/api/composio/connections${fresh ? "?fresh=1" : ""}`,
     ),
   getComposioToolkits: (category?: string) => {
     const qs = category ? `?category=${encodeURIComponent(category)}` : "";

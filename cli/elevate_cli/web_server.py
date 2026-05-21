@@ -6568,6 +6568,66 @@ class ComposioCustomAuthBody(BaseModel):
     userId: Optional[str] = None
 
 
+# Stale-while-revalidate cache for the Composio reads the settings panel
+# fires on every mount (status + connections). Each call is a blocking
+# round-trip to api.composio.dev, so the panel felt sluggish on every
+# visit. With SWR the panel renders instantly from the last known value
+# and a background thread refreshes anything past its TTL — only a truly
+# cold cache (process just booted) pays the live fetch.
+_COMPOSIO_SWR: dict[str, tuple[float, Any]] = {}
+_COMPOSIO_SWR_LOCK = threading.Lock()
+_COMPOSIO_SWR_REFRESHING: set[str] = set()
+_COMPOSIO_STATUS_TTL_SEC = 60.0
+_COMPOSIO_CONNECTIONS_TTL_SEC = 30.0
+
+
+def _composio_refresh_async(key: str, fetch) -> None:
+    """Refresh one SWR entry on a background thread, deduped per key."""
+    with _COMPOSIO_SWR_LOCK:
+        if key in _COMPOSIO_SWR_REFRESHING:
+            return
+        _COMPOSIO_SWR_REFRESHING.add(key)
+
+    def _run() -> None:
+        try:
+            value = fetch()
+            with _COMPOSIO_SWR_LOCK:
+                _COMPOSIO_SWR[key] = (time.monotonic(), value)
+        except Exception:
+            _log.debug("Composio SWR refresh failed for %s", key, exc_info=True)
+        finally:
+            with _COMPOSIO_SWR_LOCK:
+                _COMPOSIO_SWR_REFRESHING.discard(key)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f"composio-swr-{key}"
+    ).start()
+
+
+def _composio_cached(key: str, ttl: float, fetch):
+    """Return a Composio read instantly from cache, revalidating in the
+    background when stale. A cold cache blocks on the live fetch once."""
+    now = time.monotonic()
+    with _COMPOSIO_SWR_LOCK:
+        entry = _COMPOSIO_SWR.get(key)
+    if entry is not None:
+        ts, value = entry
+        if (now - ts) >= ttl:
+            _composio_refresh_async(key, fetch)
+        return value
+    value = fetch()
+    with _COMPOSIO_SWR_LOCK:
+        _COMPOSIO_SWR[key] = (time.monotonic(), value)
+    return value
+
+
+def _composio_cache_invalidate() -> None:
+    """Drop every cached Composio read. Call after a mutation (key set or
+    cleared, account connected or deleted) so the next read is live."""
+    with _COMPOSIO_SWR_LOCK:
+        _COMPOSIO_SWR.clear()
+
+
 def _prewarm_composio_toolkits_in_background() -> None:
     """Fire-and-forget background fetch of the full toolkit catalog.
 
@@ -6582,6 +6642,15 @@ def _prewarm_composio_toolkits_in_background() -> None:
     def _warm() -> None:
         try:
             from elevate_cli import composio_client
+
+            # Warm the connections SWR cache too, so the settings panel's
+            # mount fetch is a cache hit instead of a cold round-trip.
+            with _COMPOSIO_SWR_LOCK:
+                has_connections = "connections" in _COMPOSIO_SWR
+            if not has_connections:
+                _composio_refresh_async(
+                    "connections", composio_client.list_connected_accounts
+                )
 
             cache_key = "all::::100"
             entry = _COMPOSIO_TOOLKITS_CACHE.get(cache_key)
@@ -6602,7 +6671,12 @@ async def composio_status():
     try:
         from elevate_cli import composio_client
 
-        result = composio_client.get_status()
+        result = await asyncio.to_thread(
+            _composio_cached,
+            "status",
+            _COMPOSIO_STATUS_TTL_SEC,
+            composio_client.get_status,
+        )
         # Cheap optimization: as soon as we know the key is good, schedule a
         # background fetch of the catalog. The wizard polls /status on mount
         # and on window focus, so this kicks in exactly when the user is
@@ -6623,6 +6697,7 @@ async def composio_set_key(body: ComposioKeyBody):
         result = composio_client.set_api_key(body.apiKey)
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error", "Invalid key"))
+        _composio_cache_invalidate()
         return composio_client.get_status()
     except HTTPException:
         raise
@@ -6637,6 +6712,7 @@ async def composio_clear_key():
         from elevate_cli import composio_client
 
         composio_client.clear_api_key()
+        _composio_cache_invalidate()
         return composio_client.get_status()
     except Exception as exc:
         _log.exception("DELETE /api/composio/key failed")
@@ -6644,11 +6720,27 @@ async def composio_clear_key():
 
 
 @app.get("/api/composio/connections")
-async def composio_connections():
+async def composio_connections(fresh: bool = False):
+    """List connected Composio accounts.
+
+    Served from the SWR cache for an instant settings-panel mount. Pass
+    ``?fresh=1`` (the panel does this on window focus and right after a
+    connect/delete) to bypass the cache and repopulate it with live data.
+    """
     try:
         from elevate_cli import composio_client
 
-        return composio_client.list_connected_accounts()
+        if fresh:
+            result = await asyncio.to_thread(composio_client.list_connected_accounts)
+            with _COMPOSIO_SWR_LOCK:
+                _COMPOSIO_SWR["connections"] = (time.monotonic(), result)
+            return result
+        return await asyncio.to_thread(
+            _composio_cached,
+            "connections",
+            _COMPOSIO_CONNECTIONS_TTL_SEC,
+            composio_client.list_connected_accounts,
+        )
     except Exception as exc:
         _log.exception("GET /api/composio/connections failed")
         raise HTTPException(status_code=500, detail=f"List Composio connections failed: {exc}")
@@ -6820,7 +6912,9 @@ async def composio_delete_connection(account_id: str):
     try:
         from elevate_cli import composio_client
 
-        return composio_client.delete_connected_account(account_id)
+        result = composio_client.delete_connected_account(account_id)
+        _composio_cache_invalidate()
+        return result
     except Exception as exc:
         _log.exception("DELETE /api/composio/connections failed")
         raise HTTPException(status_code=500, detail=f"Delete Composio connection failed: {exc}")

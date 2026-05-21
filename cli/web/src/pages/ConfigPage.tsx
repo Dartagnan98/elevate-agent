@@ -203,14 +203,14 @@ function ComposioPanel() {
     error: string | null;
   } | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (fresh = false) => {
     setLoading(true);
     try {
       const s = await api.getComposioStatus();
       setStatus(s);
       if (s.valid) {
         const [conns, tks] = await Promise.all([
-          api.getComposioConnections(),
+          api.getComposioConnections(fresh),
           api.getComposioToolkits(),
         ]);
         const conData = (conns.data as { items?: ComposioConnectedAccount[] } | ComposioConnectedAccount[]) ?? [];
@@ -235,7 +235,7 @@ function ComposioPanel() {
   // newly-linked account shows up without making them hit Refresh.
   useEffect(() => {
     const onFocus = () => {
-      if (status?.valid) void refresh();
+      if (status?.valid) void refresh(true);
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -264,7 +264,7 @@ function ComposioPanel() {
       } else {
         setKeyInput("");
       }
-      await refresh();
+      await refresh(true);
     } catch (err) {
       setKeyError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -379,7 +379,7 @@ function ComposioPanel() {
       if (url) {
         window.open(url, "_blank", "noopener,noreferrer");
         setCustomAuthState(null);
-        await refresh();
+        await refresh(true);
       } else {
         setCustomAuthState({
           ...customAuthState,
@@ -401,7 +401,7 @@ function ComposioPanel() {
     setConnectingSlug(id);
     try {
       await api.deleteComposioConnection(id);
-      await refresh();
+      await refresh(true);
     } finally {
       setConnectingSlug(null);
     }
@@ -456,7 +456,7 @@ function ComposioPanel() {
         </div>
         <div className="flex items-center gap-2">
           {statusBadge}
-          <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => void refresh(true)} disabled={loading}>
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
           </Button>
