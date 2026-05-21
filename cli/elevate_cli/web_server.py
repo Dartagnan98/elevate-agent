@@ -865,7 +865,8 @@ async def get_status():
             active_sessions = sum(
                 1 for s in sessions
                 if s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                and (now - s.get("last_active", s.get("started_at", 0)))
+                < _SESSION_ACTIVE_WINDOW_SEC
             )
         finally:
             db.close()
@@ -2030,6 +2031,12 @@ async def upload_attachment(session_id: str, file: UploadFile = File(...)):
     )
 
 
+# A session counts as "active" (spinner in the sidebar) only if a message
+# landed within this many seconds. The spinner means genuinely working right
+# now, not recently-touched — so this stays tight. 300s made idle chats spin.
+_SESSION_ACTIVE_WINDOW_SEC = 25
+
+
 _SESSION_LIST_FIELDS = (
     "id",
     "source",
@@ -2079,7 +2086,8 @@ async def get_sessions(
             for s in sessions:
                 s["is_active"] = (
                     s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                    and (now - s.get("last_active", s.get("started_at", 0)))
+                    < _SESSION_ACTIVE_WINDOW_SEC
                 )
             if not include_details:
                 sessions = [_session_list_payload(s) for s in sessions]
