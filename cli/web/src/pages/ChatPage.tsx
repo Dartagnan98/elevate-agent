@@ -2750,6 +2750,13 @@ export default function ChatPage() {
     [gw, sessionId],
   );
 
+  // Attachments are staged per session. Switching chats must drop any
+  // pending chips — otherwise an image uploaded under session A keeps
+  // showing (and would attach to the wrong session) over in session B.
+  useEffect(() => {
+    setAttachments([]);
+  }, [sessionId]);
+
   const uploadAttachment = useCallback(
     (file: File) => {
       if (!sessionId) {
@@ -2968,10 +2975,15 @@ export default function ChatPage() {
     });
   }, [busy, queuedInputs, sessionId, state, submitGatewayPrompt]);
 
+  const hasReadyAttachment = attachments.some(
+    (item) => item.status === "ready" && !!item.path,
+  );
+
   const submitPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed) return;
+      // An attachment-only message (image with no caption) is a valid send.
+      if (!trimmed && !hasReadyAttachment) return;
 
       setInput("");
       composerScrollTopRef.current = 0;
@@ -3046,7 +3058,7 @@ export default function ChatPage() {
 
       await submitGatewayPrompt(trimmed, routedText);
     },
-    [addArtifacts, appendMessage, artifacts, busy, gw, messages, selectedAgent, sessionId, state, submitGatewayPrompt],
+    [addArtifacts, appendMessage, artifacts, busy, gw, hasReadyAttachment, messages, selectedAgent, sessionId, state, submitGatewayPrompt],
   );
 
   useEffect(() => {
@@ -3194,7 +3206,7 @@ export default function ChatPage() {
   }, [input, voiceListening]);
 
   const canSend =
-    !!input.trim() &&
+    (!!input.trim() || hasReadyAttachment) &&
     (state === "open" ? !!sessionId : state !== "error" && state !== "closed");
   const canPickModel = state === "open" && !!sessionId;
   const visibleMessages = useMemo(
