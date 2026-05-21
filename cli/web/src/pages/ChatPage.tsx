@@ -4533,7 +4533,12 @@ function ComposerActionBar({
 }) {
   return (
     <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[0.7rem] text-[var(--chat-muted)]">
-      <div className="flex min-w-0 items-center gap-3 overflow-x-auto scrollbar-none">
+      <div className="flex min-w-0 items-center gap-3">
+        {/* Only the agent picker row scrolls. The voice cluster stays a
+            sibling OUTSIDE this overflow box — an upward-opening menu
+            inside an overflow-x-auto container gets clipped to nothing
+            (overflow-x:auto forces overflow-y to auto per CSS spec). */}
+        <div className="flex min-w-0 items-center gap-3 overflow-x-auto scrollbar-none">
         <button
           type="button"
           onClick={onAttach}
@@ -4611,6 +4616,7 @@ function ComposerActionBar({
         >
           Full access
         </span>
+        </div>
 
         <div className="relative flex shrink-0 items-center">
           <button
