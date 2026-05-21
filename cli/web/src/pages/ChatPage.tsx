@@ -571,6 +571,9 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
       traces: Array.isArray(entry.traces) ? entry.traces : undefined,
       tokenCount:
         typeof entry.tokenCount === "number" ? entry.tokenCount : undefined,
+      attachments: Array.isArray(entry.attachments)
+        ? entry.attachments
+        : undefined,
     });
   });
   return normalized.length ? normalized : null;
@@ -709,12 +712,22 @@ function mergeServerWithCache(
   const cachedByFp = new Map<string, ChatMessage>();
   for (const msg of cached) cachedByFp.set(fp(msg), msg);
   const enriched = serverMessages.map((msg) => {
-    const hasSnapshot =
-      !!msg.tools?.length ||
-      !!msg.traces?.length ||
-      typeof msg.tokenCount === "number";
-    if (hasSnapshot) return msg;
     const match = cachedByFp.get(fp(msg));
+    let next = msg;
+    // The server transcript never stores attachment metadata. Re-attach
+    // it from the cache so a sent image still shows its chip on resume.
+    if (
+      msg.role === "user" &&
+      !msg.attachments?.length &&
+      match?.attachments?.length
+    ) {
+      next = { ...next, attachments: match.attachments };
+    }
+    const hasSnapshot =
+      !!next.tools?.length ||
+      !!next.traces?.length ||
+      typeof next.tokenCount === "number";
+    if (hasSnapshot) return next;
     if (
       match &&
       (match.tools?.length ||
@@ -722,13 +735,13 @@ function mergeServerWithCache(
         typeof match.tokenCount === "number")
     ) {
       return {
-        ...msg,
+        ...next,
         tools: match.tools,
         traces: match.traces,
         tokenCount: match.tokenCount,
       };
     }
-    return msg;
+    return next;
   });
 
   const tail: ChatMessage[] = [];
@@ -2642,6 +2655,15 @@ export default function ChatPage() {
           // banner — reattach should be visually identical to the
           // moment the user left, only forward progress should appear.
           setBusy(true);
+          // replayEvents ran synchronously above, so currentAssistantRef
+          // is set if the ring buffer still held this turn's message.start.
+          // If it doesn't (ring rotated, or the turn started before the
+          // reattach window), there's no streaming assistant message — so
+          // the "Working" digest has nowhere to render. Mint a placeholder
+          // so the live meter shows; message.complete will fill it in.
+          if (!currentAssistantRef.current) {
+            ensureAssistant();
+          }
         } else {
           // Gateway confirms no live turn. The transcript may still end
           // on a user message (pendingAfterResume) because the agent
