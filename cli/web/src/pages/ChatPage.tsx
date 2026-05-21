@@ -23,13 +23,16 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import {
   AlertCircle,
   Bot,
+  Brain,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clipboard,
   Command,
+  Dot,
   ExternalLink,
   FileCode2,
+  FilePen,
   FileText,
   Folder,
   GitBranch,
@@ -40,12 +43,14 @@ import {
   Paperclip,
   Pin,
   Plug,
+  Search,
   Send,
   ShieldAlert,
   Sparkles,
   SquareTerminal,
   Wrench,
   X,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -737,16 +742,6 @@ interface ProgressSummary {
   status: ProgressState;
 }
 
-interface ActivityTimelineItem {
-  createdAt: number;
-  detail?: string;
-  details: string[];
-  id: string;
-  kind: "artifact" | "status" | "tool";
-  label: string;
-  status: ProgressState;
-}
-
 function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : pluralLabel}`;
 }
@@ -851,40 +846,6 @@ function detailsFor(tools: ToolEntry[]): string[] {
   return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-4);
 }
 
-function firstTimestamp(tools: ToolEntry[], fallback = Date.now()): number {
-  const starts = tools.map((tool) => tool.startedAt).filter(Boolean);
-  return starts.length ? Math.min(...starts) : fallback;
-}
-
-function activityClauseText(tools: ToolEntry[]): string {
-  const groups = {
-    edit: [] as ToolEntry[],
-    other: [] as ToolEntry[],
-    read: [] as ToolEntry[],
-    run: [] as ToolEntry[],
-    search: [] as ToolEntry[],
-  };
-
-  for (const tool of tools) {
-    groups[toolKind(tool)].push(tool);
-  }
-
-  const explored = [
-    groups.read.length ? plural(groups.read.length, "file") : "",
-    groups.search.length ? plural(groups.search.length, "search", "searches") : "",
-  ].filter(Boolean);
-  const clauses = [
-    explored.length ? `explored ${explored.join(", ")}` : "",
-    groups.run.length ? `ran ${plural(groups.run.length, "command")}` : "",
-    groups.edit.length ? `edited ${plural(groups.edit.length, "file")}` : "",
-    groups.other.length ? `used ${plural(groups.other.length, "tool action")}` : "",
-  ].filter(Boolean);
-
-  if (!clauses.length) return "";
-  const text = clauses.join(", ");
-  return text[0].toUpperCase() + text.slice(1);
-}
-
 function isGenericActivityText(text: string): boolean {
   const clean = displayStatusText(text).trim().toLowerCase();
   return (
@@ -897,74 +858,6 @@ function isGenericActivityText(text: string): boolean {
     clean === "done"
   );
 }
-
-function buildActivityTimeline({
-  activityTrace,
-  artifacts,
-  busy,
-  tools,
-}: {
-  activityTrace: ActivityTrace[];
-  artifacts: ArtifactEntry[];
-  busy: boolean;
-  tools: ToolEntry[];
-}): ActivityTimelineItem[] {
-  const items: ActivityTimelineItem[] = [];
-
-  for (const trace of activityTrace) {
-    // The digest header ("Working for Xs") already communicates that
-    // we're busy — surfacing generic "status" traces below it just
-    // duplicates the message. Only push substantive reasoning /
-    // thinking content into the timeline.
-    if (trace.kind === "status") continue;
-    const label = displayStatusText(trace.text).trim();
-    if (!label || isGenericActivityText(label)) continue;
-    items.push({
-      createdAt: trace.createdAt,
-      details: [],
-      id: trace.id,
-      kind: "status",
-      label,
-      status: busy ? "running" : "done",
-    });
-  }
-
-  if (tools.length) {
-    const sortedTools = [...tools].sort((a, b) => a.startedAt - b.startedAt);
-    items.push({
-      createdAt: firstTimestamp(sortedTools),
-      detail: "Click to inspect the work behind this step",
-      details: detailsFor(sortedTools).slice(-8),
-      id: "tool-rollup",
-      kind: "tool",
-      label: activityClauseText(sortedTools) || `Used ${plural(sortedTools.length, "tool action")}`,
-      status: summaryStatus(sortedTools),
-    });
-  }
-
-  if (artifacts.length) {
-    items.push({
-      createdAt: Math.max(...artifacts.map((artifact) => artifact.createdAt).filter(Boolean)),
-      detail: "Files, diffs, previews, and outputs",
-      details: artifacts.slice(-6).map((artifact) =>
-        compactLine(artifact.detail || artifact.path || artifact.source, artifact.title),
-      ),
-      id: "artifact-rollup",
-      kind: "artifact",
-      label: `Prepared ${plural(artifacts.length, "artifact")}`,
-      status: "done",
-    });
-  }
-
-  return items
-    .sort((a, b) => a.createdAt - b.createdAt)
-    .filter((item, index, sorted) => {
-      const previous = sorted[index - 1];
-      return !(previous && previous.kind === item.kind && previous.label === item.label);
-    })
-    .slice(-8);
-}
-
 
 function progressIntentLabel(text: string): string {
   const clean = displayStatusText(text).trim();
@@ -4238,9 +4131,147 @@ function MessageRow({
   );
 }
 
+/**
+ * One row in the per-turn breakdown dropdown — either an individual tool
+ * call or a reasoning/thinking step, interleaved chronologically.
+ */
+type BreakdownStep =
+  | {
+      type: "tool";
+      id: string;
+      at: number;
+      name: string;
+      context: string;
+      status: ToolEntry["status"];
+      count: number;
+    }
+  | { type: "trace"; id: string; at: number; text: string };
+
+/** Pick a lucide icon for a tool by substring-matching its name. */
+function breakdownToolIcon(name: string): LucideIcon {
+  const n = name.toLowerCase();
+  if (/terminal|bash|shell|run|exec|command/.test(n)) return SquareTerminal;
+  if (/search|grep|glob|find/.test(n)) return Search;
+  if (/write|edit|patch/.test(n)) return FilePen;
+  if (/read|cat|open|view/.test(n)) return FileText;
+  if (/memory/.test(n)) return Brain;
+  return Zap;
+}
+
+function truncatePreview(value: string | undefined, max = 48): string {
+  const clean = (value ?? "").replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max)}…`;
+}
+
+/**
+ * Build the chronological list of individual tool calls + reasoning steps
+ * for the expanded breakdown. Memory tool calls are excluded — they get
+ * their own standalone rows. Consecutive identical tool calls collapse
+ * into one row with a `count`.
+ */
+function buildBreakdownSteps(
+  tools: ToolEntry[],
+  activityTrace: ActivityTrace[],
+): BreakdownStep[] {
+  const raw: BreakdownStep[] = [];
+
+  for (const tool of tools) {
+    if (tool.name.toLowerCase() === "memory") continue;
+    raw.push({
+      type: "tool",
+      id: tool.id,
+      at: tool.startedAt || 0,
+      name: tool.name,
+      context: tool.context ?? "",
+      status: tool.status,
+      count: 1,
+    });
+  }
+
+  for (const trace of activityTrace) {
+    if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
+    const text = compactLine(trace.text);
+    if (!text) continue;
+    raw.push({ type: "trace", id: trace.id, at: trace.createdAt || 0, text });
+  }
+
+  raw.sort((a, b) => a.at - b.at);
+
+  // Collapse consecutive identical tool calls (same name + context).
+  const merged: BreakdownStep[] = [];
+  for (const step of raw) {
+    const prev = merged[merged.length - 1];
+    if (
+      step.type === "tool" &&
+      prev &&
+      prev.type === "tool" &&
+      prev.name === step.name &&
+      prev.context === step.context
+    ) {
+      prev.count += 1;
+      if (step.status === "error") prev.status = "error";
+      else if (step.status === "running" && prev.status !== "error") {
+        prev.status = "running";
+      }
+      continue;
+    }
+    merged.push({ ...step });
+  }
+  return merged;
+}
+
+/** A single tool/trace line inside the expanded breakdown. */
+function BreakdownRow({ step }: { step: BreakdownStep }) {
+  if (step.type === "trace") {
+    return (
+      <div className="flex items-start gap-2 text-xs leading-5 text-[var(--chat-muted)]">
+        <Dot className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-70" />
+        <span className="min-w-0 flex-1 truncate">{step.text}</span>
+      </div>
+    );
+  }
+
+  const Icon = breakdownToolIcon(step.name);
+  return (
+    <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted)]">
+      <Icon
+        className={cn(
+          "h-3.5 w-3.5 shrink-0",
+          step.status === "error" && "text-[var(--chat-danger)]",
+          step.status === "running" && "animate-pulse",
+        )}
+      />
+      <span className="shrink-0 font-mono font-medium">{step.name}</span>
+      {step.context && (
+        <span className="min-w-0 flex-1 truncate font-mono opacity-80">
+          {truncatePreview(step.context)}
+        </span>
+      )}
+      {step.count > 1 && (
+        <span className="shrink-0 text-[0.62rem] opacity-70">
+          ×{step.count}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** A standalone, always-visible row for a memory save. */
+function MemorySaveRow({ tool }: { tool: ToolEntry }) {
+  const preview = truncatePreview(tool.summary || tool.context, 64);
+  return (
+    <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted-strong)]">
+      <Brain className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)] opacity-90" />
+      <span className="min-w-0 flex-1 truncate">
+        Saved to memory{preview ? `: ${preview}` : ""}
+      </span>
+    </div>
+  );
+}
+
 function ChatActivityDigest({
   activityTrace,
-  artifacts,
   busy,
   tools,
 }: {
@@ -4250,26 +4281,43 @@ function ChatActivityDigest({
   tools: ToolEntry[];
 }) {
   const [open, setOpen] = useState(false);
-  const timeline = useMemo(
-    () => buildActivityTimeline({ activityTrace, artifacts, busy, tools }),
-    [activityTrace, artifacts, busy, tools],
+
+  const steps = useMemo(
+    () => buildBreakdownSteps(tools, activityTrace),
+    [tools, activityTrace],
   );
-  const show = busy || tools.length > 0 || activityTrace.length > 0;
+  const memoryTools = useMemo(
+    () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
+    [tools],
+  );
+
+  const show =
+    busy || tools.length > 0 || activityTrace.length > 0;
   if (!show) return null;
 
   const start = activityStartedAt(tools, activityTrace);
   const end = busy ? Date.now() : activityFinishedAt(tools);
   const duration = formatDuration(end - start);
-  const visibleTimeline = open ? timeline : timeline.slice(-4);
 
   return (
     <section className="border-t border-[var(--chat-border)] pt-4 text-[var(--chat-muted)]">
+      {memoryTools.length > 0 && (
+        <div className="mb-3 space-y-1.5">
+          {memoryTools.map((tool) => (
+            <MemorySaveRow key={tool.id} tool={tool} />
+          ))}
+        </div>
+      )}
+
       <button
         className="flex items-center gap-2 text-sm text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
-        <span>{busy ? "Working" : "Worked"} for {duration}</span>
+        <span>
+          {busy ? "Working" : "Worked"} for {duration}
+          {steps.length > 0 && ` · ${plural(steps.length, "step")}`}
+        </span>
         <ChevronDown
           className={cn(
             "h-3.5 w-3.5 transition-transform",
@@ -4278,11 +4326,13 @@ function ChatActivityDigest({
         />
       </button>
 
-      <div className="mt-3 space-y-3">
-        {visibleTimeline.map((item) => (
-          <ActivityTimelineRow key={item.id} item={item} />
-        ))}
-      </div>
+      {open && steps.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {steps.map((step) => (
+            <BreakdownRow key={step.id} step={step} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -4833,80 +4883,6 @@ function ProgressSummaryList({ summaries }: { summaries: ProgressSummary[] }) {
       {summaries.map((summary) => (
         <ProgressSummaryRow key={summary.id} summary={summary} />
       ))}
-    </div>
-  );
-}
-
-function ActivityTimelineRow({ item }: { item: ActivityTimelineItem }) {
-  const [open, setOpen] = useState(false);
-  const hasDetails = item.details.length > 0;
-  const failed = item.status === "error";
-  const running = item.status === "running";
-  const Icon = running
-    ? Loader2
-    : item.kind === "artifact"
-      ? FileText
-      : item.kind === "tool"
-        ? SquareTerminal
-        : CheckCircle2;
-
-  return (
-    <div className="max-w-[46rem] text-sm leading-6">
-      <button
-        aria-expanded={open}
-        className={cn(
-          "group flex w-full items-start gap-2.5 rounded-md py-1.5 text-left transition-colors",
-          hasDetails && "hover:text-[var(--chat-text)]",
-        )}
-        disabled={!hasDetails}
-        onClick={() => hasDetails && setOpen((value) => !value)}
-        type="button"
-      >
-        <span
-          className={cn(
-            "mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
-            failed
-              ? "bg-[color-mix(in_srgb,var(--chat-danger)_18%,var(--chat-bg))] text-[var(--chat-danger)]"
-              : running
-                ? "text-[var(--chat-muted-strong)]"
-                : "bg-[var(--chat-muted-strong)] text-[var(--chat-bg)]",
-          )}
-        >
-          <Icon className={cn("h-2.5 w-2.5", running && "animate-spin")} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span
-            className={cn(
-              "block text-[var(--chat-muted-strong)]",
-              running && item.kind === "status" && "elevate-thinking-shimmer rounded-lg px-2 py-1",
-            )}
-          >
-            {item.label}
-          </span>
-          {item.detail && (
-            <span className="mt-0.5 block truncate text-xs text-[var(--chat-muted)]">
-              {item.detail}
-            </span>
-          )}
-        </span>
-        {hasDetails && (
-          <ChevronDown
-            className={cn(
-              "mt-1.5 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] transition-transform group-hover:text-[var(--chat-muted-strong)]",
-              open && "rotate-180",
-            )}
-          />
-        )}
-      </button>
-      {open && hasDetails && (
-        <div className="ml-6 mt-1.5 space-y-1 text-xs leading-5 text-[var(--chat-muted)]">
-          {item.details.map((detail, index) => (
-            <div key={`${item.id}-${index}`} className="truncate">
-              {detail}
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
