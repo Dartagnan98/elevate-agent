@@ -224,6 +224,10 @@ _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
+# Per-session Claude-style permission mode overrides (composer picker).
+# When unset for a session, get_permission_mode() falls back to the
+# config.yaml global default. Cleared by clear_session().
+_session_permission_mode: dict[str, str] = {}
 
 # =========================================================================
 # Blocking gateway approval (mirrors CLI's synchronous input() flow)
@@ -343,6 +347,7 @@ def clear_session(session_key: str) -> None:
     with _lock:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
+        _session_permission_mode.pop(session_key, None)
         _pending.pop(session_key, None)
         _gateway_queues.pop(session_key, None)
 
@@ -834,8 +839,19 @@ def check_all_command_guards(command: str, env_type: str,
         if not is_approved(session_key, pattern_key):
             warnings.append((pattern_key, description, False))
 
-    # Nothing to warn about
+    # Nothing flagged dangerous — but still gate shell-driven file edits
+    # (echo > f, tee, sed -i) under the permission mode, mirroring the
+    # write_file/patch gate. Dangerous file writes are intentionally left
+    # to the warning flow below so the user is not prompted twice.
     if not warnings:
+        if is_file_write_command(command):
+            edit_decision = check_file_edit_approval(command)
+            if not edit_decision.get("approved", True):
+                return {
+                    "approved": False,
+                    "message": edit_decision.get("message")
+                    or "BLOCKED: file edit was not approved.",
+                }
         return {"approved": True, "message": None}
 
     # --- Phase 2.5: Smart approval (auxiliary LLM risk assessment) ---
@@ -1119,15 +1135,76 @@ FILE_EDIT_TOOLS = frozenset({"write_file", "patch"})
 _FILE_EDIT_APPROVAL_KEY = "file-edit"
 
 
+def set_session_permission_mode(session_key: str, mode: "str | None") -> None:
+    """Set (or clear) a per-session permission mode override.
+
+    Pass *mode* = None or "" to clear the override so the session falls
+    back to the config.yaml global default.
+    """
+    if not session_key:
+        return
+    canon = _PERMISSION_MODE_CANON.get(str(mode or "").strip().lower())
+    with _lock:
+        if canon is None:
+            _session_permission_mode.pop(session_key, None)
+        else:
+            _session_permission_mode[session_key] = canon
+
+
+def get_session_permission_mode(session_key: str) -> "str | None":
+    """Return the per-session permission mode override, or None if unset."""
+    if not session_key:
+        return None
+    with _lock:
+        return _session_permission_mode.get(session_key)
+
+
 def get_permission_mode() -> str:
     """Return the active Claude-style permission mode (canonical casing).
 
-    One of: default, acceptEdits, plan, bypassPermissions. Falls back to
-    'default' when unset or unrecognized.
+    Resolution order:
+    1. per-session override (composer picker) for the active session
+    2. config.yaml global default (Settings page)
+    3. 'default'
+
+    One of: default, acceptEdits, plan, bypassPermissions.
     """
+    session_key = get_current_session_key(default="")
+    if session_key:
+        with _lock:
+            override = _session_permission_mode.get(session_key)
+        if override:
+            return override
     cfg = _get_approval_config()
     raw = str(cfg.get("permission_mode", "") or "").strip().lower()
     return _PERMISSION_MODE_CANON.get(raw, "default")
+
+
+# Shell forms that write file *content* (vs. ordinary commands). Used to
+# extend file-edit gating to shell-driven edits — output redirection to a
+# file, ``tee``, and ``sed -i`` — so `default` prompts and `acceptEdits`
+# auto-accepts edits made through the shell, not only via write_file/patch.
+_FILE_WRITE_COMMAND_RE = re.compile(
+    r"""(?xi)
+    (?:
+        (?<![0-9&]) >>? \s* (?!/dev/null\b) (?!/dev/std) (?!&) ["']? [^\s"'&|;<>]
+      | (?:^|[\s|&;(]) tee \b (?:\s+-[^\s]+)* \s+ ["']? [^\s"'&|;<>-]
+      | (?:^|[\s|&;(]) sed \b [^|;&]* (?:\s-[a-z]*i\b|\s--in-place\b)
+    )
+    """
+)
+
+
+def is_file_write_command(command: str) -> bool:
+    """Best-effort: does this shell command write content into a file?
+
+    Detects output redirection to a file, ``tee``, and ``sed -i``. False
+    positives only cost one extra (session-scoped) approval prompt.
+    """
+    if not command:
+        return False
+    norm = _normalize_command_for_detection(command)
+    return bool(_FILE_WRITE_COMMAND_RE.search(norm))
 
 
 def is_tool_allowed_in_plan_mode(tool_name: str) -> bool:

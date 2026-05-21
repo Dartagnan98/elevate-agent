@@ -3011,12 +3011,18 @@ export default function ChatPage() {
     };
   }, [busy, gw, sessionId, state]);
 
-  // Load the persisted Claude-style permission mode once the gateway is up.
+  // Load the effective Claude-style permission mode for this session once
+  // the gateway is up. The mode is session-scoped (composer picker), so it
+  // is re-fetched whenever the gateway session id changes.
   useEffect(() => {
-    if (state !== "open") return;
+    if (state !== "open" || !sessionId) return;
     let cancelled = false;
     gw
-      .request<{ value?: string }>("config.get", { key: "permission_mode" }, 8_000)
+      .request<{ value?: string }>(
+        "config.get",
+        { key: "permission_mode", session_id: sessionId },
+        8_000,
+      )
       .then((res) => {
         if (!cancelled && res?.value) setPermissionModeId(res.value);
       })
@@ -3026,7 +3032,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [gw, state]);
+  }, [gw, state, sessionId]);
 
   const selectPermissionMode = useCallback(
     (mode: PermissionMode) => {
@@ -3036,7 +3042,7 @@ export default function ChatPage() {
         void gw
           .request(
             "config.set",
-            { key: "permission_mode", value: mode.id },
+            { key: "permission_mode", value: mode.id, session_id: sessionId },
             8_000,
           )
           .catch((error: Error) => {
@@ -3050,7 +3056,7 @@ export default function ChatPage() {
       setStatusText(`Permission mode: ${mode.label}`);
       window.requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [gw],
+    [gw, sessionId],
   );
 
   const selectComposerAgent = useCallback(

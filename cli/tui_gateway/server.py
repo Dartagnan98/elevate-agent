@@ -3540,7 +3540,23 @@ def _(rid, params: dict) -> dict:
         resolved = canon.get(nv.lower())
         if resolved is None:
             return _err(rid, 4002, f"unknown permission_mode: {value}")
-        _write_config_key("approvals.permission_mode", resolved)
+        if session:
+            # Composer picker → session-scoped override (like /yolo). The
+            # Settings page writes the global default via /api/config.
+            try:
+                from tools.approval import set_session_permission_mode
+
+                set_session_permission_mode(session["session_key"], resolved)
+            except Exception as e:
+                return _err(rid, 5001, str(e))
+            agent = session.get("agent")
+            if agent is not None:
+                # Force a system-prompt rebuild so the agent is told it is
+                # (or is no longer) in plan mode on its next turn.
+                agent._cached_system_prompt = None
+        else:
+            # No session (CLI / headless) → fall back to the global default.
+            _write_config_key("approvals.permission_mode", resolved)
         return _ok(rid, {"key": key, "value": resolved})
 
     if key == "yolo":
@@ -3813,14 +3829,25 @@ def _(rid, params: dict) -> dict:
         )
         return _ok(rid, {"value": _coerce_statusbar(raw)})
     if key == "permission_mode":
+        allowed_pm = {"default", "acceptEdits", "plan", "bypassPermissions"}
+        canon = {m.lower(): m for m in allowed_pm}
+        # Prefer the per-session override (composer picker) when present.
+        session = _sessions.get(params.get("session_id", ""))
+        if session:
+            try:
+                from tools.approval import get_session_permission_mode
+
+                override = get_session_permission_mode(session["session_key"])
+            except Exception:
+                override = None
+            if override:
+                return _ok(rid, {"value": override})
         approvals = _load_cfg().get("approvals")
         raw = (
             approvals.get("permission_mode", "default")
             if isinstance(approvals, dict)
             else "default"
         )
-        allowed_pm = {"default", "acceptEdits", "plan", "bypassPermissions"}
-        canon = {m.lower(): m for m in allowed_pm}
         nv = canon.get(str(raw or "").strip().lower(), "default")
         return _ok(rid, {"value": nv})
     if key == "mtime":
