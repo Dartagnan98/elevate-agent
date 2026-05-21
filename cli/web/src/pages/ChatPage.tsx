@@ -1276,7 +1276,14 @@ function extractPathsFromText(text: string): string[] {
   const matches = text.match(
     /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
   );
-  return Array.from(new Set(matches ?? [])).slice(0, 12);
+  return Array.from(new Set(matches ?? []))
+    // Drop bare single-segment root paths like "/coming-soon.html".
+    // Those are almost always web routes / URL paths the agent mentioned,
+    // not real local files — the preview server 404s on them and the
+    // artifact gets stuck open. Real local artifacts always live inside
+    // a directory (/Users/.../x.html, /tmp/.../x.html, ~/dir/x.html).
+    .filter((path) => !(path.startsWith("/") && path.indexOf("/", 1) === -1))
+    .slice(0, 12);
 }
 
 function artifactsFromText(
