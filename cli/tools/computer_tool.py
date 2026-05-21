@@ -22,6 +22,7 @@ coordinates come from looking at the screenshot.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -58,13 +59,33 @@ _MODIFIERS = {"cmd", "command", "ctrl", "control", "alt", "option", "shift", "fn
 _MOD_MAP = {"command": "cmd", "control": "ctrl", "option": "alt"}
 
 
+# Homebrew installs cliclick here, but launchd-spawned processes (the Elevate
+# gateway) often run with a minimal PATH that excludes these dirs — so
+# shutil.which alone is unreliable. Probe the known locations too.
+_CLICLICK_FALLBACKS = (
+    "/opt/homebrew/bin/cliclick",  # Apple Silicon Homebrew
+    "/usr/local/bin/cliclick",     # Intel Homebrew
+)
+
+
+def _find_cliclick() -> str | None:
+    """Locate the cliclick binary regardless of the process PATH."""
+    found = shutil.which("cliclick")
+    if found:
+        return found
+    for candidate in _CLICLICK_FALLBACKS:
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def check_computer_requirements() -> bool:
     """Available on macOS once cliclick is installed."""
-    return sys.platform == "darwin" and shutil.which("cliclick") is not None
+    return sys.platform == "darwin" and _find_cliclick() is not None
 
 
 def _cliclick(*commands: str, timeout: float = 15.0) -> tuple[bool, str]:
-    binary = shutil.which("cliclick")
+    binary = _find_cliclick()
     if not binary:
         return False, (
             "cliclick not installed. Run 'brew install cliclick', then grant "
