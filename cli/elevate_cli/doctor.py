@@ -458,6 +458,68 @@ def run_doctor(args):
         except Exception:
             pass
 
+        # Detect stale platform_toolsets allowlists that predate a shipped
+        # toolset (the bug that hid the browser toolset). When a platform has
+        # an explicit allowlist, absorb any builtin toolset that is new since
+        # it was written, then record the known set so future user-disables
+        # still stick.
+        try:
+            import yaml
+            from elevate_cli.tools_config import (
+                CONFIGURABLE_TOOLSETS,
+                _DEFAULT_OFF_TOOLSETS,
+            )
+            with open(config_path) as f:
+                ts_config = yaml.safe_load(f) or {}
+            builtin_keys = {k for k, _, _ in CONFIGURABLE_TOOLSETS}
+            shipped = builtin_keys - set(_DEFAULT_OFF_TOOLSETS)
+            platform_toolsets = ts_config.get("platform_toolsets") or {}
+            known_map = ts_config.get("known_builtin_toolsets") or {}
+            stale_platforms = []
+            for platform, ts_list in platform_toolsets.items():
+                if not isinstance(ts_list, list):
+                    continue
+                listed = {str(t) for t in ts_list}
+                # Explicit allowlist = lists at least one configurable key.
+                if not (listed & builtin_keys):
+                    continue
+                known = set(known_map.get(platform, []))
+                missing = {
+                    k for k in shipped
+                    if k not in listed and k not in known
+                }
+                if missing:
+                    stale_platforms.append((platform, missing))
+            if stale_platforms:
+                names = ", ".join(
+                    f"{p} (+{', '.join(sorted(m))})" for p, m in stale_platforms
+                )
+                check_warn(
+                    "platform_toolsets allowlist missing shipped toolsets",
+                    f"({names})",
+                )
+                if should_fix:
+                    for platform, missing in stale_platforms:
+                        cur = [str(t) for t in platform_toolsets.get(platform, [])]
+                        ts_config["platform_toolsets"][platform] = sorted(
+                            set(cur) | missing
+                        )
+                    ts_config.setdefault("known_builtin_toolsets", {})
+                    for platform in platform_toolsets:
+                        ts_config["known_builtin_toolsets"][platform] = sorted(
+                            builtin_keys
+                        )
+                    from utils import atomic_yaml_write
+                    atomic_yaml_write(config_path, ts_config)
+                    check_ok("Absorbed shipped toolsets into platform allowlists")
+                    fixed_count += 1
+                else:
+                    issues.append(
+                        "platform_toolsets allowlist is stale — run 'elevate doctor --fix'"
+                    )
+        except Exception:
+            pass
+
         # Validate config structure (catches malformed custom_providers, etc.)
         try:
             from elevate_cli.config import validate_config_structure

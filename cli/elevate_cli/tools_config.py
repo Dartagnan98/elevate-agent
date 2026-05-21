@@ -534,6 +534,24 @@ def _get_platform_tools(
 
     if has_explicit_config:
         enabled_toolsets = {ts for ts in toolset_names if ts in configurable_keys}
+        # Self-heal: a builtin toolset shipped AFTER this allowlist was last
+        # saved would otherwise be silently dropped (the bug that hid the
+        # browser toolset from older configs). known_builtin_toolsets records
+        # which builtin toolsets existed at the last `elevate tools` save; any
+        # configurable toolset that is new since then, not default-off, and
+        # not explicitly disabled gets auto-enabled. Same new-vs-disabled
+        # distinction used for plugin toolsets below. If the key is absent
+        # entirely (pre-migration config), every absent non-default-off
+        # toolset is treated as new — the allowlist can only add, never
+        # silently subtract, until the next save records the known set.
+        known_builtin = set(
+            (config.get("known_builtin_toolsets", {}) or {}).get(platform, [])
+        )
+        for ts_key in configurable_keys:
+            if ts_key in enabled_toolsets or ts_key in _DEFAULT_OFF_TOOLSETS:
+                continue
+            if ts_key not in known_builtin:
+                enabled_toolsets.add(ts_key)
     else:
         # No explicit config — fall back to resolving composite toolset names
         # (e.g. "elevate-cli") to individual tool names and reverse-mapping.
@@ -652,6 +670,13 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     if plugin_keys:
         config.setdefault("known_plugin_toolsets", {})
         config["known_plugin_toolsets"][platform] = sorted(plugin_keys)
+
+    # Same for builtin toolsets: record the full shipped set at save time so a
+    # toolset shipped later is recognised as new (and auto-enabled) rather than
+    # silently dropped, while a toolset the user unchecked now stays disabled.
+    builtin_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+    config.setdefault("known_builtin_toolsets", {})
+    config["known_builtin_toolsets"][platform] = sorted(builtin_keys)
 
     save_config(config)
 
