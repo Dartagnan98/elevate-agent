@@ -1031,5 +1031,202 @@ def check_all_command_guards(command: str, env_type: str,
             "user_approved": True, "description": combined_desc}
 
 
+# =========================================================================
+# Claude-style permission modes — runtime enforcement
+# =========================================================================
+# `default` / `acceptEdits` / `plan` / `bypassPermissions` are surfaced in the
+# chat composer and Settings. This section makes `plan` and `acceptEdits`
+# behave for real instead of collapsing to plain `manual` approvals:
+#
+#   plan              — read-only. Mutating tools are blocked at dispatch.
+#   acceptEdits       — file edits auto-approved; other dangerous actions
+#                       still prompt.
+#   default           — file edits prompt once per session (interactive
+#                       sessions only); dangerous commands prompt as before.
+#   bypassPermissions — nothing prompts (maps to approval mode `off`).
+#
+# Non-interactive sessions (cron, batch, autonomous) are NEVER gated on file
+# edits, so autonomous file editing keeps working exactly as before.
+
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
+_PERMISSION_MODE_CANON = {m.lower(): m for m in PERMISSION_MODES}
+
+# Tools that only read state — the allowlist for `plan` (read-only) mode.
+# Anything NOT in this set is blocked while plan mode is active.
+PLAN_MODE_ALLOWED_TOOLS = frozenset({
+    "read_file", "search_files", "web_search", "web_extract",
+    "session_search", "todo", "clarify", "memory",
+    "browser_snapshot", "browser_console", "browser_get_images",
+    "browser_vision", "ha_get_state", "ha_list_entities",
+    "ha_list_services", "feishu_doc_read", "feishu_drive_list_comments",
+    "feishu_drive_list_comment_replies", "skills_list", "skill_view",
+    "vision_analyze", "video_analyze", "rl_check_status",
+    "rl_get_current_config", "rl_get_results", "rl_list_environments",
+    "rl_list_runs",
+})
+
+# File-editing tools — gated by check_file_edit_approval().
+FILE_EDIT_TOOLS = frozenset({"write_file", "patch"})
+
+# A single per-session approval key: approving one file edit for the session
+# covers every later edit in that session (mirrors acceptEdits ergonomics).
+_FILE_EDIT_APPROVAL_KEY = "file-edit"
+
+
+def get_permission_mode() -> str:
+    """Return the active Claude-style permission mode (canonical casing).
+
+    One of: default, acceptEdits, plan, bypassPermissions. Falls back to
+    'default' when unset or unrecognized.
+    """
+    cfg = _get_approval_config()
+    raw = str(cfg.get("permission_mode", "") or "").strip().lower()
+    return _PERMISSION_MODE_CANON.get(raw, "default")
+
+
+def is_tool_allowed_in_plan_mode(tool_name: str) -> bool:
+    """Return True if *tool_name* is read-only and safe under plan mode."""
+    return tool_name in PLAN_MODE_ALLOWED_TOOLS
+
+
+def _await_gateway_choice(session_key: str, entry: "_ApprovalEntry") -> tuple:
+    """Block the agent thread until the user resolves *entry* or it times out.
+
+    Returns (resolved: bool, choice: str | None). Fires inactivity heartbeats
+    so the gateway watchdog does not kill the agent mid-prompt.
+    """
+    timeout = _get_approval_config().get("gateway_timeout", 300)
+    try:
+        timeout = int(timeout)
+    except (ValueError, TypeError):
+        timeout = 300
+
+    try:
+        from tools.environments.base import touch_activity_if_due
+    except Exception:  # pragma: no cover
+        touch_activity_if_due = None
+
+    _now = time.monotonic()
+    _deadline = _now + max(timeout, 0)
+    _activity_state = {"last_touch": _now, "start": _now}
+    resolved = False
+    while True:
+        _remaining = _deadline - time.monotonic()
+        if _remaining <= 0:
+            break
+        if entry.event.wait(timeout=min(1.0, _remaining)):
+            resolved = True
+            break
+        if touch_activity_if_due is not None:
+            touch_activity_if_due(_activity_state, "waiting for user approval")
+
+    with _lock:
+        queue = _gateway_queues.get(session_key, [])
+        if entry in queue:
+            queue.remove(entry)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+    return resolved, entry.result
+
+
+def check_file_edit_approval(path: str, approval_callback=None) -> dict:
+    """Gate a file-edit tool (write_file / patch) on the permission mode.
+
+    - acceptEdits / bypassPermissions -> auto-approved, no prompt
+    - plan                            -> blocked (defensive; dispatch also
+                                          blocks edit tools in plan mode)
+    - default                         -> prompt once per session, but only
+                                          in interactive (CLI / gateway)
+                                          sessions
+
+    Non-interactive sessions (cron, batch, autonomous) are never gated.
+
+    Returns {"approved": bool, "message": str | None}.
+    """
+    pmode = get_permission_mode()
+    if pmode in ("acceptEdits", "bypassPermissions"):
+        return {"approved": True, "message": None}
+    if pmode == "plan":
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: plan mode is active (read-only). File edits are "
+                "disabled. Present your plan to the user and ask them to "
+                "switch the permission mode to apply changes."
+            ),
+        }
+
+    if os.getenv("ELEVATE_YOLO_MODE") or is_current_session_yolo_enabled():
+        return {"approved": True, "message": None}
+
+    is_cli = os.getenv("ELEVATE_INTERACTIVE")
+    is_gateway = os.getenv("ELEVATE_GATEWAY_SESSION")
+    if not is_cli and not is_gateway:
+        # cron / batch / autonomous runs are never gated on file edits
+        return {"approved": True, "message": None}
+
+    session_key = get_current_session_key()
+    if is_approved(session_key, _FILE_EDIT_APPROVAL_KEY):
+        return {"approved": True, "message": None}
+
+    description = f"Modify file: {path}" if path else "Modify a file"
+
+    if is_gateway:
+        with _lock:
+            notify_cb = _gateway_notify_cbs.get(session_key)
+        if notify_cb is None:
+            # No user channel registered — allow rather than hang forever
+            # (mirrors the command-guard fallback for headless sessions).
+            return {"approved": True, "message": None}
+        approval_data = {
+            "command": path or "(file edit)",
+            "pattern_key": _FILE_EDIT_APPROVAL_KEY,
+            "pattern_keys": [_FILE_EDIT_APPROVAL_KEY],
+            "description": description,
+        }
+        entry = _ApprovalEntry(approval_data)
+        with _lock:
+            _gateway_queues.setdefault(session_key, []).append(entry)
+        try:
+            notify_cb(approval_data)
+        except Exception as exc:
+            logger.warning("File-edit approval notify failed: %s", exc)
+            with _lock:
+                queue = _gateway_queues.get(session_key, [])
+                if entry in queue:
+                    queue.remove(entry)
+                if not queue:
+                    _gateway_queues.pop(session_key, None)
+            return {
+                "approved": False,
+                "message": "BLOCKED: could not send approval request to user.",
+            }
+        resolved, choice = _await_gateway_choice(session_key, entry)
+    else:
+        choice = prompt_dangerous_approval(
+            path or "(file edit)", description,
+            approval_callback=approval_callback,
+        )
+        resolved = choice is not None
+
+    if not resolved or choice is None or choice == "deny":
+        reason = "timed out" if not resolved else "denied by the user"
+        return {
+            "approved": False,
+            "message": (
+                f"BLOCKED: file edit {reason}. Do NOT retry this edit. "
+                "Ask the user how they want to proceed."
+            ),
+        }
+
+    if choice == "session":
+        approve_session(session_key, _FILE_EDIT_APPROVAL_KEY)
+    elif choice == "always":
+        approve_session(session_key, _FILE_EDIT_APPROVAL_KEY)
+        approve_permanent(_FILE_EDIT_APPROVAL_KEY)
+        save_permanent_allowlist(_permanent_approved)
+    return {"approved": True, "message": None}
+
+
 # Load permanent allowlist from config on module import
 load_permanent_allowlist()

@@ -1188,9 +1188,10 @@ DEFAULT_CONFIG = {
     #   approve — auto-approve all dangerous commands in cron jobs
     # permission_mode — Claude-style tool permission schema. Takes precedence
     # over ``mode`` when set. One of:
-    #   default          — ask before every dangerous action
+    #   default          — prompt for file edits (once/session) + dangerous
+    #                      commands; interactive sessions only
     #   acceptEdits      — auto-accept file edits, still ask for other actions
-    #   plan             — read-only, no execution (planning pass)
+    #   plan             — read-only; mutating tools blocked at dispatch
     #   bypassPermissions — never ask (maps to mode=off)
     "approvals": {
         "mode": "manual",

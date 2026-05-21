@@ -299,6 +299,9 @@ class ToolRegistry:
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+        gate = _check_permission_gate(name, args)
+        if gate is not None:
+            return gate
         try:
             if entry.is_async:
                 from model_tools import _run_async
@@ -451,6 +454,52 @@ registry = ToolRegistry()
 #   return tool_error("not found", code=404)
 #   return tool_result(success=True, data=payload)
 #   return tool_result(items)            # pass a dict directly
+
+
+def _check_permission_gate(name: str, args: dict) -> Optional[str]:
+    """Enforce the active Claude-style permission mode for a tool call.
+
+    Returns a JSON error string when the call must be blocked, otherwise
+    None. This is the single runtime choke point that makes `plan` mode
+    (read-only) and `acceptEdits` (gated file edits) behave for real.
+    """
+    try:
+        from tools import approval
+    except Exception:
+        return None
+    try:
+        pmode = approval.get_permission_mode()
+    except Exception:
+        return None
+
+    # Fast path: default / bypassPermissions never block here unless the
+    # call is a file edit (which only `default` gates).
+    if pmode == "plan":
+        if name not in approval.PLAN_MODE_ALLOWED_TOOLS:
+            return tool_error(
+                f"Plan mode is active (read-only). The tool '{name}' can "
+                "change state, so it is blocked. Keep researching with "
+                "read-only tools, then present a written plan. The user can "
+                "switch the permission mode (composer picker or Settings) to "
+                "let you execute it.",
+                permission_mode="plan", blocked=True,
+            )
+        return None
+
+    if name in approval.FILE_EDIT_TOOLS:
+        path = ""
+        if isinstance(args, dict):
+            path = str(args.get("path") or args.get("file") or "")
+        try:
+            decision = approval.check_file_edit_approval(path)
+        except Exception:
+            return None
+        if not decision.get("approved", True):
+            return tool_error(
+                decision.get("message") or "File edit was not approved.",
+                permission_mode=pmode, blocked=True,
+            )
+    return None
 
 
 def tool_error(message, **extra) -> str:

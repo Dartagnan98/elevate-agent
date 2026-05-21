@@ -4735,6 +4735,27 @@ class AIAgent:
         if platform_key in PLATFORM_HINTS:
             prompt_parts.append(PLATFORM_HINTS[platform_key])
 
+        # Permission mode (Claude-style). In `plan` mode the runtime blocks
+        # every mutating tool, so tell the agent up front to behave like a
+        # planning pass instead of discovering the wall tool-by-tool.
+        try:
+            from tools.approval import get_permission_mode
+            _pmode = get_permission_mode()
+        except Exception:
+            _pmode = "default"
+        if _pmode == "plan":
+            prompt_parts.append(
+                "# Plan mode (read-only)\n\n"
+                "Plan mode is active. You may ONLY use read-only tools "
+                "(reading files, searching, web lookups). Every tool that "
+                "edits files, runs commands, sends messages, or otherwise "
+                "changes state is blocked by the runtime. Do not attempt "
+                "them. Research thoroughly, then deliver a concrete written "
+                "plan of the steps you would take. End by telling the user "
+                "they can switch the permission mode (composer picker or "
+                "Settings) to let you execute it."
+            )
+
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 
     # =========================================================================
