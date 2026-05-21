@@ -132,11 +132,24 @@ interface SessionCreateResponse {
   session_id: string;
 }
 
+interface ResumeRunningTool {
+  tool_id: string;
+  name: string;
+  context?: string;
+  started_at?: number;
+}
+
 interface SessionResumeResponse extends SessionCreateResponse {
   messages?: GatewayTranscriptMessage[];
   running?: boolean;
   replay_events?: GatewayEvent[];
   replay_seq?: number;
+  /**
+   * Snapshot of tools still executing on the gateway at resume time.
+   * The event ring can rotate a long turn's tool.start frames out, so
+   * this guarantees the running tool cards reattach regardless.
+   */
+  running_tools?: ResumeRunningTool[];
 }
 
 type ChatRole = "assistant" | "system" | "tool" | "user";
@@ -2714,6 +2727,28 @@ export default function ChatPage() {
           // so the live meter shows; message.complete will fill it in.
           if (!currentAssistantRef.current) {
             ensureAssistant();
+          }
+          // Restore the running tool cards. The event ring can rotate a
+          // long turn's tool.start frames out, so replay alone is not
+          // enough — the gateway also hands back a snapshot of every tool
+          // still executing. Feed them through the same tool.start path;
+          // trackTool dedupes on tool_id, so a tool whose start frame
+          // survived in the ring is not doubled.
+          if (
+            Array.isArray(resumed.running_tools) &&
+            resumed.running_tools.length > 0
+          ) {
+            gw.replayEvents(
+              resumed.running_tools.map((rt) => ({
+                type: "tool.start" as const,
+                session_id: created.session_id,
+                payload: {
+                  tool_id: rt.tool_id,
+                  name: rt.name,
+                  context: rt.context ?? "",
+                },
+              })),
+            );
           }
         } else {
           // Gateway confirms no live turn. The transcript may still end

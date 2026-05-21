@@ -1017,12 +1017,27 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
         except Exception:
             pass
-        session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
+        started_at = time.time()
+        session.setdefault("tool_started_at", {})[tool_call_id] = started_at
+        # Snapshot the running tool so session.resume can rebuild the
+        # tool cards on reattach. The event ring rotates a long turn's
+        # tool.start frames out, so replay alone loses them.
+        ctx = _tool_ctx(name, args)
+        session.setdefault("running_tools", {})[tool_call_id] = {
+            "tool_id": tool_call_id,
+            "name": name,
+            "context": ctx,
+            "started_at": started_at,
+        }
     if _tool_progress_enabled(sid):
         _emit(
             "tool.start",
             sid,
-            {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)},
+            {
+                "tool_id": tool_call_id,
+                "name": name,
+                "context": _tool_ctx(name, args),
+            },
         )
 
 
@@ -1034,6 +1049,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     if session is not None:
         snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
         started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
+        session.setdefault("running_tools", {}).pop(tool_call_id, None)
     duration_s = time.time() - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
@@ -1334,6 +1350,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     session["show_reasoning"] = _load_show_reasoning()
     session["tool_progress_mode"] = _load_tool_progress_mode()
     session["tool_started_at"] = {}
+    session["running_tools"] = {}
     with session["history_lock"]:
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
@@ -2104,6 +2121,7 @@ def _(rid, params: dict) -> dict:
         new_transport = current_transport() or _stdio_transport
         replay_events: list[dict] = []
         replay_seq = 0
+        running_tools: list[dict] = []
         ring = existing_session.get("events")
         events_lock = existing_session.get("events_lock")
         if ring is not None and events_lock is not None:
@@ -2111,6 +2129,9 @@ def _(rid, params: dict) -> dict:
                 existing_session["transport"] = new_transport
                 replay_events = list(ring)
                 replay_seq = int(existing_session.get("events_seq", 0))
+                rt = existing_session.get("running_tools")
+                if isinstance(rt, dict):
+                    running_tools = [dict(v) for v in rt.values()]
         else:
             # Legacy sessions created before the ring existed — bind
             # transport without the snapshot; replay just stays empty.
@@ -2128,6 +2149,7 @@ def _(rid, params: dict) -> dict:
             "running": bool(existing_session.get("running")),
             "replay_events": replay_events,
             "replay_seq": replay_seq,
+            "running_tools": running_tools,
         }
         if messages is not None:
             result["messages"] = messages
@@ -2969,6 +2991,10 @@ def _(rid, params: dict) -> dict:
             _clear_session_context(session_tokens)
             with session["history_lock"]:
                 session["running"] = False
+                # Turn over — drop any running-tool snapshot so a later
+                # resume doesn't rebuild stale cards (e.g. a tool that
+                # errored out without a tool.complete frame).
+                session["running_tools"] = {}
 
     threading.Thread(target=run, daemon=True).start()
     return _ok(rid, {"status": "streaming"})
