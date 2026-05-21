@@ -42,6 +42,7 @@ let backendProcess = null;
 const COMPUTER_USE_FLAG = path.join(HOME, ".elevate", "computer-use-active");
 const COMPUTER_USE_FRESH_MS = 6000;
 let ownsBackend = false;
+let backendReady = false;
 let installProcess = null;
 let backendPort = PREFERRED_PORT;
 let backendUrl = `http://${HOST}:${backendPort}`;
@@ -353,6 +354,13 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // Without this, a closed main window leaves `mainWindow` pointing at a
+  // destroyed BrowserWindow. The `if (!mainWindow)` guards elsewhere stay
+  // truthy, so the next loadURL/loadFile throws — that's the reopen glitch.
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+
   mainWindow.on("page-title-updated", (event) => {
     event.preventDefault();
   });
@@ -381,6 +389,9 @@ function createWindow() {
 }
 
 function createOverlay() {
+  // Reusing the existing overlay avoids leaking a window each time the
+  // desktop is (re)started.
+  if (overlayWindow && !overlayWindow.isDestroyed()) return;
   // A frameless, transparent, click-through window that draws a pulsing glow
   // around the screen while the computer-use tool is active. It floats above
   // everything (including full-screen apps) and never steals focus or clicks.
@@ -463,6 +474,7 @@ async function startDesktop() {
   loadLocalPage("loading.html");
 
   const ready = await ensureBackend();
+  backendReady = ready;
   if (ready) {
     loadAppPath(START_PATH);
   } else {
@@ -521,9 +533,24 @@ ipcMain.handle("desktop:install", async () => runInstaller());
 app.whenReady().then(startDesktop);
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    startDesktop();
+  // The hidden overlay window keeps the app alive after the main window is
+  // closed, so BrowserWindow.getAllWindows() is never empty — track the
+  // main window explicitly instead.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
   }
+  // Backend is already up from the first launch: skip the loading screen
+  // and health check and just bring the UI straight back.
+  if (backendReady) {
+    createWindow();
+    createMenu();
+    loadAppPath(START_PATH);
+    return;
+  }
+  startDesktop();
 });
 
 app.on("before-quit", () => {
