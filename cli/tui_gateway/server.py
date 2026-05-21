@@ -2823,10 +2823,11 @@ def _(rid, params: dict) -> dict:
                 "stream_callback": _stream,
             }
             # persist_user_message rewrites the stored user-message content
-            # to a clean string.  For a multimodal turn that would drop the
-            # image/PDF blocks from history — the model must keep seeing them
-            # on later turns — so skip the override when prompt is a list.
-            if isinstance(persist_user_message, str) and not isinstance(prompt, list):
+            # to a clean string so the routing envelope never leaks into
+            # resumed history. For a multimodal turn the override swaps only
+            # the first text block (see _apply_persist_user_message_override),
+            # leaving the image/PDF blocks intact for later turns.
+            if isinstance(persist_user_message, str):
                 run_kwargs["persist_user_message"] = persist_user_message
 
             result = agent.run_conversation(prompt, **run_kwargs)

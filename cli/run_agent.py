@@ -3284,7 +3284,39 @@ class AIAgent:
         if 0 <= idx < len(messages):
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
-                msg["content"] = override
+                content = msg.get("content")
+                if isinstance(content, list):
+                    # Multimodal turn — replace only the first text block so
+                    # the image / PDF blocks the model still needs on later
+                    # turns stay in history. The first text block is what the
+                    # transcript displays, so swapping it to the clean string
+                    # keeps the routing envelope out of resumed history.
+                    # An empty override means an attachment-only turn — leave
+                    # the placeholder first block untouched.
+                    if not override.strip():
+                        return
+                    new_content = []
+                    replaced = False
+                    for blk in content:
+                        if (
+                            not replaced
+                            and isinstance(blk, dict)
+                            and blk.get("type")
+                            in ("text", "input_text", "output_text")
+                        ):
+                            new_blk = dict(blk)
+                            new_blk["text"] = override
+                            new_content.append(new_blk)
+                            replaced = True
+                        else:
+                            new_content.append(blk)
+                    if not replaced:
+                        new_content.insert(
+                            0, {"type": "text", "text": override}
+                        )
+                    msg["content"] = new_content
+                else:
+                    msg["content"] = override
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
