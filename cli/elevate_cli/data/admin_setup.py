@@ -8,6 +8,7 @@ This module owns that singleton readiness profile in operational.db.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -17,6 +18,8 @@ from typing import Any, Iterable, Mapping
 
 from elevate_constants import get_elevate_home
 from elevate_cli.data._util import now_iso
+
+_log = logging.getLogger(__name__)
 
 
 PROFILE_ID = "default"
@@ -1335,6 +1338,7 @@ def sync_admin_setup_runtime(
 
     guide_counts = _guide_counts(province_guide)
     province = str(profile.get("province") or "").upper()
+    guide_memory_result: dict[str, Any] | None = None
     if province and sum(guide_counts.values()) > 0:
         mark(
             "regional_memory",
@@ -1343,6 +1347,17 @@ def sync_admin_setup_runtime(
             signals=["Province guide imported into SQLite"],
             details={"province": province, **guide_counts},
         )
+        # Make the full province guide corpus searchable on demand: ingest it
+        # into the holographic memory store so the agent can document_search /
+        # recall it, not just read the compact excerpts injected into prompts.
+        try:
+            from elevate_cli.data.province_guide_memory import (
+                sync_province_guide_to_memory,
+            )
+
+            guide_memory_result = sync_province_guide_to_memory(conn, province)
+        except Exception:  # noqa: BLE001 - memory sync must never break setup
+            _log.warning("province guide memory sync failed", exc_info=True)
 
     if not updates:
         memory = sync_admin_setup_memory(snapshot)
@@ -1352,6 +1367,8 @@ def sync_admin_setup_runtime(
             snapshot["playbook"] = playbook
         except Exception:
             pass
+        if guide_memory_result is not None:
+            snapshot["guideMemory"] = guide_memory_result
         return snapshot
     updated = update_admin_setup(conn, items=updates, actor=actor)
     try:
@@ -1359,6 +1376,8 @@ def sync_admin_setup_runtime(
         updated["playbook"] = playbook
     except Exception:
         pass
+    if guide_memory_result is not None:
+        updated["guideMemory"] = guide_memory_result
     return updated
 
 
