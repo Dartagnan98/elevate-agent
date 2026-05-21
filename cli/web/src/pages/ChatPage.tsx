@@ -3756,7 +3756,7 @@ export default function ChatPage() {
                 queuedInputs={queuedInputs}
               />
 
-              <div className="relative rounded-lg bg-[var(--chat-bg)] p-2.5 shadow-[inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-accent)]">
+              <div className="relative rounded-lg bg-[var(--chat-surface-strong)] p-2.5 shadow-[inset_0_0_0_1px_var(--chat-border-strong)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-border-strong)]">
                 <AttachmentChipStrip
                   attachments={attachments}
                   onRemove={removeAttachment}
