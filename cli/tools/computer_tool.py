@@ -223,14 +223,38 @@ end tell
 '''
 
 
+# ui_snapshot spawns `osascript` to talk to System Events. macOS gates
+# that behind the AppleEvents/Automation TCC permission. If the gateway
+# process can't get (or hold) that grant, every call re-triggers the
+# "would like to access data from other apps" dialog — an unstoppable
+# prompt loop for the user. So once ui_snapshot fails, we latch it OFF
+# for the rest of the process: further calls return the fallback message
+# WITHOUT spawning osascript, so no dialog can fire again. A gateway
+# restart clears the latch (one prompt worst case, never a loop).
+_UI_SNAPSHOT_DISABLED = False
+
+_UI_SNAPSHOT_FALLBACK = (
+    "ui_snapshot is unavailable in this process (macOS did not grant the "
+    "gateway AppleEvents/Automation access). Do NOT retry ui_snapshot — it "
+    "is disabled for this session. Use action 'screenshot' + vision_analyze "
+    "instead; that always works and gives you click coordinates."
+)
+
+
 def _ui_snapshot() -> tuple[bool, str]:
+    global _UI_SNAPSHOT_DISABLED
+    if _UI_SNAPSHOT_DISABLED:
+        return False, _UI_SNAPSHOT_FALLBACK
     try:
         proc = subprocess.run(
             ["osascript", "-e", _UI_SNAPSHOT_SCRIPT],
             capture_output=True, text=True, timeout=20,
         )
     except subprocess.TimeoutExpired:
-        return False, "ui_snapshot timed out"
+        # A hung osascript is almost always a TCC dialog blocking the call.
+        # Latch off so the next call can't spawn another blocking dialog.
+        _UI_SNAPSHOT_DISABLED = True
+        return False, _UI_SNAPSHOT_FALLBACK
     err = (proc.stderr or "").strip()
     out = (proc.stdout or "").strip()
     # entire-contents failures (Electron apps, missing Accessibility grant)
@@ -238,11 +262,12 @@ def _ui_snapshot() -> tuple[bool, str]:
     failed = proc.returncode != 0 or "(no window detail" in out
     if failed:
         detail = err or out
+        # Latch ui_snapshot off for the session so it can never re-prompt.
+        _UI_SNAPSHOT_DISABLED = True
         return False, (
-            f"ui_snapshot could not read the UI tree ({detail}). This app may "
-            f"not expose accessibility info, or the gateway needs macOS "
-            f"Accessibility permission. Use action 'screenshot' + "
-            f"vision_analyze instead — that always works."
+            f"ui_snapshot could not read the UI tree ({detail}). It is now "
+            f"disabled for this session — do NOT retry it. Use action "
+            f"'screenshot' + vision_analyze instead; that always works."
         )
     return True, out
 
