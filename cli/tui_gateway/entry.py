@@ -102,6 +102,27 @@ def _log_exit(reason: str) -> None:
     print(f"[gateway-exit] {reason}", file=sys.stderr, flush=True)
 
 
+def _warm_slash_completions():
+    """Pre-scan skill commands in the background at startup.
+
+    The first ``complete.slash`` RPC lazily triggers ``scan_skill_commands``,
+    a filesystem walk that takes ~3s — which the user feels as a lag between
+    typing ``/`` and the command popover appearing. Doing it once at startup,
+    off the request path, makes every ``/`` instant.
+    """
+    import threading
+
+    def _scan():
+        try:
+            from agent.skill_commands import get_skill_commands
+
+            get_skill_commands()
+        except Exception:
+            pass
+
+    threading.Thread(target=_scan, daemon=True, name="warm-slash").start()
+
+
 def main():
     _install_sidecar_publisher()
 
@@ -112,6 +133,8 @@ def main():
     }):
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)
+
+    _warm_slash_completions()
 
     for raw in sys.stdin:
         line = raw.strip()
