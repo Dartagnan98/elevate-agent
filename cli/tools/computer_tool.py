@@ -371,9 +371,31 @@ def _do_key(spec: str) -> tuple[bool, str]:
     return _cliclick(*cmds)
 
 
+def _keep_awake() -> None:
+    """Keep the display awake while the computer tool is in use.
+
+    An idle Mac dims, sleeps the display, runs the screensaver, then hits the
+    idle lock — any of which strands the agent mid-task. `caffeinate -u`
+    declares user activity, which wakes the display now and resets the idle
+    timer; `-t 90` lets the assertion lapse 90s after the agent goes quiet so
+    the Mac is not pinned awake forever. Fire-and-forget, called once per
+    computer action, so a continuous agent run never lets the screen idle.
+    """
+    try:
+        subprocess.Popen(
+            ["caffeinate", "-u", "-t", "90"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
 def computer_tool(args: dict) -> str:
     if sys.platform != "darwin":
         return tool_error("The computer tool is macOS-only.")
+    _keep_awake()
     action = (args.get("action") or "").strip()
     if action not in _VALID_ACTIONS:
         return tool_error(
