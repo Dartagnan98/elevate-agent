@@ -4170,10 +4170,10 @@ function QueuedInputStrip({
           <div
             key={item.id}
             className={cn(
-              "group flex items-start gap-2 rounded-md px-2.5 py-1.5 text-xs",
+              "group flex items-start gap-2 py-0.5 text-xs",
               item.status === "error"
-                ? "bg-[color-mix(in_srgb,var(--chat-danger)_14%,var(--chat-bg))] text-[var(--chat-danger)]"
-                : "bg-[var(--chat-surface-strong)] text-[var(--chat-muted-strong)]",
+                ? "text-[var(--chat-danger)]"
+                : "text-[var(--chat-muted-strong)]",
             )}
           >
             <span
