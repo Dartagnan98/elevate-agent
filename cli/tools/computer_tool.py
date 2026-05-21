@@ -71,12 +71,19 @@ _MOD_MAP = {"command": "cmd", "control": "ctrl", "option": "alt"}
 #   cmd+ctrl+q          → Lock Screen
 #   cmd+shift+q         → Log Out (with dialog)
 #   cmd+shift+alt+q     → Log Out immediately
+#   cmd+l               → focuses a browser address bar normally, but users
+#                         commonly rebind it as a custom "lock screen" hotkey
+#                         (System Settings > Keyboard Shortcuts). The computer
+#                         tool drives NATIVE apps — web navigation belongs to
+#                         the browser tool — so cmd+l is never needed here and
+#                         is blocked to defuse that footgun.
 _LOCKOUT_COMBOS = {
     (frozenset({"cmd", "ctrl"}), "q"),
     (frozenset({"cmd", "shift"}), "q"),
     (frozenset({"cmd", "shift", "alt"}), "q"),
     (frozenset({"cmd", "shift", "ctrl"}), "q"),
     (frozenset({"cmd", "shift", "ctrl", "alt"}), "q"),
+    (frozenset({"cmd"}), "l"),
 }
 
 
@@ -349,6 +356,14 @@ def _do_key(spec: str) -> tuple[bool, str]:
     # unordered modifier set so "cmd+ctrl+q" and "ctrl+cmd+q" both match.
     _modset = frozenset(mods)
     if (_modset, key) in _LOCKOUT_COMBOS:
+        if _modset == frozenset({"cmd"}) and key == "l":
+            return False, (
+                f"Refused key chord {spec!r}: cmd+l is commonly rebound as a "
+                f"custom lock-screen hotkey, which would strand this session "
+                f"behind the login window. To open a web page, use the "
+                f"browser tool — not the computer tool. To focus a field, "
+                f"click it directly."
+            )
         return False, (
             f"Refused key chord {spec!r}: it locks / sleeps / logs out the "
             f"Mac, which would strand this session behind the login window. "
