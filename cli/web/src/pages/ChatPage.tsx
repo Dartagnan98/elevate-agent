@@ -4470,33 +4470,12 @@ function MemorySaveRow({ tool }: { tool: ToolEntry }) {
   );
 }
 
-// Live "working" meter shown while a turn streams: a pulsing accent mark
-// with elapsed time and a running token estimate. Collapses into the
-// "Worked for ..." digest once the turn completes.
-function LiveTurnMeter({
-  startedAt,
-  tokens,
-}: {
-  startedAt: number;
-  tokens: number;
-}) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const elapsed = formatDuration(Math.max(0, now - startedAt));
-  return (
-    <div className="flex items-center gap-2 text-sm text-[var(--chat-muted)]">
-      <Sparkle className="h-4 w-4 shrink-0 animate-pulse fill-[var(--chat-accent)] text-[var(--chat-accent)]" />
-      <span>
-        {elapsed}
-        {tokens > 0 ? ` · ${tokens.toLocaleString()} tokens` : ""}
-      </span>
-    </div>
-  );
-}
-
+// Working/worked digest. While a turn streams, the header is the live
+// meter: pulsing accent mark + "Working" + elapsed + running token count,
+// and the breakdown is expanded by default so reasoning (grey) and tool
+// calls scroll in chronologically as they happen. Once the turn completes
+// the same header collapses into "Worked for ..." with the real token
+// count, and the breakdown defaults to collapsed.
 function ChatActivityDigest({
   activityTrace,
   busy,
@@ -4513,7 +4492,16 @@ function ChatActivityDigest({
   tokenCount?: number;
   tools: ToolEntry[];
 }) {
-  const [open, setOpen] = useState(false);
+  // null = follow the default for the current state (open while busy,
+  // collapsed when done). A real boolean = the user toggled it explicitly.
+  const [open, setOpen] = useState<boolean | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!busy) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   const steps = useMemo(
     () => buildBreakdownSteps(tools, activityTrace),
@@ -4529,8 +4517,14 @@ function ChatActivityDigest({
   if (!show) return null;
 
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
-  const end = busy ? Date.now() : activityFinishedAt(tools);
-  const duration = formatDuration(end - start);
+  const end = busy ? now : activityFinishedAt(tools);
+  const duration = formatDuration(Math.max(0, end - start));
+  const expanded = open ?? busy;
+  const tokens = busy
+    ? liveTokens ?? 0
+    : typeof tokenCount === "number"
+      ? tokenCount
+      : 0;
 
   return (
     <section className="border-t border-[var(--chat-border)] pt-4 text-[var(--chat-muted)]">
@@ -4542,31 +4536,30 @@ function ChatActivityDigest({
         </div>
       )}
 
-      {busy && <LiveTurnMeter startedAt={start} tokens={liveTokens ?? 0} />}
-
-      {!busy && (
       <button
         className="flex items-center gap-2 text-sm text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen(() => !expanded)}
         type="button"
       >
+        {busy && (
+          <Sparkle className="h-4 w-4 shrink-0 animate-pulse fill-[var(--chat-accent)] text-[var(--chat-accent)]" />
+        )}
         <span>
-          Worked for {duration}
-          {steps.length > 0 && ` · ${plural(steps.length, "step")}`}
-          {typeof tokenCount === "number" && tokenCount > 0
-            ? ` · ${tokenCount.toLocaleString()} tokens`
-            : ""}
+          {busy ? "Working" : "Worked for"} {duration}
+          {!busy && steps.length > 0 && ` · ${plural(steps.length, "step")}`}
+          {tokens > 0 ? ` · ${tokens.toLocaleString()} tokens` : ""}
         </span>
-        <ChevronDown
-          className={cn(
-            "h-3.5 w-3.5 transition-transform",
-            open && "rotate-180",
-          )}
-        />
+        {steps.length > 0 && (
+          <ChevronDown
+            className={cn(
+              "h-3.5 w-3.5 transition-transform",
+              expanded && "rotate-180",
+            )}
+          />
+        )}
       </button>
-      )}
 
-      {!busy && open && steps.length > 0 && (
+      {expanded && steps.length > 0 && (
         <div className="mt-3 space-y-1.5">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} />
