@@ -1342,7 +1342,7 @@ function DesktopSidebar({
 
       <PluginSlot name="header-left" />
 
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-1.5">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-0.5">
         <div className="space-y-0.5">
           <button
             type="button"
