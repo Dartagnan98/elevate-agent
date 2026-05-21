@@ -1353,6 +1353,19 @@ function artifactKey(entry: Omit<ArtifactEntry, "createdAt" | "id" | "key">) {
   ].join(":");
 }
 
+// Stable identity for the "user dismissed this preview" set.  Unlike
+// `artifactKey` this deliberately omits `messageId` and `source`: when a
+// session is resumed the cached transcript and the server transcript can
+// assign different message IDs to the same artifact, which would change
+// `artifactKey` and make a previously-closed PDF pop back open.  The file
+// path (or content for inline artifacts) is the durable identity.
+function artifactDismissKey(
+  entry: Pick<ArtifactEntry, "kind" | "path" | "title" | "content">,
+): string {
+  if (entry.path) return `${entry.kind}:path:${entry.path}`;
+  return `${entry.kind}:inline:${entry.title}:${(entry.content ?? "").slice(0, 120)}`;
+}
+
 function makeArtifact(
   entry: Omit<ArtifactEntry, "createdAt" | "id" | "key">,
 ): ArtifactEntry {
@@ -1678,7 +1691,7 @@ export default function ChatPage() {
       return next.slice(-ARTIFACT_LIMIT);
     });
 
-    if (previewCandidate && !dismissedArtifactsRef.current.has(previewCandidate.key)) {
+    if (previewCandidate && !dismissedArtifactsRef.current.has(artifactDismissKey(previewCandidate))) {
       setPreviewArtifact(previewCandidate);
     }
   }, []);
@@ -1686,7 +1699,7 @@ export default function ChatPage() {
   const dismissPreviewArtifact = useCallback(() => {
     setPreviewArtifact((current) => {
       if (current) {
-        dismissedArtifactsRef.current.add(current.key);
+        dismissedArtifactsRef.current.add(artifactDismissKey(current));
         writeDismissedArtifactKeys(sessionId, dismissedArtifactsRef.current);
       }
       return null;
@@ -1702,8 +1715,9 @@ export default function ChatPage() {
 
   const openArtifactPreview = useCallback(
     (artifact: ArtifactEntry) => {
-      if (dismissedArtifactsRef.current.has(artifact.key)) {
-        dismissedArtifactsRef.current.delete(artifact.key);
+      const dKey = artifactDismissKey(artifact);
+      if (dismissedArtifactsRef.current.has(dKey)) {
+        dismissedArtifactsRef.current.delete(dKey);
         writeDismissedArtifactKeys(sessionId, dismissedArtifactsRef.current);
       }
       setPreviewArtifact(artifact);
