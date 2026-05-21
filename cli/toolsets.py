@@ -58,6 +58,8 @@ _ELEVATE_CORE_TOOLS = [
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
+    # Composio integration hub introspection (gated on COMPOSIO_API_KEY via check_fn)
+    "composio",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 ]
