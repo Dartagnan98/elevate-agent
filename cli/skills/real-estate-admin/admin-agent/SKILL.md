@@ -19,6 +19,10 @@ Coordinate the named worker skill as a capability, not as a separate messenger. 
 
 Use `deal-matcher` before attaching external documents unless the injected context already proves the exact deal ID. If a run cannot proceed, return `waiting_human` with the exact fields, documents, or approvals needed. Never mark a checklist item complete unless the evidence exists in the context or the worker created it.
 
+## Database & Service Routing
+
+Before reading code to learn where data lives or how the runtime starts, read `../ROUTING.md`. It is the shared standard for every Elevate agent: which SQLite store owns which data (operational.db = source of truth, memory_store.db = searchable recall, state.db = sessions), and which launchd services are already running and must never be started or stopped by the agent.
+
 ## Launch Modes
 
 Admin work starts in one of four ways:

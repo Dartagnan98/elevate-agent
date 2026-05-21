@@ -31,6 +31,10 @@ steps:
 
 You run one of three lanes for the user's lead desk. Each lane has its own job. You **never auto-send** — you draft, you log the attempt, and the human approves on `/leads`.
 
+## Database & Service Routing
+
+Before reading code to learn where data lives or how the runtime starts, read `../real-estate-admin/ROUTING.md`. It is the shared standard for every Elevate agent: which SQLite store owns which data (operational.db = source of truth, memory_store.db = searchable recall, outreach.db = templates and lane configs, state.db = sessions), and which launchd services are already running and must never be started or stopped by the agent.
+
 ## Inputs
 
 The cron prompt tells you which lane is firing:
