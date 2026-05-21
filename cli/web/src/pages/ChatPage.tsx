@@ -3013,6 +3013,23 @@ export default function ChatPage() {
             setStatusText("Steer rejected");
             return;
           }
+          // Visually inject the steer mid-turn: finalize the assistant
+          // chunk written so far, drop the steer in below it, then clear
+          // the streaming ref so the agent's continued output starts a
+          // fresh assistant message UNDER the steer — the conversation
+          // reads in delivery order instead of the steer being stranded
+          // at the bottom while text keeps growing above it.
+          const priorAssistantId = currentAssistantRef.current;
+          if (priorAssistantId) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === priorAssistantId && m.status === "streaming"
+                  ? { ...m, status: "complete" }
+                  : m,
+              ),
+            );
+            currentAssistantRef.current = null;
+          }
           appendMessage("user", item.text);
           setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
           setStatusText("Steer delivered");
