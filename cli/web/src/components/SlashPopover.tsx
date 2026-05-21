@@ -94,6 +94,9 @@ type Trigger =
 
 const DEBOUNCE_MS = 70;
 const MAX_GROUP_ITEMS = 12;
+// The slash menu is the primary way to reach skills, so it shows the full
+// catalog (the popover itself scrolls) instead of the 12-item @-mention cap.
+const MAX_SLASH_GROUP_ITEMS = 100;
 const EMPTY_CATALOG: MentionCatalog = {
   plugins: [],
   skills: [],
@@ -368,7 +371,7 @@ function slashSkillItems(catalog: MentionCatalog, query: string | null): PickerI
       };
     })
     .filter((item) => item.text && matchesSlash(item, query))
-    .slice(0, MAX_GROUP_ITEMS);
+    .slice(0, MAX_SLASH_GROUP_ITEMS);
 }
 
 function skillCommandMap(catalog: MentionCatalog): Map<string, SkillInfo> {
@@ -396,7 +399,11 @@ function normalizeSlashItem(
   };
 }
 
-function orderGroupedItems(items: PickerItem[], groupOrder: string[]): PickerItem[] {
+function orderGroupedItems(
+  items: PickerItem[],
+  groupOrder: string[],
+  maxPerGroup: number = MAX_GROUP_ITEMS,
+): PickerItem[] {
   const seen = new Set<string>();
   const grouped = new Map<string, PickerItem[]>();
   for (const item of items) {
@@ -405,7 +412,7 @@ function orderGroupedItems(items: PickerItem[], groupOrder: string[]): PickerIte
     seen.add(dedupeKey);
 
     const group = grouped.get(item.group) ?? [];
-    if (group.length < MAX_GROUP_ITEMS) {
+    if (group.length < maxPerGroup) {
       group.push(item);
       grouped.set(item.group, group);
     }
@@ -475,7 +482,13 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
               .map((item) => normalizeSlashItem(item, skillsByCommand))
               .filter((item) => query === null || matchesSlash(item, query));
             const skillItems = slashSkillItems(catalog, query);
-            setItems(orderGroupedItems([...commandItems, ...skillItems], ["Commands", "Skills"]));
+            setItems(
+              orderGroupedItems(
+                [...commandItems, ...skillItems],
+                ["Commands", "Skills"],
+                MAX_SLASH_GROUP_ITEMS,
+              ),
+            );
             setSelected(0);
             return;
           }
@@ -560,6 +573,13 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
       }),
       [apply, items, selected, visible],
     );
+
+    // Keep the keyboard-selected row inside the scrollable popover viewport.
+    useEffect(() => {
+      if (!visible) return;
+      const el = document.getElementById(`slash-item-${selected}`);
+      el?.scrollIntoView({ block: "nearest" });
+    }, [selected, visible]);
 
     if (!visible) return null;
 
