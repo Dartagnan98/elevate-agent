@@ -4500,7 +4500,7 @@ function MessageRow({
       <div
         className={cn(
           "min-w-0 flex-1 max-w-[74ch]",
-          isUser && "flex flex-col items-end",
+          isUser && "flex flex-col items-start",
         )}
       >
         {showDigest ? (
