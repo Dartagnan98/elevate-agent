@@ -1774,17 +1774,13 @@ function SessionListItem({
         }}
         className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-1 lg:group-hover:pr-16 lg:group-focus-within:pr-16"
       >
-        {session.is_active ? (
-          <Loader2
-            aria-label="Running"
-            className="h-3.5 w-3.5 shrink-0 animate-spin text-primary lg:h-3 lg:w-3"
-          />
-        ) : (
-          <SessionStatusDot
-            lastActive={session.last_active}
-            unread={unread}
-          />
-        )}
+        {/* `is_active` is a 25s recency flag, not a turn-running signal — it
+            lags a finished turn and misses long ones — so it must not drive a
+            spinner. The status dot conveys freshness without a false "Running". */}
+        <SessionStatusDot
+          lastActive={session.last_active}
+          unread={unread}
+        />
         <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
           {title}
         </span>

@@ -3357,24 +3357,26 @@ class AIAgent:
                 content = msg.get("content")
                 if isinstance(content, list):
                     # Multimodal turn — the SQLite `content` column is TEXT,
-                    # so a raw block list would fail to bind.  Persist a
-                    # flattened text form (typed text + [image] markers).
-                    # The live in-memory history and the JSONL session log
-                    # keep the full blocks; only a cold DB-only resume
-                    # degrades to text.
-                    _parts: List[str] = []
+                    # so a raw block list would fail to bind.  Persist only
+                    # the first text block: that is exactly the user's typed
+                    # message (the gateway's _content_to_text uses the same
+                    # rule), so the resumed transcript shows clean text with
+                    # no "[image]" marker leaking in.  The live in-memory
+                    # history and the JSONL session log keep the full blocks;
+                    # only a cold DB-only resume degrades to text.
+                    _flat = ""
                     for _blk in content:
-                        if isinstance(_blk, str):
-                            _parts.append(_blk)
-                        elif isinstance(_blk, dict):
-                            _bt = _blk.get("type")
-                            if _bt in ("text", "input_text", "output_text"):
-                                _t = _blk.get("text")
-                                if isinstance(_t, str) and _t:
-                                    _parts.append(_t)
-                            elif _bt in ("image_url", "input_image"):
-                                _parts.append("[image]")
-                    content = "\n\n".join(p for p in _parts if p)
+                        if isinstance(_blk, str) and _blk.strip():
+                            _flat = _blk
+                            break
+                        if isinstance(_blk, dict) and _blk.get("type") in (
+                            "text", "input_text", "output_text",
+                        ):
+                            _t = _blk.get("text")
+                            if isinstance(_t, str):
+                                _flat = _t
+                                break
+                    content = _flat
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
