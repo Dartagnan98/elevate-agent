@@ -2756,6 +2756,31 @@ export default function ChatPage() {
           if (!currentAssistantRef.current) {
             ensureAssistant();
           }
+          // Adopt orphaned replay state. When the ring has rotated this
+          // turn's message.start frame out, the replayed reasoning/tool
+          // deltas above ran while currentAssistantRef was still null, so
+          // they were tagged with messageId === undefined and never group
+          // onto the resumed assistant turn — the digest renders empty
+          // ("Working" with nothing under it). Re-tag every untagged trace
+          // and tool onto the assistant message we just ensured so the
+          // breakdown + live token meter render on reattach.
+          const adoptId = currentAssistantRef.current;
+          if (adoptId) {
+            setActivityTrace((prev) =>
+              prev.some((trace) => !trace.messageId)
+                ? prev.map((trace) =>
+                    trace.messageId ? trace : { ...trace, messageId: adoptId },
+                  )
+                : prev,
+            );
+            setTools((prev) =>
+              prev.some((tool) => !tool.messageId)
+                ? prev.map((tool) =>
+                    tool.messageId ? tool : { ...tool, messageId: adoptId },
+                  )
+                : prev,
+            );
+          }
           // Restore the running tool cards. The event ring can rotate a
           // long turn's tool.start frames out, so replay alone is not
           // enough — the gateway also hands back a snapshot of every tool
