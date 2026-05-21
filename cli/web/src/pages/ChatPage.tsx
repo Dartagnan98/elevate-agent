@@ -162,6 +162,10 @@ interface ChatMessage {
   // the fallback for turns rehydrated from cache/server.
   tools?: ToolEntry[];
   traces?: ActivityTrace[];
+  // Output tokens for this turn, frozen at message.complete. Prefers the
+  // real per-turn count from gateway usage; falls back to the live
+  // estimate when usage deltas aren't available.
+  tokenCount?: number;
 }
 
 type ArtifactKind = "diff" | "file" | "output";
@@ -565,6 +569,8 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
       warning: typeof entry.warning === "string" ? entry.warning : undefined,
       tools: Array.isArray(entry.tools) ? entry.tools : undefined,
       traces: Array.isArray(entry.traces) ? entry.traces : undefined,
+      tokenCount:
+        typeof entry.tokenCount === "number" ? entry.tokenCount : undefined,
     });
   });
   return normalized.length ? normalized : null;
@@ -696,16 +702,31 @@ function mergeServerWithCache(
   const fp = (m: ChatMessage) => `${m.role}:${m.content.slice(0, 200)}`;
   const serverFingerprints = new Set(serverMessages.map(fp));
 
-  // The server transcript doesn't carry tool/trace snapshots. Re-attach
-  // them from the cached counterpart so the activity digest renders on
-  // resumed turns. Match on the same fingerprint the tail logic uses.
+  // The server transcript doesn't carry tool/trace/token snapshots.
+  // Re-attach them from the cached counterpart so the activity digest
+  // renders on resumed turns. Match on the same fingerprint the tail
+  // logic uses.
   const cachedByFp = new Map<string, ChatMessage>();
   for (const msg of cached) cachedByFp.set(fp(msg), msg);
   const enriched = serverMessages.map((msg) => {
-    if (msg.tools?.length || msg.traces?.length) return msg;
+    const hasSnapshot =
+      !!msg.tools?.length ||
+      !!msg.traces?.length ||
+      typeof msg.tokenCount === "number";
+    if (hasSnapshot) return msg;
     const match = cachedByFp.get(fp(msg));
-    if (match && (match.tools?.length || match.traces?.length)) {
-      return { ...msg, tools: match.tools, traces: match.traces };
+    if (
+      match &&
+      (match.tools?.length ||
+        match.traces?.length ||
+        typeof match.tokenCount === "number")
+    ) {
+      return {
+        ...msg,
+        tools: match.tools,
+        traces: match.traces,
+        tokenCount: match.tokenCount,
+      };
     }
     return msg;
   });
@@ -1545,6 +1566,10 @@ export default function ChatPage() {
   // can snapshot the finished turn without a stale-closure read.
   const toolsRef = useRef<ToolEntry[]>([]);
   const activityTraceRef = useRef<ActivityTrace[]>([]);
+  // Cumulative session usage mirror + the output-token baseline captured
+  // at message.start, so message.complete can diff out this turn's tokens.
+  const usageRef = useRef<UsageInfo | null>(null);
+  const turnOutputBaselineRef = useRef<number | null>(null);
 
   const [info, setInfo] = useState<SessionInfo>({});
   const [usage, setUsage] = useState<UsageInfo | null>(null);
@@ -1876,6 +1901,10 @@ export default function ChatPage() {
   useEffect(() => {
     activityTraceRef.current = activityTrace;
   }, [activityTrace]);
+
+  useEffect(() => {
+    usageRef.current = usage;
+  }, [usage]);
 
   useEffect(() => {
     const persisted = persistedSessionIdRef.current;
@@ -2250,6 +2279,9 @@ export default function ChatPage() {
         currentAssistantRef.current = null;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant();
+        // Snapshot cumulative output tokens so message.complete can diff
+        // out exactly this turn's count.
+        turnOutputBaselineRef.current = usageRef.current?.output ?? null;
         setBusy(true);
         setStatusText("Working...");
         addActivityTrace("status", "Working...");
@@ -2296,14 +2328,37 @@ export default function ChatPage() {
             trace.messageId === messageId &&
             (trace.kind === "reasoning" || trace.kind === "thinking"),
         );
-        updateAssistant((message) => ({
-          ...message,
-          content: text || message.content,
-          status: status === "interrupted" ? "interrupted" : "complete",
-          warning: warning || undefined,
-          tools: turnTools.length ? turnTools : message.tools,
-          traces: turnTraces.length ? turnTraces : message.traces,
-        }));
+        // Freeze this turn's token count. Prefer the real per-turn output
+        // (cumulative-now minus the baseline captured at message.start);
+        // fall back to the live estimate when usage deltas aren't usable.
+        const completeUsage = normalizeUsage(compactToolPayload(ev.payload).usage);
+        const baseline = turnOutputBaselineRef.current;
+        const realTurnOutput =
+          completeUsage?.output != null &&
+          baseline != null &&
+          completeUsage.output >= baseline
+            ? completeUsage.output - baseline
+            : undefined;
+        turnOutputBaselineRef.current = null;
+
+        updateAssistant((message) => {
+          const finalContent = text || message.content;
+          const estimatedTurnTokens =
+            estimateTokens(finalContent) +
+            turnTraces.reduce(
+              (sum, trace) => sum + estimateTokens(trace.text),
+              0,
+            );
+          return {
+            ...message,
+            content: finalContent,
+            status: status === "interrupted" ? "interrupted" : "complete",
+            warning: warning || undefined,
+            tools: turnTools.length ? turnTools : message.tools,
+            traces: turnTraces.length ? turnTraces : message.traces,
+            tokenCount: realTurnOutput ?? (estimatedTurnTokens || undefined),
+          };
+        });
         if (text) {
           addArtifacts(artifactsFromText(text, "assistant", messageId));
         }
@@ -4206,6 +4261,7 @@ function MessageRow({
             busy={!!busy}
             liveTokens={liveTokens}
             startedAt={message.createdAt}
+            tokenCount={message.tokenCount}
             tools={tools ?? []}
           />
         ) : null}
@@ -4446,6 +4502,7 @@ function ChatActivityDigest({
   busy,
   liveTokens,
   startedAt,
+  tokenCount,
   tools,
 }: {
   activityTrace: ActivityTrace[];
@@ -4453,6 +4510,7 @@ function ChatActivityDigest({
   busy: boolean;
   liveTokens?: number;
   startedAt?: number;
+  tokenCount?: number;
   tools: ToolEntry[];
 }) {
   const [open, setOpen] = useState(false);
@@ -4495,6 +4553,9 @@ function ChatActivityDigest({
         <span>
           Worked for {duration}
           {steps.length > 0 && ` · ${plural(steps.length, "step")}`}
+          {typeof tokenCount === "number" && tokenCount > 0
+            ? ` · ${tokenCount.toLocaleString()} tokens`
+            : ""}
         </span>
         <ChevronDown
           className={cn(
