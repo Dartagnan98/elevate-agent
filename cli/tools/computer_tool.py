@@ -58,6 +58,22 @@ _SPECIAL_KEYS = {
 _MODIFIERS = {"cmd", "command", "ctrl", "control", "alt", "option", "shift", "fn"}
 _MOD_MAP = {"command": "cmd", "control": "ctrl", "option": "alt"}
 
+# macOS key chords that lock the screen, sleep the Mac, or log the user out.
+# Modifier sets use cliclick-normalized names (cmd/ctrl/alt/shift/fn) and are
+# matched unordered, so chord direction does not matter. If the computer tool
+# fires one of these mid-task it strands both the agent and the user behind
+# the login window — so _do_key refuses them outright.
+#   cmd+ctrl+q          → Lock Screen
+#   cmd+shift+q         → Log Out (with dialog)
+#   cmd+shift+alt+q     → Log Out immediately
+_LOCKOUT_COMBOS = {
+    (frozenset({"cmd", "ctrl"}), "q"),
+    (frozenset({"cmd", "shift"}), "q"),
+    (frozenset({"cmd", "shift", "alt"}), "q"),
+    (frozenset({"cmd", "shift", "ctrl"}), "q"),
+    (frozenset({"cmd", "shift", "ctrl", "alt"}), "q"),
+}
+
 
 # Homebrew installs cliclick here, but launchd-spawned processes (the Elevate
 # gateway) often run with a minimal PATH that excludes these dirs — so
@@ -322,6 +338,19 @@ def _do_key(spec: str) -> tuple[bool, str]:
     if len(keys) != 1:
         return False, f"key spec must have exactly one non-modifier key: {spec!r}"
     key = keys[0]
+
+    # Guard against chords that lock, sleep, or log out the Mac — these strand
+    # the agent (and the user) behind the login window mid-task. Compared as an
+    # unordered modifier set so "cmd+ctrl+q" and "ctrl+cmd+q" both match.
+    _modset = frozenset(mods)
+    if (_modset, key) in _LOCKOUT_COMBOS:
+        return False, (
+            f"Refused key chord {spec!r}: it locks / sleeps / logs out the "
+            f"Mac, which would strand this session behind the login window. "
+            f"Lock-screen and logout shortcuts are blocked for the computer "
+            f"tool. If you meant to quit an app, use 'cmd+q' alone."
+        )
+
     cmds: list[str] = []
     if mods:
         cmds.append("kd:" + ",".join(mods))
