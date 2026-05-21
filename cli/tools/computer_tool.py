@@ -84,6 +84,45 @@ def check_computer_requirements() -> bool:
     return sys.platform == "darwin" and _find_cliclick() is not None
 
 
+# When a computer-use action fails for lack of a macOS permission, route the
+# user straight to the exact Privacy & Security pane that fixes it instead of
+# leaving them to hunt for it (or to dismiss a recurring consent dialog that
+# never sticks). Each pane is opened at most once per process so System
+# Settings is never spammed.
+_PRIVACY_PANES = {
+    "full_disk": ("Privacy_AllFiles", "Full Disk Access"),
+    "accessibility": ("Privacy_Accessibility", "Accessibility"),
+    "screen": ("Privacy_ScreenCapture", "Screen Recording"),
+    "automation": ("Privacy_Automation", "Automation"),
+}
+_PRIVACY_PANES_OPENED: set[str] = set()
+
+
+def _route_to_permission(pane: str) -> str:
+    """Open the relevant Privacy & Security pane once and return guidance."""
+    anchor, label = _PRIVACY_PANES.get(pane, ("", pane))
+    if anchor and pane not in _PRIVACY_PANES_OPENED:
+        _PRIVACY_PANES_OPENED.add(pane)
+        try:
+            subprocess.run(
+                [
+                    "open",
+                    "x-apple.systempreferences:com.apple.preference."
+                    f"security?{anchor}",
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
+    return (
+        f" This action needs the macOS '{label}' permission. Opened System "
+        f"Settings > Privacy & Security > {label} — switch 'Elevate' ON there "
+        f"(add it with the + button if it is not listed; the app is at "
+        f"~/Applications/Elevate.app), then retry."
+    )
+
+
 def _cliclick(*commands: str, timeout: float = 15.0) -> tuple[bool, str]:
     binary = _find_cliclick()
     if not binary:
@@ -102,7 +141,8 @@ def _cliclick(*commands: str, timeout: float = 15.0) -> tuple[bool, str]:
         return False, "cliclick timed out"
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
-        return False, err or "cliclick failed (check Accessibility permission)"
+        base = err or "cliclick failed"
+        return False, base + _route_to_permission("accessibility")
     return True, (proc.stdout or "").strip()
 
 
@@ -141,10 +181,7 @@ def _take_screenshot() -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "screencapture timed out"
     if proc.returncode != 0 or not out_path.exists():
-        return False, (
-            "screencapture failed — grant the gateway Screen Recording "
-            "permission in System Settings > Privacy & Security."
-        )
+        return False, "screencapture failed." + _route_to_permission("screen")
     # Downscale Retina pixels to logical points so coordinates the agent
     # reads off the screenshot match what cliclick will click.
     logical = _logical_size()
@@ -254,7 +291,7 @@ def _ui_snapshot() -> tuple[bool, str]:
         # A hung osascript is almost always a TCC dialog blocking the call.
         # Latch off so the next call can't spawn another blocking dialog.
         _UI_SNAPSHOT_DISABLED = True
-        return False, _UI_SNAPSHOT_FALLBACK
+        return False, _UI_SNAPSHOT_FALLBACK + _route_to_permission("full_disk")
     err = (proc.stderr or "").strip()
     out = (proc.stdout or "").strip()
     # entire-contents failures (Electron apps, missing Accessibility grant)
@@ -268,6 +305,7 @@ def _ui_snapshot() -> tuple[bool, str]:
             f"ui_snapshot could not read the UI tree ({detail}). It is now "
             f"disabled for this session — do NOT retry it. Use action "
             f"'screenshot' + vision_analyze instead; that always works."
+            + _route_to_permission("full_disk")
         )
     return True, out
 
