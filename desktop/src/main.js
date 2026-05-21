@@ -4,6 +4,7 @@ const {
   Menu,
   dialog,
   ipcMain,
+  session,
   shell,
   screen,
 } = require("electron");
@@ -466,7 +467,25 @@ function loadAppPath(pathname = START_PATH) {
   mainWindow.loadURL(`${backendUrl}${pathname}`);
 }
 
+// Grant microphone access to the in-app voice-input feature. Without an
+// explicit handler some Electron builds deny `media` requests, which makes
+// getUserMedia (used by the chat composer's voice button) fail silently.
+// macOS still gates the device behind its own TCC prompt — backed by the
+// NSMicrophoneUsageDescription string Electron ships in Info.plist.
+function setupPermissions() {
+  const ses = session.defaultSession;
+  if (!ses) return;
+  ses.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === "media" || permission === "audioCapture");
+  });
+  // The dashboard is a local, trusted origin. Keep the permission check
+  // permissive so getUserMedia's pre-flight passes without tightening any
+  // other permission the app already relied on.
+  ses.setPermissionCheckHandler(() => true);
+}
+
 async function startDesktop() {
+  setupPermissions();
   createWindow();
   createMenu();
   createOverlay();

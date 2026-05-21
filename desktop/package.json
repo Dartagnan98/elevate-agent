@@ -21,6 +21,9 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Elevate uses the microphone for voice input in chat."
+      },
       "target": [
         "dmg",
         "zip"
