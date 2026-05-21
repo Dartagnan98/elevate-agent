@@ -3770,7 +3770,8 @@ export default function ChatPage() {
                   onApply={applyComposerCompletion}
                 />
 
-                <div className="relative min-h-7">
+                <div className="flex items-end gap-1">
+                  <div className="relative min-h-7 flex-1">
                   <ComposerRichInputLayer
                     input={input}
                     layerRef={richLayerRef}
@@ -3781,7 +3782,7 @@ export default function ChatPage() {
                     aria-controls="slash-popover-listbox"
                     aria-label="Message Elevate Agent"
                     className={cn(
-                      "relative z-10 max-h-40 min-h-7 w-full resize-none bg-transparent pl-2 pr-9 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
+                      "relative z-10 max-h-40 min-h-7 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
                       "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
                       input
                         ? "text-transparent"
@@ -3835,10 +3836,11 @@ export default function ChatPage() {
                     spellCheck
                     value={input}
                   />
+                  </div>
                   <button
                     aria-label={busy ? "Interrupt response" : "Send message"}
                     className={cn(
-                      "absolute bottom-0 right-0 z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
+                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
                       busy
                         ? "bg-[var(--chat-text)] text-[var(--chat-bg)]"
                         : canSend
@@ -4200,7 +4202,7 @@ function ComposerRichInputLayer({
   if (!input) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden pl-2 pr-9 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)]">
+    <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)]">
       <div
         ref={layerRef}
         className="whitespace-pre-wrap break-words"
