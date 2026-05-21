@@ -3878,7 +3878,7 @@ export default function ChatPage() {
                     {busy ? (
                       <span className="h-3 w-3 rounded-[0.22rem] bg-current" />
                     ) : (
-                      <CornerDownLeft className="h-4 w-4" />
+                      <CornerDownLeft className="h-4 w-4 -translate-y-[1.5px]" />
                     )}
                   </button>
                 </div>
