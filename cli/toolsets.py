@@ -90,6 +90,12 @@ TOOLSETS = {
         "tools": ["video_analyze"],
         "includes": []
     },
+
+    "computer": {
+        "description": "Control the macOS desktop — drive native apps via mouse, keyboard, and screenshots (opt-in, macOS only, needs Accessibility + Screen Recording permissions)",
+        "tools": ["computer"],
+        "includes": []
+    },
     
     "image_gen": {
         "description": "Creative generation tools (images)",
