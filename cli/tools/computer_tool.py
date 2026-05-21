@@ -159,20 +159,25 @@ def _take_screenshot() -> tuple[bool, str]:
     return True, str(out_path)
 
 
+# NOTE: do not name a variable `result` — it is AppleScript's implicit
+# last-command variable, silently overwritten by every command (so
+# `result & "text"` ends up coercing the last command's object, e.g. a
+# window, into a string and throws -1700). Use `outText` instead.
 _UI_SNAPSHOT_SCRIPT = r'''
 tell application "System Events"
     set frontApp to first application process whose frontmost is true
     set appName to name of frontApp
-    set result to "frontmost app: " & appName & linefeed
+    set outText to "frontmost app: " & appName & linefeed
     set wantRoles to {"AXButton", "AXMenuButton", "AXPopUpButton", ¬
         "AXTextField", "AXTextArea", "AXCheckBox", "AXRadioButton", ¬
         "AXLink", "AXTab", "AXSlider", "AXComboBox"}
     try
         if (count of windows of frontApp) is 0 then
-            return result & "(no windows)"
+            return outText & "(no windows)"
         end if
         set w to window 1 of frontApp
-        set result to result & "window: " & (name of w) & linefeed
+        set winName to (name of w) as text
+        set outText to outText & "window: " & winName & linefeed
         set els to entire contents of w
         set shown to 0
         repeat with el in els
@@ -182,27 +187,38 @@ tell application "System Events"
                 if elRole is in wantRoles then
                     set elName to ""
                     try
-                        set elName to (name of el) as text
+                        set rawName to name of el
+                        if rawName is not missing value then ¬
+                            set elName to rawName as text
                     end try
                     if elName is "" then
                         try
-                            set elName to (description of el) as text
+                            set rawDesc to description of el
+                            if rawDesc is not missing value then ¬
+                                set elName to rawDesc as text
                         end try
                     end if
+                    if elName is "" then set elName to "(unlabeled)"
                     set elPos to position of el
                     set elSize to size of el
                     set cx to ((item 1 of elPos) + ((item 1 of elSize) / 2)) as integer
                     set cy to ((item 2 of elPos) + ((item 2 of elSize) / 2)) as integer
-                    set result to result & elRole & " | " & elName & ¬
+                    set outText to outText & elRole & " | " & elName & ¬
                         " | click=" & cx & "," & cy & linefeed
                     set shown to shown + 1
                 end if
             end try
         end repeat
-    on error errMsg
-        set result to result & "(no window detail: " & errMsg & ")"
+    on error errMsg number errNum
+        -- errMsg can hold an uncoercible object reference (Electron apps),
+        -- so coercing it can itself throw — fall back to the numeric code.
+        try
+            set outText to outText & "(no window detail: " & (errMsg as text) & ")"
+        on error
+            set outText to outText & "(no window detail: AX error " & errNum & ")"
+        end try
     end try
-    return result
+    return outText
 end tell
 '''
 

@@ -86,7 +86,10 @@ class ResponsesApiTransport(ProviderTransport):
             elif reasoning_config.get("effort"):
                 reasoning_effort = reasoning_config["effort"]
 
-        _effort_clamp = {"minimal": "low"}
+        # The Codex Responses route accepts low / medium / high. Map the
+        # Elevate-internal extremes onto the nearest accepted value so a
+        # `minimal` or `xhigh` setting doesn't 400 the request.
+        _effort_clamp = {"minimal": "low", "xhigh": "high"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
         kwargs = {
