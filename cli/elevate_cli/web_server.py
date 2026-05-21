@@ -1900,6 +1900,9 @@ def _preview_roots() -> list[Path]:
         PROJECT_ROOT,
         get_elevate_home(),
         Path(tempfile.gettempdir()),
+        # macOS: tempfile.gettempdir() returns /var/folders/.../T, not /tmp.
+        # Agents routinely write artifacts to /tmp, so allow it explicitly.
+        Path("/tmp"),
     ]
     resolved: list[Path] = []
     for root in roots:
