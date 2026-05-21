@@ -4602,7 +4602,7 @@ function ArtifactPreviewPane({
           <div className="relative h-full w-full">
             <iframe
               className="absolute inset-0 h-full w-full bg-[var(--chat-bg)]"
-              src={blobUrl}
+              src={`${blobUrl}#navpanes=0&view=FitH`}
               title={artifact.title}
             />
             <noscript>
