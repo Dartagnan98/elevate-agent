@@ -2526,7 +2526,6 @@ export default function ChatPage() {
           );
         }
 
-        let pendingAfterResume = false;
         if (resumeWarning) {
           setMessages([
             {
@@ -2550,7 +2549,6 @@ export default function ChatPage() {
             if (persistedSessionIdRef.current) {
               rememberTranscript(persistedSessionIdRef.current, merged);
             }
-            pendingAfterResume = hasPendingTurn(merged);
           }
         } else if (!resumeId && !historyHydratedRef.current) {
           setMessages([]);
@@ -2581,7 +2579,14 @@ export default function ChatPage() {
           // banner — reattach should be visually identical to the
           // moment the user left, only forward progress should appear.
           setBusy(true);
-        } else if (!pendingAfterResume) {
+        } else {
+          // Gateway confirms no live turn. The transcript may still end
+          // on a user message (pendingAfterResume) because the agent
+          // died mid-turn when the tab detached — but a pending-looking
+          // turn that the gateway is NOT running is a dead turn, not a
+          // resuming one. Clearing busy unconditionally here unlocks the
+          // composer instead of leaving it stuck behind a permanent
+          // "Resuming work" spinner the gateway will never finish.
           setBusy(false);
           setStatusText("Ready");
         }
