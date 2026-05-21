@@ -535,10 +535,34 @@ def _get_approval_config() -> dict:
         return {}
 
 
+# Claude-style permission_mode → internal approval mode. acceptEdits and plan
+# both fall back to manual approvals until dedicated agent-runtime support
+# lands; the UI still surfaces them as distinct selectable modes.
+_PERMISSION_MODE_TO_APPROVAL = {
+    "default": "manual",
+    "acceptedits": "manual",
+    "plan": "manual",
+    "bypasspermissions": "off",
+}
+
+
 def _get_approval_mode() -> str:
-    """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
-    mode = _get_approval_config().get("mode", "manual")
-    return _normalize_approval_mode(mode)
+    """Read the effective approval mode. Returns 'manual', 'smart', or 'off'.
+
+    ``approvals.permission_mode`` (Claude-style schema) takes precedence over
+    the legacy ``approvals.mode`` when set. The lone exception: a ``default``
+    permission_mode still honors a directly-configured legacy ``smart`` mode so
+    power users on smart approvals are not silently downgraded.
+    """
+    cfg = _get_approval_config()
+    pmode = str(cfg.get("permission_mode", "") or "").strip().lower()
+    if pmode:
+        if pmode == "default":
+            legacy = _normalize_approval_mode(cfg.get("mode", "manual"))
+            if legacy == "smart":
+                return "smart"
+        return _PERMISSION_MODE_TO_APPROVAL.get(pmode, "manual")
+    return _normalize_approval_mode(cfg.get("mode", "manual"))
 
 
 def _get_approval_timeout() -> int:

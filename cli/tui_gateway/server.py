@@ -3532,6 +3532,17 @@ def _(rid, params: dict) -> dict:
                 agent.verbose_logging = nv == "verbose"
         return _ok(rid, {"key": key, "value": nv})
 
+    if key == "permission_mode":
+        nv = str(value or "").strip()
+        allowed_pm = {"default", "acceptEdits", "plan", "bypassPermissions"}
+        # Accept case-insensitive input but persist the canonical casing.
+        canon = {m.lower(): m for m in allowed_pm}
+        resolved = canon.get(nv.lower())
+        if resolved is None:
+            return _err(rid, 4002, f"unknown permission_mode: {value}")
+        _write_config_key("approvals.permission_mode", resolved)
+        return _ok(rid, {"key": key, "value": resolved})
+
     if key == "yolo":
         try:
             if session:
@@ -3801,6 +3812,17 @@ def _(rid, params: dict) -> dict:
             display.get("tui_statusbar", "top") if isinstance(display, dict) else "top"
         )
         return _ok(rid, {"value": _coerce_statusbar(raw)})
+    if key == "permission_mode":
+        approvals = _load_cfg().get("approvals")
+        raw = (
+            approvals.get("permission_mode", "default")
+            if isinstance(approvals, dict)
+            else "default"
+        )
+        allowed_pm = {"default", "acceptEdits", "plan", "bypassPermissions"}
+        canon = {m.lower(): m for m in allowed_pm}
+        nv = canon.get(str(raw or "").strip().lower(), "default")
+        return _ok(rid, {"value": nv})
     if key == "mtime":
         cfg_path = _elevate_home / "config.yaml"
         try:

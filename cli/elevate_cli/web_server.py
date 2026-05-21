@@ -503,6 +503,13 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Dangerous command approval mode",
         "options": ["ask", "yolo", "deny"],
     },
+    "approvals.permission_mode": {
+        "type": "select",
+        "description": "Tool permission mode (Claude-style). Overrides 'mode' when set: "
+        "default = ask first, acceptEdits = auto-accept file edits, "
+        "plan = read-only, bypassPermissions = never ask",
+        "options": ["default", "acceptEdits", "plan", "bypassPermissions"],
+    },
     "context.engine": {
         "type": "select",
         "description": "Context management engine",

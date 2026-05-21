@@ -32,6 +32,7 @@ import {
   CornerDownLeft,
   Dot,
   ExternalLink,
+  Eye,
   FileCode2,
   FilePen,
   FileText,
@@ -46,6 +47,7 @@ import {
   Pin,
   Plug,
   Search,
+  Shield,
   ShieldAlert,
   Sparkle,
   Sparkles,
@@ -430,6 +432,63 @@ const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
     status: "ready",
   },
 ];
+
+/* Claude-style tool permission modes. Surfaced in the composer action bar
+   and persisted server-side via `config.set permission_mode`. acceptEdits
+   and plan currently fall back to manual approvals on the gateway until
+   dedicated agent-runtime support lands — the selector still presents them
+   so the UX is in place. */
+interface PermissionMode {
+  id: "default" | "acceptEdits" | "plan" | "bypassPermissions";
+  label: string;
+  short: string;
+  description: string;
+  icon: LucideIcon;
+  tone: string;
+}
+
+const PERMISSION_MODES: PermissionMode[] = [
+  {
+    id: "default",
+    label: "Ask first",
+    short: "Ask first",
+    description: "Prompt for approval before every risky action.",
+    icon: Shield,
+    tone: "var(--chat-muted-strong)",
+  },
+  {
+    id: "acceptEdits",
+    label: "Accept edits",
+    short: "Accept edits",
+    description: "Auto-accept file edits, still ask for everything else.",
+    icon: FilePen,
+    tone: "var(--chat-muted-strong)",
+  },
+  {
+    id: "plan",
+    label: "Plan mode",
+    short: "Plan mode",
+    description: "Read-only — no commands run, planning pass only.",
+    icon: Eye,
+    tone: "var(--chat-muted-strong)",
+  },
+  {
+    id: "bypassPermissions",
+    label: "Bypass permissions",
+    short: "Bypass perms",
+    description: "Never ask — run every action without approval.",
+    icon: ShieldAlert,
+    tone: "var(--chat-accent)",
+  },
+];
+
+const DEFAULT_PERMISSION_MODE = PERMISSION_MODES[0];
+
+function resolvePermissionMode(id: string | undefined | null): PermissionMode {
+  return (
+    PERMISSION_MODES.find((mode) => mode.id === id) ?? DEFAULT_PERMISSION_MODE
+  );
+}
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   closed: "closed",
@@ -1719,6 +1778,8 @@ export default function ChatPage() {
   );
   const [selectedAgentId, setSelectedAgentId] = useState("executive-assistant");
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [permissionModeId, setPermissionModeId] = useState<string>("default");
+  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [resumeFallback, setResumeFallback] = useState(false);
   const [portalRoot] = useState<HTMLElement | null>(() =>
@@ -2950,6 +3011,48 @@ export default function ChatPage() {
     };
   }, [busy, gw, sessionId, state]);
 
+  // Load the persisted Claude-style permission mode once the gateway is up.
+  useEffect(() => {
+    if (state !== "open") return;
+    let cancelled = false;
+    gw
+      .request<{ value?: string }>("config.get", { key: "permission_mode" }, 8_000)
+      .then((res) => {
+        if (!cancelled && res?.value) setPermissionModeId(res.value);
+      })
+      .catch(() => {
+        /* permission mode is non-critical to chat */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gw, state]);
+
+  const selectPermissionMode = useCallback(
+    (mode: PermissionMode) => {
+      setPermissionMenuOpen(false);
+      setPermissionModeId((previous) => {
+        if (previous === mode.id) return previous;
+        void gw
+          .request(
+            "config.set",
+            { key: "permission_mode", value: mode.id },
+            8_000,
+          )
+          .catch((error: Error) => {
+            setPermissionModeId(previous);
+            setStatusText(
+              `Could not change permission mode: ${error.message}`,
+            );
+          });
+        return mode.id;
+      });
+      setStatusText(`Permission mode: ${mode.label}`);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [gw],
+  );
+
   const selectComposerAgent = useCallback(
     (agent: ComposerAgent) => {
       setSelectedAgentId(agent.id);
@@ -4085,6 +4188,12 @@ export default function ChatPage() {
                 micDevices={micDevices}
                 selectedMicId={selectedMicId}
                 voiceMenuOpen={voiceMenuOpen}
+                permissionMode={resolvePermissionMode(permissionModeId)}
+                permissionMenuOpen={permissionMenuOpen}
+                onTogglePermissionMenu={() =>
+                  setPermissionMenuOpen((open) => !open)
+                }
+                onSelectPermissionMode={selectPermissionMode}
                 selectedAgent={selectedAgent}
                 usage={usage}
                 voiceListening={voiceListening}
@@ -4502,6 +4611,10 @@ function ComposerActionBar({
   onToggleAgentMenu,
   onToggleVoice,
   onToggleVoiceMenu,
+  permissionMode,
+  permissionMenuOpen,
+  onTogglePermissionMenu,
+  onSelectPermissionMode,
   selectedAgent,
   selectedMicId,
   usage,
@@ -4523,6 +4636,10 @@ function ComposerActionBar({
   onToggleAgentMenu(): void;
   onToggleVoice(): void;
   onToggleVoiceMenu(): void;
+  permissionMode: PermissionMode;
+  permissionMenuOpen: boolean;
+  onTogglePermissionMenu(): void;
+  onSelectPermissionMode(mode: PermissionMode): void;
   selectedAgent: ComposerAgent;
   selectedMicId: string;
   usage: UsageInfo | null;
@@ -4610,12 +4727,75 @@ function ComposerActionBar({
           )}
         </div>
 
-        <span
-          className="text-[0.7rem] text-[var(--chat-muted-strong)]"
-          title="Tool access"
-        >
-          Full access
-        </span>
+        </div>
+
+        {/* Permission mode picker. Sits OUTSIDE the overflow box above so
+            its upward-opening menu is not clipped (overflow-x:auto forces
+            overflow-y to auto per CSS spec). */}
+        <div className="relative flex shrink-0 items-center">
+          <button
+            type="button"
+            onClick={onTogglePermissionMenu}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[0.7rem] transition-colors",
+              "hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+              permissionMenuOpen && "text-[var(--chat-text)]",
+            )}
+            style={{ color: permissionMode.tone }}
+            title={`Permission mode: ${permissionMode.label}`}
+            aria-label="Choose permission mode"
+          >
+            <permissionMode.icon className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{permissionMode.short}</span>
+            <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />
+          </button>
+
+          {permissionMenuOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-20"
+                onClick={onTogglePermissionMenu}
+              />
+              <div
+                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[19rem] overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1.5 text-left"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onTogglePermissionMenu();
+                  }
+                }}
+                role="menu"
+              >
+                <div className="px-2.5 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-[var(--chat-muted)]">
+                  Permission mode
+                </div>
+                {PERMISSION_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => onSelectPermissionMode(mode)}
+                    className={cn(
+                      "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
+                      permissionMode.id === mode.id
+                        ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+                        : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+                    )}
+                  >
+                    <mode.icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-semibold">
+                        {mode.label}
+                      </span>
+                      <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
+                        {mode.description}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         <div className="relative flex shrink-0 items-center">

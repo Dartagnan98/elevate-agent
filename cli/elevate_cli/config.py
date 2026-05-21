@@ -1186,8 +1186,15 @@ DEFAULT_CONFIG = {
     # cron_mode — what to do when a cron job hits a dangerous command:
     #   deny    — block the command and let the agent find another way (default, safe)
     #   approve — auto-approve all dangerous commands in cron jobs
+    # permission_mode — Claude-style tool permission schema. Takes precedence
+    # over ``mode`` when set. One of:
+    #   default          — ask before every dangerous action
+    #   acceptEdits      — auto-accept file edits, still ask for other actions
+    #   plan             — read-only, no execution (planning pass)
+    #   bypassPermissions — never ask (maps to mode=off)
     "approvals": {
         "mode": "manual",
+        "permission_mode": "default",
         "timeout": 60,
         "cron_mode": "deny",
     },
