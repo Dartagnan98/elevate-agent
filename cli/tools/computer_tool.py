@@ -45,6 +45,11 @@ _VALID_ACTIONS = set(_CLICK_ACTIONS) | {
     "key",
     "scroll",
 }
+# Actions that post real mouse / keyboard events. If the Mac is locked these
+# land in the login window (a URL typed into the password field, etc), so
+# they are refused while the lock screen is up. screenshot / ui_snapshot are
+# read-only and stay allowed — a screenshot of the lock screen is useful.
+_INPUT_ACTIONS = set(_CLICK_ACTIONS) | {"type", "key", "scroll"}
 
 # cliclick key names accepted for the `key` action (single keys / chord parts
 # that are not plain characters). Modifiers are handled separately.
@@ -371,19 +376,64 @@ def _do_key(spec: str) -> tuple[bool, str]:
     return _cliclick(*cmds)
 
 
-def _keep_awake() -> None:
-    """Keep the display awake while the computer tool is in use.
+# The Elevate desktop app polls this file's mtime and shows a pulsing
+# screen-edge glow while it is fresh — so the user always sees when the
+# agent is driving their Mac. The keep-awake watcher tracks the same file.
+_IN_USE_FLAG = Path.home() / ".elevate" / "computer-use-active"
 
-    An idle Mac dims, sleeps the display, runs the screensaver, then hits the
-    idle lock — any of which strands the agent mid-task. `caffeinate -u`
-    declares user activity, which wakes the display now and resets the idle
-    timer; `-t 90` lets the assertion lapse 90s after the agent goes quiet so
-    the Mac is not pinned awake forever. Fire-and-forget, called once per
-    computer action, so a continuous agent run never lets the screen idle.
+# Unique substring planted in the keep-awake process' args so a later
+# computer action can `pgrep -f` it and avoid stacking duplicate watchers.
+_CAFFEINATE_MARKER = "elevate-computer-use-keepawake"
+
+
+def _signal_in_use() -> None:
+    """Touch the in-use flag file that drives the desktop 'controlling your
+    Mac' glow overlay and the keep-awake watcher. Fire-and-forget, called
+    once per computer action."""
+    try:
+        _IN_USE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        _IN_USE_FLAG.write_text(str(int(time.time())))
+    except Exception:
+        pass
+
+
+def _keep_awake() -> None:
+    """Keep the Mac fully awake for as long as the agent is driving it.
+
+    An idle Mac dims, runs the screensaver, then drops to the idle lock — and
+    once it locks, every click and keystroke the agent sends lands in the
+    login window (a URL gets typed into the password field, etc). The only
+    real fix is to never let it idle while the tool is in use.
+
+    A single `caffeinate -dimsu` holds the no-sleep + user-active assertions
+    for the lifetime of the shell loop it wraps. That loop stays alive while
+    the in-use flag is fresh (touched by `_signal_in_use` every action) and
+    exits ~150s after the agent goes quiet, so caffeinate releases and the
+    Mac is never pinned awake forever. One watcher at a time — a `pgrep`
+    guard skips spawning a second. `_signal_in_use` must run first so the
+    flag exists when the loop starts.
     """
     try:
+        existing = subprocess.run(
+            ["/usr/bin/pgrep", "-f", _CAFFEINATE_MARKER],
+            capture_output=True, text=True, timeout=4,
+        )
+        if existing.returncode == 0 and existing.stdout.strip():
+            return  # a keep-awake watcher is already running
+    except Exception:
+        pass  # pgrep failed — fall through and (re)spawn rather than risk none
+
+    flag = str(_IN_USE_FLAG)
+    # `: marker` is a shell no-op that plants _CAFFEINATE_MARKER in the args.
+    loop = (
+        f": {_CAFFEINATE_MARKER}; "
+        f'while [ -f "{flag}" ] && '
+        f'[ $(( $(date +%s) - $(cat "{flag}" 2>/dev/null || echo 0) )) -lt 150 ]; '
+        f"do sleep 5; done"
+    )
+    try:
         subprocess.Popen(
-            ["caffeinate", "-u", "-t", "90"],
+            ["/usr/bin/caffeinate", "-dimsu", "/bin/sh", "-c", loop],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -392,31 +442,60 @@ def _keep_awake() -> None:
         pass
 
 
-# The Elevate desktop app polls this file's mtime and shows a pulsing
-# screen-edge glow while it is fresh — so the user always sees when the
-# agent is driving their Mac.
-_IN_USE_FLAG = Path.home() / ".elevate" / "computer-use-active"
+# JXA: ask the window server whether the login/lock window is up. The
+# session dictionary carries the CGSSessionScreenIsLocked key only while the
+# screen is locked, so unwrapping it to undefined means unlocked. Prints
+# "locked" / "unlocked" / "unknown". Runs fine even while the screen is
+# locked. Verified working on macOS 2026 (CoreGraphics + Foundation bridge).
+_LOCK_CHECK_JXA = (
+    'ObjC.import("CoreGraphics");'
+    'ObjC.import("Foundation");'
+    "try {"
+    "  var d = $.CGSessionCopyCurrentDictionary();"
+    "  if (!d) { 'unknown' }"
+    "  else {"
+    "    var nd = $.NSDictionary.dictionaryWithDictionary(d);"
+    "    var v = ObjC.unwrap(nd.objectForKey('CGSSessionScreenIsLocked'));"
+    "    v ? 'locked' : 'unlocked'"
+    "  }"
+    "} catch (e) { 'unknown' }"
+)
 
 
-def _signal_in_use() -> None:
-    """Touch the in-use flag file that drives the desktop 'controlling your
-    Mac' glow overlay. Fire-and-forget, called once per computer action."""
+def _screen_is_locked() -> bool:
+    """True only when the Mac is *definitely* at the lock / login screen.
+
+    Fail-open: if the check errors or is inconclusive, return False so a flaky
+    probe never blocks legitimate use. Used to refuse clicks/keystrokes that
+    would otherwise land in the password field.
+    """
     try:
-        _IN_USE_FLAG.parent.mkdir(parents=True, exist_ok=True)
-        _IN_USE_FLAG.write_text(str(int(time.time())))
+        out = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", _LOCK_CHECK_JXA],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() == "locked"
     except Exception:
-        pass
+        return False
 
 
 def computer_tool(args: dict) -> str:
     if sys.platform != "darwin":
         return tool_error("The computer tool is macOS-only.")
+    _signal_in_use()  # must run before _keep_awake so the flag exists
     _keep_awake()
-    _signal_in_use()
     action = (args.get("action") or "").strip()
     if action not in _VALID_ACTIONS:
         return tool_error(
             f"Unknown action {action!r}. Valid: {sorted(_VALID_ACTIONS)}"
+        )
+
+    if action in _INPUT_ACTIONS and _screen_is_locked():
+        return tool_error(
+            f"The Mac is at the lock / login screen — a {action!r} now would "
+            "land in the password field, not the app. Stop here and ask the "
+            "user to unlock the Mac with Touch ID or their password. Do not "
+            "retry clicks or keystrokes until it is unlocked."
         )
 
     if action == "screenshot":
