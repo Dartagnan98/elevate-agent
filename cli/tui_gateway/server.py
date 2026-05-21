@@ -1295,6 +1295,57 @@ def _apply_personality_to_session(
         return False, None
 
 
+def _apply_agent_lane(session: dict, agent_id: str) -> None:
+    """Apply a selected agent-hub lane as an ephemeral_system_prompt overlay.
+
+    The base ephemeral prompt (personality / config system prompt) is captured
+    once per session so switching lanes never loses it. Selecting the default
+    'executive-assistant' lane clears any overlay and restores the base prompt.
+    The overlay is appended, not substituted, so the base persona, tools, and
+    Hub context all stay in force under the selected lane.
+    """
+    agent = session.get("agent")
+    if not agent:
+        return
+    wanted = (agent_id or "").strip().lower()
+    if not wanted:
+        return
+    if "agent_base_ephemeral" not in session:
+        session["agent_base_ephemeral"] = (
+            getattr(agent, "ephemeral_system_prompt", None) or ""
+        )
+    if session.get("agent_lane_id") == wanted:
+        return
+
+    base = session["agent_base_ephemeral"]
+    overlay = ""
+    if wanted != "executive-assistant":
+        try:
+            from elevate_cli.agent_hub import get_agent_def
+
+            adef = get_agent_def(wanted)
+        except Exception:
+            adef = None
+        if adef:
+            name = str(adef.get("name") or wanted).strip()
+            desc = str(adef.get("description") or "").strip()
+            lane_prompt = str(adef.get("prompt") or "").strip()
+            lines = [f"You are now operating as the {name} agent."]
+            if desc:
+                lines.append(desc)
+            if lane_prompt:
+                lines.append(lane_prompt)
+            overlay = "\n".join(lines).strip()
+
+    if overlay:
+        new_prompt = (base + "\n\n" + overlay).strip() if base else overlay
+    else:
+        new_prompt = base
+    agent.ephemeral_system_prompt = new_prompt or None
+    agent._cached_system_prompt = None
+    session["agent_lane_id"] = wanted
+
+
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _load_cfg()
 
@@ -1341,6 +1392,8 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     finally:
         _clear_session_context(tokens)
     session["agent"] = new_agent
+    session.pop("agent_base_ephemeral", None)
+    session.pop("agent_lane_id", None)
     session["attached_images"] = []
     session["attached_videos"] = []
     session["attached_files"] = []
@@ -2786,9 +2839,15 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
     persist_user_message = params.get("persist_user_message")
+    agent_id = str(params.get("agent_id") or "").strip()
     session, err = _sess(params, rid)
     if err:
         return err
+    if agent_id:
+        try:
+            _apply_agent_lane(session, agent_id)
+        except Exception:
+            logger.exception("failed to apply agent lane %s", agent_id)
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")

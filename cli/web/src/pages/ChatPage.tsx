@@ -200,6 +200,7 @@ interface ArtifactEntry {
 }
 
 interface QueuedInput {
+  agentId: string;
   createdAt: number;
   id: string;
   routedText: string;
@@ -857,6 +858,7 @@ function normalizeStoredQueue(value: unknown): QueuedInput[] {
     const routedText = typeof e.routedText === "string" ? e.routedText : text;
     if (!text) return;
     out.push({
+      agentId: typeof e.agentId === "string" ? e.agentId : "",
       createdAt: typeof e.createdAt === "number" ? e.createdAt : Date.now() - index,
       id: typeof e.id === "string" && e.id ? e.id : id(`queued-${index}`),
       routedText,
@@ -1361,19 +1363,11 @@ const HUB_INTERFACE_CONTEXT = [
   ].join(" "),
 ].join("\n");
 
-function routePromptForAgent(text: string, agent: ComposerAgent): string {
-  const userRequest = `User request: ${text}`;
-
-  if (agent.id === "executive-assistant") {
-    return [HUB_INTERFACE_CONTEXT, userRequest].join("\n\n");
-  }
-
-  return [
-    HUB_INTERFACE_CONTEXT,
-    `[Elevate agent route: ${agent.name} (${agent.id})]`,
-    "Use this specialist lane for the turn when useful, then return the answer in this chat.",
-    userRequest,
-  ].join("\n\n");
+function routePromptForAgent(text: string): string {
+  // The active agent lane is now applied server-side via the agent_id
+  // param on prompt.submit, so the prompt itself only carries the Hub
+  // interface context. No per-agent prompt prefix is injected here.
+  return [HUB_INTERFACE_CONTEXT, `User request: ${text}`].join("\n\n");
 }
 
 function nowLabel(ts: number): string {
@@ -3005,7 +2999,12 @@ export default function ChatPage() {
   );
 
   const submitGatewayPrompt = useCallback(
-    async (text: string, routedText: string, status = "Sending...") => {
+    async (
+      text: string,
+      routedText: string,
+      agentId: string,
+      status = "Sending...",
+    ) => {
       if (!sessionId) return;
 
       const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
@@ -3051,6 +3050,9 @@ export default function ChatPage() {
         };
         if (routedText !== text) {
           payload.persist_user_message = text;
+        }
+        if (agentId) {
+          payload.agent_id = agentId;
         }
 
         await gw.request("prompt.submit", payload);
@@ -3161,6 +3163,7 @@ export default function ChatPage() {
     void submitGatewayPrompt(
       next.text,
       next.routedText,
+      next.agentId,
       "Sending queued follow-up...",
     ).finally(() => {
       queueDispatchRef.current = false;
@@ -3220,10 +3223,11 @@ export default function ChatPage() {
         return;
       }
 
-      const routedText = routePromptForAgent(trimmed, selectedAgent);
+      const routedText = routePromptForAgent(trimmed);
 
       if (!sessionId || state !== "open") {
         const queued: QueuedInput = {
+          agentId: selectedAgent.id,
           createdAt: Date.now(),
           id: id("queued"),
           routedText,
@@ -3237,6 +3241,7 @@ export default function ChatPage() {
 
       if (busy) {
         const queued: QueuedInput = {
+          agentId: selectedAgent.id,
           createdAt: Date.now(),
           id: id("queued"),
           routedText,
@@ -3248,7 +3253,7 @@ export default function ChatPage() {
         return;
       }
 
-      await submitGatewayPrompt(trimmed, routedText);
+      await submitGatewayPrompt(trimmed, routedText, selectedAgent.id);
     },
     [addArtifacts, appendMessage, artifacts, busy, gw, hasReadyAttachment, messages, selectedAgent, sessionId, state, submitGatewayPrompt],
   );
@@ -4305,8 +4310,8 @@ function ComposerActionBar({
   voiceSupported: boolean;
 }) {
   return (
-    <div className="mt-1.5 flex items-center justify-between gap-2 px-1 text-[0.66rem] text-[var(--chat-muted)]">
-      <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto scrollbar-none">
+    <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[0.7rem] text-[var(--chat-muted)]">
+      <div className="flex min-w-0 items-center gap-3 overflow-x-auto scrollbar-none">
         <button
           type="button"
           onClick={onAttach}
@@ -4377,28 +4382,6 @@ function ComposerActionBar({
           Full access
         </span>
 
-        <span aria-hidden className="text-[0.6rem] text-[var(--chat-muted)]">·</span>
-
-        <button
-          type="button"
-          onClick={onOpenModel}
-          disabled={!canPickModel}
-          className={cn(
-            "text-[0.7rem] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:text-[var(--chat-text)]",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
-          title="Change model"
-        >
-          {modelLabel(info)}
-        </button>
-
-        <span aria-hidden className="text-[0.6rem] text-[var(--chat-muted)]">·</span>
-
-        <ContextRing usage={usage} />
-
-        <span aria-hidden className="text-[0.6rem] text-[var(--chat-muted)]">·</span>
-
         <button
           type="button"
           onClick={onToggleVoice}
@@ -4413,6 +4396,23 @@ function ComposerActionBar({
         >
           {voiceListening ? "Stop" : "Voice"}
         </button>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2.5">
+        <button
+          type="button"
+          onClick={onOpenModel}
+          disabled={!canPickModel}
+          className={cn(
+            "text-[0.7rem] text-[var(--chat-muted-strong)] transition-colors",
+            "hover:text-[var(--chat-text)]",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+          title="Change model"
+        >
+          {modelLabel(info)}
+        </button>
+        <ContextRing usage={usage} />
       </div>
     </div>
   );

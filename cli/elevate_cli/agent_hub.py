@@ -312,6 +312,29 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
     return agents
 
 
+def get_agent_def(
+    agent_id: str, config: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Resolve a single merged agent definition by id.
+
+    Public accessor used by the gateway to apply a selected agent lane to a
+    live session. Returns the merged def (config overrides folded over the
+    built-in defaults) or ``None`` if the id is unknown.
+    """
+    wanted = _slug(str(agent_id or ""))
+    if not wanted:
+        return None
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            config = {}
+    for agent in _load_agent_defs(config or {}):
+        if _slug(str(agent.get("id") or "")) == wanted:
+            return agent
+    return None
+
+
 def _session_summary(limit: int = 100, *, include_total: bool = True) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "total": 0,
