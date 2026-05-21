@@ -557,26 +557,28 @@ def run_doctor(args):
                 check_warn(f"{_DHH}/{subdir_name}/ not found", "(will be created on first use)")
     
     # Check for SOUL.md persona file
+    from elevate_cli.default_soul import DEFAULT_SOUL_MD, is_placeholder_soul
+
     soul_path = elevate_home / "SOUL.md"
-    if soul_path.exists():
-        content = soul_path.read_text(encoding="utf-8").strip()
-        # Check if it's just the template comments (no real content)
-        lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith(("<!--", "-->", "#"))]
-        if lines:
-            check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
-        else:
-            check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
+    if soul_path.exists() and not is_placeholder_soul(
+        soul_path.read_text(encoding="utf-8")
+    ):
+        check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
     else:
-        check_warn(f"{_DHH}/SOUL.md not found", "(create it to give Elevate a custom personality)")
+        if soul_path.exists():
+            check_warn(
+                f"{_DHH}/SOUL.md is a blank placeholder",
+                "(no persona — agent runs on the bare model default)",
+            )
+        else:
+            check_warn(
+                f"{_DHH}/SOUL.md not found",
+                "(create it to give Elevate a custom personality)",
+            )
         if should_fix:
             soul_path.parent.mkdir(parents=True, exist_ok=True)
-            soul_path.write_text(
-                "# Elevate Persona\n\n"
-                "<!-- Edit this file to customize how Elevate communicates. -->\n\n"
-                "You are Elevate, a helpful AI assistant.\n",
-                encoding="utf-8",
-            )
-            check_ok(f"Created {_DHH}/SOUL.md with basic template")
+            soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
+            check_ok(f"Seeded {_DHH}/SOUL.md with the default Elevate persona")
             fixed_count += 1
     
     # Check memory directory

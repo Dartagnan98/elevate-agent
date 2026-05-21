@@ -310,10 +310,24 @@ def _secure_file(path):
 
 
 def _ensure_default_soul_md(home: Path) -> None:
-    """Seed a default SOUL.md into ELEVATE_HOME if the user doesn't have one yet."""
+    """Seed a default SOUL.md into ELEVATE_HOME.
+
+    Seeds DEFAULT_SOUL_MD when SOUL.md is missing, and also upgrades a
+    placeholder SOUL.md (empty, or only headings/HTML-comment template lines
+    with no real persona). This catches older installs provisioned with a
+    blank comment-only template — without that, the agent runs on the bare
+    model default and behaves inconsistently (e.g. confirming instead of
+    acting). A SOUL.md with any real content the user wrote is left untouched.
+    """
+    from elevate_cli.default_soul import is_placeholder_soul
+
     soul_path = home / "SOUL.md"
     if soul_path.exists():
-        return
+        try:
+            if not is_placeholder_soul(soul_path.read_text(encoding="utf-8")):
+                return
+        except OSError:
+            return
     soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
     _secure_file(soul_path)
 
