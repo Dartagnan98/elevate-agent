@@ -102,7 +102,8 @@
   --chat-text: var(--midground);
   --chat-muted: color-mix(in srgb, var(--midground-base) 58%, transparent);
   --chat-muted-strong: color-mix(in srgb, var(--midground-base) 72%, transparent);
-  --chat-user: color-mix(in srgb, var(--midground-base) 8%, var(--background-base));
+  --chat-user: #0b6bff;
+  --chat-user-text: #ffffff;
   --chat-accent: var(--color-primary, #D97757);
   --chat-accent-soft: color-mix(in srgb, var(--chat-accent) 18%, var(--background-base));
   --chat-success: var(--color-success, #44c487);

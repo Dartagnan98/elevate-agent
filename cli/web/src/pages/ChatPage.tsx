@@ -4518,7 +4518,7 @@ function MessageRow({
           className={cn(
             "max-w-full text-sm leading-7",
             isUser
-              ? "inline-block rounded-md bg-[var(--chat-user)] px-3.5 py-2 text-[var(--chat-text)] shadow-sm"
+              ? "inline-block rounded-md bg-[var(--chat-user)] px-3.5 py-2 text-[var(--chat-user-text)] shadow-sm"
               : message.role === "system"
                 ? "rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_32%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] px-3 py-2 text-[var(--chat-text)]"
                 : "text-[var(--chat-text)]",
