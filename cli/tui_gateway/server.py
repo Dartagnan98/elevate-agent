@@ -2812,76 +2812,114 @@ def _(rid, params: dict) -> dict:
             if images or videos or files:
                 prompt = _build_multimodal_prompt(prompt, images, videos, files)
 
-            def _stream(delta):
-                payload = {"text": delta}
-                if streamer and (r := streamer.feed(delta)) is not None:
-                    payload["rendered"] = r
-                _emit("message.delta", sid, payload)
+            # Turn loop: normally one pass, but a /steer or soft follow-up
+            # that arrived too late for the agent loop to fold into the turn
+            # comes back in result["pending_steer"] / ["pending_soft_interrupt"].
+            # When that happens we re-run the agent with the leftover text as
+            # a fresh user turn so the dashboard conversation continues under
+            # the steer instead of the steer being silently dropped.
+            current_prompt = prompt
+            current_history = list(history)
+            current_history_version = history_version
+            persist_override = persist_user_message
+            followup_rounds = 0
+            raw = ""
+            status = "complete"
 
-            run_kwargs = {
-                "conversation_history": list(history),
-                "stream_callback": _stream,
-            }
-            # persist_user_message rewrites the stored user-message content
-            # to a clean string so the routing envelope never leaks into
-            # resumed history. For a multimodal turn the override swaps only
-            # the first text block (see _apply_persist_user_message_override),
-            # leaving the image/PDF blocks intact for later turns.
-            if isinstance(persist_user_message, str):
-                run_kwargs["persist_user_message"] = persist_user_message
+            while True:
+                streamer = make_stream_renderer(cols)
 
-            result = agent.run_conversation(prompt, **run_kwargs)
+                def _stream(delta, _streamer=streamer):
+                    payload = {"text": delta}
+                    if _streamer and (r := _streamer.feed(delta)) is not None:
+                        payload["rendered"] = r
+                    _emit("message.delta", sid, payload)
 
-            last_reasoning = None
-            status_note = None
-            if isinstance(result, dict):
-                if isinstance(result.get("messages"), list):
-                    with session["history_lock"]:
-                        current_version = int(session.get("history_version", 0))
-                        if current_version == history_version:
-                            session["history"] = result["messages"]
-                            session["history_version"] = history_version + 1
-                        else:
-                            # History mutated externally during the turn
-                            # (undo/compress/retry/rollback now guard on
-                            # session.running, but this is the defensive
-                            # backstop for any path that slips past).
-                            # Surface the desync rather than silently
-                            # dropping the agent's output — the UI can
-                            # show the response and warn that it was
-                            # not persisted.
-                            print(
-                                f"[tui_gateway] prompt.submit: history_version mismatch "
-                                f"(expected={history_version} current={current_version}) — "
-                                f"agent output NOT written to session history",
-                                file=sys.stderr,
-                            )
-                            status_note = (
-                                "History changed during this turn — the response above is visible "
-                                "but was not saved to session history."
-                            )
-                raw = result.get("final_response", "")
-                status = (
-                    "interrupted"
-                    if result.get("interrupted")
-                    else "error" if result.get("error") else "complete"
-                )
-                lr = result.get("last_reasoning")
-                if isinstance(lr, str) and lr.strip():
-                    last_reasoning = lr.strip()
-            else:
-                raw = str(result)
-                status = "complete"
+                run_kwargs = {
+                    "conversation_history": current_history,
+                    "stream_callback": _stream,
+                }
+                # persist_user_message rewrites the stored user-message
+                # content to a clean string so the routing envelope never
+                # leaks into resumed history. For a multimodal turn the
+                # override swaps only the first text block, leaving the
+                # image/PDF blocks intact for later turns. Continuation
+                # turns carry no envelope, so the override is dropped.
+                if isinstance(persist_override, str):
+                    run_kwargs["persist_user_message"] = persist_override
 
-            payload = {"text": raw, "usage": _get_usage(agent), "status": status}
-            if last_reasoning:
-                payload["reasoning"] = last_reasoning
-            if status_note:
-                payload["warning"] = status_note
-            rendered = render_message(raw, cols)
-            if rendered:
-                payload["rendered"] = rendered
-            _emit("message.complete", sid, payload)
+                result = agent.run_conversation(current_prompt, **run_kwargs)
+
+                last_reasoning = None
+                status_note = None
+                if isinstance(result, dict):
+                    if isinstance(result.get("messages"), list):
+                        with session["history_lock"]:
+                            current_version = int(session.get("history_version", 0))
+                            if current_version == current_history_version:
+                                session["history"] = result["messages"]
+                                session["history_version"] = current_history_version + 1
+                                current_history_version += 1
+                            else:
+                                # History mutated externally during the turn
+                                # (undo/compress/retry/rollback now guard on
+                                # session.running, but this is the defensive
+                                # backstop for any path that slips past).
+                                # Surface the desync rather than silently
+                                # dropping the agent's output — the UI can
+                                # show the response and warn that it was
+                                # not persisted.
+                                print(
+                                    f"[tui_gateway] prompt.submit: history_version mismatch "
+                                    f"(expected={current_history_version} current={current_version}) — "
+                                    f"agent output NOT written to session history",
+                                    file=sys.stderr,
+                                )
+                                status_note = (
+                                    "History changed during this turn — the response above is visible "
+                                    "but was not saved to session history."
+                                )
+                    raw = result.get("final_response", "")
+                    status = (
+                        "interrupted"
+                        if result.get("interrupted")
+                        else "error" if result.get("error") else "complete"
+                    )
+                    lr = result.get("last_reasoning")
+                    if isinstance(lr, str) and lr.strip():
+                        last_reasoning = lr.strip()
+                else:
+                    raw = str(result)
+                    status = "complete"
+
+                payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+                if last_reasoning:
+                    payload["reasoning"] = last_reasoning
+                if status_note:
+                    payload["warning"] = status_note
+                rendered = render_message(raw, cols)
+                if rendered:
+                    payload["rendered"] = rendered
+                _emit("message.complete", sid, payload)
+
+                followup = None
+                if isinstance(result, dict) and status != "interrupted":
+                    followup = (
+                        result.get("pending_steer")
+                        or result.get("pending_soft_interrupt")
+                    )
+                if (
+                    not followup
+                    or not str(followup).strip()
+                    or followup_rounds >= 8
+                ):
+                    break
+                followup_rounds += 1
+                current_prompt = str(followup).strip()
+                persist_override = None
+                if isinstance(result, dict) and isinstance(result.get("messages"), list):
+                    current_history = list(result["messages"])
+                _emit("message.start", sid)
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool

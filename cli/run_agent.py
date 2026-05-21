@@ -12540,15 +12540,33 @@ class AIAgent:
                     ):
                         messages.pop()
 
+                    # A /steer or soft follow-up that landed during the final
+                    # API call (after the pre-API drain, while the model was
+                    # generating this text) has no tool result to attach to.
+                    # Drain both here and continue the loop with a fresh user
+                    # turn so the agent keeps working instead of ending the
+                    # turn with the steer silently stranded.
                     _soft_items = self._drain_pending_soft_interrupts()
-                    if _soft_items:
+                    _steer_after_text = self._drain_pending_steer()
+                    if _soft_items or _steer_after_text:
                         messages.append(final_msg)
+                        _continuation_parts = []
+                        if _steer_after_text:
+                            _continuation_parts.append(_steer_after_text)
+                        if _soft_items:
+                            _continuation_parts.append(
+                                self._soft_interrupt_text(_soft_items)
+                            )
                         messages.append({
                             "role": "user",
-                            "content": self._soft_interrupt_text(_soft_items),
+                            "content": "\n\n".join(_continuation_parts),
                         })
                         final_response = None
-                        _turn_exit_reason = "soft_interrupt_after_text_response"
+                        _turn_exit_reason = (
+                            "steer_after_text_response"
+                            if _steer_after_text
+                            else "soft_interrupt_after_text_response"
+                        )
                         self._session_messages = messages
                         self._save_session_log(messages)
                         continue
