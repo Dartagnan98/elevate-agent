@@ -40,6 +40,7 @@ import {
   Film,
   Image as ImageIcon,
   Loader2,
+  Mic,
   PanelLeftOpen,
   Paperclip,
   Pin,
@@ -80,42 +81,11 @@ interface SessionInfo {
   provider?: string;
 }
 
-interface BrowserSpeechRecognitionResult {
-  transcript: string;
+/** A selectable microphone input device. */
+interface MicDevice {
+  deviceId: string;
+  label: string;
 }
-
-type BrowserSpeechRecognitionResultItem =
-  ArrayLike<BrowserSpeechRecognitionResult> & { isFinal?: boolean };
-
-interface BrowserSpeechRecognitionEvent {
-  resultIndex: number;
-  results: ArrayLike<BrowserSpeechRecognitionResultItem>;
-}
-
-interface BrowserSpeechRecognitionErrorEvent {
-  error?: string;
-}
-
-interface BrowserSpeechRecognition {
-  abort(): void;
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onend: (() => void) | null;
-  onerror: ((event: BrowserSpeechRecognitionErrorEvent) => void) | null;
-  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
-  start(): void;
-  stop(): void;
-}
-
-interface BrowserSpeechRecognitionConstructor {
-  new (): BrowserSpeechRecognition;
-}
-
-type SpeechWindow = Window & {
-  SpeechRecognition?: BrowserSpeechRecognitionConstructor;
-  webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
-};
 
 interface GatewayTranscriptMessage {
   context?: string;
@@ -1395,10 +1365,36 @@ function compactToolPayload(payload: unknown) {
     : {}) as Record<string, unknown>;
 }
 
-function speechRecognitionConstructor() {
-  if (typeof window === "undefined") return undefined;
-  const speechWindow = window as SpeechWindow;
-  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+/** Whether this runtime can capture the microphone via MediaRecorder.
+ *
+ * The Electron webview does not support the Web Speech API, so voice input
+ * is done by recording the mic locally and shipping the audio to the gateway
+ * for server-side transcription. */
+function voiceCaptureSupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === "function" &&
+    typeof window.MediaRecorder === "function"
+  );
+}
+
+/** Best MediaRecorder container the current browser can encode. */
+function pickAudioMimeType(): string {
+  if (typeof window === "undefined" || typeof window.MediaRecorder !== "function") {
+    return "";
+  }
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  for (const type of candidates) {
+    if (window.MediaRecorder.isTypeSupported(type)) return type;
+  }
+  return "";
 }
 
 function fileName(path: string): string {
@@ -1659,7 +1655,9 @@ export default function ChatPage() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
-  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const voiceBaseInputRef = useRef("");
   const queueDispatchRef = useRef(false);
   const historyHydratedRef = useRef(false);
@@ -1697,6 +1695,10 @@ export default function ChatPage() {
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceTranscribing, setVoiceTranscribing] = useState(false);
+  const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
+  const [micDevices, setMicDevices] = useState<MicDevice[]>([]);
+  const [selectedMicId, setSelectedMicId] = useState<string>("");
   const [statusText, setStatusText] = useState("Connecting...");
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
@@ -1984,8 +1986,52 @@ export default function ChatPage() {
 
   useEffect(() => {
     return () => {
-      recognitionRef.current?.abort();
-      recognitionRef.current = null;
+      try {
+        mediaRecorderRef.current?.stop();
+      } catch {
+        // recorder already inactive
+      }
+      mediaRecorderRef.current = null;
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+      audioChunksRef.current = [];
+    };
+  }, []);
+
+  // Enumerate microphones for the device picker. Labels are only populated
+  // once the user has granted mic permission at least once, so we also
+  // refresh after a successful capture and on the OS devicechange event.
+  useEffect(() => {
+    if (!voiceCaptureSupported()) return;
+    let cancelled = false;
+
+    const refreshDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (cancelled) return;
+        const mics = devices
+          .filter((device) => device.kind === "audioinput")
+          .map((device, index) => ({
+            deviceId: device.deviceId,
+            label: device.label || `Microphone ${index + 1}`,
+          }));
+        setMicDevices(mics);
+        setSelectedMicId((current) => {
+          if (current && mics.some((mic) => mic.deviceId === current)) {
+            return current;
+          }
+          return mics[0]?.deviceId ?? "";
+        });
+      } catch {
+        // enumeration unavailable — picker stays empty, default mic still works
+      }
+    };
+
+    void refreshDevices();
+    navigator.mediaDevices.addEventListener?.("devicechange", refreshDevices);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener?.("devicechange", refreshDevices);
     };
   }, []);
 
@@ -3350,75 +3396,146 @@ export default function ChatPage() {
     }
   };
 
-  const voiceSupported = Boolean(speechRecognitionConstructor());
-  const toggleVoiceInput = useCallback(() => {
-    const SpeechRecognition = speechRecognitionConstructor();
-    if (!SpeechRecognition) {
-      setBanner("Voice input is not available in this browser.");
-      return;
-    }
+  const voiceSupported = voiceCaptureSupported();
 
-    if (voiceListening) {
-      recognitionRef.current?.stop();
-      setVoiceListening(false);
-      setStatusText("Voice input stopped");
-      inputRef.current?.focus();
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
-    voiceBaseInputRef.current = input.trimEnd();
-    recognition.onresult = (event) => {
-      const finalSegments: string[] = [];
-      const interimSegments: string[] = [];
-      for (let index = 0; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const transcript = result?.[0]?.transcript?.trim() ?? "";
-        if (!transcript) continue;
-        if (result.isFinal) finalSegments.push(transcript);
-        else interimSegments.push(transcript);
+  // Ship a recorded mic blob to the gateway for server-side transcription
+  // and append the returned text to the composer input.
+  const transcribeRecording = useCallback(
+    async (blob: Blob, mimeType: string) => {
+      if (!blob.size) {
+        setStatusText("No audio captured");
+        return;
       }
+      setVoiceTranscribing(true);
+      setStatusText("Transcribing...");
+      try {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+          reader.onload = () => {
+            const result = String(reader.result ?? "");
+            const comma = result.indexOf(",");
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+          };
+          reader.readAsDataURL(blob);
+        });
 
-      const dictated = [...finalSegments, ...interimSegments].join(" ").trim();
-      if (dictated) {
-        const nextInput = [voiceBaseInputRef.current, dictated]
+        const response = await gw.request<{ text?: string }>("voice.transcribe", {
+          audio: base64,
+          mime: (mimeType || blob.type || "audio/webm").split(";")[0],
+        });
+
+        const dictated = (response?.text ?? "").trim();
+        if (!dictated) {
+          setStatusText("No speech detected");
+          return;
+        }
+
+        const nextInput = [voiceBaseInputRef.current.trimEnd(), dictated]
           .filter(Boolean)
           .join(" ");
         setInput(nextInput);
         setCaretIndex(nextInput.length);
+        setStatusText("Voice captured");
         window.requestAnimationFrame(() => {
           const target = inputRef.current;
           if (!target) return;
+          target.focus();
           target.setSelectionRange(nextInput.length, nextInput.length);
         });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setBanner(`Voice transcription failed: ${message}`);
+        setStatusText("Voice input failed");
+      } finally {
+        setVoiceTranscribing(false);
       }
+    },
+    [gw],
+  );
 
-      if (finalSegments.length) {
-        setStatusText("Voice captured");
-      } else if (interimSegments.length) {
-        setStatusText(`Listening: ${interimSegments.join(" ")}`);
+  const toggleVoiceInput = useCallback(async () => {
+    if (!voiceCaptureSupported()) {
+      setBanner("Voice input is not available in this environment.");
+      return;
+    }
+
+    // Stop an in-progress recording — onstop fires transcription.
+    if (voiceListening) {
+      try {
+        mediaRecorderRef.current?.stop();
+      } catch {
+        // already stopped
       }
-    };
-    recognition.onerror = (event) => {
-      setBanner(`Voice input error: ${event.error ?? "unavailable"}`);
       setVoiceListening(false);
-      recognitionRef.current = null;
-    };
-    recognition.onend = () => {
-      setVoiceListening(false);
-      recognitionRef.current = null;
-      inputRef.current?.focus();
-    };
+      return;
+    }
 
-    recognitionRef.current = recognition;
+    if (voiceTranscribing) return;
+
+    voiceBaseInputRef.current = input;
     setBanner(null);
-    setVoiceListening(true);
-    setStatusText("Listening...");
-    recognition.start();
-  }, [input, voiceListening]);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedMicId
+          ? { deviceId: { exact: selectedMicId } }
+          : true,
+      });
+      mediaStreamRef.current = stream;
+
+      const mimeType = pickAudioMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = () => {
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        setVoiceListening(false);
+        const blob = new Blob(chunks, {
+          type: recorder.mimeType || mimeType || "audio/webm",
+        });
+        void transcribeRecording(blob, recorder.mimeType || mimeType);
+      };
+      recorder.onerror = () => {
+        setBanner("Voice recording error.");
+        setVoiceListening(false);
+      };
+
+      recorder.start();
+      setVoiceListening(true);
+      setStatusText("Listening... click the mic to stop");
+    } catch (error) {
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+      const name = error instanceof Error ? error.name : "";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        setBanner("Microphone access was denied. Allow mic access to use voice input.");
+      } else if (name === "NotFoundError") {
+        setBanner("No microphone was found.");
+      } else {
+        const message = error instanceof Error ? error.message : String(error);
+        setBanner(`Could not start the microphone: ${message}`);
+      }
+      setVoiceListening(false);
+    }
+  }, [input, selectedMicId, transcribeRecording, voiceListening, voiceTranscribing]);
+
+  const selectMicDevice = useCallback((deviceId: string) => {
+    setSelectedMicId(deviceId);
+    setVoiceMenuOpen(false);
+  }, []);
 
   const canSend =
     (!!input.trim() || hasReadyAttachment) &&
@@ -3897,9 +4014,15 @@ export default function ChatPage() {
                   setAgentMenuOpen((open) => !open);
                 }}
                 onToggleVoice={toggleVoiceInput}
+                onToggleVoiceMenu={() => setVoiceMenuOpen((open) => !open)}
+                onSelectMic={selectMicDevice}
+                micDevices={micDevices}
+                selectedMicId={selectedMicId}
+                voiceMenuOpen={voiceMenuOpen}
                 selectedAgent={selectedAgent}
                 usage={usage}
                 voiceListening={voiceListening}
+                voiceTranscribing={voiceTranscribing}
                 voiceSupported={voiceSupported}
               />
             </div>
@@ -4305,30 +4428,42 @@ function ComposerActionBar({
   agents,
   canPickModel,
   info,
+  micDevices,
   onAttach,
   onOpenModel,
   onSelectAgent,
+  onSelectMic,
   onToggleAgentMenu,
   onToggleVoice,
+  onToggleVoiceMenu,
   selectedAgent,
+  selectedMicId,
   usage,
   voiceListening,
+  voiceMenuOpen,
   voiceSupported,
+  voiceTranscribing,
 }: {
   agentLocked: boolean;
   agentMenuOpen: boolean;
   agents: ComposerAgent[];
   canPickModel: boolean;
   info: SessionInfo;
+  micDevices: MicDevice[];
   onAttach(): void;
   onOpenModel(): void;
   onSelectAgent(agent: ComposerAgent): void;
+  onSelectMic(deviceId: string): void;
   onToggleAgentMenu(): void;
   onToggleVoice(): void;
+  onToggleVoiceMenu(): void;
   selectedAgent: ComposerAgent;
+  selectedMicId: string;
   usage: UsageInfo | null;
   voiceListening: boolean;
+  voiceMenuOpen: boolean;
   voiceSupported: boolean;
+  voiceTranscribing: boolean;
 }) {
   return (
     <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[0.7rem] text-[var(--chat-muted)]">
@@ -4411,20 +4546,96 @@ function ComposerActionBar({
           Full access
         </span>
 
-        <button
-          type="button"
-          onClick={onToggleVoice}
-          disabled={!voiceSupported}
-          className={cn(
-            "text-[0.7rem] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:text-[var(--chat-text)]",
-            "disabled:cursor-not-allowed disabled:opacity-45",
-            voiceListening && "text-[var(--chat-text)]",
+        <div className="relative flex shrink-0 items-center">
+          <button
+            type="button"
+            onClick={onToggleVoice}
+            disabled={!voiceSupported || voiceTranscribing}
+            className={cn(
+              "inline-flex h-6 w-6 items-center justify-center rounded-sm transition-colors",
+              "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+              "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent",
+              voiceListening &&
+                "bg-[var(--chat-accent-soft)] text-[var(--chat-accent)] hover:bg-[var(--chat-accent-soft)]",
+            )}
+            title={
+              !voiceSupported
+                ? "Voice input unavailable"
+                : voiceTranscribing
+                  ? "Transcribing..."
+                  : voiceListening
+                    ? "Stop recording"
+                    : "Voice to text"
+            }
+            aria-label="Voice to text"
+          >
+            {voiceTranscribing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Mic className="h-3.5 w-3.5" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={onToggleVoiceMenu}
+            disabled={!voiceSupported}
+            className={cn(
+              "inline-flex h-6 w-4 items-center justify-center rounded-sm transition-colors",
+              "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+              "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent",
+              voiceMenuOpen && "text-[var(--chat-text)]",
+            )}
+            title="Select microphone"
+            aria-label="Select microphone"
+          >
+            <ChevronUp className="h-3 w-3 opacity-60" />
+          </button>
+
+          {voiceMenuOpen && (
+            <>
+              <div className="fixed inset-0 z-20" onClick={onToggleVoiceMenu} />
+              <div
+                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[16rem] overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1.5 text-left"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onToggleVoiceMenu();
+                  }
+                }}
+                role="menu"
+              >
+                <div className="px-2.5 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-[var(--chat-muted)]">
+                  Microphone
+                </div>
+                {micDevices.length === 0 ? (
+                  <div className="px-2.5 py-2 text-[0.68rem] text-[var(--chat-muted)]">
+                    No microphones detected
+                  </div>
+                ) : (
+                  micDevices.map((device) => (
+                    <button
+                      key={device.deviceId || device.label}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => onSelectMic(device.deviceId)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
+                        selectedMicId === device.deviceId
+                          ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+                          : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+                      )}
+                    >
+                      <Mic className="h-3.5 w-3.5 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate text-xs">
+                        {device.label}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
           )}
-          title={voiceSupported ? "Voice to text" : "Voice input unavailable"}
-        >
-          {voiceListening ? "Stop" : "Voice"}
-        </button>
+        </div>
       </div>
 
       <div className="flex shrink-0 items-center gap-2.5">

@@ -4959,6 +4959,87 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5026, str(e))
 
 
+# Map of browser MediaRecorder MIME types to file extensions. The browser
+# captures audio (so device selection happens client-side via getUserMedia's
+# deviceId) and ships the encoded blob here for server-side transcription —
+# this avoids depending on the Web Speech API, which does not work inside the
+# Electron webview, and on server-side ``sounddevice`` capture.
+_VOICE_MIME_EXT = {
+    "audio/webm": ".webm",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+}
+
+
+@method("voice.transcribe")
+def _(rid, params: dict) -> dict:
+    """Transcribe a client-recorded audio blob to text.
+
+    The web client records the microphone with ``MediaRecorder`` and sends
+    the encoded audio here as base64. We decode it to a temp file and run it
+    through the configured STT provider (``tools.transcription_tools``).
+    """
+    audio_b64 = params.get("audio") or ""
+    if not audio_b64:
+        return _err(rid, 4021, "audio required")
+
+    mime = str(params.get("mime") or "audio/webm").split(";")[0].strip().lower()
+    ext = _VOICE_MIME_EXT.get(mime, ".webm")
+
+    import base64 as _b64
+    import tempfile as _tempfile
+
+    try:
+        audio_bytes = _b64.b64decode(audio_b64, validate=False)
+    except Exception as e:
+        return _err(rid, 4022, f"invalid audio payload: {e}")
+
+    if not audio_bytes:
+        return _err(rid, 4023, "empty audio payload")
+
+    voice_dir = os.path.join(_tempfile.gettempdir(), "elevate_voice")
+    try:
+        os.makedirs(voice_dir, exist_ok=True)
+    except OSError:
+        voice_dir = _tempfile.gettempdir()
+
+    fd, audio_path = _tempfile.mkstemp(suffix=ext, dir=voice_dir, prefix="rec_")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(audio_bytes)
+
+        from tools.transcription_tools import transcribe_audio
+
+        result = transcribe_audio(audio_path)
+        if not result.get("success"):
+            return _err(rid, 5027, result.get("error") or "transcription failed")
+
+        text = (result.get("transcript") or "").strip()
+        try:
+            from tools.voice_mode import is_whisper_hallucination
+
+            if text and is_whisper_hallucination(text):
+                text = ""
+        except Exception:
+            pass
+
+        return _ok(rid, {"text": text, "provider": result.get("provider", "")})
+    except ImportError as e:
+        return _err(rid, 5027, f"transcription unavailable: {e}")
+    except Exception as e:
+        logger.exception("voice.transcribe failed")
+        return _err(rid, 5027, str(e))
+    finally:
+        try:
+            if os.path.isfile(audio_path):
+                os.unlink(audio_path)
+        except OSError:
+            pass
+
+
 # ── Methods: insights ────────────────────────────────────────────────
 
 
