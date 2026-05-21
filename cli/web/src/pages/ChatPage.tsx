@@ -5378,11 +5378,11 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
   const running = summary.status === "running";
 
   return (
-    <div className="text-sm leading-6">
+    <div className="text-[0.8rem] leading-5">
       <button
         aria-expanded={open}
         className={cn(
-          "group flex w-full items-start gap-3 rounded-md px-1 py-1.5 text-left transition-colors",
+          "group flex w-full items-start gap-2.5 rounded-md px-1 py-1 text-left transition-colors",
           hasDetails && "hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
         )}
         disabled={!hasDetails}
@@ -5391,7 +5391,7 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
       >
         <span
           className={cn(
-            "mt-1 flex h-[1.05rem] w-[1.05rem] shrink-0 items-center justify-center rounded-full border",
+            "mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border",
             failed
               ? "border-[color-mix(in_srgb,var(--chat-danger)_70%,transparent)] text-[var(--chat-danger)]"
               : complete
@@ -5414,7 +5414,7 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
         <div className="min-w-0 flex-1">
           <div
             className={cn(
-              "text-[0.92rem] font-medium",
+              "text-[0.8rem] font-medium leading-5",
               summary.status === "pending"
                 ? "text-[var(--chat-muted)]"
                 : "text-[var(--chat-muted-strong)]",
@@ -5431,7 +5431,7 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
         {hasDetails && (
           <ChevronDown
             className={cn(
-              "mt-1.5 h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)] opacity-70 transition group-hover:opacity-100",
+              "mt-0.5 h-3 w-3 shrink-0 text-[var(--chat-muted)] opacity-70 transition group-hover:opacity-100",
               open && "rotate-180",
             )}
           />
