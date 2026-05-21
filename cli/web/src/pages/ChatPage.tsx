@@ -2425,18 +2425,12 @@ export default function ChatPage() {
         if (text) {
           addArtifacts(artifactsFromText(text, "assistant", messageId));
         }
-        setTools((prev) =>
-          prev.map((tool) =>
-            tool.status === "running" && tool.tool_id.startsWith("progress:")
-              ? {
-                  ...tool,
-                  completedAt: Date.now(),
-                  status: "done" as const,
-                  summary: tool.preview ?? tool.summary,
-                }
-              : tool,
-          ),
-        );
+        // The turn is over: its tools + reasoning are now snapshotted onto
+        // the message above. Clear the live activity state so the side
+        // Activity panel goes idle ("Ready") instead of leaving stale
+        // "Analyzing." / "Sending request..." rows hanging after the reply.
+        setTools([]);
+        setActivityTrace([]);
         currentAssistantRef.current = null;
         setBusy(false);
         setSubagents((prev) =>
@@ -4374,8 +4368,15 @@ function MessageRow({
           0,
         )
       : 0;
+  // Live turns show the digest from streaming state; completed turns show it
+  // from the frozen per-turn snapshot (tokenCount is set at message.complete),
+  // so it survives the live activity state being cleared after the turn.
   const showDigest =
-    isAssistant && (!!busy || !!tools?.length || !!activityTrace?.length);
+    isAssistant &&
+    (!!busy ||
+      !!tools?.length ||
+      !!activityTrace?.length ||
+      typeof message.tokenCount === "number");
 
   return (
     <article
@@ -4667,7 +4668,10 @@ function ChatActivityDigest({
   );
 
   const show =
-    busy || tools.length > 0 || activityTrace.length > 0;
+    busy ||
+    tools.length > 0 ||
+    activityTrace.length > 0 ||
+    typeof tokenCount === "number";
   if (!show) return null;
 
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
