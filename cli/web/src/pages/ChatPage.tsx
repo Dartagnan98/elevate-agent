@@ -3836,29 +3836,29 @@ export default function ChatPage() {
                     value={input}
                   />
                 </div>
-
-                <ComposerActionBar
-                  agentMenuOpen={agentMenuOpen}
-                  agents={activeComposerAgents}
-                  busy={busy}
-                  canPickModel={canPickModel}
-                  canSend={canSend}
-                  info={info}
-                  onAttach={onPaperclipClick}
-                  onOpenModel={() => setModelOpen(true)}
-                  onInterrupt={interruptCurrentTurn}
-                  onSelectAgent={selectComposerAgent}
-                  onToggleAgentMenu={() => {
-                    setAgentMenuOpen((open) => !open);
-                  }}
-                  onToggleVoice={toggleVoiceInput}
-                  selectedAgent={selectedAgent}
-                  state={state}
-                  usage={usage}
-                  voiceListening={voiceListening}
-                  voiceSupported={voiceSupported}
-                />
               </div>
+
+              <ComposerActionBar
+                agentMenuOpen={agentMenuOpen}
+                agents={activeComposerAgents}
+                busy={busy}
+                canPickModel={canPickModel}
+                canSend={canSend}
+                info={info}
+                onAttach={onPaperclipClick}
+                onOpenModel={() => setModelOpen(true)}
+                onInterrupt={interruptCurrentTurn}
+                onSelectAgent={selectComposerAgent}
+                onToggleAgentMenu={() => {
+                  setAgentMenuOpen((open) => !open);
+                }}
+                onToggleVoice={toggleVoiceInput}
+                selectedAgent={selectedAgent}
+                state={state}
+                usage={usage}
+                voiceListening={voiceListening}
+                voiceSupported={voiceSupported}
+              />
             </div>
           </form>
         </section>
