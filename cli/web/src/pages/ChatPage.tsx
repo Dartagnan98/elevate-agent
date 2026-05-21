@@ -1814,7 +1814,15 @@ export default function ChatPage() {
     setPreviewArtifact((current) => {
       if (current) {
         dismissedArtifactsRef.current.add(artifactDismissKey(current));
-        writeDismissedArtifactKeys(sessionId, dismissedArtifactsRef.current);
+        // Persist under the stable persisted-session id, NOT the ephemeral
+        // gateway session_id. session.resume mints a fresh session_id on
+        // every reattach, so a dismissal written under sessionId would be
+        // read back under resumeId (the persisted id) and never match —
+        // which is why the panel kept reopening on leave/return.
+        writeDismissedArtifactKeys(
+          persistedSessionIdRef.current ?? sessionId,
+          dismissedArtifactsRef.current,
+        );
       }
       return null;
     });
@@ -1832,7 +1840,10 @@ export default function ChatPage() {
       const dKey = artifactDismissKey(artifact);
       if (dismissedArtifactsRef.current.has(dKey)) {
         dismissedArtifactsRef.current.delete(dKey);
-        writeDismissedArtifactKeys(sessionId, dismissedArtifactsRef.current);
+        writeDismissedArtifactKeys(
+          persistedSessionIdRef.current ?? sessionId,
+          dismissedArtifactsRef.current,
+        );
       }
       setPreviewArtifact(artifact);
     },
