@@ -155,6 +155,12 @@ interface ChatMessage {
   status?: "streaming" | "complete" | "error" | "interrupted";
   title?: string;
   warning?: string;
+  // Snapshotted at message.complete so the activity digest (tool
+  // breakdown + memory rows) survives a session resume. Live turns
+  // render from the `tools`/`activityTrace` state instead; these are
+  // the fallback for turns rehydrated from cache/server.
+  tools?: ToolEntry[];
+  traces?: ActivityTrace[];
 }
 
 type ArtifactKind = "diff" | "file" | "output";
@@ -556,9 +562,46 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
           : "complete" as const,
       title: typeof entry.title === "string" ? entry.title : undefined,
       warning: typeof entry.warning === "string" ? entry.warning : undefined,
+      tools: Array.isArray(entry.tools) ? entry.tools : undefined,
+      traces: Array.isArray(entry.traces) ? entry.traces : undefined,
     });
   });
   return normalized.length ? normalized : null;
+}
+
+// Slim a turn's tool snapshot before it goes into localStorage. The
+// activity digest only needs name/context/summary/status to render —
+// drop the heavy streaming preview + inline diff, truncate long args,
+// and cap the count so a tool-heavy turn can't blow the cache budget.
+function slimToolsForStorage(tools?: ToolEntry[]): ToolEntry[] | undefined {
+  if (!tools?.length) return undefined;
+  const cut = (value?: string) =>
+    value && value.length > 300 ? `${value.slice(0, 300)}…` : value;
+  return tools.slice(-60).map((tool) => ({
+    kind: "tool",
+    id: tool.id,
+    tool_id: tool.tool_id,
+    name: tool.name,
+    context: cut(tool.context),
+    summary: cut(tool.summary),
+    status: tool.status,
+    startedAt: tool.startedAt,
+    completedAt: tool.completedAt,
+    messageId: tool.messageId,
+  }));
+}
+
+function slimTracesForStorage(
+  traces?: ActivityTrace[],
+): ActivityTrace[] | undefined {
+  if (!traces?.length) return undefined;
+  return traces.slice(-40).map((trace) => ({
+    createdAt: trace.createdAt,
+    id: trace.id,
+    kind: trace.kind,
+    messageId: trace.messageId,
+    text: trace.text.length > 500 ? `${trace.text.slice(0, 500)}…` : trace.text,
+  }));
 }
 
 function trimTranscriptForStorage(messages: ChatMessage[]): ChatMessage[] {
@@ -573,7 +616,13 @@ function trimTranscriptForStorage(messages: ChatMessage[]): ChatMessage[] {
     const size = content.length + (message.title?.length ?? 0) + (message.warning?.length ?? 0);
     if (trimmed.length && used + size > MAX_STORED_TRANSCRIPT_CHARS) break;
     used += size;
-    trimmed.push({ ...message, content, status: message.status ?? "complete" });
+    trimmed.push({
+      ...message,
+      content,
+      status: message.status ?? "complete",
+      tools: slimToolsForStorage(message.tools),
+      traces: slimTracesForStorage(message.traces),
+    });
   }
   return trimmed.reverse();
 }
@@ -645,13 +694,28 @@ function mergeServerWithCache(
   if (!cached?.length) return serverMessages;
   const fp = (m: ChatMessage) => `${m.role}:${m.content.slice(0, 200)}`;
   const serverFingerprints = new Set(serverMessages.map(fp));
+
+  // The server transcript doesn't carry tool/trace snapshots. Re-attach
+  // them from the cached counterpart so the activity digest renders on
+  // resumed turns. Match on the same fingerprint the tail logic uses.
+  const cachedByFp = new Map<string, ChatMessage>();
+  for (const msg of cached) cachedByFp.set(fp(msg), msg);
+  const enriched = serverMessages.map((msg) => {
+    if (msg.tools?.length || msg.traces?.length) return msg;
+    const match = cachedByFp.get(fp(msg));
+    if (match && (match.tools?.length || match.traces?.length)) {
+      return { ...msg, tools: match.tools, traces: match.traces };
+    }
+    return msg;
+  });
+
   const tail: ChatMessage[] = [];
   for (let i = cached.length - 1; i >= 0; i--) {
     const msg = cached[i];
     if (serverFingerprints.has(fp(msg))) break;
     tail.unshift(msg);
   }
-  return tail.length ? [...serverMessages, ...tail] : serverMessages;
+  return tail.length ? [...enriched, ...tail] : enriched;
 }
 
 // Detect whether the cached transcript ends with a user message that has no
@@ -1469,6 +1533,10 @@ export default function ChatPage() {
   const queueDispatchRef = useRef(false);
   const historyHydratedRef = useRef(false);
   const persistedSessionIdRef = useRef<string | null>(null);
+  // Live mirrors of tools/activityTrace so the message.complete handler
+  // can snapshot the finished turn without a stale-closure read.
+  const toolsRef = useRef<ToolEntry[]>([]);
+  const activityTraceRef = useRef<ActivityTrace[]>([]);
 
   const [info, setInfo] = useState<SessionInfo>({});
   const [usage, setUsage] = useState<UsageInfo | null>(null);
@@ -1792,6 +1860,14 @@ export default function ChatPage() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
   }, [messages, tools, pendingPrompt]);
+
+  useEffect(() => {
+    toolsRef.current = tools;
+  }, [tools]);
+
+  useEffect(() => {
+    activityTraceRef.current = activityTrace;
+  }, [activityTrace]);
 
   useEffect(() => {
     const persisted = persistedSessionIdRef.current;
@@ -2192,11 +2268,33 @@ export default function ChatPage() {
         const warning = eventString(ev, "warning");
         const messageId = currentAssistantRef.current ?? ensureAssistant();
 
+        // Snapshot the finished turn's tools + reasoning traces onto the
+        // message so the activity digest survives a session resume. Any
+        // tool still "running" at message.complete is coerced to "done"
+        // (the turn is over — nothing is actually still executing).
+        const turnTools = toolsRef.current
+          .filter((tool) => tool.messageId === messageId)
+          .map((tool) =>
+            tool.status === "running"
+              ? {
+                  ...tool,
+                  status: "done" as const,
+                  completedAt: tool.completedAt ?? Date.now(),
+                }
+              : tool,
+          );
+        const turnTraces = activityTraceRef.current.filter(
+          (trace) =>
+            trace.messageId === messageId &&
+            (trace.kind === "reasoning" || trace.kind === "thinking"),
+        );
         updateAssistant((message) => ({
           ...message,
           content: text || message.content,
           status: status === "interrupted" ? "interrupted" : "complete",
           warning: warning || undefined,
+          tools: turnTools.length ? turnTools : message.tools,
+          traces: turnTraces.length ? turnTraces : message.traces,
         }));
         if (text) {
           addArtifacts(artifactsFromText(text, "assistant", messageId));
@@ -3048,7 +3146,10 @@ export default function ChatPage() {
         );
         if (hasActivity) return true;
         const hasTools = tools.some((tool) => tool.messageId === message.id);
-        return hasTools;
+        if (hasTools) return true;
+        // Resumed turn: tools/traces live on the message snapshot, not
+        // in the live state arrays.
+        return Boolean(message.tools?.length || message.traces?.length);
       }),
     [activityTrace, messages, tools],
   );
@@ -3295,8 +3396,14 @@ export default function ChatPage() {
                 {visibleMessages.map((message, index) => {
                   const isLatest = index === visibleMessages.length - 1;
                   const isAssistant = message.role === "assistant";
-                  const turnTools = isAssistant ? toolsByMessage.get(message.id) : undefined;
-                  const turnTraces = isAssistant ? tracesByMessage.get(message.id) : undefined;
+                  // Live state first; fall back to the snapshot stored on
+                  // the message so resumed turns still show their digest.
+                  const turnTools = isAssistant
+                    ? toolsByMessage.get(message.id) ?? message.tools
+                    : undefined;
+                  const turnTraces = isAssistant
+                    ? tracesByMessage.get(message.id) ?? message.traces
+                    : undefined;
                   const turnArtifacts = isAssistant ? artifactsByMessage.get(message.id) : undefined;
                   const isStreaming = isAssistant && message.status === "streaming" && isLatest;
                   return (
