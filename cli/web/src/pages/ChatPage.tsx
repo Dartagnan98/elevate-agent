@@ -145,6 +145,8 @@ interface ChatMessageAttachment {
   name: string;
   size: number;
   mediaType: string;
+  /** Downscaled JPEG data URL for inline image previews. */
+  previewUrl?: string;
 }
 
 interface ChatMessage {
@@ -201,6 +203,54 @@ interface ChatAttachment {
   path?: string;
   status: "uploading" | "ready" | "error";
   error?: string;
+  /** Downscaled JPEG data URL for inline image previews. */
+  previewUrl?: string;
+}
+
+const THUMBNAIL_MAX_PX = 360;
+
+/**
+ * Build a small JPEG data-URL thumbnail from an image File so the chat can
+ * render an actual preview instead of a generic file chip. Returns null for
+ * non-images or if the browser can't decode the file.
+ */
+function makeImageThumbnail(file: File): Promise<string | null> {
+  if (!(file.type || "").toLowerCase().startsWith("image/")) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(
+          1,
+          THUMBNAIL_MAX_PX / Math.max(img.width, img.height),
+        );
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(null);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.8));
+      } catch {
+        resolve(null);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    img.src = url;
+  });
 }
 
 const ATTACHMENT_MAX_BYTES = 500 * 1024 * 1024;
@@ -2801,6 +2851,15 @@ export default function ChatPage() {
       };
       setAttachments((prev) => [...prev, placeholder]);
 
+      void makeImageThumbnail(file).then((preview) => {
+        if (!preview) return;
+        setAttachments((prev) =>
+          prev.map((item) =>
+            item.id === localId ? { ...item, previewUrl: preview } : item,
+          ),
+        );
+      });
+
       void api
         .uploadChatAttachment(sessionId, file)
         .then((response) => {
@@ -2868,7 +2927,12 @@ export default function ChatPage() {
       }
 
       const messageAttachments: ChatMessageAttachment[] = readyAttachments.map(
-        (att) => ({ name: att.name, size: att.size, mediaType: att.mediaType }),
+        (att) => ({
+          name: att.name,
+          size: att.size,
+          mediaType: att.mediaType,
+          previewUrl: att.previewUrl,
+        }),
       );
       appendMessage(
         "user",
@@ -3875,6 +3939,44 @@ function AttachmentChipStrip({
         const Icon = attachmentIconFor(item.mediaType, item.name);
         const isError = item.status === "error";
         const isUploading = item.status === "uploading";
+
+        if (item.previewUrl) {
+          return (
+            <div
+              key={item.id}
+              className="group relative h-16 w-16 overflow-hidden rounded-md border border-[var(--chat-border)] bg-[var(--chat-surface-soft)]"
+              title={item.error || `${item.name} · ${formatAttachmentSize(item.size)}`}
+            >
+              <img
+                src={item.previewUrl}
+                alt={item.name}
+                className={cn(
+                  "h-full w-full object-cover",
+                  (isUploading || isError) && "opacity-40",
+                )}
+              />
+              {isUploading && (
+                <span className="absolute inset-0 flex items-center justify-center text-[0.58rem] font-medium text-[var(--chat-text)]">
+                  uploading...
+                </span>
+              )}
+              {isError && (
+                <span className="absolute inset-0 flex items-center justify-center text-[0.58rem] font-medium text-[var(--chat-danger)]">
+                  failed
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => onRemove(item.id)}
+                aria-label={`Remove ${item.name}`}
+                className="absolute right-0.5 top-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-[var(--chat-bg)]/80 text-[var(--chat-muted)] transition-colors hover:text-[var(--chat-text)]"
+              >
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </div>
+          );
+        }
+
         return (
           <div
             key={item.id}
@@ -4321,6 +4423,24 @@ function MessageRow({
               {isUser && message.attachments && message.attachments.length > 0 ? (
                 <div className="mb-2 flex flex-wrap justify-start gap-1.5">
                   {message.attachments.map((att, idx) => {
+                    if (att.previewUrl) {
+                      return (
+                        <a
+                          key={`${message.id}-att-${idx}`}
+                          href={att.previewUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)]"
+                          title={`${att.name} · ${formatAttachmentSize(att.size)}`}
+                        >
+                          <img
+                            src={att.previewUrl}
+                            alt={att.name}
+                            className="max-h-48 max-w-[16rem] object-contain"
+                          />
+                        </a>
+                      );
+                    }
                     const Icon = attachmentIconFor(att.mediaType, att.name);
                     return (
                       <span
