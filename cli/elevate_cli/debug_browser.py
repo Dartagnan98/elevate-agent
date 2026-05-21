@@ -190,6 +190,13 @@ def launch_chrome(wait: bool = True) -> bool:
             "--no-first-run",
             "--no-default-browser-check",
             "--restore-last-session",
+            # The profile is cloned from the user's real Chrome, so it carries
+            # their extensions — including ad/content blockers and the Claude
+            # for Chrome extension. Those run webRequest/declarativeNetRequest
+            # rules that block the agent's navigations with
+            # ERR_BLOCKED_BY_CLIENT. The agent only needs the cloned COOKIES
+            # (logins), never the extensions, so disable them outright.
+            "--disable-extensions",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
