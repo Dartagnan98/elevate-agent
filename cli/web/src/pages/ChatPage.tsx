@@ -4696,6 +4696,23 @@ function ChatActivityDigest({
     [tools],
   );
 
+  // Once a turn finishes, the "Worked for … · N steps · N tokens" digest is
+  // just transcript clutter — drop it on completed turns (and in loaded
+  // sessions). Keep only the live "Working …" meter while the turn streams.
+  // Memory-save rows still surface so nothing important is lost.
+  if (!busy) {
+    if (memoryTools.length === 0) return null;
+    return (
+      <section className="border-t border-[var(--chat-border)] pt-4 text-[var(--chat-muted)]">
+        <div className="space-y-1.5">
+          {memoryTools.map((tool) => (
+            <MemorySaveRow key={tool.id} tool={tool} />
+          ))}
+        </div>
+      </section>
+    );
+  }
+
   const show =
     busy ||
     tools.length > 0 ||
