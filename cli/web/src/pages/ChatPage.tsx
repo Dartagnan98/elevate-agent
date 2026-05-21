@@ -46,6 +46,7 @@ import {
   Search,
   Send,
   ShieldAlert,
+  Sparkle,
   Sparkles,
   SquareTerminal,
   Wrench,
@@ -1125,6 +1126,13 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+// Rough live token estimate (~4 chars/token). Exact counts only arrive at
+// message.complete; this keeps the live meter ticking on every delta.
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
 }
 
 function eventText(ev: GatewayEvent): string {
@@ -3414,7 +3422,6 @@ export default function ChatPage() {
                   return (
                     <MessageRow
                       key={message.id}
-                      activityText={isStreaming ? statusText : undefined}
                       activityTrace={turnTraces}
                       artifacts={turnArtifacts ?? []}
                       busy={isStreaming && busy}
@@ -4128,7 +4135,6 @@ function ComposerActionBar({
 }
 
 function MessageRow({
-  activityText,
   activityTrace,
   artifacts,
   busy,
@@ -4137,7 +4143,6 @@ function MessageRow({
   tools,
   turnArtifacts,
 }: {
-  activityText?: string;
   activityTrace?: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy?: boolean;
@@ -4154,9 +4159,32 @@ function MessageRow({
   ) {
     return null;
   }
-  if (isAssistant && !message.content.trim() && !(tools && tools.length) && !(activityTrace && activityTrace.length)) {
+  if (
+    isAssistant &&
+    !busy &&
+    !message.content.trim() &&
+    !(tools && tools.length) &&
+    !(activityTrace && activityTrace.length)
+  ) {
     return null;
   }
+
+  // While the turn streams, estimate tokens from the visible assistant text
+  // plus any reasoning/thinking traces so the live meter has something to
+  // count. Exact usage replaces this at message.complete.
+  const liveTokens =
+    isAssistant && busy
+      ? estimateTokens(message.content) +
+        (activityTrace ?? []).reduce(
+          (sum, trace) =>
+            trace.kind === "reasoning" || trace.kind === "thinking"
+              ? sum + estimateTokens(trace.text)
+              : sum,
+          0,
+        )
+      : 0;
+  const showDigest =
+    isAssistant && (!!busy || !!tools?.length || !!activityTrace?.length);
 
   return (
     <article
@@ -4171,11 +4199,13 @@ function MessageRow({
           isUser && "flex flex-col items-end",
         )}
       >
-        {isAssistant && (tools?.length || activityTrace?.length) ? (
+        {showDigest ? (
           <ChatActivityDigest
             activityTrace={activityTrace ?? []}
             artifacts={turnArtifacts ?? []}
             busy={!!busy}
+            liveTokens={liveTokens}
+            startedAt={message.createdAt}
             tools={tools ?? []}
           />
         ) : null}
@@ -4187,18 +4217,13 @@ function MessageRow({
               : message.role === "system"
                 ? "rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_32%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] px-3 py-2 text-[var(--chat-text)]"
                 : "text-[var(--chat-text)]",
-            isAssistant && (tools?.length || activityTrace?.length) ? "mt-2" : null,
+            showDigest ? "mt-2" : null,
           )}
         >
           {message.role === "assistant" ? (
             message.content ? (
               <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[var(--chat-surface-strong)] [&_code]:text-[var(--chat-text)] [&_pre]:border-[var(--chat-border-strong)] [&_pre]:bg-[var(--chat-surface-soft)]">
                 <Markdown content={message.content} />
-              </div>
-            ) : busy ? (
-              <div className="flex items-center gap-2 text-[var(--chat-muted)]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {displayStatusText(activityText || "Working...")}
               </div>
             ) : null
           ) : (
@@ -4389,14 +4414,45 @@ function MemorySaveRow({ tool }: { tool: ToolEntry }) {
   );
 }
 
+// Live "working" meter shown while a turn streams: a pulsing accent mark
+// with elapsed time and a running token estimate. Collapses into the
+// "Worked for ..." digest once the turn completes.
+function LiveTurnMeter({
+  startedAt,
+  tokens,
+}: {
+  startedAt: number;
+  tokens: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const elapsed = formatDuration(Math.max(0, now - startedAt));
+  return (
+    <div className="flex items-center gap-2 text-sm text-[var(--chat-muted)]">
+      <Sparkle className="h-4 w-4 shrink-0 animate-pulse fill-[var(--chat-accent)] text-[var(--chat-accent)]" />
+      <span>
+        {elapsed}
+        {tokens > 0 ? ` · ${tokens.toLocaleString()} tokens` : ""}
+      </span>
+    </div>
+  );
+}
+
 function ChatActivityDigest({
   activityTrace,
   busy,
+  liveTokens,
+  startedAt,
   tools,
 }: {
   activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
+  liveTokens?: number;
+  startedAt?: number;
   tools: ToolEntry[];
 }) {
   const [open, setOpen] = useState(false);
@@ -4414,7 +4470,7 @@ function ChatActivityDigest({
     busy || tools.length > 0 || activityTrace.length > 0;
   if (!show) return null;
 
-  const start = activityStartedAt(tools, activityTrace);
+  const start = startedAt ?? activityStartedAt(tools, activityTrace);
   const end = busy ? Date.now() : activityFinishedAt(tools);
   const duration = formatDuration(end - start);
 
@@ -4428,13 +4484,16 @@ function ChatActivityDigest({
         </div>
       )}
 
+      {busy && <LiveTurnMeter startedAt={start} tokens={liveTokens ?? 0} />}
+
+      {!busy && (
       <button
         className="flex items-center gap-2 text-sm text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
         <span>
-          {busy ? "Working" : "Worked"} for {duration}
+          Worked for {duration}
           {steps.length > 0 && ` · ${plural(steps.length, "step")}`}
         </span>
         <ChevronDown
@@ -4444,8 +4503,9 @@ function ChatActivityDigest({
           )}
         />
       </button>
+      )}
 
-      {open && steps.length > 0 && (
+      {!busy && open && steps.length > 0 && (
         <div className="mt-3 space-y-1.5">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} />
