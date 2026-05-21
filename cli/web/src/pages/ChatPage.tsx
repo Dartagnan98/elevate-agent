@@ -3756,7 +3756,7 @@ export default function ChatPage() {
                 queuedInputs={queuedInputs}
               />
 
-              <div className="relative rounded-xl bg-[var(--chat-surface-strong)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-border)]">
+              <div className="relative rounded-xl bg-[var(--chat-surface-strong)] p-2 shadow-[inset_0_0_0_1px_var(--chat-border)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-border)]">
                 <AttachmentChipStrip
                   attachments={attachments}
                   onRemove={removeAttachment}
@@ -3770,7 +3770,7 @@ export default function ChatPage() {
                   onApply={applyComposerCompletion}
                 />
 
-                <div className="relative min-h-20">
+                <div className="relative min-h-7">
                   <ComposerRichInputLayer
                     input={input}
                     layerRef={richLayerRef}
@@ -3781,7 +3781,7 @@ export default function ChatPage() {
                     aria-controls="slash-popover-listbox"
                     aria-label="Message Elevate Agent"
                     className={cn(
-                      "relative z-10 max-h-40 min-h-20 w-full resize-none bg-transparent px-2 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
+                      "relative z-10 max-h-40 min-h-7 w-full resize-none bg-transparent pl-2 pr-9 pb-1 pt-1 text-sm leading-6 outline-none placeholder:text-[var(--chat-muted)]",
                       "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
                       input
                         ? "text-transparent"
@@ -3835,26 +3835,43 @@ export default function ChatPage() {
                     spellCheck
                     value={input}
                   />
+                  <button
+                    aria-label={busy ? "Interrupt response" : "Send message"}
+                    className={cn(
+                      "absolute bottom-0 right-0 z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
+                      busy
+                        ? "bg-[var(--chat-text)] text-[var(--chat-bg)]"
+                        : canSend
+                          ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+                          : "text-[var(--chat-muted)]",
+                    )}
+                    disabled={busy ? state !== "open" : !canSend}
+                    onClick={busy ? interruptCurrentTurn : undefined}
+                    title={busy ? "Stop the current response" : "Send message"}
+                    type={busy ? "button" : "submit"}
+                  >
+                    {busy ? (
+                      <span className="h-3 w-3 rounded-[0.22rem] bg-current" />
+                    ) : (
+                      <CornerDownLeft className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
               </div>
 
               <ComposerActionBar
                 agentMenuOpen={agentMenuOpen}
                 agents={activeComposerAgents}
-                busy={busy}
                 canPickModel={canPickModel}
-                canSend={canSend}
                 info={info}
                 onAttach={onPaperclipClick}
                 onOpenModel={() => setModelOpen(true)}
-                onInterrupt={interruptCurrentTurn}
                 onSelectAgent={selectComposerAgent}
                 onToggleAgentMenu={() => {
                   setAgentMenuOpen((open) => !open);
                 }}
                 onToggleVoice={toggleVoiceInput}
                 selectedAgent={selectedAgent}
-                state={state}
                 usage={usage}
                 voiceListening={voiceListening}
                 voiceSupported={voiceSupported}
@@ -4183,7 +4200,7 @@ function ComposerRichInputLayer({
   if (!input) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden px-2 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)]">
+    <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden pl-2 pr-9 pb-1 pt-1 text-sm leading-6 text-[var(--chat-text)]">
       <div
         ref={layerRef}
         className="whitespace-pre-wrap break-words"
@@ -4259,36 +4276,28 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
 function ComposerActionBar({
   agentMenuOpen,
   agents,
-  busy,
   canPickModel,
-  canSend,
   info,
   onAttach,
   onOpenModel,
-  onInterrupt,
   onSelectAgent,
   onToggleAgentMenu,
   onToggleVoice,
   selectedAgent,
-  state,
   usage,
   voiceListening,
   voiceSupported,
 }: {
   agentMenuOpen: boolean;
   agents: ComposerAgent[];
-  busy: boolean;
   canPickModel: boolean;
-  canSend: boolean;
   info: SessionInfo;
   onAttach(): void;
   onOpenModel(): void;
-  onInterrupt(): void;
   onSelectAgent(agent: ComposerAgent): void;
   onToggleAgentMenu(): void;
   onToggleVoice(): void;
   selectedAgent: ComposerAgent;
-  state: ConnectionState;
   usage: UsageInfo | null;
   voiceListening: boolean;
   voiceSupported: boolean;
@@ -4401,30 +4410,6 @@ function ComposerActionBar({
           title={voiceSupported ? "Voice to text" : "Voice input unavailable"}
         >
           {voiceListening ? "Stop" : "Voice"}
-        </button>
-      </div>
-
-      <div className="ml-auto flex min-w-0 items-center">
-        <button
-          aria-label={busy ? "Interrupt response" : "Send message"}
-          className={cn(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
-            busy
-              ? "bg-[var(--chat-text)] text-[var(--chat-bg)]"
-              : canSend
-                ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
-                : "text-[var(--chat-muted)]",
-          )}
-          disabled={busy ? state !== "open" : !canSend}
-          onClick={busy ? onInterrupt : undefined}
-          title={busy ? "Stop the current response" : "Send message"}
-          type={busy ? "button" : "submit"}
-        >
-          {busy ? (
-            <span className="h-3 w-3 rounded-[0.22rem] bg-current" />
-          ) : (
-            <CornerDownLeft className="h-4 w-4" />
-          )}
         </button>
       </div>
     </div>
