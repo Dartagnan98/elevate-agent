@@ -1678,23 +1678,23 @@ class AIAgent:
         self._api_max_retries = _api_retries
 
         # Absolute cumulative wall-clock budget for ONE API-call sequence
-        # (all retries for a single turn). The non-stream stale detector
-        # only guards an individual request; every retry resets it, so a
-        # run of hung calls can burn far past any single timeout (observed
-        # in production: 2063s on a 6-msg / 17k-token turn before giving
-        # up). This ceiling bounds the cumulative dead time regardless of
-        # how many retries reset the per-call detector. 0/empty/<=0 or a
-        # local endpoint disables it. Override: agent.api_turn_deadline in
-        # config.yaml or ELEVATE_API_TURN_DEADLINE env (seconds).
+        # (all retries for a single turn). DISABLED BY DEFAULT (0): heavy
+        # agentic workflows (full CMA runs, multi-phase marketing pipelines)
+        # legitimately run far past any fixed ceiling, and a dumb total
+        # wall-clock cap cannot tell a productive long turn from a dead one.
+        # Per-request hangs are already caught by the non-stream stale
+        # detector, and api_max_retries bounds retry storms. Set a positive
+        # value via agent.api_turn_deadline in config.yaml or the
+        # ELEVATE_API_TURN_DEADLINE env (seconds) to re-enable the backstop.
         _raw_turn_deadline = _agent_section.get("api_turn_deadline", None)
         if _raw_turn_deadline is None:
             _raw_turn_deadline = os.getenv("ELEVATE_API_TURN_DEADLINE")
         try:
             self._api_turn_deadline_s = (
-                1200.0 if _raw_turn_deadline is None else float(_raw_turn_deadline)
+                0.0 if _raw_turn_deadline is None else float(_raw_turn_deadline)
             )
         except (TypeError, ValueError):
-            self._api_turn_deadline_s = 1200.0
+            self._api_turn_deadline_s = 0.0
         if self._api_turn_deadline_s <= 0:
             self._api_turn_deadline_s = 0.0  # disabled
 

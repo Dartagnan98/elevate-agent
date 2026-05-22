@@ -4563,7 +4563,16 @@ class GatewayRunner:
                     )
                     if msg:
                         event.text = msg
-                        event._persist_user_message = f"/{command}"
+                        # Persist the command WITH its arguments so the saved
+                        # transcript shows what was actually asked. Storing a
+                        # bare `/{command}` collapses every invocation into an
+                        # identical featureless chip on reload — distinct runs
+                        # become indistinguishable duplicates.
+                        event._persist_user_message = (
+                            f"/{command} {user_instruction}".strip()
+                            if user_instruction
+                            else f"/{command}"
+                        )
                 else:
                     # Not an active skill — check if it's a known-but-disabled or
                     # uninstalled skill and give actionable guidance.

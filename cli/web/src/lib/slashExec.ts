@@ -42,7 +42,11 @@ export interface SlashExecCallbacks {
    * separates `send` (a visible user turn) from a skill load (bulk context
    * that loads quietly on the first slash command).
    */
-  sendSkill(payload: string, commandName: string): Promise<void> | void;
+  sendSkill(
+    payload: string,
+    commandName: string,
+    args?: string,
+  ): Promise<void> | void;
 }
 
 export interface SlashExecOptions {
@@ -123,7 +127,7 @@ export async function executeSlash({
         // The model gets the full SKILL.md via sendSkill; the transcript
         // shows only the `/command` bubble + this one-line confirmation.
         sys(`⚡ loaded skill: ${d.name}`);
-        await sendSkill(msg, d.name);
+        await sendSkill(msg, d.name, arg);
         return "sent";
       }
 

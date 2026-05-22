@@ -371,6 +371,49 @@ function writeDismissedArtifactKeys(sessionId: string | null | undefined, keys: 
   } catch {}
 }
 
+// Artifacts (PDFs, files, outputs) are captured live from tool.complete
+// events — which carry full filesystem paths. The persisted transcript
+// drops tool messages entirely (shouldKeepTranscriptMessage), so on a
+// reload or session switch those paths are gone and the right-side panel
+// re-derives nothing from the remaining prose (which often shows only
+// bare filenames). Cache the captured artifacts per session so the panel
+// survives a reattach instead of going empty.
+const ARTIFACT_STORAGE_PREFIX = "elevate.chat.artifacts.v1:";
+
+function readSessionArtifacts(sessionId: string | null | undefined): ArtifactEntry[] {
+  if (typeof window === "undefined" || !sessionId) return [];
+  try {
+    const raw = window.localStorage.getItem(`${ARTIFACT_STORAGE_PREFIX}${sessionId}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter(
+        (entry): entry is ArtifactEntry =>
+          !!entry && typeof entry === "object" &&
+          typeof entry.key === "string" && typeof entry.title === "string",
+      );
+    }
+  } catch {}
+  return [];
+}
+
+function writeSessionArtifacts(
+  sessionId: string | null | undefined,
+  artifacts: ArtifactEntry[],
+): void {
+  if (typeof window === "undefined" || !sessionId) return;
+  try {
+    if (artifacts.length === 0) {
+      window.localStorage.removeItem(`${ARTIFACT_STORAGE_PREFIX}${sessionId}`);
+      return;
+    }
+    window.localStorage.setItem(
+      `${ARTIFACT_STORAGE_PREFIX}${sessionId}`,
+      JSON.stringify(artifacts.slice(-40)),
+    );
+  } catch {}
+}
+
 function clampPreviewPanelWidth(width: number): number {
   if (typeof window === "undefined") return Math.round(width);
   const max = Math.max(
@@ -1911,6 +1954,19 @@ export default function ChatPage() {
     }
   }, []);
 
+  // Persist the artifacts panel per session. Tool messages (which carry
+  // the full file paths) are stripped from the saved transcript, so on
+  // reattach the panel can only be rebuilt from this localStorage copy.
+  // Skip empty writes: artifacts only ever grow within a session, so the
+  // only time the array is empty is the reattach reset (setArtifacts([]))
+  // — writing that would wipe a still-valid cache before the restore runs.
+  useEffect(() => {
+    if (!artifacts.length) return;
+    const id = persistedSessionIdRef.current ?? sessionId;
+    if (!id) return;
+    writeSessionArtifacts(id, artifacts);
+  }, [artifacts, sessionId]);
+
   const dismissPreviewArtifact = useCallback(() => {
     setPreviewArtifact((current) => {
       if (current) {
@@ -2270,6 +2326,13 @@ export default function ChatPage() {
     setStatusText(resumeId ? "Loading chat..." : "Connecting...");
 
     if (resumeId) {
+      // Restore the artifacts captured during earlier turns of this
+      // session. Tool messages (which carry the full file paths) are
+      // stripped from the persisted transcript, so without this the
+      // right-side panel re-derives nothing and goes empty on reattach.
+      const cachedArtifacts = readSessionArtifacts(resumeId);
+      if (cachedArtifacts.length) setArtifacts(cachedArtifacts);
+
       const cached = restoreTranscript(resumeId);
       if (cached) {
         historyHydratedRef.current = true;
@@ -3315,7 +3378,7 @@ export default function ChatPage() {
   // bubble the caller already appended, plus the "⚡ loaded skill" line.
   // On reload, collapseSkillInvocation() keeps the rehydrated turn compact.
   const submitSkillInvocation = useCallback(
-    async (payload: string, commandName?: string) => {
+    async (payload: string, commandName?: string, args?: string) => {
       if (!sessionId || state !== "open") return;
       setBusy(true);
       setStatusText("Loading skill...");
@@ -3324,7 +3387,16 @@ export default function ChatPage() {
           session_id: sessionId,
           text: payload,
         };
-        if (commandName) req.persist_user_message = `/${commandName}`;
+        // Persist the command WITH its arguments so the reloaded transcript
+        // shows what was actually asked. A bare `/${commandName}` collapses
+        // every invocation into an identical chip — distinct runs become
+        // indistinguishable duplicates after a refresh or session switch.
+        if (commandName) {
+          const trimmedArgs = (args ?? "").trim();
+          req.persist_user_message = trimmedArgs
+            ? `/${commandName} ${trimmedArgs}`
+            : `/${commandName}`;
+        }
         if (selectedAgent.id) req.agent_id = selectedAgent.id;
         await gw.request("prompt.submit", req);
       } catch (error) {
@@ -3609,6 +3681,17 @@ export default function ChatPage() {
       setStatusText("Running...");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // "no pending ... request" (gateway error 4009) means the request the
+      // agent was waiting on is already gone — the run finished, was
+      // interrupted, or the gateway restarted out from under it. The prompt
+      // box can never be answered, so dismiss it instead of leaving a dead
+      // form on screen that re-errors on every Send.
+      if (/no pending .* request/i.test(message)) {
+        setPendingPrompt(null);
+        setPromptValue("");
+        setStatusText("Question expired");
+        return;
+      }
       appendMessage("system", message, { status: "error" });
     }
   };
@@ -4089,6 +4172,10 @@ export default function ChatPage() {
                     promptValue={promptValue}
                     setPromptValue={setPromptValue}
                     onRespond={(value) => void respondToPrompt(value)}
+                    onDismiss={() => {
+                      setPendingPrompt(null);
+                      setPromptValue("");
+                    }}
                   />
                 )}
                 <div ref={endRef} />
@@ -5472,11 +5559,13 @@ function InlineArtifactCard({
 
 function PendingPromptCard({
   onRespond,
+  onDismiss,
   pendingPrompt,
   promptValue,
   setPromptValue,
 }: {
   onRespond(value: string): void;
+  onDismiss(): void;
   pendingPrompt: PendingPrompt;
   promptValue: string;
   setPromptValue(value: string): void;
@@ -5538,7 +5627,17 @@ function PendingPromptCard({
 
   return (
     <Card className="border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-3 text-[var(--chat-text)]">
-      <div className="mb-2 text-sm font-semibold">{title}</div>
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="text-sm font-semibold">{title}</div>
+        <button
+          type="button"
+          aria-label="Dismiss question"
+          className="shrink-0 text-xs text-[var(--chat-text-muted)] hover:text-[var(--chat-text)]"
+          onClick={onDismiss}
+        >
+          Dismiss
+        </button>
+      </div>
       {choices?.length ? (
         <div className="flex flex-wrap gap-2">
           {choices.map((choice) => (
