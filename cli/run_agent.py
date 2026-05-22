@@ -9938,20 +9938,6 @@ class AIAgent:
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
 
-            # Apply Anthropic prompt caching for Claude models on native
-            # Anthropic, OpenRouter, and third-party Anthropic-compatible
-            # gateways. Auto-detected: if ``_use_prompt_caching`` is set,
-            # inject cache_control breakpoints (system + last 3 messages)
-            # to reduce input token costs by ~75% on multi-turn
-            # conversations. Layout is chosen per endpoint by
-            # ``_anthropic_prompt_cache_policy``.
-            if self._use_prompt_caching:
-                api_messages = apply_anthropic_cache_control(
-                    api_messages,
-                    cache_ttl=self._cache_ttl,
-                    native_anthropic=self._use_native_cache_layout,
-                )
-
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
             # gated on context_compressor — so orphans from session loading or
@@ -9996,6 +9982,19 @@ class AIAgent:
             # lone surrogates (U+D800-U+DFFF) that crash json.dumps() inside
             # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
             _sanitize_messages_surrogates(api_messages)
+
+            # Apply Anthropic prompt caching AFTER all message mutations
+            # (sanitize, whitespace normalize, JSON canonicalize, surrogate
+            # strip).  cache_control breakpoints mark positions in the final
+            # message array — if sanitize inserts a stub or normalize changes
+            # bytes before markers are placed, the prefix hash mismatches and
+            # every turn cache-misses.
+            if self._use_prompt_caching:
+                api_messages = apply_anthropic_cache_control(
+                    api_messages,
+                    cache_ttl=self._cache_ttl,
+                    native_anthropic=self._use_native_cache_layout,
+                )
 
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)

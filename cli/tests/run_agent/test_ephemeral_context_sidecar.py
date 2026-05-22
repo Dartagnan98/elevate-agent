@@ -203,6 +203,38 @@ class TestSidecarBehavior:
         assert "_ephemeral_context" not in api_msg
 
 
+class TestCacheControlOrdering:
+    """cache_control breakpoints must be applied AFTER all message mutations.
+
+    If sanitize/normalize/strip runs after cache markers are placed, inserted
+    stubs or byte changes shift the prefix hash and every turn cache-misses.
+    """
+
+    def test_cache_control_applied_after_sanitize(self) -> None:
+        idx_sanitize = RUN_AGENT_SRC.index("self._sanitize_api_messages(api_messages)")
+        idx_cache = RUN_AGENT_SRC.index("apply_anthropic_cache_control(")
+        assert idx_cache > idx_sanitize, (
+            "apply_anthropic_cache_control must run AFTER _sanitize_api_messages — "
+            "sanitize can insert/remove messages which shifts cache breakpoints"
+        )
+
+    def test_cache_control_applied_after_whitespace_normalize(self) -> None:
+        idx_strip = RUN_AGENT_SRC.index('am["content"] = am["content"].strip()')
+        idx_cache = RUN_AGENT_SRC.index("apply_anthropic_cache_control(")
+        assert idx_cache > idx_strip, (
+            "apply_anthropic_cache_control must run AFTER whitespace normalize — "
+            "stripping changes bytes in messages that would get cache markers"
+        )
+
+    def test_cache_control_applied_after_surrogate_strip(self) -> None:
+        idx_surr = RUN_AGENT_SRC.index("_sanitize_messages_surrogates(api_messages)")
+        idx_cache = RUN_AGENT_SRC.index("apply_anthropic_cache_control(")
+        assert idx_cache > idx_surr, (
+            "apply_anthropic_cache_control must run AFTER surrogate sanitize — "
+            "surrogate replacement changes bytes that affect prefix hashing"
+        )
+
+
 class TestCrossTurnByteStability:
     """The actual property the sidecar exists to provide.
 
