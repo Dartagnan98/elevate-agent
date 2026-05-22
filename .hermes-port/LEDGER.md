@@ -91,8 +91,11 @@ SKIP (do not port - would break Elevate or pure dead weight):
 ## Notes
 - Elevate runs live for Skyleigh. Never push a batch that fails tests.
 - `is_truthy_value` exists in `cli/utils.py` - dependency confirmed.
-- PRE-EXISTING: 29 gateway-test failures on committed HEAD (baseline before
-  any port). Root causes: `NameError: name 'event' is not defined` at
-  gateway/run.py:11468, and an api_server.py toolset bug. NOT port
-  regressions. The B3e run.py hand-port should resolve the run.py one.
+- FIXED 2026-05-22: the 29 pre-existing gateway-test failures. Causes were
+  (1) run.py:11468 NameError - persist_user_message now threaded as a param;
+  (2) stale FakeAgent run_conversation stubs missing persist_user_message;
+  (3) stale toolset-restriction tests predating the tools_config self-heal -
+  added known_builtin_toolsets to test configs;
+  (4) stale slack tool_progress test - added config.yaml override.
+  Gateway suite now 3730 passed / 0 failed.
 - venv: use `cli/.venv/bin/python` (pytest 9.0.2). NOT `cli/venv/`.
