@@ -57,6 +57,27 @@ SKIP (do not port - would break Elevate or pure dead weight):
         resolve_proxy_url signature + run.py await changes first)
   - [ ] B3c config.py, session.py, status.py, stream_consumer.py, webhook.py
         non-security delta, platforms/base.py
+        FINDINGS (2026-05-22 recon): NOT copy+sed-able. Bidirectional
+        divergence - Elevate carries intentionally-committed logic Hermes
+        lacks; a wholesale copy would destroy it. Hand-merge hunk-by-hunk,
+        per file, preserving BOTH sides. Specifics:
+        * config.py (1400 vs HM 1923): KEEP Elevate-only _gateway_env_values(),
+          ELEVATE_AGENT_*_TELEGRAM_BOT_TOKEN agent-bot parsing/merge, agent_id
+          visible-lane field, per-platform connected-detection block,
+          env-driven unauthorized_dm_behavior wiring.
+        * session.py (1300 vs HM 1347): KEEP Elevate-only agent_id lane field
+          threaded through to_dict/from_dict.
+        * webhook.py (864 vs HM 821): DECISION MADE - keep Elevate's STRICTER
+          security model (opt-in allow_insecure_no_auth config flag +
+          _insecure_no_auth_allowed() + _is_public_bind_host()). Hermes uses a
+          looser _is_loopback_host() gate. Do NOT port Hermes's webhook
+          security; only port its non-security deltas if any.
+        * base.py (2653 vs HM 3812) + config.py: much of the Hermes delta is
+          SKIP-list platform code (Weixin/Feishu/WeCom). Port only genuine
+          capability improvements, not the skipped-platform additions.
+        * status.py / stream_consumer.py: rename divergence + refactor;
+          stream_consumer has Elevate chunk-splitting (_split_text_chunks,
+          upstream issue 10454) to preserve.
   - [ ] B3d big platform adapters: telegram, discord, slack, api_server,
         matrix, signal, whatsapp, email, mattermost
   - [ ] B3e gateway/run.py (12.7k->18.2k lines, has Elevate-only divergence -
