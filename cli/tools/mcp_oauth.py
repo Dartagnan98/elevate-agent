@@ -520,13 +520,14 @@ def _maybe_preregister_client(
 
 
 def _parse_base_url(server_url: str) -> str:
-    """Return the origin URL used for OAuth discovery for an MCP server."""
-    from urllib.parse import urlparse, urlunparse
+    """Return the OAuth resource URL for an MCP server.
 
-    parsed = urlparse(server_url)
-    if not parsed.scheme or not parsed.netloc:
-        return server_url.rstrip("/")
-    return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
+    Some OAuth-protected HTTP MCP servers, including Composio at
+    ``https://connect.composio.dev/mcp``, advertise the full MCP endpoint path
+    as the protected resource. Stripping the path to the origin makes the MCP
+    SDK reject the server with a protected-resource mismatch.
+    """
+    return server_url.rstrip("/")
 
 
 def build_oauth_auth(
