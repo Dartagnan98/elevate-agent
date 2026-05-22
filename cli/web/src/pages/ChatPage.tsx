@@ -574,13 +574,32 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
   return true;
 }
 
+// A skill slash command (/cma-audit) injects the entire SKILL.md as the
+// user turn so the model has full context. That payload must never render
+// verbatim in the transcript. The first line of the turn is always the
+// activation note built by agent/skill_commands.py:_build_skill_message —
+// detect it and collapse the whole turn to the `/command` chip the user
+// actually typed. Display-only: the model still has the full turn in
+// gateway history.
+const SKILL_INVOCATION_RE =
+  /^\[SYSTEM: The user (?:has invoked|launched this CLI session with) the "([^"]+)" skill/;
+
+function collapseSkillInvocation(role: ChatRole, content: string): string {
+  if (role !== "user") return content;
+  const match = content.match(SKILL_INVOCATION_RE);
+  return match ? `/${match[1]}` : content;
+}
+
 function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage[] {
   return (messages ?? [])
     .filter((m) =>
       shouldKeepTranscriptMessage(m.role, String(m.text ?? m.context ?? "")),
     )
     .map((m, index) => ({
-      content: String(m.text ?? m.context ?? ""),
+      content: collapseSkillInvocation(
+        m.role,
+        String(m.text ?? m.context ?? ""),
+      ),
       createdAt: Date.now() - Math.max(0, (messages?.length ?? 0) - index),
       id: id(`history-${index}`),
       role: m.role,
@@ -605,7 +624,10 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       ),
     )
     .map((m, index) => ({
-      content: String(m.content ?? ""),
+      content: collapseSkillInvocation(
+        m.role,
+        typeof m.content === "string" ? m.content : "",
+      ),
       createdAt: timestampMillis(
         m.timestamp,
         Date.now() - Math.max(0, (messages?.length ?? 0) - index),
@@ -649,7 +671,7 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     }
     if (!shouldKeepTranscriptMessage(role, content)) return;
     normalized.push({
-      content,
+      content: collapseSkillInvocation(role, content),
       createdAt: timestampMillis(entry.createdAt, Date.now() - index),
       id: typeof entry.id === "string" && entry.id ? entry.id : id(`cached-${index}`),
       role,
@@ -2012,7 +2034,14 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    dismissedArtifactsRef.current = readDismissedArtifactKeys(sessionId);
+    // Dismissals are persisted under the STABLE persisted-session id, not the
+    // ephemeral gateway session_id (session.resume mints a fresh one on every
+    // reattach). Reading under sessionId here would clobber the ref with an
+    // empty set the moment the gateway connects — which is why a closed
+    // preview reopened on leave/return. Read under the same key the write uses.
+    dismissedArtifactsRef.current = readDismissedArtifactKeys(
+      persistedSessionIdRef.current ?? sessionId,
+    );
   }, [sessionId]);
 
   useEffect(() => {
@@ -3265,6 +3294,35 @@ export default function ChatPage() {
     [appendMessage, attachments, gw, sessionId],
   );
 
+  // Skill slash commands (/cma-audit) load the full SKILL.md into the
+  // model's context. The model needs every line; the user does not want to
+  // see it. So we submit the payload as the prompt text (gateway history
+  // keeps it — the model retains the skill across follow-up turns) but
+  // render NO user bubble for it. The only thing visible is the `/command`
+  // bubble the caller already appended, plus the "⚡ loaded skill" line.
+  // On reload, collapseSkillInvocation() keeps the rehydrated turn compact.
+  const submitSkillInvocation = useCallback(
+    async (payload: string) => {
+      if (!sessionId || state !== "open") return;
+      setBusy(true);
+      setStatusText("Loading skill...");
+      try {
+        const req: Record<string, unknown> = {
+          session_id: sessionId,
+          text: payload,
+        };
+        if (selectedAgent.id) req.agent_id = selectedAgent.id;
+        await gw.request("prompt.submit", req);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendMessage("system", message, { status: "error" });
+        setBusy(false);
+        setStatusText("Error");
+      }
+    },
+    [appendMessage, gw, selectedAgent, sessionId, state],
+  );
+
   const interruptCurrentTurn = useCallback(() => {
     if (!sessionId || state !== "open") return;
 
@@ -3422,6 +3480,7 @@ export default function ChatPage() {
         await executeSlash({
           callbacks: {
             send: submitPrompt,
+            sendSkill: submitSkillInvocation,
             sys: (body) => appendMessage("system", body),
           },
           command: trimmed,
@@ -3463,7 +3522,7 @@ export default function ChatPage() {
 
       await submitGatewayPrompt(trimmed, routedText, selectedAgent.id);
     },
-    [addArtifacts, appendMessage, artifacts, busy, gw, hasReadyAttachment, messages, selectedAgent, sessionId, state, submitGatewayPrompt],
+    [addArtifacts, appendMessage, artifacts, busy, gw, hasReadyAttachment, messages, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
 
   useEffect(() => {
@@ -4271,6 +4330,7 @@ export default function ChatPage() {
             void executeSlash({
               callbacks: {
                 send: submitPrompt,
+                sendSkill: submitSkillInvocation,
                 sys: (body) => appendMessage("system", body),
               },
               command: slashCommand,

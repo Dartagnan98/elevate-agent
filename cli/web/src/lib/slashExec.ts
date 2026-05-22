@@ -35,6 +35,14 @@ export interface SlashExecCallbacks {
   sys(text: string): void;
   /** Submit a user message to the agent (prompt.submit). */
   send(message: string): Promise<void> | void;
+  /**
+   * Submit a skill payload. The model receives the full SKILL.md `payload`,
+   * but the client MUST keep it out of the visible transcript — the leading
+   * `/command` bubble is the only thing the user should see. This is what
+   * separates `send` (a visible user turn) from a skill load (bulk context
+   * that loads quietly on the first slash command).
+   */
+  sendSkill(payload: string): Promise<void> | void;
 }
 
 export interface SlashExecOptions {
@@ -56,7 +64,7 @@ export async function executeSlash({
   command,
   sessionId,
   gw,
-  callbacks: { sys, send },
+  callbacks: { sys, send, sendSkill },
 }: SlashExecOptions): Promise<SlashExecResult> {
   const { name, arg } = parseSlash(command);
 
@@ -103,19 +111,28 @@ export async function executeSlash({
           command: `/${d.target}${arg ? ` ${arg}` : ""}`,
           sessionId,
           gw,
-          callbacks: { sys, send },
+          callbacks: { sys, send, sendSkill },
         });
 
-      case "skill":
+      case "skill": {
+        const msg = d.message?.trim() ?? "";
+        if (!msg) {
+          sys(`/${name}: skill payload missing message`);
+          return "error";
+        }
+        // The model gets the full SKILL.md via sendSkill; the transcript
+        // shows only the `/command` bubble + this one-line confirmation.
+        sys(`⚡ loaded skill: ${d.name}`);
+        await sendSkill(msg);
+        return "sent";
+      }
+
       case "send": {
         const msg = d.message?.trim() ?? "";
         if (!msg) {
-          sys(
-            `/${name}: ${d.type === "skill" ? "skill payload missing message" : "empty message"}`,
-          );
+          sys(`/${name}: empty message`);
           return "error";
         }
-        if (d.type === "skill") sys(`⚡ loading skill: ${d.name}`);
         await send(msg);
         return "sent";
       }
