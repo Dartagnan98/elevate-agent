@@ -571,6 +571,18 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
   if (!clean) return false;
   if (role === "tool") return false;
   if (role !== "user" && isRawToolPayload(clean)) return false;
+  if (clean.startsWith("[CONTEXT COMPACTION")) return false;
+  if (role === "user") {
+    if (/^\[SYSTEM:/.test(clean)) {
+      // Skill invocations pass through — collapseSkillInvocation handles them
+      if (/^\[SYSTEM: (?:The user |The ")/.test(clean)) return true;
+      return false;
+    }
+    if (clean.startsWith("[System note:")) return false;
+    if (clean.startsWith("You've reached the maximum number of tool-calling iterations")) return false;
+    if (clean.startsWith("[Elevate Hub interface context]")) return false;
+    if (clean.startsWith("User follow-up received while you were already working:")) return false;
+  }
   return true;
 }
 
@@ -582,12 +594,13 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
 // actually typed. Display-only: the model still has the full turn in
 // gateway history.
 const SKILL_INVOCATION_RE =
-  /^\[SYSTEM: The user (?:has invoked|launched this CLI session with) the "([^"]+)" skill/;
+  /^\[SYSTEM: (?:The user (?:has invoked|launched this CLI session with) the "([^"]+)" skill|The "([^"]+)" skill is auto-loaded)/;
 
 function collapseSkillInvocation(role: ChatRole, content: string): string {
   if (role !== "user") return content;
   const match = content.match(SKILL_INVOCATION_RE);
-  return match ? `/${match[1]}` : content;
+  if (!match) return content;
+  return `/${match[1] || match[2]}`;
 }
 
 function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage[] {
