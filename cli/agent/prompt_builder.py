@@ -665,6 +665,44 @@ def build_environment_hints() -> str:
     return "\n\n".join(hints)
 
 
+def build_app_layout_hint() -> str:
+    """Return a static map of the Elevate app's on-disk data layout.
+
+    The layout is identical across every install — only the ELEVATE_HOME
+    root varies, so it is resolved at call time. Injecting this into every
+    system prompt keeps the agent from grepping the filesystem to locate
+    its own databases on each run.
+    """
+    home = get_elevate_home()
+    db = home / "data" / "operational.db"
+    return (
+        "# Elevate data layout\n\n"
+        f"Your app keeps its data under `{home}`. These locations are fixed. "
+        "Never use search_files or terminal discovery to find them — go "
+        "straight to the path.\n\n"
+        f"Primary database — all CRM, deal and lead data: `{db}`\n"
+        "Query it with the `sqlite3` CLI. Key tables:\n"
+        "- `deals` — admin deals/transactions, listing or buyer side "
+        "(columns: id, title, side, current_stage, status).\n"
+        "- `deal_contacts`, `deal_attachments`, `deal_events` — records tied to a deal.\n"
+        "- `contacts` — people (id, display_name, primary_email, primary_phone, type, stage).\n"
+        "- `conversations` — per-contact message threads across email, sms, "
+        "imessage, messenger, instagram, whatsapp, telegram, voice, crm.\n"
+        "- `lead_inquiries`, `lead_signals`, `lead_properties` — inbound buyer-lead "
+        "criteria and activity.\n"
+        "- `send_queue`, `draft_attempts` — outbound messaging pipeline.\n"
+        "- `templates`, `notes`, `events` — supporting records.\n\n"
+        "Side databases under the same root: "
+        f"`{home / 'state.db'}` (agent/session state), "
+        f"`{home / 'memory_store.db'}` (long-term memory), "
+        f"`{home / 'orchestration.db'}` (multi-agent orchestration).\n\n"
+        "To list deals, run one query — do not explore:\n"
+        f'  sqlite3 "{db}" "SELECT id, title, side, status FROM deals '
+        'ORDER BY rowid DESC LIMIT 20;"\n'
+        "Run `.schema <table>` for exact columns before a complex query."
+    )
+
+
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2

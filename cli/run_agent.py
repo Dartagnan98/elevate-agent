@@ -102,6 +102,7 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_context_files_prompt,
     build_environment_hints,
+    build_app_layout_hint,
     build_memory_guidance,
     load_soul_md,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -3121,6 +3122,30 @@ class AIAgent:
         "If nothing stands out, just say 'Nothing to save.' and stop."
     )
 
+    # Correction signals: phrases a user uses when the agent did something
+    # wrong or not as desired. Matching one forces a skill review this turn,
+    # regardless of the tool-iteration nudge counter — corrections are exactly
+    # the moments a skill should learn something.
+    _CORRECTION_SIGNALS = (
+        "no don't", "no dont", "no, don't", "no, dont", "don't ", "do not ",
+        "stop ", "that's wrong", "thats wrong", "that is wrong", "incorrect",
+        "not what i", "that's not", "thats not", "you should have",
+        "you were supposed to", "i said", "i told you", "fix it", "redo ",
+        "wrong ", "not right", "that's not right", "not how", "never do",
+    )
+
+    @classmethod
+    def _looks_like_correction(cls, text: str) -> bool:
+        """Heuristic: does this user message read as a correction?"""
+        if not text:
+            return False
+        low = text.strip().lower()
+        if low in ("no", "no.", "nope", "wrong", "stop"):
+            return True
+        if low.startswith(("no ", "no,", "nope ", "nope,")):
+            return True
+        return any(sig in low for sig in cls._CORRECTION_SIGNALS)
+
     @staticmethod
     def _summarize_background_review_actions(
         review_messages: List[Dict],
@@ -4730,6 +4755,10 @@ class AIAgent:
         _env_hints = build_environment_hints()
         if _env_hints:
             prompt_parts.append(_env_hints)
+
+        # App data layout — fixed map of where Elevate keeps its databases,
+        # so the agent never greps the filesystem to find its own data.
+        prompt_parts.append(build_app_layout_hint())
 
         platform_key = (self.platform or "").lower().strip()
         if platform_key in PLATFORM_HINTS:
@@ -9483,6 +9512,11 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+        # Detect a user correction this turn. When the user corrects the
+        # agent, force a skill review afterward regardless of the iteration
+        # nudge counter — corrections are the highest-signal moment to learn.
+        self._correction_this_turn = self._looks_like_correction(original_user_message)
+
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
@@ -9660,6 +9694,16 @@ class AIAgent:
                 _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+
+        # Persist the user's message to the session DB before the first API
+        # call. Without this, nothing is written until _persist_session fires
+        # inside the loop below (after the first response) — so a turn that is
+        # still running, interrupted, or switched away from leaves the session
+        # at message_count=0: untitled in the sidebar, and empty on reattach
+        # (the web transcript merges to [] and wipes to just the typed line).
+        # Idempotent: _last_flushed_db_idx makes the in-loop calls write only
+        # genuinely new messages.
+        self._persist_session(messages, conversation_history)
 
         # Main conversation loop
         api_call_count = 0
@@ -12799,13 +12843,18 @@ class AIAgent:
         # Clear stream callback so it doesn't leak into future calls
         self._stream_callback = None
 
-        # Check skill trigger NOW — based on how many tool iterations THIS turn used.
+        # Check skill trigger NOW — based on how many tool iterations THIS turn
+        # used, OR a user correction this turn (corrections always trigger,
+        # even on a zero-tool turn — the lesson is in the user's words).
         _should_review_skills = False
-        if (self._skill_nudge_interval > 0
-                and self._iters_since_skill >= self._skill_nudge_interval
-                and "skill_manage" in self.valid_tool_names):
-            _should_review_skills = True
-            self._iters_since_skill = 0
+        if "skill_manage" in self.valid_tool_names:
+            if (self._skill_nudge_interval > 0
+                    and self._iters_since_skill >= self._skill_nudge_interval):
+                _should_review_skills = True
+                self._iters_since_skill = 0
+            elif getattr(self, "_correction_this_turn", False):
+                _should_review_skills = True
+                self._iters_since_skill = 0
 
         # External memory provider: sync the completed turn + queue next prefetch.
         # Use original_user_message (clean input) — user_message may contain

@@ -231,7 +231,24 @@ def _build_skill_message(
         timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
         content = _expand_inline_shell(content, skill_dir, timeout)
 
-    parts = [activation_note, "", content.strip()]
+    parts = [activation_note]
+
+    # The user's argument (text after `/command`) is the task. Place it
+    # immediately after the activation note — before the full SKILL.md —
+    # and frame it as the target so the model acts on it instead of
+    # treating it as an optional footnote buried under the skill doc.
+    if user_instruction:
+        parts.append("")
+        parts.append(
+            f"[Skill argument] The user invoked this skill with: "
+            f"{user_instruction}\n"
+            "Treat this as the subject and target of the skill run. Apply the "
+            "skill's instructions to it directly and begin work now — do not "
+            "ask the user to restate or confirm it."
+        )
+
+    parts.append("")
+    parts.append(content.strip())
 
     # ── Inject the absolute skill directory so the agent can reference
     #    bundled scripts without an extra skill_view() round-trip. ──
@@ -299,10 +316,6 @@ def _build_skill_message(
             f'file_path="<path>"), or run scripts directly by absolute path '
             f"(e.g. `node {skill_dir}/scripts/foo.js`)."
         )
-
-    if user_instruction:
-        parts.append("")
-        parts.append(f"The user has provided the following instruction alongside the skill invocation: {user_instruction}")
 
     if runtime_note:
         parts.append("")
