@@ -688,6 +688,19 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+class AmbiguousJobReference(LookupError):
+    """Raised when a job name matches more than one job."""
+
+    def __init__(self, ref: str, matches: List[Dict[str, Any]]):
+        self.ref = ref
+        self.matches = matches
+        ids = ", ".join(m["id"] for m in matches)
+        super().__init__(
+            f"Job name '{ref}' is ambiguous — matches {len(matches)} jobs: {ids}. "
+            f"Use the job ID instead."
+        )
+
+
 def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
     """List all jobs, optionally including disabled ones."""
     jobs = [_apply_skill_fields(j) for j in load_jobs()]
