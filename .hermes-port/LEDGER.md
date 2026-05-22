@@ -84,6 +84,20 @@ SKIP (do not port - would break Elevate or pure dead weight):
         hand-port hunk by hunk, B2-caliber risk)
 - [ ] B4 elevate_cli/ deltas + new files
 - [ ] B5 tools/ deltas + new files
+  - [x] B5a net-new tool files (clarify_gateway, computer_use/*, computer_use_tool,
+        environments/vercel_sandbox, fal_common, lazy_deps, skill_provenance,
+        skill_usage, slash_confirm + 8 test files) - +195 tests, 0 regressions.
+        SKIPPED (broken dep chains, defer): kanban_tools (needs elevate_cli.kanban_db),
+        x_search_tool (needs full tools/xai_http.py - Elevate has 12-line stub),
+        video_generation_tool (needs agent/video_gen_provider). agent-layer
+        computer-use multimodal wiring (prompt_builder/anthropic_adapter/run_agent)
+        NOT done - port in B2.
+  - [ ] B5b tools/ differ files. Recon done (B5b-recon.md): 55 Class A copy+sed-safe,
+        10 Class B hand-merge (delegate_tool, web_tools, approval, session_search_tool,
+        skills_tool, send_message_tool, skills_hub, skills_sync, memory_tool,
+        image_generation_tool), 2 Class C skip (feishu_*). VERIFY skills_guard.py:
+        Elevate dropped huggingface/skills from TRUSTED_REPOS - confirm intentional
+        before overwrite.
 - [ ] B6 providers/ + plugins/model-providers/
 - [ ] B7 skills / optional-skills (filtered)
 - [ ] B8 tests sweep
