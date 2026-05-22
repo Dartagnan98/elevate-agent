@@ -16,6 +16,15 @@ def _elevate_home_path() -> Path:
         return Path(os.path.expanduser("~/.elevate"))
 
 
+def _elevate_root_path() -> Path:
+    """Resolve the Elevate root dir (always the parent of any profile, never per-profile)."""
+    try:
+        from elevate_constants import get_default_elevate_root  # local import to avoid cycles
+        return get_default_elevate_root()
+    except Exception:
+        return Path(os.path.expanduser("~/.elevate"))
+
+
 def build_write_denied_paths(home: str) -> set[str]:
     """Return exact sensitive paths that must never be written."""
     elevate_home = _elevate_home_path()
@@ -82,6 +91,37 @@ def is_write_denied(path: str) -> bool:
     for prefix in build_write_denied_prefixes(home):
         if resolved.startswith(prefix):
             return True
+
+    # Elevate control-plane files: block both the ACTIVE profile's view
+    # (elevate_home) AND the global root view. Without the root pass, a
+    # profile-mode session leaves <root>/auth.json + <root>/config.yaml
+    # writable — letting a prompt-injected write_file overwrite the global
+    # files that every profile inherits from.
+    control_file_names = ("auth.json", "config.yaml", "webhook_subscriptions.json")
+    mcp_tokens_dir_name = "mcp-tokens"
+
+    elevate_dirs: list[str] = []
+    for base in (_elevate_home_path(), _elevate_root_path()):
+        try:
+            real = os.path.realpath(base)
+            if real not in elevate_dirs:
+                elevate_dirs.append(real)
+        except Exception:
+            continue
+
+    for base_real in elevate_dirs:
+        for name in control_file_names:
+            try:
+                if resolved == os.path.realpath(os.path.join(base_real, name)):
+                    return True
+            except Exception:
+                continue
+        try:
+            mcp_real = os.path.realpath(os.path.join(base_real, mcp_tokens_dir_name))
+            if resolved == mcp_real or resolved.startswith(mcp_real + os.sep):
+                return True
+        except Exception:
+            pass
 
     safe_root = get_safe_write_root()
     if safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
