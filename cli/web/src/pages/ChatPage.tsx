@@ -3315,7 +3315,7 @@ export default function ChatPage() {
   // bubble the caller already appended, plus the "⚡ loaded skill" line.
   // On reload, collapseSkillInvocation() keeps the rehydrated turn compact.
   const submitSkillInvocation = useCallback(
-    async (payload: string) => {
+    async (payload: string, commandName?: string) => {
       if (!sessionId || state !== "open") return;
       setBusy(true);
       setStatusText("Loading skill...");
@@ -3324,6 +3324,7 @@ export default function ChatPage() {
           session_id: sessionId,
           text: payload,
         };
+        if (commandName) req.persist_user_message = `/${commandName}`;
         if (selectedAgent.id) req.agent_id = selectedAgent.id;
         await gw.request("prompt.submit", req);
       } catch (error) {

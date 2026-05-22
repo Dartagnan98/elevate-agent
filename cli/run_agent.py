@@ -8763,6 +8763,7 @@ class AIAgent:
                 "role": "tool",
                 "content": function_result,
                 "tool_call_id": tc.id,
+                "tool_name": name,
             }
             messages.append(tool_msg)
 
@@ -9126,7 +9127,8 @@ class AIAgent:
             tool_msg = {
                 "role": "tool",
                 "content": function_result,
-                "tool_call_id": tool_call.id
+                "tool_call_id": tool_call.id,
+                "tool_name": function_name,
             }
             messages.append(tool_msg)
 
@@ -9186,7 +9188,7 @@ class AIAgent:
             "Please provide a final response summarizing what you've found and accomplished so far, "
             "without calling any more tools."
         )
-        messages.append({"role": "user", "content": summary_request})
+        messages.append({"role": "system", "content": summary_request})
 
         try:
             # Build API messages, stripping internal-only fields

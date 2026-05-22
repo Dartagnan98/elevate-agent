@@ -4563,7 +4563,7 @@ class GatewayRunner:
                     )
                     if msg:
                         event.text = msg
-                        # Fall through to normal message processing with skill content
+                        event._persist_user_message = f"/{command}"
                 else:
                     # Not an active skill — check if it's a known-but-disabled or
                     # uninstalled skill and give actionable guidance.
@@ -11456,7 +11456,13 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+                _persist_override = getattr(event, "_persist_user_message", None)
+                result = agent.run_conversation(
+                    message,
+                    conversation_history=agent_history,
+                    task_id=session_id,
+                    persist_user_message=_persist_override,
+                )
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
