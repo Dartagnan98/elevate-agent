@@ -115,9 +115,15 @@ class TestApiServerAdapterToolset:
                                         "provider": None, "api_mode": None,
                                         "command": None, "args": []}
             mock_model.return_value = "test/model"
-            # User overrides with just web and terminal
+            # User overrides with just web and terminal. known_builtin_toolsets
+            # records the builtin set known at the last `elevate tools` save;
+            # supplying it disables the self-heal auto-enable so the explicit
+            # allowlist is honored exactly (a real saved config has this key).
+            from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS
+            _all_builtin = [name for name, _, _ in CONFIGURABLE_TOOLSETS]
             mock_config.return_value = {
-                "platform_toolsets": {"api_server": ["web", "terminal"]}
+                "platform_toolsets": {"api_server": ["web", "terminal"]},
+                "known_builtin_toolsets": {"api_server": _all_builtin},
             }
             mock_agent_cls.return_value = MagicMock()
 

@@ -391,7 +391,16 @@ def test_telegram_auto_mode_cma_message_escalates_to_skill_runner_profile():
 
 def test_explicit_platform_tool_config_is_respected():
     runner = _make_runner()
-    cfg = {"platform_toolsets": {"telegram": ["web", "terminal"]}}
+    # known_builtin_toolsets records the builtin set known at the last
+    # `elevate tools` save. Supplying it (all configurable keys) disables the
+    # self-heal auto-enable so the explicit ["web", "terminal"] allowlist is
+    # honored exactly — the state a real saved config is in.
+    from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS
+    _all_builtin = [name for name, _, _ in CONFIGURABLE_TOOLSETS]
+    cfg = {
+        "platform_toolsets": {"telegram": ["web", "terminal"]},
+        "known_builtin_toolsets": {"telegram": _all_builtin},
+    }
 
     toolsets = runner._resolve_gateway_enabled_toolsets(
         cfg,

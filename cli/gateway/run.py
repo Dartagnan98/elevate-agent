@@ -5337,6 +5337,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                persist_user_message=getattr(event, "_persist_user_message", None),
             )
             _turn_latency_ms = int(max(0.0, time.monotonic() - _turn_started_at) * 1000)
 
@@ -10541,6 +10542,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -11465,7 +11467,7 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                _persist_override = getattr(event, "_persist_user_message", None)
+                _persist_override = persist_user_message
                 result = agent.run_conversation(
                     message,
                     conversation_history=agent_history,

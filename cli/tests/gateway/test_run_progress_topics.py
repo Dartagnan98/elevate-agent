@@ -63,7 +63,7 @@ class FakeAgent:
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         self.tool_progress_callback("tool.started", "terminal", "pwd", {})
         time.sleep(0.35)
         self.tool_progress_callback("tool.started", "browser_navigate", "https://example.com", {})
@@ -83,7 +83,7 @@ class LongPreviewAgent:
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         self.tool_progress_callback("tool.started", "terminal", self.LONG_CMD, {})
         time.sleep(0.35)
         return {
@@ -98,7 +98,7 @@ class DelayedProgressAgent:
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         self.tool_progress_callback("tool.started", "terminal", "first command", {})
         time.sleep(0.45)
         self.tool_progress_callback("tool.started", "terminal", "second command", {})
@@ -115,7 +115,7 @@ class DelayedInterimAgent:
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         self.interim_assistant_callback("first interim")
         time.sleep(0.45)
         self.interim_assistant_callback("second interim")
@@ -244,6 +244,14 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
 async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch, tmp_path):
     """Slack DM progress should keep event ts fallback threading."""
     monkeypatch.setenv("ELEVATE_TOOL_PROGRESS_MODE", "all")
+    # Slack's built-in display tier sets tool_progress="off" by default.
+    # Override via config so this test still exercises the progress-callback
+    # path the Slack DM event_message_id threading depends on.
+    import yaml
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"display": {"platforms": {"slack": {"tool_progress": "all"}}}}),
+        encoding="utf-8",
+    )
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -388,7 +396,7 @@ class CommentaryAgent:
         self.stream_delta_callback = kwargs.get("stream_delta_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         if self.interim_assistant_callback:
             self.interim_assistant_callback("I'll inspect the repo first.", already_streamed=False)
         time.sleep(0.1)
@@ -406,7 +414,7 @@ class PreviewedResponseAgent:
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         if self.interim_assistant_callback:
             self.interim_assistant_callback("You're welcome.", already_streamed=False)
         return {
@@ -422,7 +430,7 @@ class StreamingRefineAgent:
         self.stream_delta_callback = kwargs.get("stream_delta_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         if self.stream_delta_callback:
             self.stream_delta_callback("Continuing to refine:")
         time.sleep(0.1)
@@ -443,7 +451,7 @@ class QueuedCommentaryAgent:
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         type(self).calls += 1
         if type(self).calls == 1 and self.interim_assistant_callback:
             self.interim_assistant_callback("I'll inspect the repo first.", already_streamed=False)
@@ -459,7 +467,7 @@ class BackgroundReviewAgent:
         self.background_review_callback = kwargs.get("background_review_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         if self.background_review_callback:
             self.background_review_callback("💾 Skill 'prospect-scanner' created.")
         return {
@@ -477,7 +485,7 @@ class VerboseAgent:
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, persist_user_message=None):
         self.tool_progress_callback(
             "tool.started", "execute_code", None,
             {"code": self.LONG_CODE},
