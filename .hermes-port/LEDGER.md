@@ -92,12 +92,26 @@ SKIP (do not port - would break Elevate or pure dead weight):
         video_generation_tool (needs agent/video_gen_provider). agent-layer
         computer-use multimodal wiring (prompt_builder/anthropic_adapter/run_agent)
         NOT done - port in B2.
-  - [ ] B5b tools/ differ files. Recon done (B5b-recon.md): 55 Class A copy+sed-safe,
-        10 Class B hand-merge (delegate_tool, web_tools, approval, session_search_tool,
-        skills_tool, send_message_tool, skills_hub, skills_sync, memory_tool,
-        image_generation_tool), 2 Class C skip (feishu_*). VERIFY skills_guard.py:
-        Elevate dropped huggingface/skills from TRUSTED_REPOS - confirm intentional
-        before overwrite.
+  - [ ] B5b tools/ differ files. Recon (B5b-recon.md): 55 nom-Class A, 10 B, 2 C.
+    - [x] B5b-phase1 (16 files actually port-clean): browser_cdp_tool, browser_dialog_tool,
+          browser_supervisor, budget_config, environments/__init__, environments/singularity,
+          fuzzy_match, mixture_of_agents_tool, osv_check, schema_sanitizer, skills_guard
+          (TRUSTED_REPOS adopts huggingface/skills - fork-point staleness, not intentional drop),
+          tirith_security, todo_tool, tool_backend_helpers, voice_mode (WAV chunking),
+          xai_http (full xAI OAuth credential resolver - UNBLOCKS x_search_tool from B5a).
+          +tests/tools/conftest.py + test_memory_tool_schema.py. 0 regressions in tools/+run_agent/.
+    - [ ] B5b-phase2 BLOCKED until helpers ported. ~23 Class A tool files revert because
+          Hermes versions import symbols missing in Elevate: cfg_get (elevate_cli.config),
+          AmbiguousJobReference (cron.jobs), _subprocess_compat (elevate_cli),
+          secure_parent_dir (elevate_constants), atomic_replace (utils),
+          safe_schedule_threadsafe (agent.async_utils). PORT ORDER REVISION: do B4 elevate_cli
+          + agent-layer helpers FIRST, then re-attempt these tools. Also ~9 files have
+          behavior-changes the recon under-classified (Hermes-strict but breaks Elevate
+          callers): discord_tool (entrypoint rename), code_execution_tool (psutil hard dep),
+          file_operations (fence regex narrowing), file_tools (redact_sensitive_text kwarg),
+          environments/{file_sync,modal,daytona,base,ssh}, patch_parser (3-tuple return),
+          transcription_tools, tool_result_storage, checkpoint_manager, vision_tools, tts_tool,
+          mcp_oauth_manager, registry (TTL cache leak). Real Class B - need hand-merge.
 - [ ] B6 providers/ + plugins/model-providers/
 - [ ] B7 skills / optional-skills (filtered)
 - [ ] B8 tests sweep

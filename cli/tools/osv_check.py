@@ -65,9 +65,9 @@ def check_package_for_malware(
 def _infer_ecosystem(command: str) -> Optional[str]:
     """Infer package ecosystem from the command name."""
     base = os.path.basename(command).lower()
-    if base in ("npx", "npx.cmd"):
+    if base in {"npx", "npx.cmd"}:
         return "npm"
-    if base in ("uvx", "uvx.cmd", "pipx"):
+    if base in {"uvx", "uvx.cmd", "pipx"}:
         return "PyPI"
     return None
 
@@ -142,7 +142,7 @@ def _query_osv(
         data=data,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "elevate-osv-check/1.0",
+            "User-Agent": "elevate-agent-osv-check/1.0",
         },
         method="POST",
     )
