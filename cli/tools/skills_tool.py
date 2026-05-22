@@ -447,6 +447,56 @@ def _remaining_required_environment_names(
     return remaining
 
 
+def _check_onboarding_requirements(required_keys: List[str]) -> List[str]:
+    """Validate per-realtor onboarding inputs against the admin-setup forms.
+
+    A skill declares the admin-setup item keys it consumes via the
+    ``requires_onboarding`` frontmatter list. Any declared key whose item is not
+    in a ready state (configured / connected / manual) is returned, so the skill
+    is reported as ``setup_needed`` instead of running with missing config.
+
+    Returns human-readable strings for the missing items, or [] when everything
+    is ready. Fails open: if the admin-setup store is unavailable, returns []
+    rather than blocking a skill on an infra error.
+    """
+    wanted = [str(k).strip() for k in required_keys if str(k).strip()]
+    if not wanted:
+        return []
+    try:
+        from elevate_cli.data import connect, get_admin_setup
+        from elevate_cli.data.admin_setup import READY_STATUSES
+    except Exception:
+        return []
+    try:
+        with connect() as conn:
+            snapshot = get_admin_setup(conn)
+    except Exception:
+        logger.debug(
+            "admin-setup snapshot unavailable for onboarding check", exc_info=True
+        )
+        return []
+
+    items = snapshot.get("items") if isinstance(snapshot, dict) else None
+    if not isinstance(items, list):
+        return []
+    by_key = {
+        str(it.get("key")): it
+        for it in items
+        if isinstance(it, dict) and it.get("key")
+    }
+    missing: List[str] = []
+    for key in wanted:
+        item = by_key.get(key)
+        if item is None:
+            missing.append(f"{key} (unknown onboarding field)")
+            continue
+        status = str(item.get("status") or "missing")
+        if status not in READY_STATUSES:
+            label = str(item.get("label") or key)
+            missing.append(f"{label} [{status}]")
+    return missing
+
+
 def _gateway_setup_hint() -> str:
     try:
         from gateway.platforms.base import GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE
@@ -1367,6 +1417,21 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     exc_info=True,
                 )
 
+        # Validate per-realtor onboarding inputs ("whatever's variable") against
+        # the admin-setup forms. The first time a skill runs, this checks that
+        # the onboarding fields it consumes are filled in; anything not ready
+        # blocks the skill with a named-missing message instead of running blind.
+        required_onboarding_raw = frontmatter.get("requires_onboarding", [])
+        if isinstance(required_onboarding_raw, str):
+            required_onboarding_raw = [required_onboarding_raw]
+        if not isinstance(required_onboarding_raw, list):
+            required_onboarding_raw = []
+        missing_onboarding: list = _check_onboarding_requirements(
+            required_onboarding_raw
+        )
+        if missing_onboarding:
+            setup_needed = True
+
         result = {
             "success": True,
             "name": skill_name,
@@ -1383,6 +1448,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             "required_commands": [],
             "missing_required_environment_variables": remaining_missing_required_envs,
             "missing_credential_files": missing_cred_files,
+            "missing_onboarding": missing_onboarding,
             "missing_required_commands": [],
             "setup_needed": setup_needed,
             "setup_skipped": capture_result["setup_skipped"],
@@ -1403,6 +1469,8 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                 f"env ${env_name}" for env_name in remaining_missing_required_envs
             ] + [
                 f"file {path}" for path in missing_cred_files
+            ] + [
+                f"onboarding: {item}" for item in missing_onboarding
             ]
             setup_note = _build_setup_note(
                 SkillReadinessStatus.SETUP_NEEDED,
