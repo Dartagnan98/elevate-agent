@@ -39,14 +39,28 @@ SKIP (do not port - would break Elevate or pure dead weight):
 - blockchain skills, infographic/, achievements plugin
 
 ## Batches
-- [ ] B1 Security fixes
+- [x] B1 Security fixes
   - [x] tools/url_safety.py        (SSRF IPv4-mapped IPv6 + is_always_blocked_url) - 112 tests pass
-  - [ ] gateway HMAC webhook secret validation
-  - [ ] gateway/pairing.py         (hash pairing codes)
-  - [ ] control-plane file write-deny
-  - [ ] API key leak to non-authoritative endpoints
+  - [x] gateway HMAC webhook secret validation - 127 webhook tests pass
+  - [x] gateway/pairing.py         (hash pairing codes) - 40 tests pass
+  - [x] control-plane file write-deny (file_safety.py) - 52 tests pass
+  - [x] API key leak to non-authoritative endpoints (runtime_provider.py) - 77 tests pass
 - [ ] B2 agent/ package (run_agent.py refactor) - HIGHEST RISK, do last/carefully
 - [ ] B3 gateway/ non-security deltas
+  - [x] B3a low-risk gateway files + 7 new modules (deltas: __init__, delivery,
+        display_config, hooks, mirror, session_context, sticker_cache,
+        whatsapp_identity, platforms/{__init__,bluebubbles,helpers,
+        homeassistant,sms}; new: memory_monitor, platform_registry,
+        _http_client_limits, signal_rate_limit, runtime_footer,
+        shutdown_forensics, slash_access) - 0 regressions
+  - [ ] B3b channel_directory.py + platforms/telegram_network.py (need base.py
+        resolve_proxy_url signature + run.py await changes first)
+  - [ ] B3c config.py, session.py, status.py, stream_consumer.py, webhook.py
+        non-security delta, platforms/base.py
+  - [ ] B3d big platform adapters: telegram, discord, slack, api_server,
+        matrix, signal, whatsapp, email, mattermost
+  - [ ] B3e gateway/run.py (12.7k->18.2k lines, has Elevate-only divergence -
+        hand-port hunk by hunk, B2-caliber risk)
 - [ ] B4 elevate_cli/ deltas + new files
 - [ ] B5 tools/ deltas + new files
 - [ ] B6 providers/ + plugins/model-providers/
@@ -56,3 +70,8 @@ SKIP (do not port - would break Elevate or pure dead weight):
 ## Notes
 - Elevate runs live for Skyleigh. Never push a batch that fails tests.
 - `is_truthy_value` exists in `cli/utils.py` - dependency confirmed.
+- PRE-EXISTING: 29 gateway-test failures on committed HEAD (baseline before
+  any port). Root causes: `NameError: name 'event' is not defined` at
+  gateway/run.py:11468, and an api_server.py toolset bug. NOT port
+  regressions. The B3e run.py hand-port should resolve the run.py one.
+- venv: use `cli/.venv/bin/python` (pytest 9.0.2). NOT `cli/venv/`.
