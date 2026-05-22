@@ -1,5 +1,5 @@
 ---
-name: cma
+name: cma-router
 description: CMA workflow router for Canadian realtors. Collects MLS/property data, compares active/sold comps, analyzes photos and market stats, produces pricing guidance, renders the CMA report, and requires human approval before client delivery.
 metadata:
   elevate:
