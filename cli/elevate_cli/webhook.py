@@ -19,6 +19,7 @@ from typing import Dict
 
 from elevate_constants import display_elevate_home
 from utils import atomic_replace
+from elevate_cli.config import cfg_get
 
 
 _SUBSCRIPTIONS_FILENAME = "webhook_subscriptions.json"
@@ -60,7 +61,7 @@ def _get_webhook_config() -> dict:
     try:
         from elevate_cli.config import load_config
         cfg = load_config()
-        return cfg.get("platforms", {}).get("webhook", {})
+        return cfg_get(cfg, "platforms", "webhook", default={})
     except Exception:
         return {}
 
