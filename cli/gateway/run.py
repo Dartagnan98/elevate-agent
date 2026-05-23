@@ -2046,6 +2046,49 @@ class GatewayRunner:
     def _running_agent_count(self) -> int:
         return len(self._running_agents)
 
+    @staticmethod
+    def _is_goal_continuation_event(event_or_text: Any) -> bool:
+        """Return True for synthetic /goal continuation turns.
+
+        Goal continuations are normal queued user-role events, so pause/clear
+        must distinguish them from real user /queue messages before removing or
+        suppressing them.
+        """
+        text = getattr(event_or_text, "text", event_or_text) or ""
+        return str(text).startswith("[Continuing toward your standing goal]\nGoal:")
+
+    def _goal_still_active_for_session(self, session_id: str) -> bool:
+        """Best-effort fresh DB check before running a queued continuation."""
+        if not session_id:
+            return False
+        try:
+            from elevate_cli.goals import GoalManager
+            return GoalManager(session_id=session_id).is_active()
+        except Exception as exc:
+            logger.debug("goal continuation: active-state recheck failed: %s", exc)
+            return False
+
+    def _goal_max_turns_from_config(self) -> int:
+        """Resolve the configured /goal turn budget for gateway sessions.
+
+        GatewayRunner.config is a GatewayConfig dataclass, not the full
+        user config mapping. Top-level config blocks such as ``goals`` are
+        therefore only available through elevate_cli.config.load_config().
+        """
+        try:
+            goals_cfg = (
+                (self.config or {}).get("goals", {})
+                if isinstance(self.config, dict)
+                else getattr(self.config, "goals", {}) or {}
+            )
+            if not goals_cfg:
+                from elevate_cli.config import load_config
+
+                goals_cfg = (load_config() or {}).get("goals") or {}
+            return int(goals_cfg.get("max_turns", 20) or 20)
+        except Exception:
+            return 20
+
     def _status_action_label(self) -> str:
         return "restart" if self._restart_requested else "shutdown"
 
@@ -2168,6 +2211,66 @@ class GatewayRunner:
         if effort and effort.strip() and result is None:
             logger.warning("Unknown reasoning_effort '%s', using default (medium)", effort)
         return result
+
+    @staticmethod
+    def _parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:
+        """Parse `/reasoning` args into `(value, persist_global)`.
+
+        `/reasoning <level>` is session-scoped by default. `--global` may be
+        supplied in any position to persist the change to config.yaml.
+        """
+        import shlex
+
+        text = str(raw_args or "").strip().replace("—", "--")
+        if not text:
+            return "", False
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+
+        persist_global = False
+        value_tokens = []
+        for token in tokens:
+            if token == "--global":
+                persist_global = True
+            else:
+                value_tokens.append(token)
+        return " ".join(value_tokens).strip().lower(), persist_global
+
+    def _resolve_session_reasoning_config(
+        self,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+    ) -> dict | None:
+        """Resolve reasoning effort for a session, honoring session overrides."""
+        resolved_session_key = session_key
+        if not resolved_session_key and source is not None:
+            try:
+                resolved_session_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_session_key = None
+
+        overrides = getattr(self, "_session_reasoning_overrides", {}) or {}
+        if resolved_session_key and resolved_session_key in overrides:
+            return overrides[resolved_session_key]
+        return self._load_reasoning_config()
+
+    def _set_session_reasoning_override(
+        self,
+        session_key: str,
+        reasoning_config: Optional[dict],
+    ) -> None:
+        """Set or clear the session-scoped reasoning override."""
+        if not session_key:
+            return
+        if not hasattr(self, "_session_reasoning_overrides"):
+            self._session_reasoning_overrides = {}
+        if reasoning_config is None:
+            self._session_reasoning_overrides.pop(session_key, None)
+        else:
+            self._session_reasoning_overrides[session_key] = dict(reasoning_config)
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -10485,6 +10588,54 @@ class GatewayRunner:
         logger.debug("Process watcher ended: %s", session_id)
 
     _MAX_INTERRUPT_DEPTH = 3  # Cap recursive interrupt handling (#816)
+
+    # Config keys whose values MUST invalidate the gateway's cached agent
+    # when they change.  The agent bakes these into its compressor / context
+    # handling at construction time, so a mid-running-gateway config edit
+    # would otherwise be silently ignored until the user triggers a
+    # different cache eviction (model switch, /reset, etc.).
+    #
+    # Each entry is a tuple of (section, key) read from the raw config dict.
+    # Add more here as new baked-at-construction config settings are added.
+    _CACHE_BUSTING_CONFIG_KEYS: tuple = (
+        ("model", "context_length"),
+        ("model", "max_tokens"),
+        ("compression", "enabled"),
+        ("compression", "threshold"),
+        ("compression", "target_ratio"),
+        ("compression", "protect_last_n"),
+        ("agent", "disabled_toolsets"),
+    )
+
+    @classmethod
+    def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
+        """Pull values that must bust the cached agent.
+
+        Returns a flat dict keyed by 'section.key'.  Missing config keys and
+        non-dict sections yield None values, which still contribute to the
+        signature (so 'absent' vs 'present-and-null' differ).
+
+        The live tool registry generation is included too.  MCP reloads and
+        dynamic MCP tool-list changes mutate the registry without necessarily
+        changing config.yaml.  Cached AIAgent instances freeze their tool
+        schemas at construction time, so a registry generation change must
+        rebuild the agent before the next turn.
+        """
+        out: Dict[str, Any] = {}
+        cfg = user_config if isinstance(user_config, dict) else {}
+        for section, key in cls._CACHE_BUSTING_CONFIG_KEYS:
+            section_val = cfg.get(section)
+            if isinstance(section_val, dict):
+                out[f"{section}.{key}"] = section_val.get(key)
+            else:
+                out[f"{section}.{key}"] = None
+        try:
+            from tools.registry import registry
+
+            out["tools.registry_generation"] = getattr(registry, "_generation", None)
+        except Exception:
+            out["tools.registry_generation"] = None
+        return out
 
     @staticmethod
     def _agent_config_signature(
