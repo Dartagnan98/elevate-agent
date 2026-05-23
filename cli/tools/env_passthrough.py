@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from contextvars import ContextVar
 from typing import Iterable
+from elevate_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ def _get_allowed() -> set[str]:
 _config_passthrough: frozenset[str] | None = None
 
 
-def _is_elevate_provider_credential(name: str) -> bool:
-    """True if ``name`` is a Elevate-managed provider credential (API key,
+def _is_hermes_provider_credential(name: str) -> bool:
+    """True if ``name`` is a Hermes-managed provider credential (API key,
     token, or similar) per ``_ELEVATE_PROVIDER_ENV_BLOCKLIST``.
 
     Skill-declared ``required_environment_variables`` frontmatter must
@@ -55,7 +56,7 @@ def _is_elevate_provider_credential(name: str) -> bool:
     the credential in the ``execute_code`` child process, defeating the
     sandbox's scrubbing guarantee.
 
-    Non-Elevate API keys (TENOR_API_KEY, NOTION_TOKEN, etc.) are NOT
+    Non-Hermes API keys (TENOR_API_KEY, NOTION_TOKEN, etc.) are NOT
     in the blocklist and remain legitimately registerable — skills that
     wrap third-party APIs still work.
     """
@@ -71,24 +72,24 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
 
     Typically called when a skill declares ``required_environment_variables``.
 
-    Variables that are Elevate-managed provider credentials (from
+    Variables that are Hermes-managed provider credentials (from
     ``_ELEVATE_PROVIDER_ENV_BLOCKLIST``) are rejected here to preserve
     the ``execute_code`` sandbox's credential-scrubbing guarantee per
-    GHSA-rhgp-j443-p4rf. A skill that needs to talk to a Elevate-managed
+    GHSA-rhgp-j443-p4rf. A skill that needs to talk to a Hermes-managed
     provider should do so via the agent's main-process tools (web_search,
     web_extract, etc.) where the credential remains safely in the main
     process.
 
-    Non-Elevate third-party API keys (TENOR_API_KEY, NOTION_TOKEN, etc.)
+    Non-Hermes third-party API keys (TENOR_API_KEY, NOTION_TOKEN, etc.)
     pass through normally — they were never in the sandbox scrub list.
     """
     for name in var_names:
         name = name.strip()
         if not name:
             continue
-        if _is_elevate_provider_credential(name):
+        if _is_hermes_provider_credential(name):
             logger.warning(
-                "env passthrough: refusing to register Elevate provider "
+                "env passthrough: refusing to register Hermes provider "
                 "credential %r (blocked by _ELEVATE_PROVIDER_ENV_BLOCKLIST). "
                 "Skills must not override the execute_code sandbox's "
                 "credential scrubbing; see GHSA-rhgp-j443-p4rf.",
@@ -109,7 +110,7 @@ def _load_config_passthrough() -> frozenset[str]:
     try:
         from elevate_cli.config import read_raw_config
         cfg = read_raw_config()
-        passthrough = cfg.get("terminal", {}).get("env_passthrough")
+        passthrough = cfg_get(cfg, "terminal", "env_passthrough")
         if isinstance(passthrough, list):
             for item in passthrough:
                 if isinstance(item, str) and item.strip():

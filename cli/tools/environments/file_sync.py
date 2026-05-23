@@ -29,6 +29,12 @@ from tools.environments.base import _file_mtime_key
 
 logger = logging.getLogger(__name__)
 
+# Keep retry sleeps patchable without mutating the shared stdlib ``time``
+# module. Patching ``tools.environments.file_sync.time.sleep`` replaces
+# ``time.sleep`` globally because ``time`` is the module object; under xdist
+# that lets unrelated background threads inflate retry-test call counts.
+_sleep = time.sleep
+
 _SYNC_INTERVAL_SECONDS = 5.0
 _FORCE_SYNC_ENV = "ELEVATE_FORCE_FILE_SYNC"
 
@@ -210,7 +216,7 @@ class FileSyncManager:
     def sync_back(self, elevate_home: Path | None = None) -> None:
         """Pull remote changes back to the host filesystem.
 
-        Downloads the remote ``.elevate/`` directory as a tar archive,
+        Downloads the remote ``.hermes/`` directory as a tar archive,
         unpacks it, and applies only files that differ from what was
         originally pushed (based on SHA-256 content hashes).
 
@@ -222,7 +228,7 @@ class FileSyncManager:
 
         # Nothing was ever committed through this manager — the initial
         # push failed or never ran. Skip sync_back to avoid retry storms
-        # against an uninitialized remote .elevate/ directory.
+        # against an uninitialized remote .hermes/ directory.
         if not self._pushed_hashes and not self._synced_files:
             logger.debug("sync_back: no prior push state — skipping")
             return
@@ -243,7 +249,7 @@ class FileSyncManager:
                         "sync_back: attempt %d failed (%s), retrying in %ds",
                         attempt + 1, exc, delay,
                     )
-                    time.sleep(delay)
+                    _sleep(delay)
 
         logger.warning("sync_back: all %d attempts failed: %s", _SYNC_BACK_MAX_RETRIES, last_exc)
 
@@ -278,12 +284,15 @@ class FileSyncManager:
             # Windows: no flock — run without serialization
             self._sync_back_impl()
             return
-        lock_fd = open(lock_path, "w")
+        lock_fd = open(lock_path, "w", encoding="utf-8")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             self._sync_back_impl()
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
             lock_fd.close()
 
     def _sync_back_impl(self) -> None:
@@ -313,7 +322,7 @@ class FileSyncManager:
                 )
                 return
 
-            with tempfile.TemporaryDirectory(prefix="elevate-sync-back-") as staging:
+            with tempfile.TemporaryDirectory(prefix="hermes-sync-back-") as staging:
                 with tarfile.open(tf.name) as tar:
                     tar.extractall(staging, filter="data")
 
