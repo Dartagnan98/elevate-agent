@@ -153,18 +153,39 @@ SKIP (do not port - would break Elevate or pure dead weight):
           tirith_security, todo_tool, tool_backend_helpers, voice_mode (WAV chunking),
           xai_http (full xAI OAuth credential resolver - UNBLOCKS x_search_tool from B5a).
           +tests/tools/conftest.py + test_memory_tool_schema.py. 0 regressions in tools/+run_agent/.
-    - [ ] B5b-phase2 BLOCKED until helpers ported. ~23 Class A tool files revert because
-          Hermes versions import symbols missing in Elevate: cfg_get (elevate_cli.config),
-          AmbiguousJobReference (cron.jobs), _subprocess_compat (elevate_cli),
-          secure_parent_dir (elevate_constants), atomic_replace (utils),
-          safe_schedule_threadsafe (agent.async_utils). PORT ORDER REVISION: do B4 elevate_cli
-          + agent-layer helpers FIRST, then re-attempt these tools. Also ~9 files have
-          behavior-changes the recon under-classified (Hermes-strict but breaks Elevate
-          callers): discord_tool (entrypoint rename), code_execution_tool (psutil hard dep),
-          file_operations (fence regex narrowing), file_tools (redact_sensitive_text kwarg),
-          environments/{file_sync,modal,daytona,base,ssh}, patch_parser (3-tuple return),
-          transcription_tools, tool_result_storage, checkpoint_manager, vision_tools, tts_tool,
-          mcp_oauth_manager, registry (TTL cache leak). Real Class B - need hand-merge.
+    - [x] B5b-phase2 (2026-05-22) - 18 additional Class A tools ported across 5 commits:
+          837d219da batch1: browser_camofox_state, debug_helpers, environments/{__init__,
+            managed_modal, modal_utils}, managed_tool_gateway, openrouter_client,
+            tool_output_limits (string-literal hermes_ -> elevate_ fixes for user_id)
+          637b91df2 batch2: env_passthrough (cfg_get), environments/file_sync (_sleep
+            patchable indirection + container_base path), environments/singularity;
+            tests/tools/test_file_sync_back.py mock patches updated
+          f5a8134b9 batch3: browser_cdp_tool (safe_schedule_threadsafe),
+            credential_files (to_agent_visible_cache_path + cfg_get;
+            _resolve_hermes_home -> _resolve_elevate_home)
+          24c49e26d batch4: browser_camofox, browser_supervisor, mcp_oauth
+            (HermesTokenStorage -> ElevateTokenStorage), mcp_oauth_manager
+            (_hermes_server_name -> _elevate_server_name), environments/docker
+          119f5d81a batch5: registry (TTL cache + dynamic_schema_overrides
+            replaces phase1 stub), checkpoint_manager (refs/hermes -> refs/elevate,
+            hermes@local -> elevate@local), terminal_tool (Vercel sandbox + sudo
+            password cache), skill_manager_tool, vision_tools
+          Final pytest: 14 failed / 6173 passed / 159 skipped (baseline was 13 -
+          one new Hermes-ahead test_checkpoint_manager::test_different_dirs_different_paths
+          shadow-repo path-derivation diff). Net +1 regression for 18 ported files.
+    - [ ] B5b-phase3 HAND-MERGE backlog (~14 files): tool_result_storage (heredoc->stdin),
+          patch_parser (3-tuple V4A return), transcription_tools (lazy-install STT +
+          mistral quarantine + 16 provider-priority tests), tts_tool (mistral/minimax
+          dispatch), discord_tool (discord_server entrypoint rename), code_execution_tool
+          (generate_hermes_tools_module rename), file_tools (dedup invalidation - 26
+          tests), mcp_tool (utility-handlers 24 tests), browser_tool (path construction
+          + orphan-reaper 14 tests), environments/base (Windows newline-safe stdin +
+          cwd-restore breaks wrap_command tests), environments/{daytona,ssh,modal}
+          (cursor pagination + tar --no-overwrite-dir + remote_home), cronjob_tools
+          (needs resolve_job_ref in cron.jobs), process_registry (needs
+          _resolve_safe_cwd in environments/local). Class B per recon (memory_tool,
+          skills_sync, image_generation_tool, session_search_tool, approval,
+          send_message_tool, skills_hub, delegate_tool, web_tools) also pending.
 - [x] B6 providers/ + plugins/model-providers/ - providers/ registry shipped
       (B6 commit 822c48814). plugins/model-providers/ 59 net-new files ported
       2026-05-22 (commit 4232b21f4) - 29 provider profiles (anthropic,
