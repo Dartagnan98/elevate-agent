@@ -9578,6 +9578,232 @@ Examples:
     logs_parser.set_defaults(func=cmd_logs)
 
     # =========================================================================
+    # fallback command — manage the fallback provider chain
+    # =========================================================================
+    fallback_parser = subparsers.add_parser(
+        "fallback",
+        help="Manage fallback providers (tried when the primary model fails)",
+        description=(
+            "Manage the fallback provider chain.  Fallback providers are tried "
+            "in order when the primary model fails with rate-limit, overload, or "
+            "connection errors."
+        ),
+    )
+    fallback_subparsers = fallback_parser.add_subparsers(dest="fallback_command")
+    fallback_subparsers.add_parser(
+        "list",
+        aliases=["ls"],
+        help="Show the current fallback chain (default when no subcommand)",
+    )
+    fallback_subparsers.add_parser(
+        "add",
+        help="Pick a provider + model (same picker as `elevate model`) and append to the chain",
+    )
+    fallback_subparsers.add_parser(
+        "remove",
+        aliases=["rm"],
+        help="Pick an entry to delete from the chain",
+    )
+    fallback_subparsers.add_parser(
+        "clear",
+        help="Remove all fallback entries",
+    )
+
+    def _cmd_fallback(args):
+        from elevate_cli.fallback_cmd import cmd_fallback as _impl
+        return _impl(args)
+
+    fallback_parser.set_defaults(func=_cmd_fallback)
+
+    # =========================================================================
+    # secrets command — external secret managers (currently: Bitwarden)
+    # =========================================================================
+    secrets_parser = subparsers.add_parser(
+        "secrets",
+        help="Manage external secret sources (Bitwarden Secrets Manager)",
+        description=(
+            "Pull API keys from an external secret manager at process startup "
+            "instead of storing them in ~/.elevate/.env.  Currently supports "
+            "Bitwarden Secrets Manager."
+        ),
+    )
+    secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
+
+    secrets_bw = secrets_subparsers.add_parser(
+        "bitwarden",
+        aliases=["bw"],
+        help="Bitwarden Secrets Manager integration",
+    )
+
+    # Lazy import — only pays for itself when this subcommand is actually used.
+    from elevate_cli import secrets_cli as _secrets_cli
+
+    _secrets_cli.register_cli(secrets_bw)
+
+    def _dispatch_secrets(args):  # noqa: ANN001
+        sub = getattr(args, "secrets_command", None)
+        bw_sub = getattr(args, "secrets_bw_command", None)
+        if sub in ("bitwarden", "bw") and bw_sub is not None:
+            return args.func(args)
+        secrets_parser.print_help()
+        return 0
+
+    secrets_parser.set_defaults(func=_dispatch_secrets)
+
+    # =========================================================================
+    # migrate command — config migration for retired models / deprecated settings
+    # =========================================================================
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Migrate configuration for retired models or deprecated settings",
+        description=(
+            "Diagnose and (optionally) rewrite the active config.yaml to "
+            "replace references to retired models or deprecated settings."
+        ),
+    )
+    migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_type")
+
+    migrate_xai = migrate_subparsers.add_parser(
+        "xai",
+        help="Migrate xAI models scheduled for retirement on May 15, 2026",
+        description=(
+            "Scan config.yaml for references to xAI models retiring on "
+            "May 15, 2026 and, with --apply, rewrite them in-place to the "
+            "official replacements per the xAI migration guide. The original "
+            "config.yaml is backed up before any rewrite."
+        ),
+    )
+    migrate_xai.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite config.yaml in-place (default: dry-run, no writes)",
+    )
+    migrate_xai.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip the timestamped backup of config.yaml when applying",
+    )
+
+    def _cmd_migrate(args):
+        from elevate_cli.migrate import cmd_migrate as _impl
+        return _impl(args)
+
+    def _cmd_migrate_xai(args):
+        from elevate_cli.migrate import cmd_migrate_xai as _impl
+        return _impl(args)
+
+    migrate_xai.set_defaults(func=_cmd_migrate_xai)
+    migrate_parser.set_defaults(func=_cmd_migrate)
+
+    # =========================================================================
+    # slack command — Slack integration helpers (manifest generation, etc.)
+    # =========================================================================
+    slack_parser = subparsers.add_parser(
+        "slack",
+        help="Slack integration helpers (manifest generation, etc.)",
+        description="Slack integration helpers for Elevate.",
+    )
+    slack_sub = slack_parser.add_subparsers(dest="slack_command")
+    slack_manifest = slack_sub.add_parser(
+        "manifest",
+        help="Print or write a Slack app manifest with every gateway command "
+        "registered as a native slash (/btw, /stop, /model, ...)",
+        description=(
+            "Generate a Slack app manifest that registers every gateway "
+            "command in COMMAND_REGISTRY as a first-class Slack slash "
+            "command (matching Discord and Telegram parity). Paste the "
+            "output into Slack app config → Features → App Manifest → "
+            "Edit, then Save. Reinstall the app if Slack prompts for it."
+        ),
+    )
+    slack_manifest.add_argument(
+        "--write",
+        nargs="?",
+        const=True,
+        default=None,
+        metavar="PATH",
+        help="Write manifest to a file instead of stdout. With no PATH "
+        "writes to $ELEVATE_HOME/slack-manifest.json.",
+    )
+    slack_manifest.add_argument(
+        "--name",
+        default=None,
+        help='Bot display name (default: "Elevate")',
+    )
+    slack_manifest.add_argument(
+        "--description",
+        default=None,
+        help="Bot description shown in Slack's app directory.",
+    )
+    slack_manifest.add_argument(
+        "--slashes-only",
+        action="store_true",
+        help="Emit only the features.slash_commands array (for merging "
+        "into an existing manifest manually).",
+    )
+
+    def _cmd_slack(args):
+        sub = getattr(args, "slack_command", None)
+        if sub == "manifest":
+            from elevate_cli.slack_cli import slack_manifest_command
+            return slack_manifest_command(args)
+        slack_parser.print_help()
+        return 0
+
+    slack_parser.set_defaults(func=_cmd_slack)
+
+    # =========================================================================
+    # checkpoints command — inspect / prune / clear the checkpoint store
+    # =========================================================================
+    checkpoints_parser = subparsers.add_parser(
+        "checkpoints",
+        help="Inspect / prune / clear ~/.elevate/checkpoints/",
+        description="Manage the filesystem checkpoint store — the shadow git "
+        "repo elevate uses to snapshot working directories before "
+        "write_file/patch/terminal calls. Lets you see how much "
+        "space checkpoints occupy, force a prune, or wipe the base.",
+    )
+    from elevate_cli.checkpoints import register_cli as _register_checkpoints_cli
+    _register_checkpoints_cli(checkpoints_parser)
+
+    # =========================================================================
+    # bundles command — skill bundles (alias /<name> for multiple skills)
+    # =========================================================================
+    bundles_parser = subparsers.add_parser(
+        "bundles",
+        help="Create, list, and manage skill bundles (aliases for multiple skills)",
+        description=(
+            "Skill bundles let you load several skills under one slash "
+            "command. `/<bundle>` from the CLI or gateway loads every "
+            "referenced skill at once."
+        ),
+    )
+    from elevate_cli.bundles import register_cli as _bundles_register, bundles_command
+    _bundles_register(bundles_parser)
+    bundles_parser.set_defaults(func=bundles_command)
+
+    # =========================================================================
+    # curator command — background skill maintenance
+    # =========================================================================
+    curator_parser = subparsers.add_parser(
+        "curator",
+        help="Background skill maintenance (curator) — status, run, pause, pin",
+        description=(
+            "The curator is an auxiliary-model background task that "
+            "periodically reviews agent-created skills, prunes stale ones, "
+            "consolidates overlaps, and archives obsolete skills. "
+            "Bundled and hub-installed skills are never touched. "
+            "Archives are recoverable; auto-deletion never happens."
+        ),
+    )
+    try:
+        from elevate_cli.curator import register_cli as _register_curator_cli
+
+        _register_curator_cli(curator_parser)
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("curator CLI wiring failed: %s", _exc)
+
+    # =========================================================================
     # Parse and execute
     # =========================================================================
     # Pre-process argv so unquoted multi-word session names after -c / -r
