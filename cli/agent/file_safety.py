@@ -28,6 +28,7 @@ def _elevate_root_path() -> Path:
 def build_write_denied_paths(home: str) -> set[str]:
     """Return exact sensitive paths that must never be written."""
     elevate_home = _elevate_home_path()
+    elevate_root = _elevate_root_path()
     return {
         os.path.realpath(p)
         for p in [
@@ -35,7 +36,11 @@ def build_write_denied_paths(home: str) -> set[str]:
             os.path.join(home, ".ssh", "id_rsa"),
             os.path.join(home, ".ssh", "id_ed25519"),
             os.path.join(home, ".ssh", "config"),
+            # Active profile .env (or top-level .env when not in profile mode).
             str(elevate_home / ".env"),
+            # Top-level .env, even when running under a profile — overwriting it
+            # leaks credentials across every profile that inherits from root (#15981).
+            str(elevate_root / ".env"),
             os.path.join(home, ".bashrc"),
             os.path.join(home, ".zshrc"),
             os.path.join(home, ".profile"),
@@ -96,11 +101,11 @@ def is_write_denied(path: str) -> bool:
     # (elevate_home) AND the global root view. Without the root pass, a
     # profile-mode session leaves <root>/auth.json + <root>/config.yaml
     # writable — letting a prompt-injected write_file overwrite the global
-    # files that every profile inherits from.
+    # files that every profile inherits from (same shape as #15981).
     control_file_names = ("auth.json", "config.yaml", "webhook_subscriptions.json")
     mcp_tokens_dir_name = "mcp-tokens"
 
-    elevate_dirs: list[str] = []
+    elevate_dirs = []
     for base in (_elevate_home_path(), _elevate_root_path()):
         try:
             real = os.path.realpath(base)
