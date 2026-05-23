@@ -119,6 +119,15 @@ SKIP (do not port - would break Elevate or pure dead weight):
         DEFERRED (9): bundles.py (needs agent/skill_bundles), secrets_cli.py (needs
         agent/secret_sources), entire proxy/ subtree (8 files - need
         NOUS_INFERENCE_AUTH_MODE_AUTO in elevate_cli/auth.py).
+        2026-05-22 UPDATE: bundles.py + secrets_cli.py NOW LANDED (commit 4232b21f4)
+        after B2 net-new shipped agent/skill_bundles + agent/secret_sources.
+        proxy/ subtree (8 files) STILL deferred - auth.py needs hand-merge for
+        NOUS_INFERENCE_AUTH_MODE_*, NOUS_LEGACY_SESSION_KEYS_ENV, NOUS_DEVICE_CODE_SOURCE,
+        NOUS_INFERENCE_INVOKE_SCOPE, NOUS_LEGACY_AGENT_KEY_SCOPE, NOUS_AUTH_PATH_*,
+        _is_terminal_nous_refresh_error, _quarantine_nous_oauth_state,
+        _quarantine_nous_pool_entries, _write_shared_nous_state,
+        resolve_nous_runtime_credentials. video_generation_tool still deferred -
+        needs dynamic_schema_overrides on ToolRegistry.register.
         Surgical helper adds along the way:
         - elevate_state.py: apply_wal_with_fallback, _WAL_INCOMPAT_MARKERS,
           _wal_fallback_warned_paths, get_last_init_error,
@@ -156,7 +165,15 @@ SKIP (do not port - would break Elevate or pure dead weight):
           environments/{file_sync,modal,daytona,base,ssh}, patch_parser (3-tuple return),
           transcription_tools, tool_result_storage, checkpoint_manager, vision_tools, tts_tool,
           mcp_oauth_manager, registry (TTL cache leak). Real Class B - need hand-merge.
-- [ ] B6 providers/ + plugins/model-providers/
+- [x] B6 providers/ + plugins/model-providers/ - providers/ registry shipped
+      (B6 commit 822c48814). plugins/model-providers/ 59 net-new files ported
+      2026-05-22 (commit 4232b21f4) - 29 provider profiles (anthropic,
+      openai-codex, gemini, xai, nous, qwen-oauth, ollama-cloud, deepseek,
+      copilot, copilot-acp, bedrock, azure-foundry, alibaba, alibaba-coding-plan,
+      arcee, custom, gmi, huggingface, kilocode, kimi-coding, minimax, novita,
+      nvidia, opencode-zen, openrouter, stepfun, xiaomi, zai, ai-gateway). Each
+      __init__.py + plugin.yaml, registers ProviderProfile against the registry.
+      0 regressions.
 - [x] B7 skills / optional-skills (filtered) - 222 net-new files (117 skills +
         105 optional-skills) across 14 subcategories: apple/macos-computer-use,
         autonomous-ai-agents/{hermes-agent,kanban-codex-lane}, creative
