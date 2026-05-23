@@ -124,6 +124,7 @@ _DEFAULT_PAYLOADS = {
         "task_id": "test-task",
         "tool_call_id": "test-call",
         "result": '{"output": "hello"}',
+        "duration_ms": 42,
     },
     "pre_llm_call": {
         "session_id": "test-session",
@@ -219,7 +220,7 @@ def _cmd_test(args) -> None:
     if getattr(args, "for_tool", None):
         specs = [
             s for s in specs
-            if s.event not in ("pre_tool_call", "post_tool_call")
+            if s.event not in {"pre_tool_call", "post_tool_call"}
             or s.matches_tool(args.for_tool)
         ]
 

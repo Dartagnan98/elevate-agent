@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from elevate_cli.config import (
+    cfg_get,
     load_config,
     save_config,
     get_env_value,
@@ -24,6 +25,7 @@ from elevate_cli.config import (
 )
 from elevate_cli.colors import Colors, color
 from elevate_constants import display_elevate_home
+from tools.mcp_tool import _ENV_VAR_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +227,10 @@ def cmd_mcp_add(args):
     """Add a new MCP server with discovery-first tool selection."""
     name = args.name
     url = getattr(args, "url", None)
-    command = getattr(args, "command", None)
+    # Read from `mcp_command` (set by --command via explicit dest) — see
+    # mcp_add_p.add_argument("--command", dest="mcp_command", ...) in
+    # elevate_cli/main.py for why the dest is renamed.
+    command = getattr(args, "mcp_command", None)
     cmd_args = getattr(args, "args", None) or []
     auth_type = getattr(args, "auth", None)
     preset_name = getattr(args, "preset", None)
@@ -505,7 +510,7 @@ def cmd_mcp_list(args=None):
         # Enabled status
         enabled = cfg.get("enabled", True)
         if isinstance(enabled, str):
-            enabled = enabled.lower() in ("true", "1", "yes")
+            enabled = enabled.lower() in {"true", "1", "yes"}
         status = color("✓ enabled", Colors.GREEN) if enabled else color("✗ disabled", Colors.DIM)
 
         print(f"  {name:<16} {transport:<30} {tools_str:<12} {status}")
@@ -547,7 +552,7 @@ def cmd_mcp_test(args):
         for k, v in headers.items():
             if isinstance(v, str) and ("key" in k.lower() or "auth" in k.lower()):
                 # Mask the value
-                resolved = _interpolate_value(v)
+                resolved = _ENV_VAR_PATTERN.sub(lambda m: os.getenv(m.group(1), ""), v)
                 if len(resolved) > 8:
                     masked = resolved[:4] + "***" + resolved[-4:]
                 else:
@@ -575,13 +580,6 @@ def cmd_mcp_test(args):
             short = desc[:55] + "..." if len(desc) > 55 else desc
             print(f"    {color(tool_name, Colors.GREEN):36s} {short}")
     print()
-
-
-def _interpolate_value(value: str) -> str:
-    """Resolve ``${ENV_VAR}`` references in a string."""
-    def _replace(m):
-        return os.getenv(m.group(1), "")
-    return re.sub(r"\$\{(\w+)\}", _replace, value)
 
 
 # ─── elevate mcp login ────────────────────────────────────────────────────────
@@ -721,7 +719,7 @@ def cmd_mcp_configure(args):
 
     # Update config
     config = load_config()
-    server_entry = config.get("mcp_servers", {}).get(name, {})
+    server_entry = cfg_get(config, "mcp_servers", name, default={})
 
     if len(chosen) == total:
         # All selected → remove include/exclude (register all)
