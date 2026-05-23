@@ -43,6 +43,54 @@ def _platform_name(platform) -> str:
     return str(name).lower()
 
 
+def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) -> dict | None:
+    """Build platform-aware thread metadata for adapter sends.
+
+    Most platforms route threaded sends with a generic ``thread_id`` metadata
+    value. Telegram private-chat topics created through the DM-topic helper
+    are exposed in updates as ``message_thread_id`` plus a reply anchor. Live
+    user-message replies route with ``message_thread_id`` + ``reply_to_message_id``;
+    synthetic/resumed sends that have no reply anchor fall back to Telegram's
+    ``direct_messages_topic_id`` when the Bot API supports it.
+    """
+    thread_id = getattr(source, "thread_id", None)
+    if thread_id is None:
+        return None
+    metadata = {"thread_id": thread_id}
+    if _platform_name(getattr(source, "platform", None)) == "telegram" and getattr(source, "chat_type", None) == "dm":
+        metadata["telegram_dm_topic_reply_fallback"] = True
+        tid = str(thread_id)
+        if tid and tid not in {"", "1"}:
+            metadata["direct_messages_topic_id"] = tid
+        anchor = reply_to_message_id or getattr(source, "message_id", None)
+        if anchor is not None:
+            metadata["telegram_reply_to_message_id"] = str(anchor)
+    return metadata
+
+
+def _reply_anchor_for_event(event) -> str | None:
+    """Return reply_to id for platforms that need reply semantics.
+
+    Telegram forum/supergroup topics should be routed by topic metadata, not by
+    replying to the triggering message. Gateway-created Telegram private-chat
+    topic lanes prefer replying to the triggering user message so the answer
+    stays attached to the active lane; synthetic/resumed sends fall back to
+    ``direct_messages_topic_id`` metadata when no message id is available.
+    """
+    source = getattr(event, "source", None)
+    platform = _platform_name(getattr(source, "platform", None))
+    thread_id = getattr(source, "thread_id", None)
+    if platform == "telegram" and thread_id and getattr(source, "chat_type", None) == "dm":
+        # Reply to the triggering user message. Replying to Telegram's earlier
+        # topic seed/anchor can render the bot response outside the active lane.
+        return getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
+    if platform == "telegram" and thread_id:
+        return None
+    if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
+        return getattr(event, "reply_to_message_id", None)
+    return getattr(event, "message_id", None)
+
+
 def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bool:
     """Return True when a media file should use the platform's audio sender.
 
@@ -406,7 +454,7 @@ def proxy_kwargs_for_aiohttp(proxy_url: str | None) -> tuple[dict, dict]:
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple
+from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union
 from enum import Enum
 
 from pathlib import Path as _Path
@@ -940,7 +988,42 @@ class MessageEvent:
         return args
 
 
-@dataclass 
+_PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?gateway[.!?\s]*$", re.IGNORECASE),
+    re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?elevate\s+gateway[.!?\s]*$", re.IGNORECASE),
+    re.compile(r"^(?:please\s+)?restart\s+elevate[.!?\s]*$", re.IGNORECASE),
+)
+
+
+def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
+    """Rewrite a tiny set of DM plaintext admin phrases into slash commands.
+
+    This keeps high-impact operational phrases like ``restart gateway`` out of
+    the LLM/tool path, where they can trigger a self-restart from inside the
+    currently running agent and leave the gateway stuck in ``draining`` while it
+    waits for that same agent to finish.
+
+    Scope is intentionally narrow: DM text messages only, exact restart-style
+    phrases only. Group chats keep natural-language semantics.
+    """
+    try:
+        if event is None or event.message_type != MessageType.TEXT:
+            return
+        text = (event.text or "").strip()
+        if not text or text.startswith("/"):
+            return
+        source = getattr(event, "source", None)
+        if getattr(source, "chat_type", None) != "dm":
+            return
+        for pattern in _PLAINTEXT_GATEWAY_RESTART_PATTERNS:
+            if pattern.match(text):
+                event.text = "/restart"
+                return
+    except Exception:
+        return
+
+
+@dataclass
 class SendResult:
     """Result of sending a message."""
     success: bool
@@ -948,6 +1031,45 @@ class SendResult:
     error: Optional[str] = None
     raw_response: Any = None
     retryable: bool = False  # True for transient connection errors — base will retry automatically
+
+
+class EphemeralReply(str):
+    """System-notice reply that auto-deletes after a TTL.
+
+    Slash-command handlers in ``gateway/run.py`` can return this wrapper
+    instead of a plain string to request that the reply message be deleted
+    after ``ttl_seconds`` on platforms that support ``delete_message``.
+
+    Subclassing ``str`` keeps the wrapper transparent to anything that
+    treats handler return values as text (existing tests use ``in`` /
+    ``startswith`` / equality; the ``_process_message_background`` pipeline
+    extracts attachments from the string content).  ``isinstance(r,
+    EphemeralReply)`` still distinguishes ephemeral replies from plain
+    strings so the send path can schedule deletion.
+
+    Platforms that don't override :meth:`BasePlatformAdapter.delete_message`
+    silently ignore the TTL — the message is sent normally and left in
+    place.  When ``ttl_seconds`` is ``None``, the pipeline uses the
+    configured ``display.ephemeral_system_ttl`` default.  A default of ``0``
+    disables auto-deletion globally, preserving prior behavior.
+    """
+
+    ttl_seconds: Optional[int]
+
+    def __new__(cls, text: str, ttl_seconds: Optional[int] = None):
+        instance = super().__new__(cls, text)
+        instance.ttl_seconds = ttl_seconds
+        return instance
+
+    @property
+    def text(self) -> str:
+        """Return the underlying text.
+
+        Provided for call sites that want an explicit string conversion,
+        though ``str(reply)`` and using ``reply`` directly where a string
+        is expected both work identically.
+        """
+        return str.__str__(self)
 
 
 def merge_pending_message_event(
@@ -1159,7 +1281,20 @@ class BasePlatformAdapter(ABC):
         self._post_delivery_callbacks: Dict[str, Any] = {}
         self._expected_cancelled_tasks: set[asyncio.Task] = set()
         self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
-        # Chats where auto-TTS on voice input is disabled (set by /voice off)
+        # Auto-TTS on voice input: ``_auto_tts_default`` is the global default
+        # (``voice.auto_tts`` in config.yaml, pushed by GatewayRunner on connect).
+        # Per-chat overrides live in two sets populated from ``_voice_mode``:
+        #   - ``_auto_tts_enabled_chats``: chat explicitly opted in via ``/voice on``
+        #     or ``/voice tts`` (mode is ``voice_only`` or ``all``). Fires even when
+        #     the global default is False.
+        #   - ``_auto_tts_disabled_chats``: chat explicitly opted out via
+        #     ``/voice off`` (mode is ``off``). Suppresses auto-TTS even when the
+        #     global default is True.
+        # The gate in _process_message() is:
+        #   fire if chat in _auto_tts_enabled_chats
+        #     OR (_auto_tts_default and chat not in _auto_tts_disabled_chats)
+        self._auto_tts_default: bool = False
+        self._auto_tts_enabled_chats: set = set()
         self._auto_tts_disabled_chats: set = set()
         # Chats where typing indicator is paused (e.g. during approval waits).
         # _keep_typing skips send_typing when the chat_id is in this set.
@@ -1173,6 +1308,52 @@ class BasePlatformAdapter(ABC):
         Python ``len`` (e.g. Telegram counts UTF-16 code units).
         """
         return len
+
+    def supports_draft_streaming(
+        self,
+        chat_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Whether this adapter supports native streaming-draft updates.
+
+        Telegram Bot API 9.5 introduced ``sendMessageDraft``, which renders an
+        animated streaming preview as the bot calls it repeatedly with the
+        same ``draft_id`` and growing text.  Adapters that implement
+        ``send_draft`` should return True here for the chat types where the
+        platform supports it (Telegram restricts drafts to private DMs).
+
+        Default implementation returns False.  Stream consumers fall back to
+        the edit-based path (``send`` + ``edit_message``) when this returns
+        False or when ``send_draft`` raises.
+        """
+        return False
+
+    async def send_draft(
+        self,
+        chat_id: str,
+        draft_id: int,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "SendResult":
+        """Send or update an animated streaming-draft preview.
+
+        Reuse the same ``draft_id`` (any non-zero int) across consecutive
+        calls within a single response so the platform animates the preview
+        rather than re-creating it.  Different responses must use different
+        ``draft_id`` values within the same chat to avoid animating over a
+        prior bubble.
+
+        Drafts have no message_id and cannot be edited, replied to, or
+        deleted via normal message APIs.  When the response finishes, the
+        caller delivers the final answer as a regular ``send`` and the
+        draft preview clears naturally on the client.
+
+        Default implementation raises NotImplementedError; adapters that
+        also return True from :meth:`supports_draft_streaming` must override.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement send_draft"
+        )
 
     @property
     def has_fatal_error(self) -> bool:
@@ -1189,6 +1370,21 @@ class BasePlatformAdapter(ABC):
     @property
     def fatal_error_retryable(self) -> bool:
         return self._fatal_error_retryable
+
+    def _should_auto_tts_for_chat(self, chat_id: str) -> bool:
+        """Whether auto-TTS on voice input should fire for ``chat_id``.
+
+        Decision layers:
+          1. Explicit ``/voice on`` or ``/voice tts`` → always fire (even if
+             ``voice.auto_tts`` is False).
+          2. Explicit ``/voice off`` → never fire.
+          3. Fall back to the global ``voice.auto_tts`` config default.
+        """
+        if chat_id in self._auto_tts_enabled_chats:
+            return True
+        if chat_id in self._auto_tts_disabled_chats:
+            return False
+        return bool(self._auto_tts_default)
 
     def set_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
         self._fatal_error_handler = handler
@@ -1229,6 +1425,38 @@ class BasePlatformAdapter(ABC):
             )
         except Exception:
             pass
+
+    def _write_runtime_status_safe(self, context: str, **kwargs) -> None:
+        """Write runtime status; log first failure per context at warning, rest at debug.
+
+        Status writes can fail on permissions, ENOSPC, missing status dir, etc.
+        A persistently failing status dir used to be silent (``except: pass``).
+        Logging every failure would spam the log on reconnect loops, so this
+        surfaces the first failure per (platform, context) at warning level and
+        downgrades subsequent failures to debug.
+        """
+        try:
+            from gateway.status import write_runtime_status
+            write_runtime_status(platform=self.platform.value, **kwargs)
+        except Exception as exc:
+            # Use getattr so object.__new__(...) test harnesses that skip __init__
+            # don't blow up on attribute access.
+            logged = getattr(self, "_status_write_logged", None)
+            if logged is None:
+                logged = set()
+                try:
+                    self._status_write_logged = logged
+                except Exception:
+                    pass
+            key = (self.platform.value, context)
+            if key not in logged:
+                logger.warning(
+                    "Failed to write runtime status (%s) for %s: %s (further failures at debug level)",
+                    context, self.platform.value, exc,
+                )
+                logged.add(key)
+            else:
+                logger.debug("Failed to write runtime status (%s) for %s: %s", context, self.platform.value, exc)
 
     async def _notify_fatal_error(self) -> None:
         handler = self._fatal_error_handler
@@ -1354,6 +1582,32 @@ class BasePlatformAdapter(ABC):
     # property) so the stream consumer knows not to short-circuit.
     REQUIRES_EDIT_FINALIZE: bool = False
 
+    async def create_handoff_thread(
+        self,
+        parent_chat_id: str,
+        name: str,
+    ) -> Optional[str]:
+        """Create a fresh thread under ``parent_chat_id`` for a session handoff.
+
+        Used by the gateway's handoff watcher when transferring a CLI
+        session to a thread-capable platform — the new thread isolates the
+        handed-off conversation from any pre-existing chat in the home
+        channel and gives users a clean per-handoff scrollback.
+
+        Returns the new thread/topic id (as a string) on success, or
+        ``None`` if the platform doesn't support threading or the
+        attempt failed (permissions, topics-mode off, etc.). When ``None``
+        is returned the watcher falls back to using ``parent_chat_id``
+        directly.
+
+        Default implementation returns ``None`` — adapters that support
+        threads override this. See:
+          - Telegram: forum topics in groups, DM topics with bot API 9.4+
+          - Discord:  text-channel threads (1440-min auto-archive)
+          - Slack:    seed-message thread anchoring
+        """
+        return None
+
     async def edit_message(
         self,
         chat_id: str,
@@ -1384,6 +1638,197 @@ class BasePlatformAdapter(ABC):
         """
         return SendResult(success=False, error="Not supported")
 
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> bool:
+        """
+        Delete a previously sent message.  Optional — platforms that don't
+        support deletion return ``False`` and callers fall back to leaving
+        the message in place.
+
+        Used by the stream consumer's fresh-final cleanup path to remove
+        long-lived preview messages after sending the completed reply as
+        a fresh message so the platform's visible timestamp reflects
+        completion time.
+
+        Returns ``True`` on successful deletion, ``False`` otherwise.
+        Subclasses should override for platforms with a deletion API
+        (e.g. Telegram ``deleteMessage``).
+        """
+        return False
+
+    def _get_ephemeral_system_ttl_default(self) -> int:
+        """Read ``display.ephemeral_system_ttl`` from config.
+
+        Returns the TTL in seconds to use when an :class:`EphemeralReply`
+        does not specify one explicitly.  ``0`` (the default) disables
+        auto-deletion.  Non-fatal if config is unreadable.
+        """
+        try:
+            from elevate_cli.config import load_config as _load_config
+        except Exception:
+            return 0
+        try:
+            cfg = _load_config()
+        except Exception:
+            return 0
+        display = cfg.get("display", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(display, dict):
+            return 0
+        raw = display.get("ephemeral_system_ttl", 0)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    def _schedule_ephemeral_delete(
+        self,
+        chat_id: str,
+        message_id: str,
+        ttl_seconds: int,
+    ) -> None:
+        """Spawn a detached task that deletes ``message_id`` after ``ttl_seconds``.
+
+        Best-effort — failures (gateway restart, permission denied, message
+        too old for Telegram's 48h window) are swallowed at debug level.
+        Does not block the caller.
+        """
+
+        async def _run_delete() -> None:
+            try:
+                await asyncio.sleep(max(1, int(ttl_seconds)))
+                await self.delete_message(chat_id=chat_id, message_id=message_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(
+                    "[%s] Ephemeral delete failed for %s/%s: %s",
+                    self.name, chat_id, message_id, e,
+                )
+
+        coro = _run_delete()
+        try:
+            asyncio.create_task(coro)
+        except RuntimeError:
+            # No running loop (e.g. unit tests that never reach the async
+            # path).  Close the coroutine cleanly so Python doesn't warn
+            # about it never being awaited, then drop silently.
+            coro.close()
+
+    async def send_slash_confirm(
+        self,
+        chat_id: str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a three-option slash-command confirmation prompt.
+
+        Used by the gateway's generic slash-confirm primitive for commands
+        that have a non-destructive but expensive side effect the user should
+        explicitly acknowledge — e.g. ``/reload-mcp``, which invalidates the
+        provider prompt cache.
+
+        Platforms with inline-button support (Telegram, Discord, Slack,
+        Matrix, Feishu) should override this to render three buttons:
+        Approve Once / Always Approve / Cancel.  Button callbacks MUST be
+        routed back through the gateway by calling
+        ``GatewayRunner._resolve_slash_confirm(confirm_id, choice)`` where
+        ``choice`` is ``"once"`` / ``"always"`` / ``"cancel"``.
+
+        Platforms without button UIs leave this as the default and fall
+        through to the gateway's text fallback (which sends ``message`` as
+        plain text and intercepts the next ``/approve`` / ``/always`` /
+        ``/cancel`` reply).
+
+        ``confirm_id`` is a short string generated by the gateway; the
+        adapter stores it alongside any platform-specific state needed to
+        route the callback (e.g. Telegram's ``_approval_state`` dict).
+        """
+        return SendResult(success=False, error="Not supported")
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a clarify prompt to the user.
+
+        Two render modes:
+
+          * **Multiple choice** (``choices`` is a non-empty list) — adapters
+            that override this should render inline buttons (one per choice
+            plus a final "Other" / free-text option).  Button callbacks
+            MUST resolve via
+            ``tools.clarify_gateway.resolve_gateway_clarify(clarify_id, response)``
+            with the chosen string.  Picking the "Other" button calls
+            ``mark_awaiting_text(clarify_id)`` so the next message in the
+            session is captured as the response.
+
+          * **Open-ended** (``choices`` is None or empty) — render the
+            question as a plain text message; the next user message in the
+            session is captured by the gateway's text-intercept and
+            resolves the clarify automatically.
+
+        The default implementation falls back to a numbered text list,
+        which works on every platform — the user replies with a number
+        ("2") or with the literal choice text, and the gateway intercepts
+        and resolves.  For the text fallback path, the default calls
+        ``mark_awaiting_text()`` so that the gateway text-intercept
+        catches the user's reply instead of timing out.
+        Adapters with native button UIs (Telegram, Discord) SHOULD
+        override this for a richer UX.
+        """
+        if choices:
+            lines = [f"❓ {question}", ""]
+            for i, choice in enumerate(choices, start=1):
+                lines.append(f"  {i}. {choice}")
+            lines.append("")
+            lines.append("Reply with the number, the option text, or your own answer.")
+            text = "\n".join(lines)
+            # Text fallback: enable text-capture so the gateway intercept
+            # picks up the user's typed reply (e.g. "2" or choice text).
+            try:
+                from tools.clarify_gateway import mark_awaiting_text
+                mark_awaiting_text(clarify_id)
+            except Exception:
+                pass
+        else:
+            text = f"❓ {question}"
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            metadata=metadata,
+        )
+
+    async def send_private_notice(
+        self,
+        chat_id: str,
+        user_id: Optional[str],
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a notice privately when the platform supports it.
+
+        The default implementation falls back to a normal send so callers can
+        use one code path across platforms.
+        """
+        return await self.send(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """
         Send a typing indicator.
@@ -1400,7 +1845,64 @@ class BasePlatformAdapter(ABC):
         Default is a no-op for platforms with one-shot typing indicators.
         """
         pass
-    
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        images: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        """Send a batch of images.
+
+        Accepts ``http(s)://``, ``file://`` URIs in the first tuple
+        element.
+
+        Default implementation sends each item individually,
+        routing animated GIFs through ``send_animation`` and local
+        files through ``send_image_file``.
+
+        Override in subclasses to bundle into a single native API call
+        (e.g. Signal's multi-attachment RPC).
+        """
+        from urllib.parse import unquote as _unquote
+
+        for image_url, alt_text in images:
+            if human_delay > 0:
+                await asyncio.sleep(human_delay)
+            try:
+                logger.info(
+                    "[%s] Sending image: %s (alt=%s)",
+                    self.name,
+                    safe_url_for_log(image_url),
+                    alt_text[:30] if alt_text else "",
+                )
+                if image_url.startswith("file://"):
+                    img_result = await self.send_image_file(
+                        chat_id=chat_id,
+                        image_path=_unquote(image_url[7:]),
+                        caption=alt_text if alt_text else None,
+                        metadata=metadata,
+                    )
+                elif self._is_animation_url(image_url):
+                    img_result = await self.send_animation(
+                        chat_id=chat_id,
+                        animation_url=image_url,
+                        caption=alt_text if alt_text else None,
+                        metadata=metadata,
+                    )
+                else:
+                    img_result = await self.send_image(
+                        chat_id=chat_id,
+                        image_url=image_url,
+                        caption=alt_text if alt_text else None,
+                        metadata=metadata,
+                    )
+                if not img_result.success:
+                    logger.error("[%s] Failed to send image: %s", self.name, img_result.error)
+            except Exception as img_err:
+                logger.error("[%s] Error sending image: %s", self.name, img_err, exc_info=True)
+
     async def send_image(
         self,
         chat_id: str,
@@ -1515,6 +2017,13 @@ class BasePlatformAdapter(ABC):
             reply_to=reply_to,
             metadata=kwargs.get("metadata"),
         )
+
+    def prepare_tts_text(self, text: str) -> str:
+        """Prepare text for TTS. Override to filter tool output, code, etc.
+
+        Default strips markdown formatting and truncates to 4000 chars.
+        """
+        return re.sub(r'[*_`#\[\]()]', '', text)[:4000].strip()
 
     async def play_tts(
         self,
@@ -1864,6 +2373,28 @@ class BasePlatformAdapter(ABC):
             return False
         lowered = error.lower()
         return "timed out" in lowered or "readtimeout" in lowered or "writetimeout" in lowered
+
+    def _unwrap_ephemeral(self, response: Any) -> Tuple[Optional[str], int]:
+        """Unwrap a handler response into (text, ttl_seconds).
+
+        Accepts a plain string, ``None``, or an :class:`EphemeralReply`.
+        Returns ``(text, ttl)`` where ``ttl > 0`` means the caller should
+        schedule a deletion via :meth:`_schedule_ephemeral_delete` after
+        the send succeeds.  ``ttl`` is forced to 0 when the adapter
+        doesn't override :meth:`delete_message` so non-supporting
+        platforms silently degrade to normal sends.
+        """
+        if isinstance(response, EphemeralReply):
+            ttl = response.ttl_seconds
+            if ttl is None:
+                try:
+                    ttl = int(self._get_ephemeral_system_ttl_default())
+                except Exception:
+                    ttl = 0
+            if ttl and ttl > 0 and type(self).delete_message is BasePlatformAdapter.delete_message:
+                ttl = 0
+            return response.text, int(ttl or 0)
+        return response, 0
 
     async def _send_with_retry(
         self,
