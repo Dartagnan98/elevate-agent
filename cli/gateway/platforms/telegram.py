@@ -87,8 +87,62 @@ from gateway.platforms.telegram_network import (
 
 
 def check_telegram_requirements() -> bool:
-    """Check if Telegram dependencies are available."""
-    return TELEGRAM_AVAILABLE
+    """Check if Telegram dependencies are available.
+
+    If python-telegram-bot is missing, attempts to lazy-install it via
+    ``tools.lazy_deps.ensure_and_bind("platform.telegram", ...)``. After a
+    successful install, re-imports the SDK and rebinds the module-level
+    type aliases so the adapter's class-level annotations resolve.
+    """
+    if TELEGRAM_AVAILABLE:
+        return True
+    try:
+        from tools.lazy_deps import ensure_and_bind as _ensure_and_bind
+    except Exception:
+        return False
+
+    def _import() -> dict:
+        from telegram import (
+            Update as _Update,
+            Bot as _Bot,
+            Message as _Message,
+            InlineKeyboardButton as _IKB,
+            InlineKeyboardMarkup as _IKM,
+        )
+        try:
+            from telegram import LinkPreviewOptions as _LPO
+        except ImportError:
+            _LPO = None
+        from telegram.ext import (
+            Application as _App,
+            CommandHandler as _CH,
+            CallbackQueryHandler as _CQH,
+            MessageHandler as _MH,
+            ContextTypes as _CT,
+            filters as _filters,
+        )
+        from telegram.constants import ParseMode as _PM, ChatType as _CtT
+        from telegram.request import HTTPXRequest as _HR
+        return {
+            "Update": _Update,
+            "Bot": _Bot,
+            "Message": _Message,
+            "InlineKeyboardButton": _IKB,
+            "InlineKeyboardMarkup": _IKM,
+            "LinkPreviewOptions": _LPO,
+            "Application": _App,
+            "CommandHandler": _CH,
+            "CallbackQueryHandler": _CQH,
+            "TelegramMessageHandler": _MH,
+            "ContextTypes": _CT,
+            "filters": _filters,
+            "ParseMode": _PM,
+            "ChatType": _CtT,
+            "HTTPXRequest": _HR,
+            "TELEGRAM_AVAILABLE": True,
+        }
+
+    return _ensure_and_bind("platform.telegram", _import, globals(), prompt=False)
 
 
 # Matches every character that MarkdownV2 requires to be backslash-escaped
@@ -142,6 +196,61 @@ def _is_table_row(line: str) -> bool:
     """Return True if *line* could plausibly be a table data row."""
     stripped = line.strip()
     return bool(stripped) and '|' in stripped
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    """Split a simple GFM table row into stripped cell values."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _render_table_block_for_telegram(table_block: list[str]) -> str:
+    """Render a detected GFM table as Telegram-friendly row groups.
+
+    Standalone helper (currently unused by ``_wrap_markdown_tables`` which
+    still emits fenced code blocks).  Kept available for callers that want
+    a bullet-group rendering for narrow mobile clients.
+    """
+    if len(table_block) < 3:
+        return "\n".join(table_block)
+
+    headers = _split_markdown_table_row(table_block[0])
+    if len(headers) < 2:
+        return "\n".join(table_block)
+
+    # Detect row-label column: present when data rows have one more cell
+    # than the header row (the row-label column carries no header).
+    first_data_row = _split_markdown_table_row(table_block[2]) if len(table_block) > 2 else []
+    has_row_label_col = len(first_data_row) == len(headers) + 1
+
+    rendered_rows: list[str] = []
+    for index, row in enumerate(table_block[2:], start=1):
+        cells = _split_markdown_table_row(row)
+        if has_row_label_col:
+            # First cell is the row-label (heading); remaining cells align with headers.
+            heading = cells[0] if cells and cells[0] else f"Row {index}"
+            data_cells = cells[1:]
+        else:
+            # No row-label column: use first non-empty cell as heading.
+            heading = next((cell for cell in cells if cell), f"Row {index}")
+            data_cells = cells
+
+        # Pad or trim data_cells to match headers length.
+        if len(data_cells) < len(headers):
+            data_cells.extend([""] * (len(headers) - len(data_cells)))
+        elif len(data_cells) > len(headers):
+            data_cells = data_cells[: len(headers)]
+
+        rendered_rows.append(f"**{heading}**")
+        rendered_rows.extend(
+            f"• {header}: {value}" for header, value in zip(headers, data_cells)
+        )
+
+    return "\n\n".join(rendered_rows)
 
 
 def _wrap_markdown_tables(text: str) -> str:
@@ -217,7 +326,14 @@ class TelegramAdapter(BasePlatformAdapter):
     _SPLIT_THRESHOLD = 4000
     MEDIA_GROUP_WAIT_SECONDS = 0.8
     _GENERAL_TOPIC_THREAD_ID = "1"
-    
+
+    # Telegram's edit_message applies MarkdownV2 formatting only on the
+    # finalize=True path.  Without this flag, stream_consumer._send_or_edit
+    # short-circuits when the raw text is unchanged between the last streamed
+    # edit and the final edit, skipping the plain-text -> MarkdownV2 conversion.
+    REQUIRES_EDIT_FINALIZE: bool = True
+
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.TELEGRAM)
         self._app: Optional[Application] = None
@@ -1395,6 +1511,30 @@ class TelegramAdapter(BasePlatformAdapter):
                 exc_info=True,
             )
             return SendResult(success=False, error=str(e))
+
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a previously sent Telegram message.
+
+        Used by the stream consumer's fresh-final cleanup path to remove
+        long-lived preview messages after sending the completed reply as
+        a fresh message.  Telegram's Bot API ``deleteMessage`` works for
+        bot-posted messages in the last 48 hours.  Failures are non-fatal
+        - the caller leaves the preview in place and logs at debug level.
+        """
+        if not self._bot:
+            return False
+        try:
+            await self._bot.delete_message(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+            )
+            return True
+        except Exception as e:
+            logger.debug(
+                "[%s] Failed to delete Telegram message %s: %s",
+                self.name, message_id, e,
+            )
+            return False
 
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
