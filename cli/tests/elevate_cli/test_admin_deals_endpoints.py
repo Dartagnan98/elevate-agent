@@ -115,7 +115,12 @@ def test_admin_setup_gate_blocks_deal_creation_until_ready():
     assert body["detail"]["setup"]["complete"] is False
 
 
-def test_admin_setup_complete_requires_runtime_verification_for_core_connectors():
+def test_admin_setup_complete_requires_browser_workflow_contract():
+    """Post ``9a4d1a349``: runtime-verification double-gate is dropped, so
+    typed-only "configured" rows for email/calendar/drive/crm count as
+    ready. The browser_workflows item still requires a playbook contract
+    (provider + access hint per portal), and missing that blocks
+    completion."""
     with connect() as conn:
         setup = get_admin_setup(conn)
         update_admin_setup(
@@ -138,12 +143,11 @@ def test_admin_setup_complete_requires_runtime_verification_for_core_connectors(
             ],
         )
         unverified = get_admin_setup(conn)
-        assert "email" in unverified["missingRequiredKeys"]
-        assert "browser_workflows" in unverified["missingRequiredKeys"]
+        assert unverified["missingRequiredKeys"] == ["browser_workflows"]
         readiness = {item["key"]: item for item in unverified["readiness"]}
-        assert readiness["email"]["state"] == "needs_runtime_verification"
         assert readiness["browser_workflows"]["state"] == "incomplete_browser_playbook"
         assert readiness["identity_profile"]["ready"] is True
+        assert readiness["email"]["ready"] is True
         with pytest.raises(ValueError):
             complete_admin_setup(conn)
 
