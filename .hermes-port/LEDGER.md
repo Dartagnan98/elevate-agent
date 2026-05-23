@@ -291,3 +291,56 @@ B4b REMAINING priority queue:
   auth_commands.py, status.py-OAuth-rest, video_generation_tool, proxy/
 
 Test net: 0 new regressions. 4065 passed in elevate_cli/+gateway/ sweep.
+
+## Session 2026-05-22 continuation - B4b wholesale-port spree
+
+After context summary, B4b continued with the rename-pipeline pattern. Each
+file: backup -> grep+sed compound renames -> spot-check residual hermes refs ->
+deploy -> run paired tests -> commit.
+
+LANDED THIS SESSION (LOCAL ONLY, origin frozen):
+- 8dac4200f auth.py + models.py wholesale (force_mint kwarg for 401-recovery,
+  union_with_portal_free_recommendations, get_curated_nous_model_ids)
+- d156b4786 providers + auth_commands + status (9 new providers, oauth helpers,
+  manual:elevate_pkce source slug)
+- 77840b30c __init__.py Windows UTF-8 stdout/stderr fix (_ensure_utf8 for
+  cp1252 box-drawing crashes)
+- 12988431f nous_subscription.py (searxng + Browserbase env detection)
+- ec46f759f mcp_config + cron + hooks + kanban_db (cfg_get, resolve_job_ref +
+  AmbiguousJobReference, tuple->set membership)
+- f4fc60262 backup.py + claw.py + test_claw.py (added create_pre_migration_backup,
+  create_pre_update_backup, _write_full_zip_backup; --no-backup flag in claw)
+- 305f1f398 plugins.py (refreshed discovery/loader; preserves
+  elevate_agent.plugins entry-point + elevate_plugins namespace package)
+- e53ffe665 uninstall.py (Windows env-var cleanup, PATH marker detection,
+  per-profile gateway tear-down)
+- 038a95991 plugins_cmd.py (list/install/enable/disable refresh)
+- 7a39702bc profiles.py (create/use/delete/show/alias/rename/export/import
+  refresh; preserved Elevate-specific generate_bash_completion +
+  generate_zsh_completion functions)
+- fe167c416 commands.py (run_doctor, run_status, run_config, etc surface refresh)
+
+DEFERRED IN THIS SESSION (Elevate ahead of Hermes, wholesale would erase
+intentional divergence):
+- model_switch.py: Elevate has endpoint-grouping logic
+  (test_list_authenticated_providers_groups_same_endpoint and 3 siblings) that
+  Hermes lacks. Reverted after wholesale port broke 4 tests.
+- doctor.py: Elevate carries "Browser Use" cloud integration (BROWSER_USE_API_KEY,
+  managed Browser Use prompts) - 10+ refs in Elevate, 0 in Hermes. Reverted
+  after wholesale port broke 2 termux browser-detection tests. Surgical merge
+  needed: take Hermes browser tier-down + termux gating only.
+
+B4b REMAINING (high-risk, defer or surgical-merge only):
+- config.py (+1047 risky): Elevate-only _gateway_env_values, agent-bot lane
+  parsing
+- gateway.py (+1112 risky): Elevate-only gateway lifecycle wrapping
+- tools_config.py (+1104 risky): Elevate-only Browser Use / yuanbao gating
+- runtime_provider.py: 19-test break on wholesale (reverted last session);
+  needs surgical merge
+- main.py, web_server.py, setup.py, memory_setup.py, banner.py, default_soul.py,
+  timeouts.py, dump.py: confirmed Elevate divergent - SKIP per scope decision
+
+Test net this session: 8 failed / 2561 passed in hermes_cli/ sweep =
+matches baseline (no new regressions). Pre-existing failures isolated to
+test_mcp_config + test_model_validation + test_setup_openclaw_migration +
+test_runtime_provider_resolution + test_setup_model_provider.
