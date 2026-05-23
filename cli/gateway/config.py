@@ -203,14 +203,21 @@ class PlatformConfig:
         )
 
 
+# Streaming defaults — exposed at module level so stream_consumer.py can
+# import them without pulling in the whole dataclass.
+DEFAULT_STREAMING_EDIT_INTERVAL: float = 1.0
+DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 40
+DEFAULT_STREAMING_CURSOR: str = " ▉"
+
+
 @dataclass
 class StreamingConfig:
     """Configuration for real-time token streaming to messaging platforms."""
     enabled: bool = False
     transport: str = "edit"       # "edit" (progressive editMessageText) or "off"
-    edit_interval: float = 1.0    # Seconds between message edits (Telegram rate-limits at ~1/s)
-    buffer_threshold: int = 40    # Chars before forcing an edit
-    cursor: str = " ▉"           # Cursor shown during streaming
+    edit_interval: float = DEFAULT_STREAMING_EDIT_INTERVAL    # Seconds between message edits (Telegram rate-limits at ~1/s)
+    buffer_threshold: int = DEFAULT_STREAMING_BUFFER_THRESHOLD    # Chars before forcing an edit
+    cursor: str = DEFAULT_STREAMING_CURSOR           # Cursor shown during streaming
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -228,9 +235,9 @@ class StreamingConfig:
         return cls(
             enabled=data.get("enabled", False),
             transport=data.get("transport", "edit"),
-            edit_interval=float(data.get("edit_interval", 1.0)),
-            buffer_threshold=int(data.get("buffer_threshold", 40)),
-            cursor=data.get("cursor", " ▉"),
+            edit_interval=float(data.get("edit_interval", DEFAULT_STREAMING_EDIT_INTERVAL)),
+            buffer_threshold=int(data.get("buffer_threshold", DEFAULT_STREAMING_BUFFER_THRESHOLD)),
+            cursor=data.get("cursor", DEFAULT_STREAMING_CURSOR),
         )
 
 
