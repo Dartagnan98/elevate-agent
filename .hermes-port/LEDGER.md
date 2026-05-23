@@ -344,3 +344,73 @@ Test net this session: 8 failed / 2561 passed in hermes_cli/ sweep =
 matches baseline (no new regressions). Pre-existing failures isolated to
 test_mcp_config + test_model_validation + test_setup_openclaw_migration +
 test_runtime_provider_resolution + test_setup_model_provider.
+
+## Session 2026-05-23 — B2 modified agent/ files surgical-merge spree
+
+Continued from prior context-summarized session. Three more unblocker
+commits + 5 substantive ports landed. All LOCAL ONLY; origin still frozen
+at validated 7-commit state.
+
+LANDED THIS SESSION (LOCAL ONLY):
+- 00592dc1b prompt_builder.py surgical: ELEVATE_AGENT_HELP_GUIDANCE +
+  KANBAN_GUIDANCE constants. Third unblocker (after memory_manager
+  StreamingContextScrubber and auxiliary_client set_runtime_main).
+  Hermes->Elevate identifier swaps: ~/.hermes/kanban.db -> ~/.elevate/kanban.db,
+  $HERMES_KANBAN_* -> $ELEVATE_KANBAN_*, hermes kanban verb -> elevate kanban verb.
+- 3104b7ce6 context_engine.py docstring + credential_sources.py
+  xai-oauth/minimax-oauth removal steps. Fixes silent removal-revert bug
+  where `elevate auth remove xai-oauth <N>` left providers entries intact
+  in auth.json and they re-seeded via _seed_from_singletons.
+- 3c73cb7ef memory_provider.py on_session_switch hook + on_memory_write
+  metadata kwarg. models_dev.py disk-cache stage-2 short-circuit
+  (~500ms cold-start savings), suffix-aware fallback for :cloud/-cloud
+  variants, refined vision-detection logic, new provider aliases
+  (novita, kimi, moonshot, minimax-oauth, xai-oauth).
+- e2ba0341e moonshot_schema.py rules 3-5 (enum null-stripping, $ref
+  sibling stripping, tuple-items collapse) + expanded rule 2
+  (anyOf null-branch collapse). Paired test port: 34->42 tests pass.
+- 31d26dea6 skill_utils.py Termux/Android platform-tag gating.
+  Linux-tagged skills now compatible inside Termux on Python 3.13+
+  where sys.platform reports "android".
+
+DEFERRED THIS SESSION (Elevate ahead of Hermes — wholesale port
+would erase intentional divergence):
+- skill_commands.py: Elevate has access-control hook
+  (elevate_cli.access.evaluate_skill_access), [SYSTEM:] activation-note
+  prefix expected by tests, argument-placement UX (treats user
+  instruction as subject before skill body). Hermes uses different
+  ordering + [IMPORTANT:] prefix + lacks access control.
+- title_generator.py: Elevate adds FailureCallback / TitleCallback /
+  main_runtime parameters + _backfill_worker async backfill mechanism.
+  Hermes regressed all of these.
+- display.py: Elevate adds rl_* tool display previews + multimodal
+  result handling + file_mutation_result_landed classifier. RL training
+  tools are Elevate-only feature.
+- insights.py: Elevate-only generate_turn_usage() and turn_usage table
+  analytics. Hermes lacks this surface entirely.
+- prompt_builder.py wholesale: Elevate adds get_prompt_hidden_skill_names,
+  build_memory_guidance factory, build_openai_model_execution_guidance
+  scoped tool guidance, _tool_choice helper. TOOL_USE_ENFORCEMENT_MODELS
+  extended with glm/qwen/deepseek. Only KANBAN_GUIDANCE +
+  ELEVATE_AGENT_HELP_GUIDANCE constants were surgically added.
+- google_code_assist.py (-1 line): Elevate ahead, trivial divergence.
+- portal_tags.py: pure rename diff (already applied to Elevate version),
+  no logic difference.
+
+B2 REMAINING (high-risk surgical merges — defer further):
+- codex_responses_adapter.py (E=813 H=1082, +269): Elevate has
+  _chat_content_to_responses_parts + _chat_messages_to_responses_input
+  helpers Hermes refactored differently.
+- credential_pool.py (E=1453 H=1955, +502): large surface refresh.
+- model_metadata.py (E=1417 H=1828, +411): metadata expansion.
+- context_compressor.py (E=1331 H=1748, +417): compression refresh.
+- anthropic_adapter.py (E=1719 H=2244, +525): largest adapter delta.
+- auxiliary_client.py (E=3365 H=5289, +1924): only surgical
+  set_runtime_main added this session; full divergence too large.
+
+Test sweep at session end:
+  tests/agent/ 1947 passed, 1 skipped, 3 pre-existing failures (none new)
+    (test_auxiliary_named_custom_providers, test_prompt_builder
+    empty_soul_md_adds_nothing, test_skill_commands disable_template_vars).
+  Baseline at session start: 1798 passing. Net +149 tests from new ports
+  and paired test pulls (memory, models_dev, moonshot, credentials).
