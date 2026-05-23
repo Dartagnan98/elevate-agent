@@ -29,7 +29,7 @@ Configuration in config.yaml::
           client_secret: "secret"               # confidential clients only
           scope: "read write"                   # default: server-provided
           redirect_port: 0                      # 0 = auto-pick free port
-          client_name: "My Custom Client"       # default: "Elevate"
+          client_name: "My Custom Client"       # default: "Hermes Agent"
 """
 
 import asyncio
@@ -37,7 +37,9 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
+import stat
 import sys
 import threading
 import time
@@ -46,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from elevate_constants import secure_parent_dir
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +56,24 @@ logger = logging.getLogger(__name__)
 # Lazy imports -- MCP SDK with OAuth support is optional
 # ---------------------------------------------------------------------------
 
-_OAUTH_AVAILABLE = False
+_OAUTH_AVAILABLE=False
 try:
     from mcp.client.auth import OAuthClientProvider
     from mcp.shared.auth import (
         OAuthClientInformationFull,
         OAuthClientMetadata,
+        OAuthMetadata,
         OAuthToken,
     )
-    from pydantic import AnyUrl
 
-    _OAUTH_AVAILABLE = True
+    _OAUTH_AVAILABLE=True
 except ImportError:
     logger.debug("MCP OAuth types not available -- OAuth MCP auth disabled")
+
+try:
+    from pydantic import AnyUrl
+except ImportError:
+    AnyUrl = None  # type: ignore[assignment, misc]
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +164,39 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    """Write a dict as JSON with restricted permissions (0o600)."""
+    """Write a dict as JSON with restricted permissions (0o600).
+
+    Uses ``os.open`` with ``O_EXCL`` and an explicit mode so the file is
+    created atomically at 0o600. The previous ``write_text`` + post-write
+    ``chmod`` opened a TOCTOU window where the temp file briefly inherited
+    the process umask (commonly 0o644 = world-readable), exposing OAuth
+    tokens to other local users between create and chmod. Mirrors the fix
+    in ``agent/google_oauth.py`` (#19673).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    # Tighten parent dir to 0o700 so siblings can't traverse to the creds.
+    # No-op on Windows (POSIX mode bits aren't enforced); ignore failures.
+    # secure_parent_dir refuses to chmod / or top-level dirs (#25821).
+    secure_parent_dir(path)
+    # Per-process random suffix avoids collisions between concurrent
+    # writers and stale leftovers from a prior crashed write.
+    tmp = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
     try:
-        tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        tmp.rename(path)
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, default=str)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
     except OSError:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -180,6 +212,7 @@ class ElevateTokenStorage:
 
         ELEVATE_HOME/mcp-tokens/<server_name>.json         -- tokens
         ELEVATE_HOME/mcp-tokens/<server_name>.client.json   -- client info
+        ELEVATE_HOME/mcp-tokens/<server_name>.meta.json     -- oauth server metadata
     """
 
     def __init__(self, server_name: str):
@@ -191,13 +224,16 @@ class ElevateTokenStorage:
     def _client_info_path(self) -> Path:
         return _get_token_dir() / f"{self._server_name}.client.json"
 
+    def _meta_path(self) -> Path:
+        return _get_token_dir() / f"{self._server_name}.meta.json"
+
     # -- tokens ------------------------------------------------------------
 
     async def get_tokens(self) -> "OAuthToken | None":
         data = _read_json(self._tokens_path())
         if data is None:
             return None
-        # Elevate records an absolute wall-clock ``expires_at`` alongside the
+        # Hermes records an absolute wall-clock ``expires_at`` alongside the
         # SDK's serialized token (see ``set_tokens``). On read we rewrite
         # ``expires_in`` to the remaining seconds so the SDK's downstream
         # ``update_token_expiry`` computes the correct absolute time and
@@ -268,11 +304,33 @@ class ElevateTokenStorage:
         _write_json(self._client_info_path(), client_info.model_dump(mode="json", exclude_none=True))
         logger.debug("OAuth client info saved for %s", self._server_name)
 
+    # -- oauth server metadata --------------------------------------------
+    # The MCP SDK keeps discovered ``OAuthMetadata`` (token endpoint URL,
+    # etc.) in memory only. Persisting it here lets a restarted process
+    # refresh tokens without re-running metadata discovery. Without this,
+    # cold-start refresh requests fall back to the SDK's guessed
+    # ``{server_url}/token`` which returns 404 on most real providers and
+    # forces a full browser re-authorization.
+
+    def save_oauth_metadata(self, metadata: "OAuthMetadata") -> None:
+        _write_json(self._meta_path(), metadata.model_dump(exclude_none=True, mode="json"))
+        logger.debug("OAuth metadata saved for %s", self._server_name)
+
+    def load_oauth_metadata(self) -> "OAuthMetadata | None":
+        data = _read_json(self._meta_path())
+        if data is None:
+            return None
+        try:
+            return OAuthMetadata.model_validate(data)
+        except (ValueError, TypeError, KeyError) as exc:
+            logger.warning("Corrupt OAuth metadata at %s -- ignoring: %s", self._meta_path(), exc)
+            return None
+
     # -- cleanup -----------------------------------------------------------
 
     def remove(self) -> None:
         """Delete all stored OAuth state for this server."""
-        for p in (self._tokens_path(), self._client_info_path()):
+        for p in (self._tokens_path(), self._client_info_path(), self._meta_path()):
             p.unlink(missing_ok=True)
 
     def has_cached_tokens(self) -> bool:
@@ -308,7 +366,7 @@ def _make_callback_handler() -> tuple[type, dict]:
 
             body = (
                 "<html><body><h2>Authorization Successful</h2>"
-                "<p>You can close this tab and return to Elevate.</p></body></html>"
+                "<p>You can close this tab and return to Hermes.</p></body></html>"
             ) if code else (
                 "<html><body><h2>Authorization Failed</h2>"
                 f"<p>Error: {error or 'unknown'}</p></body></html>"
@@ -341,6 +399,23 @@ async def _redirect_handler(authorization_url: str) -> None:
         f"    {authorization_url}\n"
     )
     print(msg, file=sys.stderr)
+
+    # On a remote SSH session the OAuth provider redirects to
+    # http://127.0.0.1:<port>/callback, which reaches the callback server on
+    # the *remote* machine — not the user's local machine where the browser
+    # opened.  Print a port-forward hint so the user knows to tunnel first.
+    if _oauth_port and (os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY")):
+        print(
+            f"  Remote session detected. The OAuth provider will redirect your browser to\n"
+            f"    http://127.0.0.1:{_oauth_port}/callback\n"
+            f"  which the callback listener on THIS machine is waiting on. If your browser\n"
+            f"  is on a different machine, forward the port first in a separate terminal:\n"
+            f"\n"
+            f"    ssh -N -L {_oauth_port}:127.0.0.1:{_oauth_port} <user>@<this-host>\n"
+            f"\n"
+            f"  Then open the URL above. See: https://elevate-agent.nousresearch.com/docs/guides/oauth-over-ssh\n",
+            file=sys.stderr,
+        )
 
     if _can_open_browser():
         try:
@@ -469,7 +544,7 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
         raise ValueError(
             "_configure_callback_port() must be called before _build_client_metadata()"
         )
-    client_name = cfg.get("client_name", "Elevate")
+    client_name = cfg.get("client_name", "Hermes Agent")
     scope = cfg.get("scope")
     redirect_uri = f"http://127.0.0.1:{port}/callback"
 
@@ -519,17 +594,6 @@ def _maybe_preregister_client(
     logger.debug("Pre-registered client_id=%s for '%s'", client_id, storage._server_name)
 
 
-def _parse_base_url(server_url: str) -> str:
-    """Return the OAuth resource URL for an MCP server.
-
-    Some OAuth-protected HTTP MCP servers, including Composio at
-    ``https://connect.composio.dev/mcp``, advertise the full MCP endpoint path
-    as the protected resource. Stripping the path to the origin makes the MCP
-    SDK reject the server with a protected-resource mismatch.
-    """
-    return server_url.rstrip("/")
-
-
 def build_oauth_auth(
     server_name: str,
     server_url: str,
@@ -575,7 +639,7 @@ def build_oauth_auth(
     _maybe_preregister_client(storage, cfg, client_metadata)
 
     return OAuthClientProvider(
-        server_url=_parse_base_url(server_url),
+        server_url=server_url,
         client_metadata=client_metadata,
         storage=storage,
         redirect_handler=_redirect_handler,

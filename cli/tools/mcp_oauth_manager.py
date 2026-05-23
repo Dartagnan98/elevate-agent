@@ -77,7 +77,7 @@ class _ProviderEntry:
 
 
 # ---------------------------------------------------------------------------
-# ElevateMCPOAuthProvider — OAuthClientProvider subclass with disk-watch
+# HermesMCPOAuthProvider — OAuthClientProvider subclass with disk-watch
 # ---------------------------------------------------------------------------
 
 
@@ -92,7 +92,7 @@ def _make_elevate_provider_class() -> Optional[type]:
     except ImportError:  # pragma: no cover — SDK required in CI
         return None
 
-    class ElevateMCPOAuthProvider(OAuthClientProvider):
+    class HermesMCPOAuthProvider(OAuthClientProvider):
         """OAuthClientProvider with pre-flow disk-mtime reload.
 
         Before every ``async_auth_flow`` invocation, asks the manager to
@@ -147,6 +147,27 @@ def _make_elevate_provider_class() -> Optional[type]:
             tokens = self.context.current_tokens
             if tokens is not None and tokens.expires_in is not None:
                 self.context.update_token_expiry(tokens)
+
+            # Cold-load: restore OAuth server metadata from disk before any
+            # refresh attempt. Without this, a restarted process with cached
+            # tokens but no in-memory metadata would fall back to the SDK's
+            # guessed ``{server_url}/token`` path (returns 404 on most real
+            # providers) and require a full browser re-authorization.
+            storage = self.context.storage
+            from tools.mcp_oauth import ElevateTokenStorage
+            if (
+                isinstance(storage, ElevateTokenStorage)
+                and self.context.oauth_metadata is None
+            ):
+                meta = storage.load_oauth_metadata()
+                if meta is not None:
+                    self.context.oauth_metadata = meta
+                    logger.debug(
+                        "MCP OAuth '%s': restored metadata from disk "
+                        "(token_endpoint=%s)",
+                        self._elevate_server_name,
+                        meta.token_endpoint,
+                    )
 
             # Pre-flight OAuth AS discovery so ``_refresh_token`` has a
             # correct ``token_endpoint`` before the first refresh attempt.
@@ -229,12 +250,39 @@ def _make_elevate_provider_class() -> Optional[type]:
                         break
                     if asm:
                         self.context.oauth_metadata = asm
+                        # Persist immediately so a subsequent cold-load can
+                        # skip discovery entirely.
+                        storage = self.context.storage
+                        from tools.mcp_oauth import ElevateTokenStorage
+                        if isinstance(storage, ElevateTokenStorage):
+                            storage.save_oauth_metadata(asm)
                         logger.debug(
                             "MCP OAuth '%s': pre-flight ASM discovered "
                             "token_endpoint=%s",
                             self._elevate_server_name, asm.token_endpoint,
                         )
                         break
+
+        def _persist_oauth_metadata_if_changed(self) -> None:
+            """Persist discovered OAuth metadata for future process restarts.
+
+            Called after the SDK's normal 401-branch auth flow completes so
+            metadata discovered via the lazy path (not pre-flight) is also
+            saved. No-op when nothing to persist or metadata hasn't changed.
+            """
+            meta = self.context.oauth_metadata
+            if meta is None:
+                return
+            storage = self.context.storage
+            from tools.mcp_oauth import ElevateTokenStorage
+            if not isinstance(storage, ElevateTokenStorage):
+                return
+            existing = storage.load_oauth_metadata()
+            if (
+                existing is None
+                or str(existing.token_endpoint) != str(meta.token_endpoint)
+            ):
+                storage.save_oauth_metadata(meta)
 
         async def async_auth_flow(self, request):  # type: ignore[override]
             # Pre-flow hook: ask the manager to refresh from disk if needed.
@@ -271,9 +319,12 @@ def _make_elevate_provider_class() -> Optional[type]:
                     incoming = yield outgoing
                     outgoing = await inner.asend(incoming)
             except StopAsyncIteration:
+                # Persist any metadata the SDK discovered lazily during the
+                # 401 branch so a subsequent cold-load skips discovery.
+                self._persist_oauth_metadata_if_changed()
                 return
 
-    return ElevateMCPOAuthProvider
+    return HermesMCPOAuthProvider
 
 
 # Cached at import time. Tested and used by :class:`MCPOAuthManager`.
@@ -341,7 +392,7 @@ class MCPOAuthManager:
     ) -> Optional[Any]:
         """Build the underlying OAuth provider.
 
-        Constructs :class:`ElevateMCPOAuthProvider` directly using the helpers
+        Constructs :class:`HermesMCPOAuthProvider` directly using the helpers
         extracted from ``tools.mcp_oauth``. The subclass injects a pre-flow
         disk-watch hook so external token refreshes (cron, other CLI
         instances) are visible to running MCP sessions.
@@ -362,7 +413,6 @@ class MCPOAuthManager:
             _configure_callback_port,
             _is_interactive,
             _maybe_preregister_client,
-            _parse_base_url,
             _redirect_handler,
             _wait_for_callback,
         )
@@ -387,7 +437,7 @@ class MCPOAuthManager:
 
         return _ELEVATE_PROVIDER_CLS(
             server_name=server_name,
-            server_url=_parse_base_url(entry.server_url),
+            server_url=entry.server_url,
             client_metadata=client_metadata,
             storage=storage,
             redirect_handler=_redirect_handler,
@@ -398,8 +448,8 @@ class MCPOAuthManager:
     def remove(self, server_name: str) -> None:
         """Evict the provider from cache AND delete tokens from disk.
 
-        Called by ``elevate mcp remove <name>`` and (indirectly) by
-        ``elevate mcp login <name>`` during forced re-auth.
+        Called by ``hermes mcp remove <name>`` and (indirectly) by
+        ``hermes mcp login <name>`` during forced re-auth.
         """
         with self._entries_lock:
             self._entries.pop(server_name, None)
