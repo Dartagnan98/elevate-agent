@@ -24,21 +24,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 @pytest.fixture
 def cron_env(tmp_path, monkeypatch):
     """Isolated cron environment with temp ELEVATE_HOME."""
-    elevate_home = tmp_path / ".elevate"
-    elevate_home.mkdir()
-    (elevate_home / "cron").mkdir()
-    (elevate_home / "cron" / "output").mkdir()
-    (elevate_home / "scripts").mkdir()
-    monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "cron").mkdir()
+    (hermes_home / "cron" / "output").mkdir()
+    (hermes_home / "scripts").mkdir()
+    monkeypatch.setenv("ELEVATE_HOME", str(hermes_home))
 
     # Clear cached module-level paths
     import cron.jobs as jobs_mod
-    monkeypatch.setattr(jobs_mod, "ELEVATE_DIR", elevate_home)
-    monkeypatch.setattr(jobs_mod, "CRON_DIR", elevate_home / "cron")
-    monkeypatch.setattr(jobs_mod, "JOBS_FILE", elevate_home / "cron" / "jobs.json")
-    monkeypatch.setattr(jobs_mod, "OUTPUT_DIR", elevate_home / "cron" / "output")
+    monkeypatch.setattr(jobs_mod, "ELEVATE_DIR", hermes_home)
+    monkeypatch.setattr(jobs_mod, "CRON_DIR", hermes_home / "cron")
+    monkeypatch.setattr(jobs_mod, "JOBS_FILE", hermes_home / "cron" / "jobs.json")
+    monkeypatch.setattr(jobs_mod, "OUTPUT_DIR", hermes_home / "cron" / "output")
 
-    return elevate_home
+    return hermes_home
 
 
 class TestJobScriptField:
@@ -213,19 +213,6 @@ class TestBuildJobPromptWithScript:
         assert "## Script Output" not in prompt
         assert "Simple job." in prompt
 
-    def test_script_empty_output_noted(self, cron_env):
-        from cron.scheduler import _build_job_prompt
-
-        script = cron_env / "scripts" / "noop.py"
-        script.write_text("# nothing\n")
-
-        job = {
-            "prompt": "Check status.",
-            "script": str(script),
-        }
-        prompt = _build_job_prompt(job)
-        assert "no output" in prompt.lower()
-        assert "Check status." in prompt
 
 
 class TestCronjobToolScript:

@@ -24,6 +24,43 @@ from utils import normalize_proxy_url
 logger = logging.getLogger(__name__)
 
 
+# Audio routing helper used by cron.scheduler._send_media_via_adapter.
+# Other platforms accept every recognized audio ext via the audio sender;
+# Telegram is special-cased because the Bot API only accepts MP3/M4A for
+# sendAudio and OGG/OPUS for sendVoice.
+_AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
+_TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
+_TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
+
+
+def _platform_name(platform) -> str:
+    """Best-effort string form of ``platform`` (accepts None, str, or object with .platform)."""
+    if platform is None:
+        return ""
+    if isinstance(platform, str):
+        return platform.lower()
+    name = getattr(platform, "platform", None) or getattr(platform, "name", None) or ""
+    return str(name).lower()
+
+
+def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bool:
+    """Return True when a media file should use the platform's audio sender.
+
+    Other platforms: every recognized audio extension routes through the
+    audio sender. Telegram only treats Opus/OGG as audio when ``is_voice``
+    is set, and only routes MP3/M4A through sendAudio attachment-style;
+    everything else falls through to document delivery (returns False).
+    """
+    normalized_ext = (ext or "").lower()
+    if normalized_ext not in _AUDIO_EXTS:
+        return False
+    if _platform_name(platform) == "telegram":
+        if normalized_ext in _TELEGRAM_VOICE_EXTS:
+            return is_voice
+        return normalized_ext in _TELEGRAM_AUDIO_ATTACHMENT_EXTS
+    return True
+
+
 def utf16_len(s: str) -> int:
     """Count UTF-16 code units in *s*.
 

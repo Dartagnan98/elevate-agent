@@ -106,7 +106,7 @@ class TestConfigFilePermissions(unittest.TestCase):
             self.assertEqual(file_mode, 0o600)
 
     def test_ensure_elevate_home_sets_0700(self):
-        home = Path(self.tmpdir) / ".elevate"
+        home = Path(self.tmpdir) / ".hermes"
         with patch("elevate_cli.config.get_elevate_home", return_value=home):
             from elevate_cli.config import ensure_elevate_home
             ensure_elevate_home()

@@ -8,6 +8,7 @@ Output is saved to ~/.elevate/cron/output/{job_id}/{timestamp}.md
 import copy
 import json
 import logging
+import shutil
 import tempfile
 import threading
 import os
@@ -16,11 +17,12 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from elevate_constants import get_elevate_home
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 
 logger = logging.getLogger(__name__)
 
-from elevate_time import now as _elevate_now
+from elevate_time import now as _hermes_now
+from utils import atomic_replace
 
 try:
     from croniter import croniter
@@ -32,8 +34,7 @@ except ImportError:
 # Configuration
 # =============================================================================
 
-_INITIAL_ELEVATE_DIR = get_elevate_home().resolve()
-ELEVATE_DIR = _INITIAL_ELEVATE_DIR
+ELEVATE_DIR = get_elevate_home().resolve()
 CRON_DIR = ELEVATE_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
 
@@ -43,27 +44,6 @@ JOBS_FILE = CRON_DIR / "jobs.json"
 _jobs_file_lock = threading.Lock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
-
-WEEKDAY_ALIASES = {
-    "mon": 0,
-    "monday": 0,
-    "tue": 1,
-    "tues": 1,
-    "tuesday": 1,
-    "wed": 2,
-    "wednesday": 2,
-    "thu": 3,
-    "thur": 3,
-    "thurs": 3,
-    "thursday": 3,
-    "fri": 4,
-    "friday": 4,
-    "sat": 5,
-    "saturday": 5,
-    "sun": 6,
-    "sunday": 6,
-}
-WEEKDAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -92,6 +72,68 @@ def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _coerce_job_text(value: Any, fallback: str = "") -> str:
+    """Coerce legacy/hand-edited nullable cron fields to strings for readers."""
+    if value is None:
+        return fallback
+    return str(value)
+
+
+def _schedule_display_for_job(job: Dict[str, Any]) -> str:
+    display = _coerce_job_text(job.get("schedule_display")).strip()
+    if display:
+        return display
+
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        for key in ("display", "value", "expr", "run_at"):
+            text = _coerce_job_text(schedule.get(key)).strip()
+            if text:
+                return text
+    elif schedule is not None:
+        return str(schedule)
+
+    return "?"
+
+
+def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a read-safe cron job shape for UI/API/tool/scheduler consumers.
+
+    Older or hand-edited jobs can have nullable fields like ``prompt``,
+    ``name``, or ``schedule_display``.  Keep storage untouched on read, but
+    ensure consumers never crash while formatting or running those records.
+    """
+    normalized = _apply_skill_fields(job)
+    job_id = _coerce_job_text(normalized.get("id"), "unknown")
+    prompt = _coerce_job_text(normalized.get("prompt"))
+    normalized["id"] = job_id
+    normalized["prompt"] = prompt
+
+    name = _coerce_job_text(normalized.get("name")).strip()
+    if not name:
+        script = _coerce_job_text(normalized.get("script")).strip()
+        label_source = (
+            prompt
+            or (normalized["skills"][0] if normalized.get("skills") else "")
+            or script
+            or job_id
+            or "cron job"
+        )
+        name = label_source[:50].strip() or "cron job"
+    normalized["name"] = name
+    normalized["schedule_display"] = _schedule_display_for_job(normalized)
+
+    state = _coerce_job_text(normalized.get("state")).strip()
+    if not state:
+        state = "scheduled" if normalized.get("enabled", True) else "paused"
+    normalized["state"] = state
+
+    profile = _coerce_job_text(normalized.get("profile")).strip()
+    normalized["profile"] = profile or None
+
+    return normalized
+
+
 def _secure_dir(path: Path):
     """Set directory to owner-only access (0700). No-op on Windows."""
     try:
@@ -109,49 +151,12 @@ def _secure_file(path: Path):
         pass
 
 
-def _current_elevate_dir() -> Path:
-    """Resolve Elevate home at call time while preserving test monkeypatches."""
-    configured = Path(ELEVATE_DIR).expanduser().resolve()
-    if configured != _INITIAL_ELEVATE_DIR:
-        return configured
-    return get_elevate_home().resolve()
-
-
-def _cron_dir() -> Path:
-    configured = Path(CRON_DIR).expanduser()
-    default = _INITIAL_ELEVATE_DIR / "cron"
-    if configured.resolve() != default:
-        return configured.resolve()
-    return _current_elevate_dir() / "cron"
-
-
-def _jobs_file() -> Path:
-    configured = Path(JOBS_FILE).expanduser()
-    default = _INITIAL_ELEVATE_DIR / "cron" / "jobs.json"
-    if configured.resolve() != default:
-        return configured.resolve()
-    return _cron_dir() / "jobs.json"
-
-
-def _output_dir() -> Path:
-    configured = Path(OUTPUT_DIR).expanduser()
-    default = _INITIAL_ELEVATE_DIR / "cron" / "output"
-    if configured.resolve() != default:
-        return configured.resolve()
-    return _cron_dir() / "output"
-
-
 def ensure_dirs():
     """Ensure cron directories exist with secure permissions."""
-    cron_dir = _cron_dir()
-    output_dir = _output_dir()
-    jobs_dir = _jobs_file().parent
-    cron_dir.mkdir(parents=True, exist_ok=True)
-    jobs_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _secure_dir(cron_dir)
-    _secure_dir(jobs_dir)
-    _secure_dir(output_dir)
+    CRON_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_dir(CRON_DIR)
+    _secure_dir(OUTPUT_DIR)
 
 
 # =============================================================================
@@ -166,50 +171,17 @@ def parse_duration(s: str) -> int:
         "30m" → 30
         "2h" → 120
         "1d" → 1440
-        "2w" → 20160
     """
     s = s.strip().lower()
-    match = re.match(
-        r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)$',
-        s,
-    )
+    match = re.match(r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$', s)
     if not match:
-        raise ValueError(f"Invalid duration: '{s}'. Use format like '30m', '2h', '1d', or '2w'")
+        raise ValueError(f"Invalid duration: '{s}'. Use format like '30m', '2h', or '1d'")
     
     value = int(match.group(1))
-    unit = match.group(2)[0]  # First char: m, h, d, or w
+    unit = match.group(2)[0]  # First char: m, h, or d
     
-    multipliers = {'m': 1, 'h': 60, 'd': 1440, 'w': 10080}
+    multipliers = {'m': 1, 'h': 60, 'd': 1440}
     return value * multipliers[unit]
-
-
-def _format_interval_display(minutes: int) -> str:
-    for unit_minutes, suffix in ((10080, "w"), (1440, "d"), (60, "h")):
-        if minutes % unit_minutes == 0:
-            return f"{minutes // unit_minutes}{suffix}"
-    return f"{minutes}m"
-
-
-def _normalize_anchor_time(value: str) -> str:
-    match = re.match(r'^(\d{1,2}):(\d{2})$', value.strip())
-    if not match:
-        raise ValueError(f"Invalid interval time '{value}'. Use HH:MM, for example 09:00")
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    if hour > 23 or minute > 59:
-        raise ValueError(f"Invalid interval time '{value}'. Use HH:MM, for example 09:00")
-    return f"{hour:02d}:{minute:02d}"
-
-
-def _next_anchor_start(weekday: Optional[int], time_label: str) -> str:
-    now = _elevate_now()
-    hour, minute = [int(part) for part in time_label.split(":", 1)]
-    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if weekday is not None:
-        candidate += timedelta(days=(weekday - now.weekday()) % 7)
-    if candidate <= now:
-        candidate += timedelta(days=7 if weekday is not None else 1)
-    return candidate.isoformat()
 
 
 def parse_schedule(schedule: str) -> Dict[str, Any]:
@@ -227,7 +199,6 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         "2h"               → once in 2 hours
         "every 30m"        → recurring every 30 minutes
         "every 2h"         → recurring every 2 hours
-        "every 2w on Tuesday at 09:00" → every two weeks, anchored
         "0 9 * * *"        → cron expression
         "2026-02-03T14:00" → once at timestamp
     """
@@ -237,39 +208,13 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     
     # "every X" pattern → recurring interval
     if schedule_lower.startswith("every "):
-        interval_text = schedule[6:].strip()
-        match = re.match(
-            r'^(?P<duration>\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks))'
-            r'(?:\s+on\s+(?P<weekday>mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?|thu(?:r|rs|rsday|rday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))?'
-            r'(?:\s+at\s+(?P<time>\d{1,2}:\d{2}))?$',
-            interval_text,
-            re.IGNORECASE,
-        )
-        if not match:
-            raise ValueError(
-                f"Invalid interval schedule '{original}'. Use 'every 30m', "
-                f"'every 2h', or 'every 2w on Monday at 09:00'"
-            )
-        duration_str = match.group("duration")
+        duration_str = schedule[6:].strip()
         minutes = parse_duration(duration_str)
-        parsed: Dict[str, Any] = {
+        return {
             "kind": "interval",
             "minutes": minutes,
             "display": f"every {minutes}m"
         }
-        weekday_text = match.group("weekday")
-        time_text = match.group("time")
-        if weekday_text or time_text:
-            anchor_time = _normalize_anchor_time(time_text or "09:00")
-            anchor_weekday = WEEKDAY_ALIASES[weekday_text.lower()] if weekday_text else None
-            parsed["anchor_time"] = anchor_time
-            parsed["start_at"] = _next_anchor_start(anchor_weekday, anchor_time)
-            parsed["display"] = f"every {_format_interval_display(minutes)}"
-            if anchor_weekday is not None:
-                parsed["anchor_weekday"] = anchor_weekday
-                parsed["display"] += f" on {WEEKDAY_LABELS[anchor_weekday]}"
-            parsed["display"] += f" at {anchor_time}"
-        return parsed
     
     # Check for cron expression (5 or 6 space-separated fields)
     # Cron fields: minute hour day month weekday [year]
@@ -310,7 +255,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     # Duration like "30m", "2h", "1d" → one-shot from now
     try:
         minutes = parse_duration(schedule)
-        run_at = _elevate_now() + timedelta(minutes=minutes)
+        run_at = _hermes_now() + timedelta(minutes=minutes)
         return {
             "kind": "once",
             "run_at": run_at.isoformat(),
@@ -329,18 +274,18 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
 
 
 def _ensure_aware(dt: datetime) -> datetime:
-    """Return a timezone-aware datetime in Elevate configured timezone.
+    """Return a timezone-aware datetime in Hermes configured timezone.
 
     Backward compatibility:
     - Older stored timestamps may be naive.
     - Naive values are interpreted as *system-local wall time* (the timezone
       `datetime.now()` used when they were created), then converted to the
-      configured Elevate timezone.
+      configured Hermes timezone.
 
     This preserves relative ordering for legacy naive timestamps across
     timezone changes and avoids false not-due results.
     """
-    target_tz = _elevate_now().tzinfo
+    target_tz = _hermes_now().tzinfo
     if dt.tzinfo is None:
         local_tz = datetime.now().astimezone().tzinfo
         return dt.replace(tzinfo=local_tz).astimezone(target_tz)
@@ -393,7 +338,7 @@ def _compute_grace_seconds(schedule: dict) -> int:
 
     if kind == "cron" and HAS_CRONITER:
         try:
-            now = _elevate_now()
+            now = _hermes_now()
             cron = croniter(schedule["expr"], now)
             first = cron.get_next(datetime)
             second = cron.get_next(datetime)
@@ -412,7 +357,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
     Returns ISO timestamp string, or None if no more runs.
     """
-    now = _elevate_now()
+    now = _hermes_now()
 
     if schedule["kind"] == "once":
         return _recoverable_oneshot_run_at(schedule, now, last_run_at=last_run_at)
@@ -423,10 +368,6 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             # Next run is last_run + interval
             last = _ensure_aware(datetime.fromisoformat(last_run_at))
             next_run = last + timedelta(minutes=minutes)
-        elif schedule.get("start_at"):
-            next_run = _ensure_aware(datetime.fromisoformat(schedule["start_at"]))
-            while next_run <= now:
-                next_run += timedelta(minutes=minutes)
         else:
             # First run is now + interval
             next_run = now + timedelta(minutes=minutes)
@@ -434,8 +375,22 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
     elif schedule["kind"] == "cron":
         if not HAS_CRONITER:
+            logger.warning(
+                "Cannot compute next run for cron schedule %r: 'croniter' is "
+                "not installed. croniter is a core dependency as of v0.9.x; "
+                "reinstall hermes-agent or run 'pip install croniter' in your "
+                "runtime env.",
+                schedule.get("expr"),
+            )
             return None
-        cron = croniter(schedule["expr"], now)
+        # Use last_run_at as the croniter base when available, consistent
+        # with interval jobs.  This ensures that after a crash/restart,
+        # the next run is anchored to the actual last execution time
+        # rather than to an arbitrary restart time.
+        base_time = now
+        if last_run_at:
+            base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
+        cron = croniter(schedule["expr"], base_time)
         next_run = cron.get_next(datetime)
         return next_run.isoformat()
 
@@ -449,18 +404,17 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     ensure_dirs()
-    jobs_file = _jobs_file()
-    if not jobs_file.exists():
+    if not JOBS_FILE.exists():
         return []
     
     try:
-        with open(jobs_file, 'r', encoding='utf-8') as f:
+        with open(JOBS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             return data.get("jobs", [])
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         try:
-            with open(jobs_file, 'r', encoding='utf-8') as f:
+            with open(JOBS_FILE, 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
                 jobs = data.get("jobs", [])
                 if jobs:
@@ -479,15 +433,14 @@ def load_jobs() -> List[Dict[str, Any]]:
 def save_jobs(jobs: List[Dict[str, Any]]):
     """Save all jobs to storage."""
     ensure_dirs()
-    jobs_file = _jobs_file()
-    fd, tmp_path = tempfile.mkstemp(dir=str(jobs_file.parent), suffix='.tmp', prefix='.jobs_')
+    fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump({"jobs": jobs, "updated_at": _elevate_now().isoformat()}, f, indent=2)
+            json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, jobs_file)
-        _secure_file(jobs_file)
+        atomic_replace(tmp_path, JOBS_FILE)
+        _secure_file(JOBS_FILE)
     except BaseException:
         try:
             os.unlink(tmp_path)
@@ -529,8 +482,32 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
+def _normalize_profile(profile: Optional[str]) -> Optional[str]:
+    """Normalize and validate an optional cron job profile name.
+
+    Empty / None disables per-job profile selection. Otherwise the profile name
+    is canonicalized with the same rules as ``hermes -p`` and must refer to an
+    existing profile at create/update time. ``default`` is the built-in root
+    profile and is always valid.
+    """
+    if profile is None:
+        return None
+    raw = str(profile).strip()
+    if not raw:
+        return None
+
+    from elevate_cli.profiles import normalize_profile_name, resolve_profile_env
+
+    normalized = normalize_profile_name(raw)
+    # resolve_profile_env validates the canonical name and checks that named
+    # profiles exist. Store only the stable profile id, not the filesystem path,
+    # so profile directories can move with the Hermes root.
+    resolve_profile_env(normalized)
+    return normalized
+
+
 def create_job(
-    prompt: str,
+    prompt: Optional[str],
     schedule: str,
     name: Optional[str] = None,
     repeat: Optional[int] = None,
@@ -542,8 +519,15 @@ def create_job(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     script: Optional[str] = None,
+    context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
+    profile: Optional[str] = None,
+    no_agent: bool = False,
+    # Elevate-specific extensions for the /leads admin agent pipeline.
+    # Must remain on the public signature so elevate_cli.data.dispatch and
+    # admin endpoints can keep passing them. Restored after B5b-phase3
+    # cron/jobs.py port from Hermes (which doesn't carry these fields).
     agent: Optional[str] = None,
     tier: Optional[str] = None,
     expected_readiness_version: Optional[str] = None,
@@ -553,7 +537,8 @@ def create_job(
     Create a new cron job.
 
     Args:
-        prompt: The prompt to run (must be self-contained, or a task instruction when skill is set)
+        prompt: The prompt to run (must be self-contained, or a task instruction when skill is set).
+                Ignored when ``no_agent=True`` except as an optional name hint.
         schedule: Schedule string (see parse_schedule)
         name: Optional friendly name
         repeat: How many times to run (None = forever, 1 = once)
@@ -564,18 +549,38 @@ def create_job(
         model: Optional per-job model override
         provider: Optional per-job provider override
         base_url: Optional per-job base URL override
-        script: Optional path to a Python script whose stdout is injected into the
-                prompt each run.  The script runs before the agent turn, and its output
-                is prepended as context.  Useful for data collection / change detection.
+        script: Optional path to a script whose stdout feeds the job. With
+                ``no_agent=True`` the script IS the job — its stdout is
+                delivered verbatim. Without ``no_agent``, its stdout is
+                injected into the agent's prompt as context (data-collection /
+                change-detection pattern). Paths resolve under
+                ~/.elevate/scripts/; ``.sh`` / ``.bash`` files run via bash,
+                anything else via Python.
+        context_from: Optional job ID (or list of job IDs) whose most recent output
+                      is injected into the prompt as context before each run.
+                      Useful for chaining cron jobs: job A finds data, job B processes it.
         enabled_toolsets: Optional list of toolset names to restrict the agent to.
                           When set, only tools from these toolsets are loaded, reducing
                           token overhead. When omitted, all default tools are loaded.
+                          Ignored when ``no_agent=True``.
         workdir: Optional absolute path.  When set, the job runs as if launched
                 from that directory: AGENTS.md / CLAUDE.md / .cursorrules from
                 that directory are injected into the system prompt, and the
                 terminal/file/code_exec tools use it as their working directory
                 (via TERMINAL_CWD).  When unset, the old behaviour is preserved
                 (no context files injected, tools use the scheduler's cwd).
+                With ``no_agent=True``, ``workdir`` is still applied as the
+                script's cwd so relative paths inside the script behave
+                predictably.
+        profile: Optional Hermes profile name. When set, the job runs with
+                that profile's ELEVATE_HOME so profile-specific config,
+                credentials, scripts, skills, and memory paths resolve
+                consistently. ``default`` selects the root profile; empty /
+                None preserves the scheduler's existing behaviour.
+        no_agent: When True, skip the agent entirely — run ``script`` on schedule
+                and deliver its stdout directly. Empty stdout = silent (no
+                delivery). Requires ``script`` to be set. Ideal for classic
+                watchdogs and periodic alerts that don't need LLM reasoning.
 
     Returns:
         The created job dict
@@ -595,7 +600,7 @@ def create_job(
         deliver = "origin" if origin else "local"
 
     job_id = uuid.uuid4().hex[:12]
-    now = _elevate_now().isoformat()
+    now = _hermes_now().isoformat()
 
     normalized_skills = _normalize_skill_list(skill, skills)
     normalized_model = str(model).strip() if isinstance(model, str) else None
@@ -609,7 +614,11 @@ def create_job(
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
+    normalized_profile = _normalize_profile(profile)
+    normalized_no_agent = bool(no_agent)
 
+    # Elevate /leads metadata normalization (agent picker, tier resolver
+    # fallback, readiness gate, backfill iterator).
     normalized_agent = str(agent).strip() if isinstance(agent, str) else None
     normalized_agent = normalized_agent or None
     normalized_tier = str(tier).strip().lower() if isinstance(tier, str) else None
@@ -623,17 +632,37 @@ def create_job(
     normalized_readiness = str(expected_readiness_version).strip() if isinstance(expected_readiness_version, str) else None
     normalized_readiness = normalized_readiness or None
 
-    label_source = (prompt or (normalized_skills[0] if normalized_skills else None)) or "cron job"
+    # no_agent jobs are meaningless without a script — the script IS the job.
+    # Surface this as a clear ValueError at create time so bad configs never
+    # reach the scheduler.
+    if normalized_no_agent and not normalized_script:
+        raise ValueError(
+            "no_agent=True requires a script — with no agent and no script "
+            "there is nothing for the job to run."
+        )
+
+    # Normalize context_from: accept str or list of str, store as list or None
+    if isinstance(context_from, str):
+        context_from = [context_from.strip()] if context_from.strip() else None
+    elif isinstance(context_from, list):
+        context_from = [str(j).strip() for j in context_from if str(j).strip()] or None
+    else:
+        context_from = None
+
+    prompt_text = _coerce_job_text(prompt)
+    label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
     job = {
         "id": job_id,
         "name": name or label_source[:50].strip(),
-        "prompt": prompt,
+        "prompt": prompt_text,
         "skills": normalized_skills,
         "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
         "provider": normalized_provider,
         "base_url": normalized_base_url,
         "script": normalized_script,
+        "no_agent": normalized_no_agent,
+        "context_from": context_from,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
@@ -655,13 +684,14 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
-        # /leads cron metadata: agent picker, tier resolver fallback, readiness gate, backfill iterator
+        "profile": normalized_profile,
+        # /leads cron metadata
         "agent": normalized_agent,
         "tier": normalized_tier,
         "expected_readiness_version": normalized_readiness,
         "backfill_pending": bool(backfill_pending),
-        # Backfill iterator state (Phase 4). Stays None until the lane's first
-        # backfill run reports progress via update_backfill_state().
+        # Backfill iterator state (Phase 4). Stays None until the lane's
+        # first backfill run reports progress via update_backfill_state().
         # Shape: {day, total_estimate, queued_today, eligible_remaining, updated_at}
         "backfill_state": None if not backfill_pending else {
             "day": 0,
@@ -684,7 +714,7 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     jobs = load_jobs()
     for job in jobs:
         if job["id"] == job_id:
-            return _apply_skill_fields(job)
+            return _normalize_job_record(job)
     return None
 
 
@@ -701,9 +731,34 @@ class AmbiguousJobReference(LookupError):
         )
 
 
+def resolve_job_ref(ref: str) -> Optional[Dict[str, Any]]:
+    """Resolve a job reference (ID or name) to a job record.
+
+    - Exact ID match wins (works even if a different job's name equals this ID).
+    - Otherwise, case-insensitive name match.
+    - If a name matches more than one job, raises AmbiguousJobReference so the
+      caller can surface the matching IDs rather than silently picking one.
+    """
+    if not ref:
+        return None
+    jobs = load_jobs()
+    for job in jobs:
+        if job["id"] == ref:
+            return _normalize_job_record(job)
+    ref_lower = ref.lower()
+    name_matches = [j for j in jobs if (j.get("name") or "").lower() == ref_lower]
+    if not name_matches:
+        return None
+    if len(name_matches) > 1:
+        raise AmbiguousJobReference(
+            ref, [_normalize_job_record(j) for j in name_matches]
+        )
+    return _normalize_job_record(name_matches[0])
+
+
 def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
     """List all jobs, optionally including disabled ones."""
-    jobs = [_apply_skill_fields(j) for j in load_jobs()]
+    jobs = [_normalize_job_record(j) for j in load_jobs()]
     if not include_disabled:
         jobs = [j for j in jobs if j.get("enabled", True)]
     return jobs
@@ -720,10 +775,19 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         # None both mean "clear the field" (restore old behaviour).
         if "workdir" in updates:
             _wd = updates["workdir"]
-            if _wd in (None, "", False):
+            if _wd in {None, "", False}:
                 updates["workdir"] = None
             else:
                 updates["workdir"] = _normalize_workdir(_wd)
+
+        # Validate / normalize profile if present in updates.  Empty string or
+        # None both mean "clear the field" (restore old behaviour).
+        if "profile" in updates:
+            _profile = updates["profile"]
+            if _profile is None or _profile == "" or _profile is False:
+                updates["profile"] = None
+            else:
+                updates["profile"] = _normalize_profile(_profile)
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates
@@ -753,7 +817,7 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
         jobs[i] = updated
         save_jobs(jobs)
-        return _apply_skill_fields(jobs[i])
+        return _normalize_job_record(jobs[i])
     return None
 
 
@@ -764,25 +828,18 @@ def update_backfill_state(
     eligible_remaining: Optional[int] = None,
     total_estimate: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Lane skill reports per-run backfill progress.
-
-    Increments ``day`` by 1, records the count it queued this run, and the
-    remaining eligible profile count it observed. When ``eligible_remaining``
-    hits 0, the job is marked ``backfill_pending=False`` and subsequent runs
-    use the incremental window instead of the backfill iterator.
-
-    Returns the refreshed job dict, or None if the job no longer exists.
-    """
+    """Lane skill reports per-run backfill progress."""
     job = get_job(job_id)
     if not job:
         return None
     if not job.get("backfill_pending"):
-        # Iterator is done — accept the report but don't mutate pending state.
         return job
-
     state = dict(job.get("backfill_state") or {
-        "day": 0, "total_estimate": 0, "queued_today": 0,
-        "eligible_remaining": None, "updated_at": None,
+        "day": 0,
+        "total_estimate": 0,
+        "queued_today": 0,
+        "eligible_remaining": None,
+        "updated_at": None,
     })
     state["day"] = int(state.get("day") or 0) + 1
     if queued_today is not None:
@@ -792,36 +849,37 @@ def update_backfill_state(
     if total_estimate is not None:
         state["total_estimate"] = int(total_estimate)
     state["updated_at"] = _elevate_now().isoformat()
-
     updates: Dict[str, Any] = {"backfill_state": state}
     if state.get("eligible_remaining") == 0:
         updates["backfill_pending"] = False
-
     return update_job(job_id, updates)
 
 
 def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Pause a job without deleting it."""
+    """Pause a job without deleting it. Accepts a job ID or name."""
+    job = resolve_job_ref(job_id)
+    if not job:
+        return None
     return update_job(
-        job_id,
+        job["id"],
         {
             "enabled": False,
             "state": "paused",
-            "paused_at": _elevate_now().isoformat(),
+            "paused_at": _hermes_now().isoformat(),
             "paused_reason": reason,
         },
     )
 
 
 def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
-    """Resume a paused job and compute the next future run from now."""
-    job = get_job(job_id)
+    """Resume a paused job and compute the next future run from now. Accepts a job ID or name."""
+    job = resolve_job_ref(job_id)
     if not job:
         return None
 
     next_run_at = compute_next_run(job["schedule"])
     return update_job(
-        job_id,
+        job["id"],
         {
             "enabled": True,
             "state": "scheduled",
@@ -833,29 +891,37 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
-    """Schedule a job to run on the next scheduler tick."""
-    job = get_job(job_id)
+    """Schedule a job to run on the next scheduler tick. Accepts a job ID or name."""
+    job = resolve_job_ref(job_id)
     if not job:
         return None
     return update_job(
-        job_id,
+        job["id"],
         {
             "enabled": True,
             "state": "scheduled",
             "paused_at": None,
             "paused_reason": None,
-            "next_run_at": _elevate_now().isoformat(),
+            "next_run_at": _hermes_now().isoformat(),
         },
     )
 
 
 def remove_job(job_id: str) -> bool:
-    """Remove a job by ID."""
+    """Remove a job by ID or name."""
+    job = resolve_job_ref(job_id)
+    if not job:
+        return False
+    canonical_id = job["id"]
     jobs = load_jobs()
     original_len = len(jobs)
-    jobs = [j for j in jobs if j["id"] != job_id]
+    jobs = [j for j in jobs if j["id"] != canonical_id]
     if len(jobs) < original_len:
         save_jobs(jobs)
+        # Clean up output directory to prevent orphaned dirs accumulating
+        job_output_dir = OUTPUT_DIR / canonical_id
+        if job_output_dir.exists():
+            shutil.rmtree(job_output_dir)
         return True
     return False
 
@@ -875,7 +941,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
-                now = _elevate_now().isoformat()
+                now = _hermes_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
@@ -898,10 +964,32 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
 
-                # If no next run (one-shot completed), disable
+                # If no next run, decide whether this is terminal completion
+                # (one-shot) or a transient failure (recurring schedule couldn't
+                # compute — e.g. 'croniter' missing from the runtime env).
+                # Recurring jobs must NEVER be silently disabled: that turns a
+                # missing runtime dep into "job completed" and the user's
+                # schedule quietly goes off. See issue #16265.
                 if job["next_run_at"] is None:
-                    job["enabled"] = False
-                    job["state"] = "completed"
+                    kind = job.get("schedule", {}).get("kind")
+                    if kind in {"cron", "interval"}:
+                        job["state"] = "error"
+                        if not job.get("last_error"):
+                            job["last_error"] = (
+                                "Failed to compute next run for recurring "
+                                "schedule (is the 'croniter' package "
+                                "installed in the gateway's Python env?)"
+                            )
+                        logger.error(
+                            "Job '%s' (%s) could not compute next_run_at; "
+                            "leaving enabled and marking state=error so the "
+                            "job is not silently disabled.",
+                            job.get("name", job["id"]),
+                            kind,
+                        )
+                    else:
+                        job["enabled"] = False
+                        job["state"] = "completed"
                 elif job.get("state") != "paused":
                     job["state"] = "scheduled"
 
@@ -928,9 +1016,9 @@ def advance_next_run(job_id: str) -> bool:
         for job in jobs:
             if job["id"] == job_id:
                 kind = job.get("schedule", {}).get("kind")
-                if kind not in ("cron", "interval"):
+                if kind not in {"cron", "interval"}:
                     return False
-                now = _elevate_now().isoformat()
+                now = _hermes_now().isoformat()
                 new_next = compute_next_run(job["schedule"], now)
                 if new_next and new_next != job.get("next_run_at"):
                     job["next_run_at"] = new_next
@@ -948,7 +1036,13 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     the job is fast-forwarded to the next future run instead of firing
     immediately.  This prevents a burst of missed jobs on gateway restart.
     """
-    now = _elevate_now()
+    with _jobs_file_lock:
+        return _get_due_jobs_locked()
+
+
+def _get_due_jobs_locked() -> List[Dict[str, Any]]:
+    """Inner implementation of get_due_jobs(); must be called with _jobs_file_lock held."""
+    now = _hermes_now()
     raw_jobs = load_jobs()
     jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
     due = []
@@ -960,19 +1054,36 @@ def get_due_jobs() -> List[Dict[str, Any]]:
 
         next_run = job.get("next_run_at")
         if not next_run:
+            schedule = job.get("schedule", {})
+            kind = schedule.get("kind")
+
+            # One-shot jobs use a small grace window via the dedicated helper.
             recovered_next = _recoverable_oneshot_run_at(
-                job.get("schedule", {}),
+                schedule,
                 now,
                 last_run_at=job.get("last_run_at"),
             )
+            recovery_kind = "one-shot" if recovered_next else None
+
+            # Recurring jobs reach here only when something — typically a
+            # direct jobs.json edit that bypassed add_job() — left
+            # next_run_at unset.  Without this branch, such jobs are
+            # silently skipped forever; recompute next_run_at from the
+            # schedule so they pick up at their next scheduled tick.
+            if not recovered_next and kind in {"cron", "interval"}:
+                recovered_next = compute_next_run(schedule, now.isoformat())
+                if recovered_next:
+                    recovery_kind = kind
+
             if not recovered_next:
                 continue
 
             job["next_run_at"] = recovered_next
             next_run = recovered_next
             logger.info(
-                "Job '%s' had no next_run_at; recovering one-shot run at %s",
+                "Job '%s' had no next_run_at; recovering %s run at %s",
                 job.get("name", job["id"]),
+                recovery_kind,
                 recovered_next,
             )
             for rj in raw_jobs:
@@ -990,7 +1101,7 @@ def get_due_jobs() -> List[Dict[str, Any]]:
             # (gateway was down and missed the window). Fast-forward to
             # the next future occurrence instead of firing a stale run.
             grace = _compute_grace_seconds(schedule)
-            if kind in ("cron", "interval") and (now - next_run_dt).total_seconds() > grace:
+            if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
                 # Job is past its catch-up grace window — this is a stale missed run.
                 # Grace scales with schedule period: daily=2h, hourly=30m, 10min=5m.
                 new_next = compute_next_run(schedule, now.isoformat())
@@ -1022,11 +1133,11 @@ def get_due_jobs() -> List[Dict[str, Any]]:
 def save_job_output(job_id: str, output: str):
     """Save job output to file."""
     ensure_dirs()
-    job_output_dir = _output_dir() / job_id
+    job_output_dir = OUTPUT_DIR / job_id
     job_output_dir.mkdir(parents=True, exist_ok=True)
     _secure_dir(job_output_dir)
     
-    timestamp = _elevate_now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = _hermes_now().strftime("%Y-%m-%d_%H-%M-%S")
     output_file = job_output_dir / f"{timestamp}.md"
     
     fd, tmp_path = tempfile.mkstemp(dir=str(job_output_dir), suffix='.tmp', prefix='.output_')
@@ -1035,7 +1146,7 @@ def save_job_output(job_id: str, output: str):
             f.write(output)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, output_file)
+        atomic_replace(tmp_path, output_file)
         _secure_file(output_file)
     except BaseException:
         try:
@@ -1045,3 +1156,120 @@ def save_job_output(job_id: str, output: str):
         raise
     
     return output_file
+
+
+# =============================================================================
+# Skill reference rewriting (curator integration)
+# =============================================================================
+
+def rewrite_skill_refs(
+    consolidated: Optional[Dict[str, str]] = None,
+    pruned: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Rewrite cron job skill references after a curator consolidation pass.
+
+    When the curator consolidates a skill X into umbrella Y (or archives X
+    as pruned), any cron job that lists ``X`` in its ``skills`` field will
+    fail to load ``X`` at run time — the scheduler logs a warning and
+    skips the skill, so the job runs without the instructions it was
+    scheduled to follow. See cron/scheduler.py where ``skill_view`` is
+    called per skill name.
+
+    This function repairs cron jobs in-place:
+
+    - A skill listed in ``consolidated`` is replaced with its umbrella
+      target (the ``into`` value). If the umbrella is already in the
+      job's skill list, the stale name is dropped without duplication.
+    - A skill listed in ``pruned`` is dropped outright — there is no
+      forwarding target.
+    - Ordering and other skills in the list are preserved.
+    - The legacy ``skill`` field is realigned via ``_apply_skill_fields``.
+
+    Args:
+        consolidated: mapping of ``old_skill_name -> umbrella_skill_name``.
+        pruned: list of skill names that were archived with no forwarding
+            target.
+
+    Returns a report dict::
+
+        {
+            "rewrites": [
+                {
+                    "job_id": ...,
+                    "job_name": ...,
+                    "before": [...],
+                    "after": [...],
+                    "mapped": {"old": "new", ...},
+                    "dropped": ["old", ...],
+                },
+                ...
+            ],
+            "jobs_updated": N,
+            "jobs_scanned": M,
+        }
+
+    Best-effort: exceptions from loading/saving propagate to the caller so
+    tests can assert behaviour; the curator invocation site wraps this
+    call in a try/except so a failure here never breaks the curator.
+    """
+    consolidated = dict(consolidated or {})
+    pruned_set = set(pruned or [])
+    # A skill listed in both wins as "consolidated" — it has a target,
+    # which is the more useful of the two outcomes.
+    pruned_set -= set(consolidated.keys())
+
+    if not consolidated and not pruned_set:
+        return {"rewrites": [], "jobs_updated": 0, "jobs_scanned": 0}
+
+    with _jobs_file_lock:
+        jobs = load_jobs()
+        rewrites: List[Dict[str, Any]] = []
+        changed = False
+
+        for job in jobs:
+            skills_before = _normalize_skill_list(job.get("skill"), job.get("skills"))
+            if not skills_before:
+                continue
+
+            mapped: Dict[str, str] = {}
+            dropped: List[str] = []
+            new_skills: List[str] = []
+
+            for name in skills_before:
+                if name in consolidated:
+                    target = consolidated[name]
+                    mapped[name] = target
+                    if target and target not in new_skills:
+                        new_skills.append(target)
+                elif name in pruned_set:
+                    dropped.append(name)
+                elif name not in new_skills:
+                    new_skills.append(name)
+
+            if not mapped and not dropped:
+                continue
+
+            job["skills"] = new_skills
+            job["skill"] = new_skills[0] if new_skills else None
+            changed = True
+
+            rewrites.append({
+                "job_id": job.get("id"),
+                "job_name": job.get("name") or job.get("id"),
+                "before": list(skills_before),
+                "after": list(new_skills),
+                "mapped": mapped,
+                "dropped": dropped,
+            })
+
+        if changed:
+            save_jobs(jobs)
+            logger.info(
+                "Curator rewrote skill references in %d cron job(s)", len(rewrites)
+            )
+
+        return {
+            "rewrites": rewrites,
+            "jobs_updated": len(rewrites),
+            "jobs_scanned": len(jobs),
+        }
