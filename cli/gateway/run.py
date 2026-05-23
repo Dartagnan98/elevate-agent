@@ -5271,8 +5271,17 @@ class GatewayRunner:
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
-            env_key = f"{platform_name.upper()}_HOME_CHANNEL"
+            from cron.scheduler import _resolve_home_env_var
+            env_key = _resolve_home_env_var(platform_name) or f"{platform_name.upper()}_HOME_CHANNEL"
             if not os.getenv(env_key):
+                # Slack dispatches all Elevate commands through a single
+                # parent slash command `/elevate`; bare `/sethome` is not
+                # registered and would fail with "app did not respond".
+                sethome_cmd = (
+                    "/elevate sethome"
+                    if source.platform == Platform.SLACK
+                    else "/sethome"
+                )
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     await adapter.send(
@@ -5280,7 +5289,7 @@ class GatewayRunner:
                         f"📬 No home channel is set for {platform_name.title()}. "
                         f"A home channel is where Elevate delivers cron job results "
                         f"and cross-platform messages.\n\n"
-                        f"Type /sethome to make this chat your home channel, "
+                        f"Type {sethome_cmd} to make this chat your home channel, "
                         f"or ignore to skip."
                     )
         
@@ -5962,11 +5971,28 @@ class GatewayRunner:
         is_running = session_key in self._running_agents
 
         title = None
+        # Token totals are persisted into sessions_db (run_agent.py), not into
+        # SessionEntry, so session_entry.total_tokens is always 0 in current
+        # code paths. SessionDB is the single source of truth; reading it here
+        # keeps /status accurate without duplicating token writes into two stores.
+        db_total_tokens = 0
         if self._session_db:
             try:
                 title = self._session_db.get_session_title(session_entry.session_id)
             except Exception:
                 title = None
+            try:
+                row = self._session_db.get_session(session_entry.session_id)
+                if row:
+                    db_total_tokens = (
+                        (row.get("input_tokens") or 0)
+                        + (row.get("output_tokens") or 0)
+                        + (row.get("cache_read_tokens") or 0)
+                        + (row.get("cache_write_tokens") or 0)
+                        + (row.get("reasoning_tokens") or 0)
+                    )
+            except Exception:
+                db_total_tokens = 0
 
         lines = [
             "📊 **Elevate Gateway Status**",
@@ -5978,7 +6004,7 @@ class GatewayRunner:
         lines.extend([
             f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
             f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Tokens:** {session_entry.total_tokens:,}",
+            f"**Tokens:** {db_total_tokens:,}",
             f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
             "",
             f"**Connected Platforms:** {', '.join(connected_platforms)}",

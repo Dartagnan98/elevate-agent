@@ -2324,8 +2324,12 @@ class BasePlatformAdapter(ABC):
         # Fall back to a new Event only if the entry was removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
-        callback_generation = getattr(interrupt_event, "_elevate_run_generation", None)
-        
+        # Snapshot taken AFTER handler runs (see below) — the run-generation is
+        # set on the interrupt_event by GatewayRunner._bind_adapter_run_generation
+        # during _handle_message_with_agent, so capturing it here would always
+        # see None and bypass the ownership check in pop_post_delivery_callback.
+        callback_generation = None
+
         # Start continuous typing indicator (refreshes every 2 seconds)
         _thread_metadata = self._event_delivery_metadata(event)
         _keep_typing_kwargs = {"metadata": _thread_metadata}
@@ -2347,7 +2351,11 @@ class BasePlatformAdapter(ABC):
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
-            
+            # Snapshot generation AFTER handler runs — the handler binds the
+            # run-generation onto interrupt_event mid-flight, so this is the
+            # earliest moment it's actually populated.
+            callback_generation = getattr(interrupt_event, "_elevate_run_generation", None)
+
             # Send response if any.  A None/empty response is normal when
             # streaming already delivered the text (already_sent=True) or
             # when the message was queued behind an active agent.  Log at
