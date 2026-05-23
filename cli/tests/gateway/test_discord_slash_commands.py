@@ -62,24 +62,13 @@ def _ensure_discord_mock():
         sys.modules.setdefault("discord.ext.commands", commands_mod)
 
     # Whether we just installed the mock OR another test module installed
-    # it first via its own _ensure_discord_mock, force the app_commands pieces
-    # needed by DiscordAdapter. Several gateway test modules install smaller
-    # stubs first; full-suite order should not change slash-command behavior.
+    # it first via its own _ensure_discord_mock, force the decorators we
+    # need onto discord.app_commands — the flat /skill command uses
+    # @app_commands.autocomplete and not every other mock stub exposes it.
     _app = getattr(sys.modules["discord"], "app_commands", None)
-    if _app is not None:
+    if _app is not None and not hasattr(_app, "autocomplete"):
         try:
-            if not hasattr(_app, "describe"):
-                _app.describe = lambda **kwargs: (lambda fn: fn)
-            if not hasattr(_app, "choices"):
-                _app.choices = lambda **kwargs: (lambda fn: fn)
-            if not hasattr(_app, "autocomplete"):
-                _app.autocomplete = lambda **kwargs: (lambda fn: fn)
-            if not hasattr(_app, "Choice"):
-                _app.Choice = lambda **kwargs: SimpleNamespace(**kwargs)
-            if not hasattr(_app, "Group"):
-                _app.Group = _FakeGroup
-            if not hasattr(_app, "Command"):
-                _app.Command = _FakeCommand
+            _app.autocomplete = lambda **kwargs: (lambda fn: fn)
         except Exception:
             pass
 
@@ -115,9 +104,13 @@ def adapter():
         tree=FakeTree(),
         get_channel=lambda _id: None,
         fetch_channel=AsyncMock(),
-        user=SimpleNamespace(id=99999, name="ElevateBot"),
+        user=SimpleNamespace(id=99999, name="HermesBot"),
     )
     adapter._text_batch_delay_seconds = 0  # disable batching for tests
+    # Slash auth is exercised in test_discord_slash_auth.py — bypass it here
+    # so registration / dispatch / thread behavior tests don't have to
+    # construct a full auth context (allowlist / channel scope).
+    adapter._check_slash_authorization = AsyncMock(return_value=True)
     return adapter
 
 
@@ -128,6 +121,10 @@ def adapter():
 
 @pytest.mark.asyncio
 async def test_registers_native_thread_slash_command(adapter):
+    # The /thread slash closure now delegates ALL the work — including
+    # defer() — to _handle_thread_create_slash so the auth gate can send
+    # an ephemeral rejection on the still-unresponded interaction. The
+    # closure should just forward.
     adapter._handle_thread_create_slash = AsyncMock()
     adapter._register_slash_commands()
 
@@ -138,7 +135,9 @@ async def test_registers_native_thread_slash_command(adapter):
 
     await command(interaction, name="Planning", message="", auto_archive_duration=1440)
 
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    # defer is now performed inside _handle_thread_create_slash, AFTER the
+    # auth check passes — not by the closure.
+    interaction.response.defer.assert_not_awaited()
     adapter._handle_thread_create_slash.assert_awaited_once_with(interaction, "Planning", "", 1440)
 
 
@@ -309,6 +308,7 @@ async def test_handle_thread_create_slash_reports_success(adapter):
         user=SimpleNamespace(display_name="Jezza", id=42),
         guild=SimpleNamespace(name="TestGuild"),
         followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
     )
 
     await adapter._handle_thread_create_slash(interaction, "Planning", "Kickoff", 1440)
@@ -337,14 +337,15 @@ async def test_handle_thread_create_slash_dispatches_session_when_message_provid
         user=SimpleNamespace(display_name="Jezza", id=42),
         guild=SimpleNamespace(name="TestGuild"),
         followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
     )
 
     adapter._dispatch_thread_session = AsyncMock()
 
-    await adapter._handle_thread_create_slash(interaction, "Planning", "Hello Elevate", 1440)
+    await adapter._handle_thread_create_slash(interaction, "Planning", "Hello Hermes", 1440)
 
     adapter._dispatch_thread_session.assert_awaited_once_with(
-        interaction, "555", "Planning", "Hello Elevate",
+        interaction, "555", "Planning", "Hello Hermes",
     )
 
 
@@ -359,6 +360,7 @@ async def test_handle_thread_create_slash_no_dispatch_without_message(adapter):
         user=SimpleNamespace(display_name="Jezza", id=42),
         guild=SimpleNamespace(name="TestGuild"),
         followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
     )
 
     adapter._dispatch_thread_session = AsyncMock()
@@ -382,6 +384,7 @@ async def test_handle_thread_create_slash_falls_back_to_seed_message(adapter):
         user=SimpleNamespace(display_name="Jezza", id=42),
         guild=SimpleNamespace(name="TestGuild"),
         followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
     )
 
     await adapter._handle_thread_create_slash(interaction, "Planning", "Kickoff", 1440)
@@ -406,6 +409,7 @@ async def test_handle_thread_create_slash_reports_failure(adapter):
         channel_id=123,
         user=SimpleNamespace(display_name="Jezza", id=42),
         followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
     )
 
     await adapter._handle_thread_create_slash(interaction, "Planning", "", 1440)
@@ -533,10 +537,10 @@ async def test_auto_create_thread_strips_mention_syntax_from_name(adapter):
 
 
 @pytest.mark.asyncio
-async def test_auto_create_thread_falls_back_to_elevate_when_only_mentions(adapter):
+async def test_auto_create_thread_falls_back_to_hermes_when_only_mentions(adapter):
     """If a message contains only mention syntax, the stripped content is
-    empty — fall back to the 'Elevate' default rather than ''."""
-    thread = SimpleNamespace(id=999, name="Elevate")
+    empty — fall back to the 'Hermes' default rather than ''."""
+    thread = SimpleNamespace(id=999, name="Hermes")
     message = SimpleNamespace(
         content="<@&1490963422786093149>",
         create_thread=AsyncMock(return_value=thread),
@@ -547,7 +551,7 @@ async def test_auto_create_thread_falls_back_to_elevate_when_only_mentions(adapt
     await adapter._auto_create_thread(message)
 
     name = message.create_thread.await_args[1]["name"]
-    assert name == "Elevate"
+    assert name == "Hermes"
 
 
 @pytest.mark.asyncio
@@ -582,7 +586,7 @@ async def test_auto_create_thread_falls_back_to_seed_message(adapter):
 
     result = await adapter._auto_create_thread(message)
     assert result is thread
-    message.channel.send.assert_awaited_once_with("🧵 Thread created by Elevate: **Hello**")
+    message.channel.send.assert_awaited_once_with("🧵 Thread created by Hermes: **Hello**")
     seed_message.create_thread.assert_awaited_once_with(
         name="Hello",
         auto_archive_duration=1440,
@@ -757,15 +761,15 @@ def test_discord_auto_thread_config_bridge(monkeypatch, tmp_path):
     from pathlib import Path
 
     # Write a config.yaml the loader will find
-    elevate_dir = tmp_path / ".elevate"
-    elevate_dir.mkdir()
-    config_path = elevate_dir / "config.yaml"
+    hermes_dir = tmp_path / ".elevate"
+    hermes_dir.mkdir()
+    config_path = hermes_dir / "config.yaml"
     config_path.write_text(yaml.dump({
         "discord": {"auto_thread": True},
     }))
 
     monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
-    monkeypatch.setenv("ELEVATE_HOME", str(elevate_dir))
+    monkeypatch.setenv("ELEVATE_HOME", str(hermes_dir))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     from gateway.config import load_gateway_config

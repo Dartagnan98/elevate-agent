@@ -11,24 +11,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from gateway.platforms.discord import ModelPickerView
+
 
 @pytest.mark.asyncio
 async def test_model_picker_clears_controls_before_running_switch_callback():
-    # Import lazily so tests/gateway/conftest.py has already installed and
-    # reconciled the shared Discord mock. Full-suite/e2e collection can import
-    # the production Discord module with a smaller mock first; reloading here
-    # prevents decorator-time MagicMock replacements from leaking into this
-    # focused regression test.
-    import importlib
-    import sys
-    import gateway.platforms.discord as discord_mod
-
-    # Some full-suite import orders temporarily replace/remove the module
-    # object in sys.modules. Restore this reference before reload so Python
-    # can re-run decorator setup against the reconciled gateway Discord mock.
-    sys.modules["gateway.platforms.discord"] = discord_mod
-    ModelPickerView = importlib.reload(discord_mod).ModelPickerView
-
     events: list[object] = []
 
     async def on_model_selected(chat_id: str, model_id: str, provider_slug: str) -> str:
