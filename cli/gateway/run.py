@@ -43,6 +43,10 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _UPDATE_AVAILABLE_DEFAULT_INTERVAL = 6 * 60 * 60
+# Per-adapter shutdown disconnect timeout (overridable via env var).
+_ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
+# Per-platform connect timeout used during startup/retry (overridable via env var).
+_PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -709,6 +713,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    _reply_anchor_for_event,
     merge_pending_message_event,
 )
 from gateway.restart import (
@@ -12905,8 +12910,189 @@ class GatewayRunner:
                     _previewed,
                 )
                 response["already_sent"] = True
-        
+
         return response
+
+    # ------------------------------------------------------------------
+    # Pass 2a utility helpers (ported from Hermes upstream)
+    # ------------------------------------------------------------------
+
+    def _active_profile_name(self) -> str:
+        """Return the profile name this gateway represents."""
+        try:
+            from elevate_cli.profiles import get_active_profile_name
+            return get_active_profile_name() or "default"
+        except Exception:
+            return "default"
+
+    def _adapter_disconnect_timeout_secs(self) -> float:
+        """Return the per-adapter disconnect timeout used during shutdown."""
+        raw = os.getenv("ELEVATE_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
+        if raw:
+            try:
+                timeout = float(raw)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid ELEVATE_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT=%r",
+                    raw,
+                )
+            else:
+                return max(0.0, timeout)
+        return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
+
+    def _platform_connect_timeout_secs(self) -> float:
+        """Return the per-platform connect timeout used during startup/retry."""
+        raw = os.getenv("ELEVATE_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
+        if raw:
+            try:
+                timeout = float(raw)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid ELEVATE_GATEWAY_PLATFORM_CONNECT_TIMEOUT=%r",
+                    raw,
+                )
+            else:
+                return max(0.0, timeout)
+        return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
+
+    async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
+        """Connect an adapter without allowing one platform to block others."""
+        timeout = self._platform_connect_timeout_secs()
+        if timeout <= 0:
+            return await adapter.connect()
+        try:
+            return await asyncio.wait_for(adapter.connect(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"{platform.value} connect timed out after {timeout:g}s"
+            ) from exc
+
+    def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
+        pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+        if not pending_native:
+            return []
+        return list(pending_native.pop(session_key, []) or [])
+
+    def _cache_session_source(self, session_key: str, source) -> None:
+        if not session_key or source is None:
+            return
+        cached_sources = getattr(self, "_session_sources", None)
+        if cached_sources is None:
+            cached_sources = OrderedDict()
+            self._session_sources = cached_sources
+        try:
+            cached_sources[session_key] = dataclasses.replace(source)
+        except Exception:
+            logger.debug("Failed to cache live session source for %s", session_key, exc_info=True)
+            return
+        # LRU: mark as most-recently-used and trim to max size.
+        try:
+            cached_sources.move_to_end(session_key)
+            max_size = getattr(self, "_session_sources_max", 512)
+            while len(cached_sources) > max_size:
+                cached_sources.popitem(last=False)
+        except Exception:
+            pass
+
+    def _get_cached_session_source(self, session_key: str):
+        if not session_key:
+            return None
+        cached_sources = getattr(self, "_session_sources", None)
+        if not cached_sources:
+            return None
+        source = cached_sources.get(session_key)
+        if source is not None:
+            try:
+                cached_sources.move_to_end(session_key)
+            except Exception:
+                pass
+        return source
+
+    def _decide_image_input_mode(self) -> str:
+        """Resolve the image-input routing for the currently active model.
+
+        Returns ``"native"`` (attach pixels on the user turn) or ``"text"``
+        (pre-analyze with vision_analyze and prepend the description). See
+        agent/image_routing.py for the full decision table.
+
+        The active provider/model are read from config.yaml so the decision
+        tracks ``/model`` switches automatically on the next message.
+        """
+        try:
+            from agent.image_routing import decide_image_input_mode
+            from agent.auxiliary_client import _read_main_model, _read_main_provider
+            from elevate_cli.config import load_config
+
+            cfg = load_config()
+            provider = _read_main_provider()
+            model = _read_main_model()
+            return decide_image_input_mode(provider, model, cfg)
+        except Exception as exc:
+            logger.debug("image_routing: decision failed, falling back to text — %s", exc)
+            return "text"
+
+    def _read_user_config(self) -> Dict[str, Any]:
+        """Read the user's raw config.yaml (cached) for gate lookups.
+
+        Used by slash-confirm gates that must reflect on-disk state changes
+        (e.g. a prior "Always Approve" click) without a gateway restart.
+        """
+        try:
+            from elevate_cli.config import load_config
+            cfg = load_config()
+            return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            return {}
+
+    def _thread_metadata_for_source(
+        self,
+        source,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build the metadata dict platforms need for thread-aware replies."""
+        thread_id = getattr(source, "thread_id", None)
+        if thread_id is None:
+            return None
+        metadata: Dict[str, Any] = {"thread_id": thread_id}
+        if (
+            getattr(source, "platform", None) == Platform.TELEGRAM
+            and getattr(source, "chat_type", None) == "dm"
+        ):
+            metadata["telegram_dm_topic_reply_fallback"] = True
+            # Telegram DM topic lanes need direct_messages_topic_id in metadata
+            # so synthetic/queued messages (goal continuations, status notices)
+            # route to the correct topic even when reply anchor is unavailable.
+            tid = str(thread_id)
+            if tid and tid not in {"", "1"}:
+                metadata["direct_messages_topic_id"] = tid
+            anchor = reply_to_message_id or getattr(source, "message_id", None)
+            if anchor is not None:
+                metadata["telegram_reply_to_message_id"] = str(anchor)
+        return metadata
+
+    @staticmethod
+    def _reply_anchor_for_event(event: MessageEvent) -> Optional[str]:
+        """Return the platform-specific reply anchor for GatewayRunner sends."""
+        return _reply_anchor_for_event(event)
+
+    @staticmethod
+    def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
+        """Reset per-turn state on a cached agent before a new turn starts.
+
+        Both _last_activity_ts and _last_activity_desc are only reset for
+        fresh external turns (depth 0); they are semantically paired —
+        desc describes the activity *at* ts, so updating one without the
+        other would make get_activity_summary() misleading.
+        For interrupt-recursive turns both are preserved so the inactivity
+        watchdog can accumulate stuck-turn idle time and fire the 30-min
+        timeout (#15654).  The depth-0 reset is still needed: a session
+        idle for 29 min would otherwise trip the watchdog before the new
+        turn makes its first API call (#9051).
+        """
+        if interrupt_depth == 0:
+            agent._last_activity_ts = time.time()
+            agent._last_activity_desc = "starting new turn (cached)"
+        agent._api_call_count = 0
 
 
 def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
