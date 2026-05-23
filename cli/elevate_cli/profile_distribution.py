@@ -1,22 +1,22 @@
-"""Profile distributions — shareable, packaged Hermes profiles via git.
+"""Profile distributions — shareable, packaged Elevate profiles via git.
 
-A distribution is a Hermes profile published as a git repository (or
+A distribution is a Elevate profile published as a git repository (or
 installed from a local directory for development). Install with one command
 from a git URL, update in place, and keep your local memories / sessions /
 credentials untouched.
 
 Where this fits relative to the existing pieces:
 
-* ``hermes profile export/import`` — local backup / restore for a profile
+* ``elevate profile export/import`` — local backup / restore for a profile
   on your own machine. NOT a distribution format. Stays as-is.
-* ``hermes skills install <url>`` — the URL install pattern we're mirroring,
+* ``elevate skills install <url>`` — the URL install pattern we're mirroring,
   but at the profile granularity.
 
-Subcommands (all live under ``hermes profile``, not a parallel tree):
+Subcommands (all live under ``elevate profile``, not a parallel tree):
 
-    hermes profile install <source> [--name N] [--alias] [--force] [--yes]
-    hermes profile update  <name>  [--force-config] [--yes]
-    hermes profile info    <name>
+    elevate profile install <source> [--name N] [--alias] [--force] [--yes]
+    elevate profile update  <name>  [--force-config] [--yes]
+    elevate profile info    <name>
 
 ``<source>`` is one of:
 
@@ -31,7 +31,7 @@ Manifest format (``distribution.yaml`` at the profile root)::
     name: telemetry
     version: 0.1.0
     description: "Compliance monitoring harness"
-    hermes_requires: ">=0.12.0"
+    elevate_requires: ">=0.12.0"
     author: "..."
     license: "..."
     env_requires:
@@ -106,14 +106,14 @@ USER_OWNED_EXCLUDE: frozenset = frozenset({
     "response_store.db-shm", "response_store.db-wal",
     "gateway.pid", "gateway_state.json", "processes.json",
     "auth.lock", "active_profile", ".update_check",
-    "errors.log", ".hermes_history",
+    "errors.log", ".elevate_history",
     # User data
     "memories", "sessions", "logs", "plans", "workspace", "home",
     "image_cache", "audio_cache", "document_cache",
     "browser_screenshots", "checkpoints", "sandboxes",
     "backups", "cache",
     # Infrastructure
-    "hermes-agent", ".worktrees", "profiles", "bin", "node_modules",
+    "elevate-agent", ".worktrees", "profiles", "bin", "node_modules",
     # User customization namespace
     "local",
 })
@@ -170,7 +170,10 @@ class DistributionManifest:
     name: str
     version: str = "0.1.0"
     description: str = ""
-    hermes_requires: str = ""
+    # Stored internally as elevate_requires. Reads accept the legacy
+    # hermes_requires field as an alias so distribution manifests authored
+    # against Hermes still load. Writes always emit elevate_requires.
+    elevate_requires: str = ""
     author: str = ""
     license: str = ""
     env_requires: List[EnvRequirement] = field(default_factory=list)
@@ -203,7 +206,11 @@ class DistributionManifest:
             name=name,
             version=str(data.get("version") or "0.1.0"),
             description=str(data.get("description") or ""),
-            hermes_requires=str(data.get("hermes_requires") or ""),
+            elevate_requires=str(
+                data.get("elevate_requires")
+                or data.get("hermes_requires")
+                or ""
+            ),
             author=str(data.get("author") or ""),
             license=str(data.get("license") or ""),
             env_requires=env_requires,
@@ -219,8 +226,8 @@ class DistributionManifest:
         }
         if self.description:
             out["description"] = self.description
-        if self.hermes_requires:
-            out["hermes_requires"] = self.hermes_requires
+        if self.elevate_requires:
+            out["elevate_requires"] = self.elevate_requires
         if self.author:
             out["author"] = self.author
         if self.license:
@@ -296,7 +303,7 @@ def _parse_semver(v: str) -> Tuple[int, int, int]:
         raise DistributionError(f"Unparseable version: {v!r}") from exc
 
 
-def check_hermes_requires(spec: str, current_version: str) -> None:
+def check_elevate_requires(spec: str, current_version: str) -> None:
     """Raise DistributionError if ``current_version`` does not satisfy ``spec``.
 
     ``spec`` accepts a single comparator (``>=0.12.0``, ``==0.12.0``, etc.).
@@ -322,7 +329,7 @@ def check_hermes_requires(spec: str, current_version: str) -> None:
     }[op]
     if not ok:
         raise DistributionError(
-            f"This distribution requires Hermes {op}{target}, "
+            f"This distribution requires Elevate {op}{target}, "
             f"but you have {current_version}."
         )
 
@@ -335,7 +342,7 @@ def check_hermes_requires(spec: str, current_version: str) -> None:
 def _env_template_from_manifest(manifest: DistributionManifest) -> str:
     """Generate a ``.env.template`` body from env_requires."""
     lines = [
-        "# Environment variables required by this Hermes distribution.",
+        "# Environment variables required by this Elevate distribution.",
         "# Copy to `.env` and fill in your own values before running.",
         "",
     ]
@@ -393,7 +400,7 @@ def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
     """Resolve *source* to a local directory containing distribution.yaml.
 
     Returns ``(staged_dir, provenance)`` where ``provenance`` is stored in the
-    installed manifest's ``source:`` field so ``hermes profile update`` can
+    installed manifest's ``source:`` field so ``elevate profile update`` can
     re-pull from the same place.
 
     Accepts:
@@ -412,7 +419,7 @@ def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
         if not (cloned / MANIFEST_FILENAME).is_file():
             raise DistributionError(
                 f"No {MANIFEST_FILENAME} at the root of {src_str!r}. "
-                "This repository is not a Hermes profile distribution."
+                "This repository is not a Elevate profile distribution."
             )
         return cloned, src_str
 
@@ -481,18 +488,18 @@ def plan_install(
         normalize_profile_name,
         validate_profile_name,
     )
-    from elevate_cli import __version__ as hermes_version
+    from elevate_cli import __version__ as elevate_version
 
     staged, provenance = _stage_source(source, workdir)
     manifest = read_manifest(staged)
     if manifest is None:
         raise DistributionError(
             f"No {MANIFEST_FILENAME} found at the distribution root — "
-            "this source is not a Hermes distribution."
+            "this source is not a Elevate distribution."
         )
 
     # Version check up-front so we fail fast
-    check_hermes_requires(manifest.hermes_requires, hermes_version)
+    check_elevate_requires(manifest.elevate_requires, elevate_version)
 
     # Resolve target profile name
     target_name = override_name or manifest.name
@@ -599,13 +606,13 @@ def install_distribution(
         create_wrapper_script,
     )
 
-    with tempfile.TemporaryDirectory(prefix="hermes_dist_install_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="elevate_dist_install_") as tmp:
         plan = plan_install(source, Path(tmp), override_name=name)
 
         if plan.existing and not force:
             raise DistributionError(
                 f"Profile '{plan.manifest.name}' already exists at {plan.target_dir}. "
-                "Use `hermes profile update` to upgrade in place, "
+                "Use `elevate profile update` to upgrade in place, "
                 "or pass --force to overwrite."
             )
 
@@ -653,15 +660,15 @@ def update_distribution(
     if existing_manifest is None:
         raise DistributionError(
             f"Profile '{canon}' is not a distribution (no {MANIFEST_FILENAME}). "
-            "Only profiles installed via `hermes profile install` can be updated."
+            "Only profiles installed via `elevate profile install` can be updated."
         )
     if not existing_manifest.source:
         raise DistributionError(
             f"Profile '{canon}' has no recorded source.  Re-install with "
-            "`hermes profile install <source> --name {canon} --force`."
+            "`elevate profile install <source> --name {canon} --force`."
         )
 
-    with tempfile.TemporaryDirectory(prefix="hermes_dist_update_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="elevate_dist_update_") as tmp:
         plan = plan_install(
             existing_manifest.source,
             Path(tmp),

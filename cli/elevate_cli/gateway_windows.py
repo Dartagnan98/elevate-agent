@@ -48,8 +48,8 @@ _FALLBACK_PATTERNS = re.compile(
 )
 _ACCESS_DENIED_PATTERN = re.compile(r"(access is denied|acceso denegado)", re.IGNORECASE)
 
-_TASK_NAME_DEFAULT = "Hermes_Gateway"
-_TASK_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
+_TASK_NAME_DEFAULT = "Elevate_Gateway"
+_TASK_DESCRIPTION = "Elevate Agent Gateway - Messaging Platform Integration"
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ def _is_running_as_admin() -> bool:
 
 
 def _current_profile_cli_args() -> list[str]:
-    """Return CLI args that preserve the current Hermes profile."""
+    """Return CLI args that preserve the current Elevate profile."""
     from elevate_cli.gateway import _profile_arg
 
     profile_arg = _profile_arg()
@@ -230,8 +230,8 @@ def _launch_elevated_uninstall() -> bool:
 def get_task_name() -> str:
     """Scheduled Task name, scoped per profile.
 
-    Default profile: ``Hermes_Gateway``
-    Named profile X: ``Hermes_Gateway_<X>``
+    Default profile: ``Elevate_Gateway``
+    Named profile X: ``Elevate_Gateway_<X>``
     """
     _assert_windows()
     # Local import to avoid circular module initialization during elevate_cli boot.
@@ -251,9 +251,9 @@ def _sanitize_filename(value: str) -> str:
 def get_task_script_path() -> Path:
     """The generated ``gateway.cmd`` wrapper that the schtasks entry invokes.
 
-    Lives under ``%LOCALAPPDATA%\\hermes\\gateway-service\\<task_name>.cmd``
+    Lives under ``%LOCALAPPDATA%\\elevate\\gateway-service\\<task_name>.cmd``
     (or ``<ELEVATE_HOME>/gateway-service/<task_name>.cmd`` so per-profile
-    Hermes installs stay self-contained).
+    Elevate installs stay self-contained).
     """
     _assert_windows()
     from elevate_cli.config import get_elevate_home
@@ -294,7 +294,7 @@ def get_startup_entry_path() -> Path:
 def _build_gateway_cmd_script(
     python_path: str,
     working_dir: str,
-    hermes_home: str,
+    elevate_home: str,
     profile_arg: str,
 ) -> str:
     """Build the ``gateway.cmd`` wrapper content (CRLF-terminated).
@@ -311,7 +311,7 @@ def _build_gateway_cmd_script(
     """
     lines = ["@echo off", f"rem {_TASK_DESCRIPTION}"]
     lines.append(f"cd /d {_quote_cmd_script_arg(working_dir)}")
-    lines.append(f'set "ELEVATE_HOME={hermes_home}"')
+    lines.append(f'set "ELEVATE_HOME={elevate_home}"')
     lines.append('set "PYTHONIOENCODING=utf-8"')
     lines.append('set "ELEVATE_GATEWAY_DETACHED=1"')
     # VIRTUAL_ENV lets the gateway's own python detection find the venv
@@ -360,10 +360,10 @@ def _write_task_script() -> Path:
 
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
-    hermes_home = str(Path(get_elevate_home()).resolve())
-    profile_arg = _profile_arg(hermes_home)
+    elevate_home = str(Path(get_elevate_home()).resolve())
+    profile_arg = _profile_arg(elevate_home)
 
-    content = _build_gateway_cmd_script(python_path, working_dir, hermes_home, profile_arg)
+    content = _build_gateway_cmd_script(python_path, working_dir, elevate_home, profile_arg)
     script_path = get_task_script_path()
     script_path.write_text(content, encoding="utf-8", newline="")
     return script_path
@@ -387,7 +387,7 @@ def _resolve_task_user() -> str | None:
 def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, str]:
     """Create or replace the Scheduled Task. Returns (success, detail).
 
-    Always recreate instead of ``/Change``. Older Hermes builds and failed
+    Always recreate instead of ``/Change``. Older Elevate builds and failed
     experiments may have left repeat/restart settings on the task; ``/Change``
     preserves those stale triggers and can make the gateway relaunch every
     minute. Delete+create gives us a clean ONLOGON task every install.
@@ -523,8 +523,8 @@ def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
 
     python_exe, venv_dir, extra_pythonpath = _resolve_detached_python(get_python_path())
     working_dir = str(PROJECT_ROOT)
-    hermes_home = str(Path(get_elevate_home()).resolve())
-    profile_arg = _profile_arg(hermes_home)
+    elevate_home = str(Path(get_elevate_home()).resolve())
+    profile_arg = _profile_arg(elevate_home)
 
     argv = [python_exe, "-m", "elevate_cli.main"]
     if profile_arg:
@@ -532,7 +532,7 @@ def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
     argv.extend(["gateway", "run"])
 
     env_overlay = {
-        "ELEVATE_HOME": hermes_home,
+        "ELEVATE_HOME": elevate_home,
         "PYTHONIOENCODING": "utf-8",
         "ELEVATE_GATEWAY_DETACHED": "1",
         "VIRTUAL_ENV": str(venv_dir),
@@ -662,7 +662,7 @@ def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -
     print(f"✓ Installed Windows login item: {entry}")
     print(f"  Task script: {script_path}")
 
-    # Re-running `hermes -p <profile> gateway install` must be safe.
+    # Re-running `elevate -p <profile> gateway install` must be safe.
     # Startup-folder fallback only installs login persistence. Starting is
     # controlled by the pre-UAC start_now answer so all user decisions happen
     # before any elevation prompt.
@@ -676,7 +676,7 @@ def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -
         _report_gateway_start(f"direct spawn (PID {pid})")
     else:
         profile_arg = _profile_arg()
-        start_cmd = f"hermes {profile_arg} gateway start" if profile_arg else "hermes gateway start"
+        start_cmd = f"elevate {profile_arg} gateway start" if profile_arg else "elevate gateway start"
         print("ℹ Startup fallback installed; gateway not started now.")
         print(f"  Start manually with: {start_cmd}")
     _print_next_steps()
@@ -709,7 +709,7 @@ def install(
                 _report_gateway_start(f"direct spawn (PID {pid})")
         else:
             print("ℹ Gateway not started and no auto-start service installed.")
-            print("  Run later with: hermes gateway start")
+            print("  Run later with: elevate gateway start")
         return
 
     task_name = get_task_name()
@@ -726,11 +726,11 @@ def install(
         print("  UAC is Windows' admin approval prompt; it is needed to create/update the Scheduled Task.")
         if prompt_yes_no("  Open the UAC prompt now?", False):
             if _launch_elevated_install(force=force, start_now=start_now, start_on_login=start_on_login):
-                print("✓ Launched elevated Hermes gateway install prompt.")
+                print("✓ Launched elevated Elevate gateway install prompt.")
                 if start_now:
                     print("  Approve the Windows UAC prompt; the elevated install will start the gateway afterwards.")
                 else:
-                    print("  Approve the Windows UAC prompt, then run: hermes gateway status")
+                    print("  Approve the Windows UAC prompt, then run: elevate gateway status")
                 return
             print("⚠ Falling back to Startup folder because elevation was unavailable or cancelled.")
         else:
@@ -752,7 +752,7 @@ def install(
                 _report_gateway_start(f"direct spawn (PID {pid})")
         else:
             print("ℹ Gateway not started now.")
-            print("  Start manually with: hermes gateway start")
+            print("  Start manually with: elevate gateway start")
         _print_next_steps()
         return
 
@@ -767,11 +767,11 @@ def install(
         print("  UAC is Windows' admin approval prompt; it is needed to create/update the Scheduled Task.")
         if prompt_yes_no("  Open the UAC prompt now?", False):
             if _launch_elevated_install(force=force, start_now=start_now, start_on_login=start_on_login):
-                print("✓ Launched elevated Hermes gateway install prompt.")
+                print("✓ Launched elevated Elevate gateway install prompt.")
                 if start_now:
                     print("  Approve the Windows UAC prompt; the elevated install will start the gateway afterwards.")
                 else:
-                    print("  Approve the Windows UAC prompt, then run: hermes gateway status")
+                    print("  Approve the Windows UAC prompt, then run: elevate gateway status")
                 return
             print("⚠ Falling back to Startup folder because elevation was unavailable or cancelled.")
         else:
@@ -784,7 +784,7 @@ def install(
         print(f"✓ Installed Windows login item: {entry}")
         print(f"  Task script: {script_path}")
 
-        # Re-running `hermes -p <profile> gateway install` must be safe.
+        # Re-running `elevate -p <profile> gateway install` must be safe.
         # Startup-folder fallback only installs login persistence. Starting is
         # controlled by the pre-UAC start_now answer so all user decisions happen
         # before any elevation prompt.
@@ -798,7 +798,7 @@ def install(
             _report_gateway_start(f"direct spawn (PID {pid})")
         else:
             profile_arg = _profile_arg()
-            start_cmd = f"hermes {profile_arg} gateway start" if profile_arg else "hermes gateway start"
+            start_cmd = f"elevate {profile_arg} gateway start" if profile_arg else "elevate gateway start"
             print("ℹ Startup fallback installed; gateway not started now.")
             print(f"  Start manually with: {start_cmd}")
         _print_next_steps()
@@ -840,11 +840,11 @@ def _report_gateway_start(via: str) -> None:
 def _print_next_steps() -> None:
     from elevate_cli.config import get_elevate_home
 
-    hermes_home = Path(get_elevate_home()).resolve()
+    elevate_home = Path(get_elevate_home()).resolve()
     print()
     print("Next steps:")
-    print("  hermes gateway status                      # Check status")
-    print(f"  type {hermes_home}\\logs\\gateway.log       # View logs")
+    print("  elevate gateway status                      # Check status")
+    print(f"  type {elevate_home}\\logs\\gateway.log       # View logs")
 
 
 def uninstall() -> None:
@@ -868,8 +868,8 @@ def uninstall() -> None:
             print("  UAC is Windows' admin approval prompt; it is needed to remove the Scheduled Task.")
             if prompt_yes_no("  Open the UAC prompt now?", False):
                 if _launch_elevated_uninstall():
-                    print("✓ Launched elevated Hermes gateway uninstall prompt.")
-                    print("  Approve the Windows UAC prompt, then run: hermes gateway status")
+                    print("✓ Launched elevated Elevate gateway uninstall prompt.")
+                    print("  Approve the Windows UAC prompt, then run: elevate gateway status")
                     return
                 print("⚠ Elevated uninstall prompt was unavailable or cancelled.")
             else:
@@ -969,7 +969,7 @@ def status(deep: bool = False) -> None:
     if not task_installed and not startup_installed and not pids:
         print()
         print("To install:")
-        print("  hermes gateway install")
+        print("  elevate gateway install")
 
 
 def start() -> None:
@@ -988,14 +988,14 @@ def start() -> None:
 
         print("✗ Gateway service is not installed")
         if not prompt_yes_no("  Install it now so the gateway starts on login?", True):
-            print("  Run: hermes gateway install")
+            print("  Run: elevate gateway install")
             return
         install(force=False)
         task_installed = is_task_registered()
         startup_installed = is_startup_entry_installed()
         if not task_installed and not startup_installed:
             print("⚠ Gateway install did not complete in this process.")
-            print("  If a UAC prompt opened, approve it, then run: hermes gateway start")
+            print("  If a UAC prompt opened, approve it, then run: elevate gateway start")
             return
 
     if task_installed:
