@@ -4187,10 +4187,8 @@ def _(rid, params: dict) -> dict:
         # Mirror the web "Restart Gateway" button (web_server.py:1119).
         # Drains active runs then re-execs the gateway process.
         try:
-            import subprocess
-            import sys as _sys
             proc = subprocess.Popen(
-                [_sys.executable, "-m", "elevate_cli", "gateway", "restart"],
+                [sys.executable, "-m", "elevate_cli", "gateway", "restart"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
