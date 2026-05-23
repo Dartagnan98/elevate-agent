@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from elevate_cli import cloud_skills
@@ -17,11 +15,16 @@ def test_activate_install_syncs_dashboard_packs_and_paid_skills(monkeypatch):
         entitlements=["real_estate_admin", "real_estate_cma"],
     )
 
-    monkeypatch.setattr(cloud_skills, "mount_all", lambda: Path("/tmp/elevate-skills"))
     monkeypatch.setattr(
         cloud_skills,
-        "mounted_skill_names",
-        lambda: ["seller-package", "closing-admin"],
+        "sync_all",
+        lambda: {
+            "path": "/tmp/elevate-skills",
+            "skill_count": 2,
+            "skill_names": ["seller-package", "closing-admin"],
+            "removed": [],
+            "errors": [],
+        },
     )
 
     result = license_mod.activate_install(lic)
