@@ -262,3 +262,32 @@ REMAINING (large hand-merge - cannot be one-shot ported):
   (4) stale slack tool_progress test - added config.yaml override.
   Gateway suite now 3730 passed / 0 failed.
 - venv: use `cli/.venv/bin/python` (pytest 9.0.2). NOT `cli/venv/`.
+
+## Session 2026-05-22 continuation — B4b elevate_cli/ progress
+
+Landed since last summary block (LOCAL ONLY, origin still frozen):
+- B4b yuanbao+browser fix (commit 791e2a430)
+- B4b voice + skills_hub (8cdf9a516)
+- B4b register_browser_provider on PluginContext (d027ad00b)
+- B4b small deltas batch (f05e80b70): hooks/model_normalize/curses_ui/dump/completion/webhook
+- B4b Bitwarden + hardening (485851e0c): env_loader/memory_setup/mcp_config
+- B4b status + debug redaction (5d9913ab8): status.py mask_secret, debug.py --no-redact full feature port + main.py wiring
+- B4b goals subgoals + judge parse-failure auto-pause (dedb1bf42): goals.py 3-tuple judge return, /subgoal mid-loop criteria, DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES guard, max_tokens 200->4096
+- B4b skin_engine hardening (0e9e13faa): selection_bg color, _mapping_or_empty defensive YAML parsing, prompt_symbol normalization
+
+B4b SKIPPED / DEFERRED:
+- banner.py: Elevate-specific ELEVATE/AGENT ASCII (intentional divergence)
+- pty_bridge.py: Elevate ahead (better Windows TERM handling)
+- tips.py: references curator/snapshot/kanban/footer/redraw not yet ported
+- providers.py: 9 new providers (xAI OAuth, LM Studio, MiniMax OAuth, Novita,
+  Tencent TokenHub, GMI Cloud, Ollama Cloud, Azure Foundry, AWS Bedrock) +
+  aliases — paired with auth.py/models.py port
+- status.py OAuth helpers (MiniMax, xAI, LM Studio probe, Vercel sandbox runtime)
+  — paired with auth.py port
+- auth_commands.py (173 lines diff): paired with auth.py port
+
+B4b REMAINING priority queue:
+- auth.py (7468 vs 4401 lines): the foundational port that unblocks providers.py,
+  auth_commands.py, status.py-OAuth-rest, video_generation_tool, proxy/
+
+Test net: 0 new regressions. 4065 passed in elevate_cli/+gateway/ sweep.
