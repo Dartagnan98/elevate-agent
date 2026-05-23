@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +59,14 @@ class GatewayRuntimeSnapshot:
     @property
     def has_process_service_mismatch(self) -> bool:
         return self.service_installed and self.running and not self.service_running
+
+
+@dataclass(frozen=True)
+class ProfileGatewayProcess:
+    profile: str
+    path: Path
+    pid: int
+
 
 def _get_service_pids() -> set:
     """Return PIDs currently managed by systemd or launchd gateway services.
@@ -229,6 +238,54 @@ def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
     return False
 
 
+def _get_ancestor_pids() -> set[int]:
+    """Return the set of PIDs in the current process's ancestor chain.
+
+    Walks from the current PID up to PID 1 (init) so that process-table scans
+    never match the calling CLI process or any of its parents.  This prevents
+    ``elevate gateway status`` from falsely counting the ``elevate`` CLI that
+    invoked it as a running gateway instance.
+    """
+    ancestors: set[int] = set()
+    pid = os.getpid()
+    # Cap iterations to avoid infinite loops on exotic platforms.
+    for _ in range(64):
+        ancestors.add(pid)
+        parent = _get_parent_pid(pid)
+        if parent is None or parent <= 0 or parent in ancestors:
+            break
+        pid = parent
+    return ancestors
+
+
+def _filter_venv_launcher_stubs(pids: list[int]) -> list[int]:
+    """Drop venv-launcher ``pythonw.exe`` stubs that are parents of the real
+    interpreter process.
+
+    Uses ``psutil`` (core dependency).  Safe on any platform; only useful on
+    Windows because the stub pattern is Windows-specific.
+    """
+    try:
+        import psutil  # type: ignore
+    except ImportError:
+        return pids
+
+    pid_set = set(pids)
+    parent_of: dict[int, int | None] = {}
+    for pid in pids:
+        try:
+            parent_of[pid] = psutil.Process(pid).ppid()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            parent_of[pid] = None
+
+    drop: set[int] = set()
+    for pid, ppid in parent_of.items():
+        if ppid is not None and ppid in pid_set:
+            drop.add(ppid)
+
+    return [p for p in pids if p not in drop]
+
+
 def _append_unique_pid(pids: list[int], pid: int | None, exclude_pids: set[int]) -> None:
     if pid is None or pid <= 0:
         return
@@ -369,6 +426,237 @@ def find_gateway_pids(exclude_pids: set | None = None, all_profiles: bool = Fals
     return pids
 
 
+def find_profile_gateway_processes(
+    exclude_pids: set | None = None,
+) -> list[ProfileGatewayProcess]:
+    """Return running gateway PIDs mapped to Elevate profiles via PID files."""
+    _exclude = set(exclude_pids or set())
+    processes: list[ProfileGatewayProcess] = []
+    try:
+        from gateway.status import get_running_pid
+        from elevate_cli.profiles import list_profiles
+    except Exception:
+        return processes
+
+    seen: set[int] = set()
+    for profile in list_profiles():
+        try:
+            pid = get_running_pid(profile.path / "gateway.pid", cleanup_stale=False)
+        except Exception:
+            continue
+        if pid is None or pid <= 0 or pid in _exclude or pid in seen:
+            continue
+        seen.add(pid)
+        processes.append(ProfileGatewayProcess(profile=profile.name, path=profile.path, pid=pid))
+    return processes
+
+
+def _gateway_run_args_for_profile(profile: str) -> list[str]:
+    args = [get_python_path(), "-m", "elevate_cli.main"]
+    if profile != "default":
+        args.extend(["--profile", profile])
+    args.extend(["gateway", "run", "--replace"])
+    return args
+
+
+def launch_detached_profile_gateway_restart(profile: str, old_pid: int) -> bool:
+    """Relaunch a manually-run profile gateway after its current PID exits."""
+    if old_pid <= 0:
+        return False
+
+    # The watcher is a tiny Python subprocess that polls the old PID and
+    # respawns the gateway once it's gone.  Both legs of the chain need
+    # platform-appropriate detach semantics:
+    #
+    # POSIX — ``start_new_session=True`` (os.setsid in the child) detaches
+    # from the parent's process group so Ctrl+C in the CLI doesn't propagate
+    # and the watcher/gateway survive the CLI exiting.
+    #
+    # Windows — ``start_new_session`` is silently accepted but does NOT
+    # detach.  The Win32 equivalent is the ``CREATE_NEW_PROCESS_GROUP |
+    # DETACHED_PROCESS | CREATE_NO_WINDOW`` creationflags bundle.
+    from elevate_cli._subprocess_compat import windows_detach_popen_kwargs
+
+    watcher = textwrap.dedent(
+        """
+        import os
+        import subprocess
+        import sys
+        import time
+
+        pid = int(sys.argv[1])
+        cmd = sys.argv[2:]
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            from gateway.status import _pid_exists
+            if not _pid_exists(pid):
+                break
+            time.sleep(0.2)
+
+        _popen_kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            _CREATE_NEW_PROCESS_GROUP = 0x00000200
+            _DETACHED_PROCESS = 0x00000008
+            _CREATE_NO_WINDOW = 0x08000000
+            _popen_kwargs["creationflags"] = (
+                _CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS | _CREATE_NO_WINDOW
+            )
+        else:
+            _popen_kwargs["start_new_session"] = True
+        subprocess.Popen(cmd, **_popen_kwargs)
+        """
+    ).strip()
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", watcher, str(old_pid), *_gateway_run_args_for_profile(profile)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **windows_detach_popen_kwargs(),
+        )
+    except OSError:
+        return False
+    return True
+
+
+def _read_systemd_unit_environment(system: bool = False) -> dict[str, str]:
+    """Parse the gateway unit's ``Environment=`` directives.
+
+    ``systemctl show -p Environment`` returns a single line of
+    space-separated ``KEY=VALUE`` pairs; values are not quoted in the output
+    even when the unit file quoted them. We split on whitespace and ``=``.
+    """
+    selected_system = _select_systemd_scope(system)
+    try:
+        result = _run_systemctl(
+            [
+                "show",
+                get_service_name(),
+                "--no-pager",
+                "--property",
+                "Environment",
+            ],
+            system=selected_system,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    parsed: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith("Environment="):
+            continue
+        body = line[len("Environment="):].strip()
+        for token in body.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            parsed[key] = value
+    return parsed
+
+
+def _sync_elevate_home_from_systemd_unit(system: bool) -> None:
+    """When acting on a system-scope unit, adopt its ``ELEVATE_HOME``.
+
+    Under ``sudo``, ``ELEVATE_HOME`` is stripped and ``HOME=/root``, so
+    :func:`get_elevate_home` falls back to ``/root/.elevate`` — the wrong
+    profile. The unit file pins ``ELEVATE_HOME`` for the actual gateway
+    process, so we mirror that into our own environment to make
+    ``read_runtime_status`` / ``get_running_pid`` read the correct files.
+    """
+    if not system:
+        return
+    env = _read_systemd_unit_environment(system=True)
+    unit_home = env.get("ELEVATE_HOME", "").strip()
+    if not unit_home:
+        return
+    current = os.environ.get("ELEVATE_HOME", "").strip()
+    if current == unit_home:
+        return
+    os.environ["ELEVATE_HOME"] = unit_home
+
+
+def _systemd_main_pid_from_props(props: dict[str, str]) -> int | None:
+    try:
+        pid = int(props.get("MainPID", "0") or "0")
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _systemd_main_pid(system: bool = False) -> int | None:
+    return _systemd_main_pid_from_props(_read_systemd_unit_properties(system=system))
+
+
+def _read_gateway_runtime_status() -> dict | None:
+    try:
+        from gateway.status import read_runtime_status
+
+        state = read_runtime_status()
+    except Exception:
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _gateway_runtime_status_for_pid(pid: int | None) -> dict | None:
+    if not pid:
+        return None
+    state = _read_gateway_runtime_status()
+    if not state:
+        return None
+    try:
+        state_pid = int(state.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return state if state_pid == pid else None
+
+
+def _systemd_unit_is_start_limited(props: dict[str, str]) -> bool:
+    result = props.get("Result", "").lower()
+    sub_state = props.get("SubState", "").lower()
+    return result == "start-limit-hit" or sub_state == "start-limit-hit"
+
+
+def _systemd_error_indicates_start_limit(exc: subprocess.CalledProcessError) -> bool:
+    parts: list[str] = []
+    for attr in ("stderr", "stdout", "output"):
+        value = getattr(exc, attr, None)
+        if not value:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode(errors="replace")
+        parts.append(str(value))
+    text = "\n".join(parts).lower()
+    return (
+        "start-limit-hit" in text
+        or "start request repeated too quickly" in text
+        or "start-limit" in text
+    )
+
+
+def _systemd_service_is_start_limited(system: bool = False) -> bool:
+    return _systemd_unit_is_start_limited(_read_systemd_unit_properties(system=system))
+
+
+def _print_systemd_start_limit_wait(system: bool = False) -> None:
+    svc = get_service_name()
+    scope_label = _service_scope_label(system).capitalize()
+    scope_flag = " --system" if system else ""
+    systemctl_prefix = "systemctl " if system else "systemctl --user "
+    journal_prefix = "journalctl " if system else "journalctl --user "
+    print(f"⏳ {scope_label} service is temporarily rate-limited by systemd.")
+    print("  systemd is refusing another immediate start after repeated exits.")
+    print(f"  Wait for the start-limit window to expire, then run: {'sudo ' if system else ''}elevate gateway restart{scope_flag}")
+    print(f"  Or clear the failed state manually: {systemctl_prefix}reset-failed {svc}")
+    print(f"  Check logs: {journal_prefix}-u {svc} -l --since '5 min ago'")
+
+
 def _probe_systemd_service_running(system: bool = False) -> tuple[bool, bool]:
     selected_system = _select_systemd_scope(system)
     unit_exists = get_systemd_unit_path(system=selected_system).exists()
@@ -394,6 +682,7 @@ def _read_systemd_unit_properties(
         "SubState",
         "Result",
         "ExecMainStatus",
+        "MainPID",
     ),
 ) -> dict[str, str]:
     """Return selected ``systemctl show`` properties for the gateway unit."""
@@ -603,6 +892,72 @@ def _print_gateway_process_mismatch(snapshot: GatewayRuntimeSnapshot) -> None:
     print("  can refuse to start another copy until this process stops.")
 
 
+def _print_other_profiles_gateway_status() -> None:
+    """Print a summary of gateway status across all profiles.
+
+    Shown at the bottom of ``elevate gateway status`` output so users with
+    multiple profiles can tell at a glance which gateways are running and
+    avoid confusing another profile's process with the current one.
+    """
+    try:
+        from elevate_cli.profiles import get_active_profile_name
+
+        current = get_active_profile_name()
+        other_processes = [
+            p for p in find_profile_gateway_processes()
+            if p.profile != current
+        ]
+        if not other_processes:
+            return
+
+        print()
+        print("Other profiles:")
+        for proc in other_processes:
+            print(f"  ✓ {proc.profile:<16s} — PID {proc.pid}")
+    except Exception:
+        pass
+
+
+def _gateway_list() -> None:
+    """List all profiles and their gateway running status.
+
+    Provides a single-command overview of every known profile and whether
+    its gateway is currently running, so multi-profile users don't have to
+    check each profile individually.
+    """
+    try:
+        from elevate_cli.profiles import list_profiles, get_active_profile_name
+    except Exception:
+        print("Unable to list profiles.")
+        return
+
+    profiles = list_profiles()
+    if not profiles:
+        print("No profiles found.")
+        return
+
+    current = get_active_profile_name()
+
+    print("Gateways:")
+    for prof in profiles:
+        marker = "✓" if prof.gateway_running else "✗"
+        label = prof.name
+        if prof.name == current:
+            label += " (current)"
+        parts = [f"  {marker} {label:<24s}"]
+        if prof.gateway_running:
+            try:
+                from gateway.status import get_running_pid
+                pid = get_running_pid(prof.path / "gateway.pid", cleanup_stale=False)
+                if pid:
+                    parts.append(f"PID {pid}")
+            except Exception:
+                pass
+        else:
+            parts.append("not running")
+        print(" — ".join(parts))
+
+
 def kill_gateway_processes(force: bool = False, exclude_pids: set | None = None,
                            all_profiles: bool = False) -> int:
     """Kill any running gateway processes. Returns count killed.
@@ -731,6 +1086,27 @@ def is_windows() -> bool:
     return sys.platform == 'win32'
 
 
+def _windows_gateway_should_absorb_console_controls() -> bool:
+    """Return True for detached Windows gateway runs that should ignore Ctrl+C.
+
+    Foreground ``elevate gateway run`` must remain interruptible from
+    PowerShell/CMD. Detached service-style launches opt in via
+    ``ELEVATE_GATEWAY_DETACHED=1``; older wrappers without the env marker are
+    treated as detached when no interactive stdin is attached.
+    """
+    if not is_windows():
+        return False
+
+    detached = os.getenv("ELEVATE_GATEWAY_DETACHED", "").strip().lower()
+    if detached in {"1", "true", "yes", "on"}:
+        return True
+
+    try:
+        return not bool(sys.stdin and sys.stdin.isatty())
+    except (ValueError, OSError):
+        return True
+
+
 # =============================================================================
 # Service Configuration
 # =============================================================================
@@ -828,6 +1204,22 @@ def _user_dbus_socket_path() -> Path:
     """Return the expected per-user D-Bus socket path (regardless of existence)."""
     xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
     return Path(xdg) / "bus"
+
+
+def _user_systemd_private_socket_path() -> Path:
+    """Return the per-user systemd private socket path (regardless of existence)."""
+    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(xdg) / "systemd" / "private"
+
+
+def _user_systemd_socket_ready() -> bool:
+    """Return True when user-scope systemd has a reachable control socket.
+
+    Some distros expose only the per-user systemd private socket even when the
+    D-Bus session bus socket is absent. ``systemctl --user`` can still work in
+    that configuration, so preflight checks must treat either socket as valid.
+    """
+    return _user_dbus_socket_path().exists() or _user_systemd_private_socket_path().exists()
 
 
 def _ensure_user_systemd_env() -> None:
@@ -1455,6 +1847,46 @@ def _build_user_local_paths(home: Path, path_entries: list[str]) -> list[str]:
     return [p for p in candidates if p not in path_entries and Path(p).exists()]
 
 
+def _build_wsl_interop_paths(path_entries: list[str]) -> list[str]:
+    """Return WSL Windows interop PATH entries for generated systemd units.
+
+    WSL shells normally inherit Windows PATH entries such as
+    ``/mnt/c/WINDOWS/System32``. systemd user services do not, so gateway tools
+    that call ``powershell.exe``/``cmd.exe`` work in a terminal but fail in the
+    background service unless we persist the relevant entries at install time.
+    """
+    if not is_wsl():
+        return []
+
+    candidates: list[str] = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry.startswith("/mnt/"):
+            candidates.append(entry)
+
+    for executable in ("powershell.exe", "cmd.exe", "explorer.exe", "wsl.exe"):
+        resolved = shutil.which(executable)
+        if resolved:
+            candidates.append(str(Path(resolved).parent))
+
+    for entry in (
+        "/mnt/c/WINDOWS/system32",
+        "/mnt/c/WINDOWS",
+        "/mnt/c/WINDOWS/System32/Wbem",
+        "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/",
+        "/mnt/c/WINDOWS/System32/OpenSSH/",
+    ):
+        if Path(entry).exists():
+            candidates.append(entry)
+
+    result: list[str] = []
+    seen = set(path_entries)
+    for entry in candidates:
+        if entry and entry not in seen:
+            seen.add(entry)
+            result.append(entry)
+    return result
+
+
 def _remap_path_for_user(path: str, target_home_dir: str) -> str:
     """Remap *path* from the current user's home to *target_home_dir*.
 
@@ -1505,6 +1937,40 @@ def _elevate_home_for_target_user(target_home_dir: str) -> str:
     except ValueError:
         # Completely custom path (not under ~/.elevate) — keep as-is
         return str(current_elevate)
+
+
+def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
+    """Build PATH directory list for service units, excluding non-existent dirs."""
+    if project_root is None:
+        project_root = PROJECT_ROOT
+
+    def _is_dir(path: Path) -> bool:
+        try:
+            return path.is_dir()
+        except OSError:
+            return False
+
+    candidates = []
+
+    venv_bin = project_root / "venv" / "bin"
+    if _is_dir(venv_bin):
+        candidates.append(str(venv_bin))
+    elif sys.prefix != sys.base_prefix:
+        candidates.append(str(Path(sys.prefix) / "bin"))
+
+    node_bin = project_root / "node_modules" / ".bin"
+    if _is_dir(node_bin):
+        candidates.append(str(node_bin))
+
+    elevate_home = get_elevate_home()
+    elevate_node = elevate_home / "node" / "bin"
+    if _is_dir(elevate_node):
+        candidates.append(str(elevate_node))
+    elevate_nm = elevate_home / "node_modules" / ".bin"
+    if _is_dir(elevate_nm):
+        candidates.append(str(elevate_nm))
+
+    return candidates
 
 
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
@@ -1724,6 +2190,56 @@ def _select_systemd_scope(system: bool = False) -> bool:
     if system:
         return True
     return get_systemd_unit_path(system=True).exists() and not get_systemd_unit_path(system=False).exists()
+
+
+def _system_scope_wizard_would_need_root(system: bool = False) -> bool:
+    """True when the setup wizard is about to trigger a system-scope operation
+    as a non-root user.
+
+    Replicates the decision ``_select_systemd_scope`` makes inside
+    ``systemd_start`` / ``systemd_restart`` / ``systemd_stop`` so the wizard
+    can detect the dead-end BEFORE prompting, rather than letting
+    ``SystemScopeRequiresRootError`` propagate out and leave the user
+    staring at a bare shell.
+    """
+    if os.geteuid() == 0:
+        return False
+    return _select_systemd_scope(system=system)
+
+
+def _print_system_scope_remediation(action: str) -> None:
+    """Print actionable remediation when the wizard skips a system-scope
+    prompt because the user isn't root. Keeps the wizard flowing instead of
+    aborting.
+    """
+    svc = get_service_name()
+    print_warning(
+        f"Gateway is installed as a system-wide service — "
+        f"{action} requires root."
+    )
+    print_info("  Options:")
+    print_info(f"    1. {action.capitalize()} it this time:")
+    if action == "start":
+        print_info(f"         sudo systemctl start {svc}")
+    elif action == "stop":
+        print_info(f"         sudo systemctl stop {svc}")
+    elif action == "restart":
+        print_info(f"         sudo systemctl restart {svc}")
+    else:
+        print_info(f"         sudo systemctl {action} {svc}")
+    print_info("    2. Switch to a per-user service (recommended for personal use):")
+    print_info("         sudo elevate gateway uninstall --system")
+    print_info("         elevate gateway install")
+    print_info("         elevate gateway start")
+
+
+def _require_service_installed(action: str, system: bool = False) -> None:
+    unit_path = get_systemd_unit_path(system=system)
+    if not unit_path.exists():
+        scope_flag = " --system" if system else ""
+        print(f"✗ Gateway service is not installed")
+        print(f"  Run: {'sudo ' if system else ''}elevate gateway install{scope_flag}")
+        sys.exit(1)
 
 
 def _get_restart_drain_timeout() -> float:
@@ -2324,6 +2840,42 @@ def launchd_status(deep: bool = False):
 # =============================================================================
 # Gateway Runner
 # =============================================================================
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_official_docker_checkout() -> bool:
+    return (
+        str(PROJECT_ROOT) == "/opt/elevate"
+        and (PROJECT_ROOT / "docker" / "entrypoint.sh").is_file()
+    )
+
+
+def _guard_official_docker_root_gateway() -> None:
+    """Refuse gateway startup when the official Docker privilege drop was bypassed."""
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    if _truthy_env(os.getenv("ELEVATE_ALLOW_ROOT_GATEWAY")):
+        return
+    if not _is_official_docker_checkout():
+        return
+
+    print_error(
+        "Refusing to run the Elevate gateway as root inside the official Docker image."
+    )
+    print(
+        "  The image entrypoint normally drops privileges to the 'elevate' user. "
+        "If you override entrypoint in Docker Compose, include "
+        "/opt/elevate/docker/entrypoint.sh before the Elevate command."
+    )
+    print(
+        "  Running the gateway as root can leave root-owned files in "
+        "$ELEVATE_HOME and break later non-root dashboard/gateway runs."
+    )
+    print("  Set ELEVATE_ALLOW_ROOT_GATEWAY=1 only if you intentionally accept this risk.")
+    sys.exit(1)
+
 
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     """Run the gateway in foreground.
@@ -4342,6 +4894,12 @@ def _gateway_command_inner(args):
                 else:
                     print("  elevate gateway install  # Install as user service")
                     print("  sudo elevate gateway install --system  # Install as boot-time system service")
+
+        # Show other profiles' gateway status for multi-profile awareness
+        _print_other_profiles_gateway_status()
+
+    elif subcmd == "list":
+        _gateway_list()
 
     elif subcmd == "migrate-legacy":
         # Stop, disable, and remove legacy Elevate gateway unit files from

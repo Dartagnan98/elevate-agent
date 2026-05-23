@@ -7380,6 +7380,17 @@ For more help on a command:
     # gateway setup
     gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
 
+    # gateway list
+    gateway_subparsers.add_parser(
+        "list",
+        help="List gateway running status across all profiles",
+        description=(
+            "Print every known Elevate profile and whether its gateway is "
+            "currently running. Helps multi-profile users see at a glance "
+            "which gateways are active without checking each profile."
+        ),
+    )
+
     # gateway migrate-legacy
     gateway_migrate_legacy = gateway_subparsers.add_parser(
         "migrate-legacy",
