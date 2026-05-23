@@ -516,7 +516,7 @@ def init_agent(
     # both live under ~/.elevate/logs/.  Idempotent, so gateway mode
     # (which creates a new AIAgent per message) won't duplicate handlers.
     from elevate_logging import setup_logging, setup_verbose_logging
-    setup_logging(hermes_home=_ra()._hermes_home)
+    setup_logging(elevate_home=_ra()._elevate_home)
 
     if agent.verbose_logging:
         setup_verbose_logging()
@@ -800,13 +800,13 @@ def init_agent(
                         raise RuntimeError(
                             f"Provider '{_explicit}' is set in config.yaml but no API key "
                             f"was found. Set the {_env_hint} environment "
-                            f"variable, or switch to a different provider with `hermes model`."
+                            f"variable, or switch to a different provider with `elevate model`."
                         )
                 if not getattr(agent, "_fallback_activated", False):
                     # No provider configured — reject with a clear message.
                     raise RuntimeError(
-                        "No LLM provider configured. Run `hermes model` to "
-                        "select a provider, or run `hermes setup` for first-time "
+                        "No LLM provider configured. Run `elevate model` to "
+                        "select a provider, or run `elevate setup` for first-time "
                         "configuration."
                     )
         
@@ -963,8 +963,8 @@ def init_agent(
         pass  # CLI/test mode — ContextVar not needed
 
     # Session logs go into ~/.elevate/sessions/ alongside gateway sessions
-    hermes_home = get_elevate_home()
-    agent.logs_dir = hermes_home / "sessions"
+    elevate_home = get_elevate_home()
+    agent.logs_dir = elevate_home / "sessions"
     agent.logs_dir.mkdir(parents=True, exist_ok=True)
     # Per-session JSON snapshot writer (~/.elevate/sessions/session_{sid}.json)
     # is opt-in via sessions.write_json_snapshots (default False).  state.db
@@ -1074,7 +1074,7 @@ def init_agent(
                     _init_kwargs = {
                         "session_id": agent.session_id,
                         "platform": platform or "cli",
-                        "hermes_home": str(get_elevate_home()),
+                        "elevate_home": str(get_elevate_home()),
                         "agent_context": "primary",
                     }
                     # Thread session title for memory provider scoping
@@ -1107,7 +1107,7 @@ def init_agent(
                         from elevate_cli.profiles import get_active_profile_name
                         _profile = get_active_profile_name()
                         _init_kwargs["agent_identity"] = _profile
-                        _init_kwargs["agent_workspace"] = "hermes"
+                        _init_kwargs["agent_workspace"] = "elevate"
                     except Exception:
                         pass
                     agent._memory_manager.initialize_all(**_init_kwargs)
@@ -1433,7 +1433,7 @@ def init_agent(
         raise ValueError(
             f"Model {agent.model} has a context window of {_ctx:,} tokens, "
             f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
-            f"by Hermes Agent.  Choose a model with at least "
+            f"by Elevate Agent.  Choose a model with at least "
             f"{MINIMUM_CONTEXT_LENGTH // 1000}K context, or set "
             f"model.context_length in config.yaml to override."
         )
@@ -1483,7 +1483,7 @@ def init_agent(
         try:
             agent.context_compressor.on_session_start(
                 agent.session_id,
-                hermes_home=str(get_elevate_home()),
+                elevate_home=str(get_elevate_home()),
                 platform=agent.platform or "cli",
                 model=agent.model,
                 context_length=getattr(agent.context_compressor, "context_length", 0),
