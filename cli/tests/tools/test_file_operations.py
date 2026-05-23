@@ -302,9 +302,9 @@ class TestShellFileOpsHelpers:
 
     def test_read_file_raw_strips_leaked_terminal_fence_markers(self, mock_env):
         leaked = (
-            "__HERMES_FENCE_a9f7b3__\x07'\n"
+            "__ELEVATE_FENCE_a9f7b3__\x07'\n"
             "alpha\n"
-            "\x1b]0;cat '/tmp/test/a.txt'\x07__HERMES_FENCE_a9f7b3__\n"
+            "\x1b]0;cat '/tmp/test/a.txt'\x07__ELEVATE_FENCE_a9f7b3__\n"
         )
 
         def side_effect(command, **kwargs):
