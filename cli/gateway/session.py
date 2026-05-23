@@ -88,6 +88,9 @@ class SessionSource:
     chat_id_alt: Optional[str] = None  # Signal group internal ID
     agent_id: Optional[str] = None  # Visible agent/bot lane when a platform has multiple agent bots
     is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
+    guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
+    parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
+    message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
     
     @property
     def description(self) -> str:
@@ -126,6 +129,12 @@ class SessionSource:
             d["user_id_alt"] = self.user_id_alt
         if self.chat_id_alt:
             d["chat_id_alt"] = self.chat_id_alt
+        if self.guild_id:
+            d["guild_id"] = self.guild_id
+        if self.parent_chat_id:
+            d["parent_chat_id"] = self.parent_chat_id
+        if self.message_id:
+            d["message_id"] = self.message_id
         return d
     
     @classmethod
@@ -142,6 +151,9 @@ class SessionSource:
             user_id_alt=data.get("user_id_alt"),
             chat_id_alt=data.get("chat_id_alt"),
             agent_id=data.get("agent_id"),
+            guild_id=data.get("guild_id"),
+            parent_chat_id=data.get("parent_chat_id"),
+            message_id=data.get("message_id"),
         )
     
 
