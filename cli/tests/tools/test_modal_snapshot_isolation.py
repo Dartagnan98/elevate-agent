@@ -29,7 +29,7 @@ def _reset_modules(prefixes: tuple[str, ...]):
 
 @pytest.fixture(autouse=True)
 def _restore_tool_modules():
-    original_elevate_home = os.environ.get("ELEVATE_HOME")
+    original_hermes_home = os.environ.get("ELEVATE_HOME")
     original_modules = {
         name: module
         for name, module in sys.modules.items()
@@ -43,10 +43,10 @@ def _restore_tool_modules():
     try:
         yield
     finally:
-        if original_elevate_home is None:
+        if original_hermes_home is None:
             os.environ.pop("ELEVATE_HOME", None)
         else:
-            os.environ["ELEVATE_HOME"] = original_elevate_home
+            os.environ["ELEVATE_HOME"] = original_hermes_home
         _reset_modules(("tools", "elevate_cli", "modal"))
         sys.modules.update(original_modules)
 
@@ -62,10 +62,10 @@ def _install_modal_test_modules(
     elevate_cli = types.ModuleType("elevate_cli")
     elevate_cli.__path__ = []  # type: ignore[attr-defined]
     sys.modules["elevate_cli"] = elevate_cli
-    elevate_home = tmp_path / "elevate-home"
-    os.environ["ELEVATE_HOME"] = str(elevate_home)
+    hermes_home = tmp_path / "hermes-home"
+    os.environ["ELEVATE_HOME"] = str(hermes_home)
     sys.modules["elevate_cli.config"] = types.SimpleNamespace(
-        get_elevate_home=lambda: elevate_home,
+        get_elevate_home=lambda: hermes_home,
     )
 
     tools_package = types.ModuleType("tools")
@@ -144,7 +144,7 @@ def _install_modal_test_modules(
             return {"kind": "registry", "image": image}
 
     async def _lookup_aio(_name: str, create_if_missing: bool = False):
-        return types.SimpleNamespace(name="elevate", create_if_missing=create_if_missing)
+        return types.SimpleNamespace(name="hermes-agent", create_if_missing=create_if_missing)
 
     class _FakeSandboxInstance:
         def __init__(self, image):
@@ -190,7 +190,7 @@ def _install_modal_test_modules(
     )
 
     return {
-        "snapshot_store": elevate_home / "modal_snapshots.json",
+        "snapshot_store": hermes_home / "modal_snapshots.json",
         "create_calls": create_calls,
         "from_id_calls": from_id_calls,
         "registry_calls": registry_calls,

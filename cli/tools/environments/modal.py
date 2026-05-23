@@ -1,7 +1,7 @@
 """Modal cloud execution environment using the native Modal SDK directly.
 
 Uses ``Sandbox.create()`` + ``Sandbox.exec()`` instead of the older runtime
-wrapper, while preserving Elevate' persistent snapshot behavior across sessions.
+wrapper, while preserving Hermes' persistent snapshot behavior across sessions.
 """
 
 import asyncio
@@ -80,11 +80,23 @@ def _delete_direct_snapshot(task_id: str, snapshot_id: str | None = None) -> Non
         _save_snapshots(snapshots)
 
 
+def _ensure_modal_sdk() -> None:
+    """Lazy-install modal on demand. Idempotent — fast no-op once installed."""
+    try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+        _lazy_ensure("terminal.modal", prompt=False)
+    except ImportError:
+        pass
+    except Exception as e:
+        raise ImportError(str(e))
+
+
 def _resolve_modal_image(image_spec: Any) -> Any:
     """Convert registry references or snapshot ids into Modal image objects.
 
     Includes add_python support for ubuntu/debian images (absorbed from PR 4511).
     """
+    _ensure_modal_sdk()
     import modal as _modal
 
     if not isinstance(image_spec, str):
@@ -132,9 +144,14 @@ class _AsyncWorker:
         self._loop.run_forever()
 
     def run_coroutine(self, coro, timeout=600):
+        from agent.async_utils import safe_schedule_threadsafe
         if self._loop is None or self._loop.is_closed():
+            if asyncio.iscoroutine(coro):
+                coro.close()
             raise RuntimeError("AsyncWorker loop is not running")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = safe_schedule_threadsafe(coro, self._loop)
+        if future is None:
+            raise RuntimeError("AsyncWorker loop is not running")
         return future.result(timeout=timeout)
 
     def stop(self):
@@ -183,6 +200,7 @@ class ModalEnvironment(BaseEnvironment):
             if restored_snapshot_id:
                 logger.info("Modal: restoring from snapshot %s", restored_snapshot_id[:20])
 
+        _ensure_modal_sdk()
         import modal as _modal
 
         cred_mounts = []
@@ -221,7 +239,7 @@ class ModalEnvironment(BaseEnvironment):
         self._worker.start()
 
         async def _create_sandbox(image_spec: Any):
-            app = await _modal.App.lookup.aio("elevate", create_if_missing=True)
+            app = await _modal.App.lookup.aio("hermes-agent", create_if_missing=True)
             create_kwargs = dict(sandbox_kwargs)
             if cred_mounts:
                 existing_mounts = list(create_kwargs.pop("mounts", []))
@@ -349,7 +367,7 @@ class ModalEnvironment(BaseEnvironment):
         self._worker.run_coroutine(_bulk(), timeout=120)
 
     def _modal_bulk_download(self, dest: Path) -> None:
-        """Download remote .elevate/ as a tar archive.
+        """Download remote .hermes/ as a tar archive.
 
         Modal sandboxes always run as root, so /root/.elevate is hardcoded
         (consistent with iter_sync_files call on line 269).

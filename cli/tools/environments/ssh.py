@@ -27,6 +27,10 @@ def _ensure_ssh_available() -> None:
         raise RuntimeError(
             "SSH is not installed or not in PATH. Install OpenSSH client: apt install openssh-client"
         )
+    if not shutil.which("scp"):
+        raise RuntimeError(
+            "SCP is not installed or not in PATH. Install OpenSSH client: apt install openssh-client"
+        )
 
 
 class SSHEnvironment(BaseEnvironment):
@@ -165,6 +169,7 @@ class SSHEnvironment(BaseEnvironment):
         if not files:
             return
 
+        base = f"{self._remote_home}/.elevate"
         parents = unique_parent_dirs(files)
         if parents:
             cmd = self._build_ssh_command()
@@ -176,13 +181,29 @@ class SSHEnvironment(BaseEnvironment):
         # Symlink staging avoids fragile GNU tar --transform rules.
         with tempfile.TemporaryDirectory(prefix="elevate-ssh-bulk-") as staging:
             for host_path, remote_path in files:
-                staged = os.path.join(staging, remote_path.lstrip("/"))
+                try:
+                    rel_remote = os.path.relpath(remote_path, base)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"remote path {remote_path!r} is not under sync base {base!r}"
+                    ) from exc
+
+                if rel_remote == "." or rel_remote.startswith("../"):
+                    raise RuntimeError(
+                        f"remote path {remote_path!r} escapes sync base {base!r}"
+                    )
+
+                staged = os.path.join(staging, rel_remote)
                 os.makedirs(os.path.dirname(staged), exist_ok=True)
                 os.symlink(os.path.abspath(host_path), staged)
 
             tar_cmd = ["tar", "-chf", "-", "-C", staging, "."]
             ssh_cmd = self._build_ssh_command()
-            ssh_cmd.append("tar xf - -C /")
+            # --no-overwrite-dir prevents tar from overwriting the mode of
+            # existing directories (e.g. /home/<user>) with the staging
+            # directory's mode.  Without this, a umask 002 produces 0775
+            # dirs which breaks sshd StrictModes (refuses authorized_keys).
+            ssh_cmd.append(f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}")
 
             tar_proc = subprocess.Popen(
                 tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -230,7 +251,7 @@ class SSHEnvironment(BaseEnvironment):
         logger.debug("SSH: bulk-uploaded %d file(s) via tar pipe", len(files))
 
     def _ssh_bulk_download(self, dest: Path) -> None:
-        """Download remote .elevate/ as a tar archive."""
+        """Download remote .hermes/ as a tar archive."""
         # Tar from / with the full path so archive entries preserve absolute
         # paths (e.g. home/user/.elevate/skills/f.py), matching _pushed_hashes keys.
         rel_base = f"{self._remote_home}/.elevate".lstrip("/")

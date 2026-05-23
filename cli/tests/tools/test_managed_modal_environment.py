@@ -33,7 +33,7 @@ def _restore_tool_and_agent_modules():
     original_modules = {
         name: module
         for name, module in sys.modules.items()
-        if name in ("tools", "agent", "elevate_cli")
+        if name in {"tools", "agent", "elevate_cli"}
         or name.startswith("tools.")
         or name.startswith("agent.")
         or name.startswith("elevate_cli.")
@@ -52,7 +52,7 @@ def _install_fake_tools_package(*, credential_mounts=None):
     elevate_cli.__path__ = []  # type: ignore[attr-defined]
     sys.modules["elevate_cli"] = elevate_cli
     sys.modules["elevate_cli.config"] = types.SimpleNamespace(
-        get_elevate_home=lambda: Path(tempfile.gettempdir()) / "elevate-home",
+        get_elevate_home=lambda: Path(tempfile.gettempdir()) / "hermes-home",
     )
 
     tools_package = types.ModuleType("tools")
