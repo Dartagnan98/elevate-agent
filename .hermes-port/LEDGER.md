@@ -437,3 +437,30 @@ Net +71 tests from this session.
 
 NEXT: B2 modified files remaining are smaller / lower risk. Pick from
 the B2 differ list or move to B4b elevate_cli/ files (task #11).
+
+## 2026-05-23 (continued) — transports/ port + azure_foundry runtime + 4 test ports
+
+7a5d07ad1 agent/transports/ wholesale port (chat_completions, codex,
+__init__, types, anthropic) + Elevate xhigh clamp surgical re-add in
+transports/codex.py + paired test file.
+
+ae2418383 elevate_cli/runtime_provider.py: surgical port of
+_resolve_azure_foundry_runtime from Hermes (~170 lines). auxiliary_client
+had _try_azure_foundry in place but every call returned (None, None)
+because the import `from elevate_cli.runtime_provider import
+_resolve_azure_foundry_runtime` errored. Now resolves api-key + Entra ID
+auth modes, GPT-5.x/o-series/codex api_mode auto-upgrade, and Anthropic-
+endpoint /v1 stripping. Paired test file (test_auxiliary_client_azure_foundry.py)
+ported as part of the same commit: 9 passing.
+
+(unnumbered) cli/tests/agent/: 4 pure-test ports (no source changes)
+  - test_auxiliary_transport_autodetect.py    (237 lines, +20 tests)
+  - test_compressor_historical_media.py       (266 lines, +21 tests)
+  - test_compressor_image_tokens.py           (141 lines, +13 tests)
+  - test_context_compressor_summary_continuity.py (69 lines, +8 tests)
+
+agent+cli sweep: 2456 passing / 7 pre-existing failures (verified pre-
+existing by stashing and re-running on HEAD). Zero new regressions from
+this session's source-code changes. Net +400 tests vs prior baseline.
+
+NEXT: continue B4b elevate_cli/ differ files OR drain B8 test-port backlog.
