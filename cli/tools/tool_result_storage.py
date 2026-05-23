@@ -9,8 +9,8 @@ Defense against context-window overflow operates at three levels:
 2. **Per-result persistence** (maybe_persist_tool_result): After a tool
    returns, if its output exceeds the tool's registered threshold
    (registry.get_max_result_size), the full output is written INTO THE
-   SANDBOX temp dir (for example /tmp/elevate-results/{tool_use_id}.txt on
-   standard Linux, or $TMPDIR/elevate-results/{tool_use_id}.txt on Termux)
+   SANDBOX temp dir (for example /tmp/hermes-results/{tool_use_id}.txt on
+   standard Linux, or $TMPDIR/hermes-results/{tool_use_id}.txt on Termux)
    via env.execute(). The in-context content is replaced with a preview +
    file path reference. The model can read_file to access the full output
    on any backend.
@@ -36,7 +36,7 @@ from tools.budget_config import (
 logger = logging.getLogger(__name__)
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
-STORAGE_DIR = "/tmp/elevate-results"
+STORAGE_DIR = "/tmp/hermes-results"
 HEREDOC_MARKER = "ELEVATE_PERSIST_EOF"
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 
@@ -53,7 +53,7 @@ def _resolve_storage_dir(env) -> str:
             else:
                 if temp_dir:
                     temp_dir = temp_dir.rstrip("/") or "/"
-                    return f"{temp_dir}/elevate-results"
+                    return f"{temp_dir}/hermes-results"
     return STORAGE_DIR
 
 
@@ -76,15 +76,21 @@ def _heredoc_marker(content: str) -> str:
 
 
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
-    """Write content into the sandbox via env.execute(). Returns True on success."""
-    marker = _heredoc_marker(content)
+    """Write content into the sandbox via env.execute(). Returns True on success.
+
+    Pushes ``content`` through stdin rather than embedding it in the command
+    string. Linux's ``MAX_ARG_STRLEN`` caps any single argv element at 128 KB
+    (32 * PAGE_SIZE), so the previous heredoc-in-the-command-string approach
+    silently failed with ``OSError: [Errno 7] Argument list too long`` for any
+    tool result over ~128 KB — exactly the case persistence exists to handle.
+    Routing through stdin removes that ceiling on local + ssh (``_stdin_mode
+    == "pipe"``); remote backends with ``_stdin_mode == "heredoc"`` keep their
+    existing API-body sized limit, which is orders of magnitude larger than
+    the exec-arg ceiling.
+    """
     storage_dir = os.path.dirname(remote_path)
-    cmd = (
-        f"mkdir -p {shlex.quote(storage_dir)} && cat > {shlex.quote(remote_path)} << '{marker}'\n"
-        f"{content}\n"
-        f"{marker}"
-    )
-    result = env.execute(cmd, timeout=30)
+    cmd = f"mkdir -p {shlex.quote(storage_dir)} && cat > {shlex.quote(remote_path)}"
+    result = env.execute(cmd, timeout=30, stdin_data=content)
     return result.get("returncode", 1) == 0
 
 

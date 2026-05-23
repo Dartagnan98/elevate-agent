@@ -85,63 +85,66 @@ class TestWriteToSandbox:
     def test_success(self):
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        result = _write_to_sandbox("hello world", "/tmp/elevate-results/abc.txt", env)
+        result = _write_to_sandbox("hello world", "/tmp/hermes-results/abc.txt", env)
         assert result is True
         env.execute.assert_called_once()
         cmd = env.execute.call_args[0][0]
         assert "mkdir -p" in cmd
-        assert "hello world" in cmd
-        assert HEREDOC_MARKER in cmd
+        # Content travels through stdin, NOT inside the command string —
+        # otherwise large content would hit Linux's 128 KB MAX_ARG_STRLEN
+        # ceiling on `bash -c <cmd>` (#22906).
+        assert "hello world" not in cmd
+        assert env.execute.call_args[1]["stdin_data"] == "hello world"
 
     def test_failure_returns_false(self):
         env = MagicMock()
         env.execute.return_value = {"output": "error", "returncode": 1}
-        result = _write_to_sandbox("content", "/tmp/elevate-results/abc.txt", env)
+        result = _write_to_sandbox("content", "/tmp/hermes-results/abc.txt", env)
         assert result is False
 
-    def test_heredoc_collision_uses_uuid_marker(self):
+    def test_large_content_via_stdin(self):
+        """Regression: 200 KB content exceeds Linux MAX_ARG_STRLEN (128 KB).
+        It must travel via stdin, never inside the command string."""
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        content = f"text with {HEREDOC_MARKER} inside"
-        _write_to_sandbox(content, "/tmp/elevate-results/abc.txt", env)
+        big = "x" * 200_000
+        _write_to_sandbox(big, "/tmp/hermes-results/big.txt", env)
         cmd = env.execute.call_args[0][0]
-        # The default marker should NOT be used as the delimiter
-        lines = cmd.split("\n")
-        # The first and last lines contain the actual delimiter
-        assert HEREDOC_MARKER not in lines[0].split("<<")[1]
+        assert len(cmd) < 1_000  # cmd is just `mkdir -p X && cat > Y`
+        assert env.execute.call_args[1]["stdin_data"] == big
 
     def test_timeout_passed(self):
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        _write_to_sandbox("content", "/tmp/elevate-results/abc.txt", env)
+        _write_to_sandbox("content", "/tmp/hermes-results/abc.txt", env)
         assert env.execute.call_args[1]["timeout"] == 30
 
     def test_uses_parent_dir_of_remote_path(self):
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        remote_path = "/data/data/com.termux/files/usr/tmp/elevate-results/abc.txt"
+        remote_path = "/data/data/com.termux/files/usr/tmp/hermes-results/abc.txt"
         _write_to_sandbox("content", remote_path, env)
         cmd = env.execute.call_args[0][0]
-        assert "mkdir -p /data/data/com.termux/files/usr/tmp/elevate-results" in cmd
+        assert "mkdir -p /data/data/com.termux/files/usr/tmp/hermes-results" in cmd
 
     def test_path_with_spaces_is_quoted(self):
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        remote_path = "/tmp/elevate results/abc file.txt"
+        remote_path = "/tmp/hermes results/abc file.txt"
         _write_to_sandbox("content", remote_path, env)
         cmd = env.execute.call_args[0][0]
-        assert "'/tmp/elevate results'" in cmd
-        assert "'/tmp/elevate results/abc file.txt'" in cmd
+        assert "'/tmp/hermes results'" in cmd
+        assert "'/tmp/hermes results/abc file.txt'" in cmd
 
     def test_shell_metacharacters_neutralized(self):
         """Paths with shell metacharacters must be quoted to prevent injection."""
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        malicious_path = "/tmp/elevate-results/$(whoami).txt"
+        malicious_path = "/tmp/hermes-results/$(whoami).txt"
         _write_to_sandbox("content", malicious_path, env)
         cmd = env.execute.call_args[0][0]
         # The $() must not appear unquoted — shlex.quote wraps it
-        assert "'/tmp/elevate-results/$(whoami).txt'" in cmd
+        assert "'/tmp/hermes-results/$(whoami).txt'" in cmd
 
     def test_semicolon_injection_neutralized(self):
         env = MagicMock()
@@ -160,7 +163,7 @@ class TestResolveStorageDir:
     def test_uses_env_temp_dir_when_available(self):
         env = MagicMock()
         env.get_temp_dir.return_value = "/data/data/com.termux/files/usr/tmp"
-        assert _resolve_storage_dir(env) == "/data/data/com.termux/files/usr/tmp/elevate-results"
+        assert _resolve_storage_dir(env) == "/data/data/com.termux/files/usr/tmp/hermes-results"
 
 
 # ── _build_persisted_message ──────────────────────────────────────────
@@ -171,12 +174,12 @@ class TestBuildPersistedMessage:
             preview="first 100 chars...",
             has_more=True,
             original_size=50_000,
-            file_path="/tmp/elevate-results/test123.txt",
+            file_path="/tmp/hermes-results/test123.txt",
         )
         assert msg.startswith(PERSISTED_OUTPUT_TAG)
         assert msg.endswith(PERSISTED_OUTPUT_CLOSING_TAG)
         assert "50,000 characters" in msg
-        assert "/tmp/elevate-results/test123.txt" in msg
+        assert "/tmp/hermes-results/test123.txt" in msg
         assert "read_file" in msg
         assert "first 100 chars..." in msg
         assert "..." in msg  # has_more indicator
@@ -186,7 +189,7 @@ class TestBuildPersistedMessage:
             preview="complete content",
             has_more=False,
             original_size=16,
-            file_path="/tmp/elevate-results/x.txt",
+            file_path="/tmp/hermes-results/x.txt",
         )
         # Should not have the trailing "..." indicator before closing tag
         lines = msg.strip().split("\n")
@@ -197,7 +200,7 @@ class TestBuildPersistedMessage:
             preview="x",
             has_more=True,
             original_size=2_000_000,
-            file_path="/tmp/elevate-results/big.txt",
+            file_path="/tmp/hermes-results/big.txt",
         )
         assert "MB" in msg
 
@@ -247,9 +250,9 @@ class TestMaybePersistToolResult:
             threshold=30_000,
         )
         assert PERSISTED_OUTPUT_TAG in result
-        # The heredoc written to sandbox should contain the full JSON blob
-        cmd = env.execute.call_args[0][0]
-        assert '"exit_code"' in cmd
+        # Content is delivered through stdin (no longer embedded in the
+        # command string — see test_large_content_via_stdin for why).
+        assert env.execute.call_args[1]["stdin_data"] == content
 
     def test_above_threshold_no_env_truncates_inline(self):
         content = "x" * 60_000
@@ -400,9 +403,9 @@ class TestMaybePersistToolResult:
             env=env,
             threshold=30_000,
         )
-        assert "/data/data/com.termux/files/usr/tmp/elevate-results/tc_termux.txt" in result
+        assert "/data/data/com.termux/files/usr/tmp/hermes-results/tc_termux.txt" in result
         cmd = env.execute.call_args[0][0]
-        assert "mkdir -p /data/data/com.termux/files/usr/tmp/elevate-results" in cmd
+        assert "mkdir -p /data/data/com.termux/files/usr/tmp/hermes-results" in cmd
 
     def test_threshold_zero_forces_persist(self):
         env = MagicMock()
@@ -516,12 +519,25 @@ class TestPerToolThresholds:
         except ImportError:
             pytest.skip("terminal_tool not importable in test env")
 
-    def test_read_file_never_persisted(self):
+    def test_read_file_result_size_cap(self):
         from tools.registry import registry
         try:
             import tools.file_tools  # noqa: F401
             val = registry.get_max_result_size("read_file")
-            assert val == float("inf")
+            assert val == 100_000
+        except ImportError:
+            pytest.skip("file_tools not importable in test env")
+
+    def test_read_file_registry_cap_is_100k(self):
+        """Regression test: read_file must have a 100_000 char registry cap (Layer 2 safety net)."""
+        from tools.registry import registry
+        try:
+            import tools.file_tools  # noqa: F401
+            val = registry.get_max_result_size("read_file")
+            assert val == 100_000, (
+                f"read_file registry cap must be 100_000, got {val!r}. "
+                "float('inf') is not allowed — it disables the Layer 2 result-size guard."
+            )
         except ImportError:
             pytest.skip("file_tools not importable in test env")
 
