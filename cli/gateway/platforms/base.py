@@ -254,6 +254,40 @@ def _no_proxy_entry_matches(entry: str, host: str, port: int | None = None) -> b
     return host == token_host or host.endswith(f".{token_host}")
 
 
+def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: "str | None" = None) -> bool:
+    """Return True when ``hostname`` matches a ``NO_PROXY`` entry.
+
+    Supports comma- or whitespace-separated entries with optional leading dots
+    and ``*.`` wildcards, which match both the apex domain and subdomains.
+    """
+    raw = no_proxy_value
+    if raw is None:
+        raw = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+
+    raw = raw.strip()
+    if not raw:
+        return False
+
+    import re as _re_local
+    lower_hostname = hostname.lower()
+    for entry in _re_local.split(r"[\s,]+", raw):
+        normalized = entry.strip().lower()
+        if not normalized:
+            continue
+        if normalized == "*":
+            return True
+
+        if normalized.startswith("*."):
+            normalized = normalized[2:]
+        elif normalized.startswith("."):
+            normalized = normalized[1:]
+
+        if lower_hostname == normalized or lower_hostname.endswith(f".{normalized}"):
+            return True
+
+    return False
+
+
 def should_bypass_proxy(target_hosts: "str | list[str] | tuple[str, ...] | set[str] | None") -> bool:
     """Return True when NO_PROXY/no_proxy matches at least one target host."""
     entries = _no_proxy_entries()
