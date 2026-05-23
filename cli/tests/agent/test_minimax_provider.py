@@ -71,9 +71,11 @@ class TestMinimaxThinkingSupport:
 
 
 class TestMinimaxAuxModel:
-    """Verify auxiliary model is standard (not highspeed)."""
+    """Verify auxiliary model is standard (not highspeed) — now reads from profiles."""
 
     def test_minimax_aux_is_standard(self):
+        # NOTE: Elevate-only fallback — auxiliary_client still uses
+        # _API_KEY_PROVIDER_AUX_MODELS dict; re-port when auxiliary_client lands.
         from agent.auxiliary_client import _API_KEY_PROVIDER_AUX_MODELS
         assert _API_KEY_PROVIDER_AUX_MODELS["minimax"] == "MiniMax-M2.7"
         assert _API_KEY_PROVIDER_AUX_MODELS["minimax-cn"] == "MiniMax-M2.7"
@@ -308,10 +310,15 @@ class TestMinimaxPreserveDots:
         from agent.anthropic_adapter import normalize_model_name
         assert normalize_model_name("MiniMax-M2.7", preserve_dots=True) == "MiniMax-M2.7"
 
-    def test_normalize_converts_without_preserve(self):
+    def test_normalize_preserves_non_anthropic_dots_without_preserve(self):
         from agent.anthropic_adapter import normalize_model_name
-        # Without preserve_dots, dots become hyphens (broken for MiniMax)
-        assert normalize_model_name("MiniMax-M2.7", preserve_dots=False) == "MiniMax-M2-7"
+        # Non-Anthropic model families use dots as canonical version separators;
+        # only Claude/Anthropic names are hyphen-normalized by default.
+        assert normalize_model_name("MiniMax-M2.7", preserve_dots=False) == "MiniMax-M2.7"
+
+    def test_normalize_still_converts_claude_dots_without_preserve(self):
+        from agent.anthropic_adapter import normalize_model_name
+        assert normalize_model_name("claude-opus-4.6", preserve_dots=False) == "claude-opus-4-6"
 
 
 class TestMinimaxSwitchModelCredentialGuard:
