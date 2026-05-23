@@ -95,6 +95,61 @@ def terminate_pid(pid: int, *, force: bool = False) -> None:
     os.kill(pid, sig)
 
 
+def _pid_exists(pid: int) -> bool:
+    """Cross-platform "is this PID alive" check that does NOT kill the target.
+
+    CRITICAL on Windows: ``os.kill(pid, 0)`` is NOT a no-op like on POSIX —
+    Windows treats sig=0 as CTRL_C_EVENT (bpo-14484), silently killing the
+    process group. Prefer psutil; fall back to ctypes OpenProcess on Windows
+    or os.kill(pid, 0) on POSIX if psutil is unavailable.
+    """
+    try:
+        import psutil  # type: ignore
+        return bool(psutil.pid_exists(int(pid)))
+    except ImportError:
+        pass
+
+    if _IS_WINDOWS:
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.WaitForSingleObject.restype = ctypes.c_uint
+            kernel32.GetLastError.restype = ctypes.c_uint
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x100000
+            WAIT_TIMEOUT = 0x00000102
+            ERROR_INVALID_PARAMETER = 87
+            ERROR_ACCESS_DENIED = 5
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, int(pid)
+            )
+            if not handle:
+                err = kernel32.GetLastError()
+                if err == ERROR_INVALID_PARAMETER:
+                    return False
+                if err == ERROR_ACCESS_DENIED:
+                    return True
+                return False
+            try:
+                wait_result = kernel32.WaitForSingleObject(handle, 0)
+                return wait_result == WAIT_TIMEOUT
+            finally:
+                kernel32.CloseHandle(handle)
+        except (OSError, AttributeError):
+            return False
+    else:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+
 def _scope_hash(identity: str) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
