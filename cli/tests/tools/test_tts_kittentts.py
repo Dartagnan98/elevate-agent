@@ -5,10 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("numpy", reason="requires optional KittenTTS/numpy extra")
-
-import numpy as np
-
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
@@ -30,7 +26,7 @@ def mock_kittentts_module():
     """Inject a fake kittentts + soundfile module that return stub objects."""
     fake_model = MagicMock()
     # 24kHz float32 PCM at ~2s of silence
-    fake_model.generate.return_value = np.zeros(48000, dtype=np.float32)
+    fake_model.generate.return_value = [0.0] * 48000
     fake_cls = MagicMock(return_value=fake_model)
     fake_kittentts = MagicMock()
     fake_kittentts.KittenTTS = fake_cls
@@ -198,4 +194,4 @@ class TestDispatcherBranch:
         result = json.loads(text_to_speech_tool(text="Hello"))
         assert result["success"] is False
         assert "kittentts" in result["error"].lower()
-        assert "elevate setup tts" in result["error"].lower()
+        assert "hermes setup tts" in result["error"].lower()

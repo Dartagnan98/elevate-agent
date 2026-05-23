@@ -38,6 +38,11 @@ dependencies = [
   "websockets>=15.0.1,<16",
   # PDF rendering + image downscaling for native multimodal attachments
   "pymupdf>=1.24.0,<2",
+  # Cross-platform process / PID management.  Used for TTS subprocess
+  # cleanup, env probes, and other cross-platform process operations.
+  # Replaces POSIX-only os.kill / os.killpg idioms that silently break
+  # on Windows.
+  "psutil>=7.0,<8",
 ]
 
 [project.optional-dependencies]
