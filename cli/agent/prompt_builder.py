@@ -1343,16 +1343,22 @@ def load_soul_md() -> Optional[str]:
     Used as the agent identity (slot #1 in the system prompt).  When this
     returns content, ``build_context_files_prompt`` should be called with
     ``skip_soul=True`` so SOUL.md isn't injected twice.
-    """
-    try:
-        from elevate_cli.config import ensure_elevate_home
-        ensure_elevate_home()
-    except Exception as e:
-        logger.debug("Could not ensure ELEVATE_HOME before loading SOUL.md: %s", e)
 
+    Only triggers ``ensure_elevate_home()`` (which seeds DEFAULT_SOUL_MD)
+    when SOUL.md does not exist on disk.  If the user has an existing
+    SOUL.md — even one that's empty or whitespace-only — leave it alone:
+    overwriting their file would clobber an intentional reset and breaks
+    the "empty SOUL.md adds nothing" invariant.
+    """
     soul_path = get_elevate_home() / "SOUL.md"
     if not soul_path.exists():
-        return None
+        try:
+            from elevate_cli.config import ensure_elevate_home
+            ensure_elevate_home()
+        except Exception as e:
+            logger.debug("Could not ensure ELEVATE_HOME before loading SOUL.md: %s", e)
+        if not soul_path.exists():
+            return None
     try:
         content = soul_path.read_text(encoding="utf-8").strip()
         if not content:

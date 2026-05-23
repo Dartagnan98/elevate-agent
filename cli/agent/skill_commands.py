@@ -143,7 +143,13 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         else:
             normalized = raw_identifier.lstrip("/")
 
-        loaded_skill = json.loads(skill_view(normalized, task_id=task_id))
+        # preprocess=False so all template/inline-shell expansion happens
+        # in ``_build_skill_message`` against the single skills_cfg loaded
+        # there (otherwise ``skill_view`` runs its own preprocessing pass
+        # using ``load_skills_config()`` from skill_preprocessing, bypassing
+        # any per-call config overrides — including the test-disabled
+        # template_vars path, #14536).
+        loaded_skill = json.loads(skill_view(normalized, task_id=task_id, preprocess=False))
     except Exception:
         return None
 
