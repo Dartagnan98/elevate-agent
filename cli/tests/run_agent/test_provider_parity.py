@@ -693,6 +693,20 @@ class TestBuildAssistantMessage:
 class TestAuxiliaryClientProviderPriority:
     """Verify auxiliary client resolution doesn't break for any provider."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_unhealthy_cache(self):
+        """Earlier tests on the same xdist worker may have poisoned the
+        module-level ``_aux_unhealthy_until`` cache via _mark_provider_unhealthy
+        (10-min TTL).  Without this cleanup, the provider chain skips providers
+        we expect to win, returning (None, None) and asserting against None.
+        """
+        from agent.auxiliary_client import _aux_unhealthy_until, _aux_unhealthy_logged_at
+        _aux_unhealthy_until.clear()
+        _aux_unhealthy_logged_at.clear()
+        yield
+        _aux_unhealthy_until.clear()
+        _aux_unhealthy_logged_at.clear()
+
     def test_openrouter_always_wins(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
         from agent.auxiliary_client import get_text_auxiliary_client
@@ -705,7 +719,8 @@ class TestAuxiliaryClientProviderPriority:
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         from agent.auxiliary_client import get_text_auxiliary_client
         with patch("agent.auxiliary_client._read_nous_auth", return_value={"access_token": "nous-tok"}), \
-             patch("agent.auxiliary_client.OpenAI") as mock:
+             patch("agent.auxiliary_client.OpenAI") as mock, \
+             patch("elevate_cli.models.get_nous_recommended_aux_model", return_value=None):
             client, model = get_text_auxiliary_client()
         assert model == "google/gemini-3-flash-preview"
 
