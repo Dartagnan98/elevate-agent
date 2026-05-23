@@ -306,11 +306,9 @@ _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
 })
 
 # OpenRouter app attribution headers (base — always sent).
-# `X-Title` is the canonical attribution header OpenRouter's dashboard
-# reads; the previous `X-OpenRouter-Title` label was not recognized there.
 _OR_HEADERS_BASE = {
-    "HTTP-Referer": "https://elevate-agent.nousresearch.com",
-    "X-Title": "Elevate Agent",
+    "HTTP-Referer": "https://github.com/Dartagnan98/elevate-agent",
+    "X-OpenRouter-Title": "Elevate",
     "X-OpenRouter-Categories": "productivity,cli-agent",
 }
 
@@ -396,8 +394,8 @@ def build_nvidia_nim_headers(base_url: str | None) -> dict:
 from elevate_cli import __version__ as _ELEVATE_VERSION
 
 _AI_GATEWAY_HEADERS = {
-    "HTTP-Referer": "https://elevate-agent.nousresearch.com",
-    "X-Title": "Elevate Agent",
+    "HTTP-Referer": "https://github.com/Dartagnan98/elevate-agent",
+    "X-Title": "Elevate",
     "User-Agent": f"ElevateAgent/{_ELEVATE_VERSION}",
 }
 
