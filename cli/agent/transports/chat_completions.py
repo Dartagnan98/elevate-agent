@@ -237,6 +237,15 @@ class ChatCompletionsTransport(ProviderTransport):
         # Reached only when get_provider_profile() returned None.
         # Known providers always go through the profile path above.
 
+        # Qwen Portal message normalization — runs after codex sanitization,
+        # before developer-role swap. Mirrors QwenProfile.prepare_messages so
+        # the legacy path (when provider profile lookup misses, or in tests
+        # that set base_url without provider) still produces a payload Qwen
+        # Portal accepts (list-of-dicts content + ephemeral cache_control).
+        qwen_prepare_fn = params.get("qwen_prepare_fn")
+        if qwen_prepare_fn:
+            sanitized = qwen_prepare_fn(sanitized)
+
         # Developer role swap for GPT-5/Codex models
         model_lower = params.get("model_lower", (model or "").lower())
         if (
@@ -276,12 +285,24 @@ class ChatCompletionsTransport(ProviderTransport):
         is_tokenhub = params.get("is_tokenhub", False)
         reasoning_config = params.get("reasoning_config")
 
+        is_qwen_portal = params.get("is_qwen_portal", False)
+
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
         elif max_tokens is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(max_tokens))
         elif anthropic_max_out is not None:
             api_kwargs["max_tokens"] = anthropic_max_out
+        elif is_qwen_portal:
+            # Qwen Portal reasoning models exhaust their output budget without
+            # an explicit cap. Mirrors QwenProfile.default_max_tokens=65536.
+            api_kwargs["max_tokens"] = 65536
+
+        # Qwen Portal session metadata goes top-level (not in extra_body).
+        if is_qwen_portal:
+            _qwen_meta = params.get("qwen_session_metadata")
+            if _qwen_meta:
+                api_kwargs["metadata"] = _qwen_meta
 
         # Kimi: top-level reasoning_effort (unless thinking disabled)
         if is_kimi:
@@ -337,6 +358,24 @@ class ChatCompletionsTransport(ProviderTransport):
         provider_prefs = params.get("provider_preferences")
         if provider_prefs and is_openrouter:
             extra_body["provider"] = provider_prefs
+
+        # Qwen Portal: vl_high_resolution_images is always-on for the portal.
+        if is_qwen_portal:
+            extra_body["vl_high_resolution_images"] = True
+
+        # Custom/Ollama: disable thinking when reasoning_config is turned off.
+        # Mirrors CustomProfile.build_api_kwargs_extras().
+        if params.get("is_custom_provider", False):
+            ollama_num_ctx = params.get("ollama_num_ctx")
+            if ollama_num_ctx:
+                _options = extra_body.get("options", {})
+                _options["num_ctx"] = ollama_num_ctx
+                extra_body["options"] = _options
+            if reasoning_config and isinstance(reasoning_config, dict):
+                _effort = (reasoning_config.get("effort") or "").strip().lower()
+                _enabled = reasoning_config.get("enabled", True)
+                if _effort == "none" or _enabled is False:
+                    extra_body["think"] = False
 
         # Pareto Code router plugin — model-gated. Same shape as the
         # profile path in plugins/model-providers/openrouter/__init__.py;
