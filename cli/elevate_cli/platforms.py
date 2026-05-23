@@ -36,7 +36,6 @@ PLATFORMS: OrderedDict[str, PlatformInfo] = OrderedDict([
     ("wecom_callback", PlatformInfo(label="💬 WeCom Callback",  default_toolset="elevate-wecom-callback")),
     ("weixin",         PlatformInfo(label="💬 Weixin",          default_toolset="elevate-weixin")),
     ("qqbot",          PlatformInfo(label="💬 QQBot",           default_toolset="elevate-qqbot")),
-    ("yuanbao",        PlatformInfo(label="🤖 Yuanbao",         default_toolset="elevate-yuanbao")),
     ("webhook",        PlatformInfo(label="🔗 Webhook",         default_toolset="elevate-webhook")),
     ("api_server",     PlatformInfo(label="🌐 API Server",      default_toolset="elevate-api-server")),
     ("cron",           PlatformInfo(label="⏰ Cron",            default_toolset="elevate-cron")),

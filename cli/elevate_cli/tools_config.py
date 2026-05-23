@@ -306,6 +306,23 @@ TOOL_CATEGORIES = {
                 ],
                 "browser_provider": "browser-use",
             },
+            {
+                "name": "Local Browser",
+                "badge": "★ recommended · free",
+                "tag": "Headless Chromium, no API key needed",
+                "env_vars": [],
+                "browser_provider": "local",
+            },
+            {
+                "name": "Camofox",
+                "badge": "free · local",
+                "tag": "Anti-detection browser (Firefox/Camoufox)",
+                "env_vars": [
+                    {"key": "CAMOFOX_URL", "prompt": "Camofox server URL", "default": "http://localhost:9377",
+                     "url": "https://github.com/jo-inc/camofox-browser"},
+                ],
+                "browser_provider": "camofox",
+            },
         ],
     },
     "homeassistant": {
