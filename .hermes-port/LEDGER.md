@@ -83,6 +83,25 @@ SKIP (do not port - would break Elevate or pure dead weight):
   - [ ] B3e gateway/run.py (12.7k->18.2k lines, has Elevate-only divergence -
         hand-port hunk by hunk, B2-caliber risk)
 - [ ] B4 elevate_cli/ deltas + new files
+  - [x] B4a net-new modules (31 of 40): _parser, azure_detect, browser_connect,
+        checkpoints, codex_runtime_plugin_migration, codex_runtime_switch, curator,
+        dep_ensure, fallback_cmd, gateway_windows, inventory, kanban, kanban_db,
+        kanban_decompose, kanban_diagnostics, kanban_specify, kanban_swarm, migrate,
+        model_catalog, oneshot, profile_describer, profile_distribution,
+        pt_input_extras, relaunch, security_advisories, send_cmd, session_recap,
+        slack_cli, stdio, vercel_auth, xai_retirement. Plus tools/kanban_tools.py
+        (unblocked by kanban_db). 0 regressions.
+        DEFERRED (9): bundles.py (needs agent/skill_bundles), secrets_cli.py (needs
+        agent/secret_sources), entire proxy/ subtree (8 files - need
+        NOUS_INFERENCE_AUTH_MODE_AUTO in elevate_cli/auth.py).
+        Surgical helper adds along the way:
+        - elevate_state.py: apply_wal_with_fallback, _WAL_INCOMPAT_MARKERS,
+          _wal_fallback_warned_paths, get_last_init_error,
+          format_session_db_unavailable, _set_last_init_error
+        - elevate_cli/profiles.py: normalize_profile_name
+        - tools/registry.py: invalidate_check_fn_cache (no-op stub until TTL cache lands)
+        - elevate_state.py: hermes_cli->elevate_cli rename in kanban_db reference
+  - [ ] B4b elevate_cli/ differ files - not yet attempted
 - [ ] B5 tools/ deltas + new files
   - [x] B5a net-new tool files (clarify_gateway, computer_use/*, computer_use_tool,
         environments/vercel_sandbox, fal_common, lazy_deps, skill_provenance,

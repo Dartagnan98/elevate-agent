@@ -25,6 +25,16 @@ from typing import Callable, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 
+def invalidate_check_fn_cache() -> None:
+    """Drop all cached ``check_fn`` results. No-op stub on this branch —
+    Elevate's registry doesn't TTL-cache check_fn yet, but ported Hermes
+    code and tests call this after config changes; the shim keeps imports
+    valid until the full TTL-cache machinery is hand-merged from Hermes
+    registry.py.
+    """
+    return
+
+
 def _is_registry_register_call(node: ast.AST) -> bool:
     """Return True when *node* is a ``registry.register(...)`` call expression."""
     if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
