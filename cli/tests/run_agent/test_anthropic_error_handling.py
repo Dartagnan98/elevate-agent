@@ -173,7 +173,7 @@ def _make_agent_cls(error_cls, recover_after=None):
             self._save_trajectory = lambda messages, user_message, completed: None
             self._save_session_log = lambda messages: None
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, **kwargs):
             calls = {"n": 0}
 
             def _fake_api_call(api_kwargs, **kw):
@@ -185,7 +185,7 @@ def _make_agent_cls(error_cls, recover_after=None):
             self._interruptible_api_call = _fake_api_call
             self._interruptible_streaming_api_call = _fake_api_call
             return super().run_conversation(
-                user_message, conversation_history=conversation_history, task_id=task_id
+                user_message, conversation_history=conversation_history, task_id=task_id, **kwargs
             )
 
     return _Agent
@@ -316,7 +316,7 @@ def test_401_credential_refresh_recovers(monkeypatch):
             refresh_count["n"] += 1
             return True  # Simulate successful credential refresh
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, **kwargs):
             calls = {"n": 0}
 
             def _fake_api_call(api_kwargs):
@@ -330,7 +330,7 @@ def test_401_credential_refresh_recovers(monkeypatch):
             # streaming for health checking even without stream consumers.
             self._interruptible_streaming_api_call = lambda api_kwargs, **kw: _fake_api_call(api_kwargs)
             return super().run_conversation(
-                user_message, conversation_history=conversation_history, task_id=task_id
+                user_message, conversation_history=conversation_history, task_id=task_id, **kwargs
             )
 
     monkeypatch.setattr(run_agent, "AIAgent", _Auth401ThenSuccessAgent)
@@ -397,14 +397,14 @@ def test_401_refresh_fails_is_non_retryable(monkeypatch):
         def _try_refresh_anthropic_client_credentials(self) -> bool:
             return False  # Simulate failed credential refresh
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, **kwargs):
             def _fake_api_call(api_kwargs, **kw):
                 raise _UnauthorizedError()
 
             self._interruptible_api_call = _fake_api_call
             self._interruptible_streaming_api_call = _fake_api_call
             return super().run_conversation(
-                user_message, conversation_history=conversation_history, task_id=task_id
+                user_message, conversation_history=conversation_history, task_id=task_id, **kwargs
             )
 
     monkeypatch.setattr(run_agent, "AIAgent", _Auth401AlwaysFailAgent)
@@ -480,7 +480,7 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
                 compressed = messages
             return compressed, system_message
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, **kwargs):
             calls = {"n": 0}
 
             def _fake_api_call(api_kwargs, **kw):
@@ -492,7 +492,7 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
             self._interruptible_api_call = _fake_api_call
             self._interruptible_streaming_api_call = _fake_api_call
             return super().run_conversation(
-                user_message, conversation_history=conversation_history, task_id=task_id
+                user_message, conversation_history=conversation_history, task_id=task_id, **kwargs
             )
 
     _PromptTooLongThenSuccessAgent.compress_called = 0
