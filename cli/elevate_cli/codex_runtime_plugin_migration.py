@@ -48,10 +48,19 @@ logger = logging.getLogger(__name__)
 # Marker comments wrapping the managed section so re-runs can detect
 # what's ours and what's user-edited. Both must appear or strip is a no-op.
 MIGRATION_MARKER = (
-    "# managed by hermes-agent — `hermes codex-runtime migrate` regenerates this section"
+    "# managed by elevate-agent — `elevate codex-runtime migrate` regenerates this section"
 )
 MIGRATION_END_MARKER = (
-    "# end hermes-agent managed section"
+    "# end elevate-agent managed section"
+)
+# Legacy markers from pre-rebrand (hermes-agent era) — recognized on
+# strip so re-runs idempotently replace prior managed blocks without
+# stranding them.
+_LEGACY_MIGRATION_MARKERS = (
+    "# managed by hermes-agent — `hermes codex-runtime migrate` regenerates this section",
+)
+_LEGACY_MIGRATION_END_MARKERS = (
+    "# end hermes-agent managed section",
 )
 
 
@@ -84,7 +93,7 @@ class MigrationReport:
                 )
                 lines.append(f"  - {name}{note}")
         else:
-            lines.append("No MCP servers found in Hermes config.")
+            lines.append("No MCP servers found in Elevate config.")
         if self.migrated_plugins:
             lines.append(
                 f"Migrated {len(self.migrated_plugins)} native Codex plugin(s):"
@@ -119,27 +128,27 @@ _KNOWN_ELEVATE_KEYS = {
 
 # Subset that have a direct codex equivalent.
 _KEYS_DROPPED_WITH_WARNING = {
-    # Hermes' sampling subsection — codex MCP has no equivalent
+    # Elevate's sampling subsection — codex MCP has no equivalent
     "sampling",
 }
 
 
 def _translate_one_server(
-    name: str, hermes_cfg: dict
+    name: str, elevate_cfg: dict
 ) -> tuple[Optional[dict], list[str]]:
-    """Translate one Hermes MCP server config to the codex inline-table dict
+    """Translate one Elevate MCP server config to the codex inline-table dict
     representation. Returns (codex_entry, skipped_keys).
 
     codex_entry is a dict ready for TOML serialization, or None when the
     server can't be translated (e.g. neither command nor url present)."""
-    if not isinstance(hermes_cfg, dict):
+    if not isinstance(elevate_cfg, dict):
         return None, []
 
     skipped: list[str] = []
     out: dict[str, Any] = {}
 
-    has_command = bool(hermes_cfg.get("command"))
-    has_url = bool(hermes_cfg.get("url"))
+    has_command = bool(elevate_cfg.get("command"))
+    has_url = bool(elevate_cfg.get("url"))
 
     if has_command and has_url:
         skipped.append("url (both command and url set; preferring stdio)")
@@ -147,47 +156,47 @@ def _translate_one_server(
 
     if has_command:
         # Stdio transport
-        out["command"] = str(hermes_cfg["command"])
-        args = hermes_cfg.get("args") or []
+        out["command"] = str(elevate_cfg["command"])
+        args = elevate_cfg.get("args") or []
         if args:
             out["args"] = [str(a) for a in args]
-        env = hermes_cfg.get("env") or {}
+        env = elevate_cfg.get("env") or {}
         if env:
             # Codex expects string values
             out["env"] = {str(k): str(v) for k, v in env.items()}
-        cwd = hermes_cfg.get("cwd")
+        cwd = elevate_cfg.get("cwd")
         if cwd:
             out["cwd"] = str(cwd)
     elif has_url:
         # streamable_http transport (codex covers both http and SSE here)
-        out["url"] = str(hermes_cfg["url"])
-        headers = hermes_cfg.get("headers") or {}
+        out["url"] = str(elevate_cfg["url"])
+        headers = elevate_cfg.get("headers") or {}
         if headers:
             out["http_headers"] = {str(k): str(v) for k, v in headers.items()}
-        # Hermes' transport: sse hint is informational; codex auto-negotiates
-        if hermes_cfg.get("transport") == "sse":
+        # Elevate's transport: sse hint is informational; codex auto-negotiates
+        if elevate_cfg.get("transport") == "sse":
             skipped.append("transport=sse (codex auto-negotiates)")
     else:
         return None, ["no command or url field"]
 
     # Timeouts
-    if "timeout" in hermes_cfg:
+    if "timeout" in elevate_cfg:
         try:
-            out["tool_timeout_sec"] = float(hermes_cfg["timeout"])
+            out["tool_timeout_sec"] = float(elevate_cfg["timeout"])
         except (TypeError, ValueError):
             skipped.append("timeout (not numeric)")
-    if "connect_timeout" in hermes_cfg:
+    if "connect_timeout" in elevate_cfg:
         try:
-            out["startup_timeout_sec"] = float(hermes_cfg["connect_timeout"])
+            out["startup_timeout_sec"] = float(elevate_cfg["connect_timeout"])
         except (TypeError, ValueError):
             skipped.append("connect_timeout (not numeric)")
 
     # Enabled flag (codex defaults to true so we only emit when explicitly false)
-    if hermes_cfg.get("enabled") is False:
+    if elevate_cfg.get("enabled") is False:
         out["enabled"] = False
 
     # Detect keys we explicitly drop with warning
-    for key in hermes_cfg:
+    for key in elevate_cfg:
         if key in _KEYS_DROPPED_WITH_WARNING:
             skipped.append(f"{key} (no codex equivalent)")
         elif key not in _KNOWN_ELEVATE_KEYS:
@@ -420,12 +429,18 @@ def _strip_existing_managed_block(toml_text: str) -> str:
     saw_end_marker = False
     for line in lines:
         line_stripped_nl = line.rstrip("\n")
-        if line_stripped_nl == MIGRATION_MARKER:
+        if (
+            line_stripped_nl == MIGRATION_MARKER
+            or line_stripped_nl in _LEGACY_MIGRATION_MARKERS
+        ):
             in_managed = True
             saw_end_marker = False
             continue
         if in_managed:
-            if line_stripped_nl == MIGRATION_END_MARKER:
+            if (
+                line_stripped_nl == MIGRATION_END_MARKER
+                or line_stripped_nl in _LEGACY_MIGRATION_END_MARKERS
+            ):
                 in_managed = False
                 saw_end_marker = True
                 continue
@@ -471,7 +486,7 @@ def _query_codex_plugins(
         with CodexAppServerClient(
             codex_home=str(codex_home) if codex_home else None
         ) as client:
-            client.initialize(client_name="hermes-migration")
+            client.initialize(client_name="elevate-migration")
             resp = client.request("plugin/list", {}, timeout=timeout)
     except Exception as exc:
         return [], f"plugin/list query failed: {exc}"
@@ -560,7 +575,7 @@ def _build_hermes_tools_mcp_entry() -> dict:
     this for browser/web/delegate_task/vision/memory/skills tools.
 
     The command runs the worktree's Python via the current sys.executable
-    so a hermes installed under /opt/, /usr/local/, or a venv all work.
+    so an elevate installed under /opt/, /usr/local/, or a venv all work.
     ELEVATE_HOME and PYTHONPATH are passed through so the spawned process
     sees the same config + module layout the user is running."""
     import sys
@@ -579,12 +594,12 @@ def _build_hermes_tools_mcp_entry() -> dict:
     # a sibling test's monkeypatch.setenv("ELEVATE_HOME", tmp_path) would
     # otherwise leak a transient pytest tempdir into the user's real
     # ~/.codex/config.toml and silently brick codex once the tempdir is GC'd.
-    hermes_home = os.environ.get("ELEVATE_HOME") or ""
-    if hermes_home and _looks_like_test_tempdir(hermes_home):
-        hermes_home = ""
-    if hermes_home:
-        env["ELEVATE_HOME"] = hermes_home
-    # PYTHONPATH passes through so a worktree-launched hermes finds the
+    elevate_home = os.environ.get("ELEVATE_HOME") or ""
+    if elevate_home and _looks_like_test_tempdir(elevate_home):
+        elevate_home = ""
+    if elevate_home:
+        env["ELEVATE_HOME"] = elevate_home
+    # PYTHONPATH passes through so a worktree-launched elevate finds the
     # branch's modules instead of the installed package.
     pythonpath = os.environ.get("PYTHONPATH")
     if pythonpath:
@@ -607,7 +622,7 @@ def _build_hermes_tools_mcp_entry() -> dict:
 
 
 def migrate(
-    hermes_config: dict,
+    elevate_config: dict,
     *,
     codex_home: Optional[Path] = None,
     dry_run: bool = False,
@@ -619,7 +634,7 @@ def migrate(
     ~/.codex/config.toml.
 
     Args:
-        hermes_config: full ~/.elevate/config.yaml dict
+        elevate_config: full ~/.elevate/config.yaml dict
         codex_home: override CODEX_HOME (defaults to ~/.codex)
         dry_run: skip the actual write; report what would happen
         discover_plugins: when True (default), query `plugin/list` against
@@ -646,15 +661,15 @@ def migrate(
     target = codex_home / "config.toml"
     report.target_path = target
 
-    hermes_servers = (hermes_config or {}).get("mcp_servers") or {}
-    if not isinstance(hermes_servers, dict):
+    elevate_servers = (elevate_config or {}).get("mcp_servers") or {}
+    if not isinstance(elevate_servers, dict):
         report.errors.append(
             "mcp_servers in Hermes config is not a dict; cannot migrate."
         )
         return report
 
     translated: dict[str, dict] = {}
-    for name, cfg in hermes_servers.items():
+    for name, cfg in elevate_servers.items():
         out, skipped = _translate_one_server(str(name), cfg or {})
         if out is None:
             report.errors.append(
