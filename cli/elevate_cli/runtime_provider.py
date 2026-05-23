@@ -595,6 +595,175 @@ def _resolve_openrouter_runtime(
     }
 
 
+def _resolve_azure_foundry_runtime(
+    *,
+    requested_provider: str,
+    model_cfg: Dict[str, Any],
+    explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve an Azure Foundry runtime entry.
+
+    Reads ``model.base_url`` + ``model.api_mode`` from config.yaml (or
+    explicit overrides), pulls the API key from ``.env`` / env var, and
+    strips a trailing ``/v1`` for Anthropic-style endpoints because the
+    Anthropic SDK appends ``/v1/messages`` internally.
+
+    When ``model.auth_mode == "entra_id"`` (and the model is OpenAI-style),
+    the returned ``api_key`` is a zero-arg callable produced by
+    :func:`agent.azure_identity_adapter.build_token_provider` rather than
+    a string. Downstream code that constructs an OpenAI SDK client passes
+    this through unchanged (the SDK accepts ``Callable[[], str]`` for
+    ``api_key`` and calls it before every request). Code paths that need
+    a string (logging, manual HTTP probes, header injection) must use the
+    helpers in ``agent.azure_identity_adapter``.
+
+    Raises :class:`AuthError` when required values are missing.
+    """
+    explicit_api_key = str(explicit_api_key or "").strip()
+    explicit_base_url_clean = str(explicit_base_url or "").strip().rstrip("/")
+
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+    cfg_base_url = ""
+    cfg_api_mode = "chat_completions"
+    cfg_auth_mode = "api_key"
+    cfg_entra: Dict[str, Any] = {}
+    if cfg_provider == "azure-foundry":
+        cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+        cfg_api_mode = _parse_api_mode(model_cfg.get("api_mode")) or "chat_completions"
+        cfg_auth_mode = str(model_cfg.get("auth_mode") or "api_key").strip().lower() or "api_key"
+        _entra = model_cfg.get("entra")
+        if isinstance(_entra, dict):
+            cfg_entra = _entra
+
+    # Model-family inference: Azure Foundry deploys GPT-5.x / codex / o1-o4
+    # reasoning models as Responses-API-only.  Calling /chat/completions
+    # against them returns 400 "The requested operation is unsupported."
+    # Upgrade api_mode when the model name matches, unless the user has
+    # explicitly chosen anthropic_messages (Anthropic-style endpoint).
+    effective_model = str(target_model or model_cfg.get("default") or "").strip()
+    if effective_model and cfg_api_mode != "anthropic_messages":
+        try:
+            from elevate_cli.models import azure_foundry_model_api_mode
+
+            inferred = azure_foundry_model_api_mode(effective_model)
+        except Exception:
+            inferred = None
+        if inferred:
+            cfg_api_mode = inferred
+
+    env_base_url = os.getenv("AZURE_FOUNDRY_BASE_URL", "").strip().rstrip("/")
+    base_url = explicit_base_url_clean or cfg_base_url or env_base_url
+    if not base_url:
+        raise AuthError(
+            "Azure Foundry requires a base URL. Set it via 'elevate model' or "
+            "the AZURE_FOUNDRY_BASE_URL environment variable."
+        )
+
+    # Anthropic SDK appends /v1/messages itself, so strip any trailing /v1
+    # we inherited from the configured base_url to avoid double-/v1 paths.
+    if cfg_api_mode == "anthropic_messages":
+        base_url = re.sub(r"/v1/?$", "", base_url)
+
+    # ── Entra ID (Microsoft Foundry recommended path) ──────────────────
+    #
+    # OpenAI-style endpoints use the OpenAI SDK's native callable
+    # ``api_key=`` contract — the SDK mints a fresh JWT per request
+    # automatically.
+    #
+    # Anthropic-style endpoints (Claude on Foundry) take the callable
+    # too: :func:`agent.anthropic_adapter.build_anthropic_client`
+    # detects the callable and constructs an ``httpx.Client`` with a
+    # request event hook that injects a fresh ``Authorization: Bearer``
+    # header per request (the Anthropic SDK does not accept callables
+    # natively). From the runtime resolver's perspective both modes
+    # are identical — return the callable api_key and let the
+    # downstream SDK wrapper handle the contract difference.
+    if cfg_auth_mode == "entra_id":
+        if explicit_api_key:
+            # User passed --api-key on the CLI while config says entra_id —
+            # honour the explicit string (escape hatch for one-off testing).
+            api_key: Any = explicit_api_key
+            source = "explicit"
+            auth_mode = "api_key"
+        else:
+            try:
+                from agent.azure_identity_adapter import (
+                    EntraIdentityConfig,
+                    SCOPE_AI_AZURE_DEFAULT,
+                    build_token_provider,
+                )
+            except Exception as exc:
+                raise AuthError(
+                    "Azure Foundry Entra ID auth requires the 'azure-identity' "
+                    "package. Install it with: pip install azure-identity "
+                    f"(import failed: {exc})"
+                ) from exc
+
+            scope = (
+                str(cfg_entra.get("scope") or "").strip()
+                or SCOPE_AI_AZURE_DEFAULT
+            )
+            try:
+                entra_config = EntraIdentityConfig(
+                    scope=scope,
+                )
+                token_provider = build_token_provider(config=entra_config)
+            except ImportError as exc:
+                raise AuthError(str(exc)) from exc
+            api_key = token_provider
+            source = "entra_id"
+            auth_mode = "entra_id"
+
+        clean_entra = {}
+        if auth_mode == "entra_id":
+            configured_scope = str(cfg_entra.get("scope") or "").strip()
+            if configured_scope:
+                clean_entra["scope"] = configured_scope
+
+        return {
+            "provider": "azure-foundry",
+            "api_mode": cfg_api_mode,
+            "base_url": base_url,
+            "api_key": api_key,
+            "auth_mode": auth_mode,
+            "entra": clean_entra,
+            "source": source,
+            "requested_provider": requested_provider,
+        }
+
+    # ── Static API key (legacy / default) ──────────────────────────────
+    api_key = explicit_api_key
+    if not api_key:
+        try:
+            from elevate_cli.config import get_env_value
+            api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or ""
+        except Exception:
+            api_key = ""
+    if not api_key:
+        api_key = os.getenv("AZURE_FOUNDRY_API_KEY", "").strip()
+    if not api_key:
+        raise AuthError(
+            "Azure Foundry requires an API key. Set AZURE_FOUNDRY_API_KEY in "
+            "~/.elevate/.env or run 'elevate model' to configure. To use "
+            "keyless Microsoft Entra ID auth instead, set "
+            "model.auth_mode: entra_id in config.yaml (or pick "
+            "'Microsoft Entra ID' in 'elevate model')."
+        )
+
+    source = "explicit" if (explicit_api_key or explicit_base_url) else "config"
+    return {
+        "provider": "azure-foundry",
+        "api_mode": cfg_api_mode,
+        "base_url": base_url,
+        "api_key": api_key,
+        "auth_mode": "api_key",
+        "source": source,
+        "requested_provider": requested_provider,
+    }
+
+
 def _resolve_explicit_runtime(
     *,
     provider: str,
