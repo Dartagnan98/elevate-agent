@@ -125,12 +125,18 @@ class TestResolveChildPython(unittest.TestCase):
     def test_project_with_no_venv_falls_back(self):
         """Project mode without VIRTUAL_ENV or CONDA_PREFIX → sys.executable."""
         env = {k: v for k, v in os.environ.items()
-               if k not in ("VIRTUAL_ENV", "CONDA_PREFIX")}
+               if k not in {"VIRTUAL_ENV", "CONDA_PREFIX"}}
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(_resolve_child_python("project"), sys.executable)
 
     def test_project_with_virtualenv_picks_venv_python(self):
         """Project mode + VIRTUAL_ENV pointing at a real venv → that python."""
+        if sys.platform == "win32":
+            pytest.skip(
+                "Creates symlinks and assumes POSIX venv layout (bin/python). "
+                "Windows venvs use Scripts/python.exe and symlink creation "
+                "requires elevated privileges (WinError 1314)."
+            )
         import tempfile, pathlib
         with tempfile.TemporaryDirectory() as td:
             fake_venv = pathlib.Path(td)
@@ -154,6 +160,12 @@ class TestResolveChildPython(unittest.TestCase):
 
     def test_project_prefers_virtualenv_over_conda(self):
         """If both VIRTUAL_ENV and CONDA_PREFIX are set, VIRTUAL_ENV wins."""
+        if sys.platform == "win32":
+            pytest.skip(
+                "Creates symlinks and assumes POSIX venv layout (bin/python). "
+                "Windows venvs use Scripts/python.exe and symlink creation "
+                "requires elevated privileges (WinError 1314)."
+            )
         import tempfile, pathlib
         with tempfile.TemporaryDirectory() as ve_td, tempfile.TemporaryDirectory() as conda_td:
             ve = pathlib.Path(ve_td)
@@ -257,7 +269,15 @@ class TestModeAwareSchema(unittest.TestCase):
 # Integration: what actually happens when execute_code runs per mode
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(sys.platform == "win32", reason="execute_code is POSIX-only")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Assumes POSIX venv layout (bin/python) and symlink creation "
+        "privileges.  execute_code itself works on Windows — these "
+        "integration tests just haven't been ported to the Scripts/"
+        "python.exe layout yet."
+    ),
+)
 class TestExecuteCodeModeIntegration(unittest.TestCase):
     """End-to-end: verify the subprocess actually runs where we expect."""
 
@@ -278,7 +298,7 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
         """Strict mode: script's os.getcwd() is the staging tmpdir."""
         result = self._run("import os; print(os.getcwd())", mode="strict")
         self.assertEqual(result["status"], "success")
-        self.assertIn("elevate_sandbox_", result["output"])
+        self.assertIn("hermes_sandbox_", result["output"])
 
     def test_project_mode_runs_in_session_cwd(self):
         """Project mode: script's os.getcwd() is the session's working dir."""
@@ -299,7 +319,7 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
     def test_project_mode_interpreter_is_venv_python(self):
         """Project mode: sys.executable inside the child is the venv's python
         when VIRTUAL_ENV is set to a real venv."""
-        # The elevate venv is always active during tests, so this also
+        # The hermes-agent venv is always active during tests, so this also
         # happens to equal sys.executable of the parent. What we're asserting
         # is: resolver picked a venv-bin/python path, not that it differs
         # from sys.executable.
@@ -314,16 +334,16 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
                 f"project-mode python should be under VIRTUAL_ENV={ve} or sys.executable={sys.executable}, got {output}",
             )
 
-    def test_project_mode_can_still_import_elevate_tools(self):
-        """Regression: elevate_tools still importable from non-tmpdir CWD.
+    def test_project_mode_can_still_import_hermes_tools(self):
+        """Regression: hermes_tools still importable from non-tmpdir CWD.
 
         This is the PYTHONPATH fix — without it, switching to session CWD
-        breaks `from elevate_tools import terminal`.
+        breaks `from hermes_tools import terminal`.
         """
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             code = (
-                "from elevate_tools import terminal\n"
+                "from hermes_tools import terminal\n"
                 "r = terminal('echo x')\n"
                 "print(r.get('output', 'MISSING'))\n"
             )
@@ -331,10 +351,10 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             self.assertIn("mock", result["output"])
 
-    def test_strict_mode_can_still_import_elevate_tools(self):
+    def test_strict_mode_can_still_import_hermes_tools(self):
         """Regression: strict mode's tmpdir CWD still works for imports."""
         code = (
-            "from elevate_tools import terminal\n"
+            "from hermes_tools import terminal\n"
             "r = terminal('echo x')\n"
             "print(r.get('output', 'MISSING'))\n"
         )
@@ -351,7 +371,15 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
 # changes CWD + interpreter, not the security posture.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(sys.platform == "win32", reason="execute_code is POSIX-only")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Assumes POSIX venv layout (bin/python) and symlink creation "
+        "privileges.  execute_code itself works on Windows — these "
+        "integration tests just haven't been ported to the Scripts/"
+        "python.exe layout yet."
+    ),
+)
 class TestSecurityInvariantsAcrossModes(unittest.TestCase):
 
     def _run(self, code, mode):
@@ -429,7 +457,7 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
         # execute_code is NOT in SANDBOX_ALLOWED_TOOLS (no recursion)
         self.assertNotIn("execute_code", SANDBOX_ALLOWED_TOOLS)
         code = (
-            "import elevate_tools as ht\n"
+            "import hermes_tools as ht\n"
             "print('execute_code_available:', hasattr(ht, 'execute_code'))\n"
             "print('delegate_task_available:', hasattr(ht, 'delegate_task'))\n"
         )
@@ -441,7 +469,7 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
     def test_tool_whitelist_enforced_in_project_mode(self):
         """CRITICAL: project mode does NOT widen the tool whitelist."""
         code = (
-            "import elevate_tools as ht\n"
+            "import hermes_tools as ht\n"
             "print('execute_code_available:', hasattr(ht, 'execute_code'))\n"
             "print('delegate_task_available:', hasattr(ht, 'delegate_task'))\n"
         )

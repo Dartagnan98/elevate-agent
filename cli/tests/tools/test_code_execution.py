@@ -5,7 +5,7 @@ Tests for the code execution sandbox (programmatic tool calling).
 
 These tests monkeypatch handle_function_call so they don't require API keys
 or a running terminal backend. They verify the core sandbox mechanics:
-UDS socket lifecycle, elevate_tools generation, timeout enforcement,
+UDS socket lifecycle, hermes_tools generation, timeout enforcement,
 output capping, tool call counting, and error propagation.
 
 Run with:  python -m pytest tests/test_code_execution.py -v
@@ -39,7 +39,7 @@ from unittest.mock import patch, MagicMock
 from tools.code_execution_tool import (
     SANDBOX_ALLOWED_TOOLS,
     execute_code,
-    generate_elevate_tools_module,
+    generate_hermes_tools_module,
     check_sandbox_requirements,
     build_execute_code_schema,
     EXECUTE_CODE_SCHEMA,
@@ -79,30 +79,30 @@ class TestSandboxRequirements(unittest.TestCase):
         self.assertIn("code", EXECUTE_CODE_SCHEMA["parameters"]["required"])
 
 
-class TestElevateToolsGeneration(unittest.TestCase):
+class TestHermesToolsGeneration(unittest.TestCase):
     def test_generates_all_allowed_tools(self):
-        src = generate_elevate_tools_module(list(SANDBOX_ALLOWED_TOOLS))
+        src = generate_hermes_tools_module(list(SANDBOX_ALLOWED_TOOLS))
         for tool in SANDBOX_ALLOWED_TOOLS:
             self.assertIn(f"def {tool}(", src)
 
     def test_generates_subset(self):
-        src = generate_elevate_tools_module(["terminal", "web_search"])
+        src = generate_hermes_tools_module(["terminal", "web_search"])
         self.assertIn("def terminal(", src)
         self.assertIn("def web_search(", src)
         self.assertNotIn("def read_file(", src)
 
     def test_empty_list_generates_nothing(self):
-        src = generate_elevate_tools_module([])
+        src = generate_hermes_tools_module([])
         self.assertNotIn("def terminal(", src)
         self.assertIn("def _call(", src)  # infrastructure still present
 
     def test_non_allowed_tools_ignored(self):
-        src = generate_elevate_tools_module(["vision_analyze", "terminal"])
+        src = generate_hermes_tools_module(["vision_analyze", "terminal"])
         self.assertIn("def terminal(", src)
         self.assertNotIn("def vision_analyze(", src)
 
     def test_rpc_infrastructure_present(self):
-        src = generate_elevate_tools_module(["terminal"])
+        src = generate_hermes_tools_module(["terminal"])
         self.assertIn("ELEVATE_RPC_SOCKET", src)
         self.assertIn("AF_UNIX", src)
         self.assertIn("def _connect(", src)
@@ -110,17 +110,33 @@ class TestElevateToolsGeneration(unittest.TestCase):
 
     def test_convenience_helpers_present(self):
         """Verify json_parse, shell_quote, and retry helpers are generated."""
-        src = generate_elevate_tools_module(["terminal"])
+        src = generate_hermes_tools_module(["terminal"])
         self.assertIn("def json_parse(", src)
         self.assertIn("def shell_quote(", src)
         self.assertIn("def retry(", src)
-        self.assertIn("import json, os, socket, shlex, time", src)
+        self.assertIn("import json, os, socket, shlex, threading, time", src)
 
     def test_file_transport_uses_tempfile_fallback_for_rpc_dir(self):
-        src = generate_elevate_tools_module(["terminal"], transport="file")
-        self.assertIn("import json, os, shlex, tempfile, time", src)
-        self.assertIn("os.path.join(tempfile.gettempdir(), \"elevate_rpc\")", src)
-        self.assertNotIn('os.environ.get("ELEVATE_RPC_DIR", "/tmp/elevate_rpc")', src)
+        src = generate_hermes_tools_module(["terminal"], transport="file")
+        self.assertIn("import json, os, shlex, tempfile, threading, time", src)
+        self.assertIn("os.path.join(tempfile.gettempdir(), \"hermes_rpc\")", src)
+        self.assertNotIn('os.environ.get("ELEVATE_RPC_DIR", "/tmp/hermes_rpc")', src)
+
+    def test_uds_transport_serializes_concurrent_calls(self):
+        """Regression: UDS _call() must hold a lock across send+recv so that
+        concurrent tool calls from multiple threads don't interleave on the
+        shared socket and receive each other's responses."""
+        src = generate_hermes_tools_module(["terminal"], transport="uds")
+        self.assertIn("_call_lock = threading.Lock()", src)
+        self.assertIn("with _call_lock:", src)
+
+    def test_file_transport_serializes_seq_allocation(self):
+        """Regression: file transport _call() must allocate `_seq` under a
+        lock, otherwise concurrent threads can pick the same seq and clobber
+        each other's request files."""
+        src = generate_hermes_tools_module(["terminal"], transport="file")
+        self.assertIn("_seq_lock = threading.Lock()", src)
+        self.assertIn("with _seq_lock:", src)
 
 
 class TestExecuteCodeRemoteTempDir(unittest.TestCase):
@@ -153,10 +169,10 @@ class TestExecuteCodeRemoteTempDir(unittest.TestCase):
         mkdir_cmd = env.commands[1][0]
         run_cmd = next(cmd for cmd, _, _ in env.commands if "python3 script.py" in cmd)
         cleanup_cmd = env.commands[-1][0]
-        self.assertIn("mkdir -p /data/data/com.termux/files/usr/tmp/elevate_exec_", mkdir_cmd)
-        self.assertIn("ELEVATE_RPC_DIR=/data/data/com.termux/files/usr/tmp/elevate_exec_", run_cmd)
-        self.assertIn("rm -rf /data/data/com.termux/files/usr/tmp/elevate_exec_", cleanup_cmd)
-        self.assertNotIn("mkdir -p /tmp/elevate_exec_", mkdir_cmd)
+        self.assertIn("mkdir -p /data/data/com.termux/files/usr/tmp/hermes_exec_", mkdir_cmd)
+        self.assertIn("ELEVATE_RPC_DIR=/data/data/com.termux/files/usr/tmp/hermes_exec_", run_cmd)
+        self.assertIn("rm -rf /data/data/com.termux/files/usr/tmp/hermes_exec_", cleanup_cmd)
+        self.assertNotIn("mkdir -p /tmp/hermes_exec_", mkdir_cmd)
 
 
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
@@ -193,7 +209,7 @@ class TestExecuteCode(unittest.TestCase):
     def test_single_tool_call(self):
         """Script calls terminal and prints the result."""
         code = """
-from elevate_tools import terminal
+from hermes_tools import terminal
 result = terminal("echo hello")
 print(result.get("output", ""))
 """
@@ -205,7 +221,7 @@ print(result.get("output", ""))
     def test_multi_tool_chain(self):
         """Script calls multiple tools sequentially."""
         code = """
-from elevate_tools import terminal, read_file
+from hermes_tools import terminal, read_file
 r1 = terminal("ls")
 r2 = read_file("test.py")
 print(f"terminal: {r1['output'][:20]}")
@@ -226,16 +242,74 @@ print(f"file lines: {r2['total_lines']}")
         result = self._run("raise ValueError('test error')")
         self.assertEqual(result["status"], "error")
 
+    def test_concurrent_tool_calls_match_responses(self):
+        """Regression for the UDS RPC race: multiple threads inside the
+        sandbox calling terminal() concurrently must each receive their own
+        response, not another thread's.
+
+        Before the fix, `_sock` and the recv-loop were shared without a
+        lock, so responses (written FIFO by the single-threaded server)
+        got delivered to whichever client thread happened to win the
+        recv() race. That surfaced as each thread seeing another thread's
+        output.
+
+        The mock dispatcher sleeps briefly to guarantee the requests
+        overlap on the socket.
+        """
+        code = '''
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from hermes_tools import terminal
+
+N = 10
+
+def call(i):
+    r = terminal(f"echo TAG-{i}")
+    return i, r.get("output", "")
+
+with ThreadPoolExecutor(max_workers=N) as ex:
+    results = list(ex.map(call, range(N)))
+
+mismatches = [(i, out) for i, out in results if f"TAG-{i}" not in out]
+if mismatches:
+    print(f"MISMATCH {len(mismatches)}/{N}: {mismatches[:3]}")
+else:
+    print(f"OK {N}/{N}")
+'''
+
+        def slow_mock(function_name, function_args, task_id=None, user_task=None):
+            import time as _t
+            if function_name == "terminal":
+                _t.sleep(0.05)  # ensure requests overlap on the socket
+                cmd = function_args.get("command", "")
+                # Echo semantics: strip leading "echo " and return the rest
+                out = cmd[5:] if cmd.startswith("echo ") else f"mock: {cmd}"
+                return json.dumps({"output": out, "exit_code": 0})
+            return _mock_handle_function_call(
+                function_name, function_args, task_id=task_id, user_task=user_task
+            )
+
+        with patch("model_tools.handle_function_call", side_effect=slow_mock):
+            raw = execute_code(
+                code=code,
+                task_id="test-concurrent",
+                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+            )
+        result = json.loads(raw)
+        self.assertEqual(result["status"], "success", msg=result)
+        self.assertIn("OK 10/10", result["output"],
+                      msg=f"Concurrent tool calls mismatched: {result['output']!r}")
+
     def test_excluded_tool_returns_error(self):
         """Script calling a tool not in the allow-list gets an error from RPC."""
         code = """
-from elevate_tools import terminal
+from hermes_tools import terminal
 result = terminal("echo hi")
 print(result)
 """
         # Only enable web_search -- terminal should be excluded
         result = self._run(code, enabled_tools=["web_search"])
-        # terminal won't be in elevate_tools.py, so import fails
+        # terminal won't be in hermes_tools.py, so import fails
         self.assertEqual(result["status"], "error")
 
     def test_empty_code(self):
@@ -287,7 +361,7 @@ raise RuntimeError("deliberate crash")
     def test_web_search_tool(self):
         """Script calls web_search and processes results."""
         code = """
-from elevate_tools import web_search
+from hermes_tools import web_search
 results = web_search("test query")
 print(f"Found {len(results.get('results', []))} results")
 """
@@ -298,7 +372,7 @@ print(f"Found {len(results.get('results', []))} results")
     def test_json_parse_helper(self):
         """json_parse handles control characters that json.loads(strict=True) rejects."""
         code = r"""
-from elevate_tools import json_parse
+from hermes_tools import json_parse
 # This JSON has a literal tab character which strict mode rejects
 text = '{"body": "line1\tline2\nline3"}'
 result = json_parse(text)
@@ -311,7 +385,7 @@ print(result["body"])
     def test_shell_quote_helper(self):
         """shell_quote properly escapes dangerous characters."""
         code = """
-from elevate_tools import shell_quote
+from hermes_tools import shell_quote
 # String with backticks, quotes, and special chars
 dangerous = '`rm -rf /` && $(whoami) "hello"'
 escaped = shell_quote(dangerous)
@@ -326,7 +400,7 @@ assert escaped.startswith("'")
     def test_retry_helper_success(self):
         """retry returns on first success."""
         code = """
-from elevate_tools import retry
+from hermes_tools import retry
 counter = [0]
 def flaky():
     counter[0] += 1
@@ -341,7 +415,7 @@ print(result)
     def test_retry_helper_eventual_success(self):
         """retry retries on failure and succeeds eventually."""
         code = """
-from elevate_tools import retry
+from hermes_tools import retry
 counter = [0]
 def flaky():
     counter[0] += 1
@@ -358,7 +432,7 @@ print(result)
     def test_retry_helper_all_fail(self):
         """retry raises the last error when all attempts fail."""
         code = """
-from elevate_tools import retry
+from hermes_tools import retry
 def always_fail():
     raise ValueError("nope")
 try:
@@ -450,12 +524,12 @@ class TestStubSchemaDrift(unittest.TestCase):
                          "search_files stub docstring still uses obsolete 'find' target value")
 
     def test_generated_module_accepts_all_params(self):
-        """The generated elevate_tools.py module should accept all current params
+        """The generated hermes_tools.py module should accept all current params
         without TypeError when called with keyword arguments."""
-        src = generate_elevate_tools_module(list(SANDBOX_ALLOWED_TOOLS))
+        src = generate_hermes_tools_module(list(SANDBOX_ALLOWED_TOOLS))
 
         # Compile the generated module to check for syntax errors
-        compile(src, "elevate_tools.py", "exec")
+        compile(src, "hermes_tools.py", "exec")
 
         # Verify specific parameter signatures are in the source
         # search_files must accept context, offset, output_mode
@@ -531,7 +605,7 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
     def test_real_scenario_all_sandbox_tools_disabled(self):
         """Reproduce the exact code path from model_tools.py:231-234.
 
-        Scenario: user runs `elevate tools code_execution` (only code_execution
+        Scenario: user runs `hermes tools code_execution` (only code_execution
         toolset enabled). tools_to_include = {"execute_code"}.
 
         model_tools.py does:
@@ -556,7 +630,7 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
                          "Bug: broken import syntax sent to the model")
 
     def test_real_scenario_only_vision_enabled(self):
-        """Another real path: user runs `elevate tools code_execution,vision`.
+        """Another real path: user runs `hermes tools code_execution,vision`.
 
         tools_to_include = {"execute_code", "vision_analyze"}
         SANDBOX_ALLOWED_TOOLS has neither, so intersection is empty.
@@ -663,7 +737,7 @@ class TestEnvVarFiltering(unittest.TestCase):
         child_env = self._get_child_env()
         self.assertIn("HOME", child_env)
 
-    def test_elevate_rpc_socket_injected(self):
+    def test_hermes_rpc_socket_injected(self):
         child_env = self._get_child_env()
         self.assertIn("ELEVATE_RPC_SOCKET", child_env)
 
@@ -700,11 +774,17 @@ class TestEnvVarFiltering(unittest.TestCase):
 class TestExecuteCodeEdgeCases(unittest.TestCase):
 
     def test_windows_returns_error(self):
-        """On Windows (or when SANDBOX_AVAILABLE is False), returns error JSON."""
+        """When SANDBOX_AVAILABLE is False (e.g. when the backend deems
+        the sandbox unusable for this environment), execute_code returns
+        an error JSON with a readable message pointing the caller at
+        regular tool calls.  Previously this was a Windows-only gate;
+        execute_code now works on Windows via loopback TCP, so the
+        error is only emitted when SANDBOX_AVAILABLE is explicitly
+        flipped off (e.g. for future platform-specific disables)."""
         with patch("tools.code_execution_tool.SANDBOX_AVAILABLE", False):
             result = json.loads(execute_code("print('hi')", task_id="test"))
             self.assertIn("error", result)
-            self.assertIn("Windows", result["error"])
+            self.assertIn("unavailable", result["error"].lower())
 
     def test_whitespace_only_code(self):
         result = json.loads(execute_code("   \n\t  ", task_id="test"))
@@ -715,7 +795,7 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
     def test_none_enabled_tools_uses_all(self):
         """When enabled_tools is None, all sandbox tools should be available."""
         code = (
-            "from elevate_tools import terminal, web_search, read_file\n"
+            "from hermes_tools import terminal, web_search, read_file\n"
             "print('all imports ok')\n"
         )
         with patch("model_tools.handle_function_call",
@@ -729,7 +809,7 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
     def test_empty_enabled_tools_uses_all(self):
         """When enabled_tools is [] (empty), all sandbox tools should be available."""
         code = (
-            "from elevate_tools import terminal, web_search\n"
+            "from hermes_tools import terminal, web_search\n"
             "print('imports ok')\n"
         )
         with patch("model_tools.handle_function_call",
@@ -744,7 +824,7 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
         """When enabled_tools has no overlap with SANDBOX_ALLOWED_TOOLS,
         should fall back to all allowed tools."""
         code = (
-            "from elevate_tools import terminal\n"
+            "from hermes_tools import terminal\n"
             "print('fallback ok')\n"
         )
         with patch("model_tools.handle_function_call",
@@ -770,11 +850,19 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_returns_code_execution_section(self):
         from tools.code_execution_tool import _load_config
-        mock_cli = MagicMock()
-        mock_cli.CLI_CONFIG = {"code_execution": {"timeout": 120, "max_tool_calls": 10}}
-        with patch.dict("sys.modules", {"cli": mock_cli}):
+        with patch("elevate_cli.config.read_raw_config",
+                   return_value={"code_execution": {"timeout": 120, "max_tool_calls": 10}}):
             result = _load_config()
-        self.assertIsInstance(result, dict)
+        self.assertEqual(result, {"timeout": 120, "max_tool_calls": 10})
+
+    def test_does_not_import_interactive_cli(self):
+        from tools.code_execution_tool import _load_config
+        mock_cli = MagicMock()
+        mock_cli.CLI_CONFIG = {"code_execution": {"timeout": 999}}
+        with patch.dict("sys.modules", {"cli": mock_cli}), \
+             patch("elevate_cli.config.read_raw_config", return_value={}):
+            result = _load_config()
+        self.assertEqual(result, {})
 
 
 # ---------------------------------------------------------------------------
