@@ -8178,6 +8178,12 @@ Examples:
         action="store_true",
         help="Print the report locally instead of uploading",
     )
+    share_parser.add_argument(
+        "--no-redact",
+        action="store_true",
+        dest="no_redact",
+        help="Disable credential redaction in log uploads (default: redact)",
+    )
     delete_parser = debug_sub.add_parser(
         "delete",
         help="Delete a paste uploaded by 'elevate debug share'",
