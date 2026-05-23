@@ -504,6 +504,9 @@ def test_setup_summary_does_not_mark_incomplete_browserbase_as_available(tmp_pat
     _print_setup_summary(load_config(), tmp_path)
     output = capsys.readouterr().out
 
+    # Elevate onboarding uses Browser Use cloud, not Browserbase: when the
+    # browser feature is unavailable the summary surfaces a generic
+    # "configure Browser Use" hint instead of Browserbase-specific env vars.
     assert "Browser Automation (Browserbase)" not in output
     assert "Browser Automation" in output
-    assert "BROWSERBASE_API_KEY/BROWSERBASE_PROJECT_ID" in output
+    assert "configure Browser Use" in output
