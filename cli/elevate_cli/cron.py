@@ -93,9 +93,14 @@ def cron_list(show_all: bool = False):
         script = job.get("script")
         if script:
             print(f"    Script:    {script}")
+        if job.get("no_agent"):
+            print(f"    Mode:      {color('no-agent', Colors.DIM)} (script stdout delivered directly)")
         workdir = job.get("workdir")
         if workdir:
             print(f"    Workdir:   {workdir}")
+        profile = job.get("profile")
+        if profile:
+            print(f"    Profile:   {profile}")
 
         # Execution history
         last_status = job.get("last_status")

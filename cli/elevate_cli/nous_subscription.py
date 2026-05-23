@@ -9,6 +9,7 @@ from typing import Dict, Iterable, Optional, Set
 from elevate_cli.auth import get_nous_auth_status
 from elevate_cli.config import get_env_value, load_config
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
+from utils import is_truthy_value
 from tools.tool_backend_helpers import (
     fal_key_is_configured,
     has_direct_modal_credentials,
@@ -23,6 +24,13 @@ from tools.tool_backend_helpers import (
 _DEFAULT_PLATFORM_TOOLSETS = {
     "cli": "elevate-cli",
 }
+
+
+def _uses_gateway(section: object) -> bool:
+    """Return True when a config section explicitly opts into the gateway."""
+    if not isinstance(section, dict):
+        return False
+    return is_truthy_value(section.get("use_gateway"), default=False)
 
 
 @dataclass(frozen=True)
@@ -247,6 +255,10 @@ def get_nous_subscription_features(
     terminal_cfg = config.get("terminal") if isinstance(config.get("terminal"), dict) else {}
 
     web_backend = str(web_cfg.get("backend") or "").strip().lower()
+    # Per-capability overrides: if set, they determine which backend is active for
+    # search/extract independently of web.backend.
+    web_search_backend = str(web_cfg.get("search_backend") or "").strip().lower()
+    web_extract_backend = str(web_cfg.get("extract_backend") or "").strip().lower()
     tts_provider = str(tts_cfg.get("provider") or "edge").strip().lower()
     browser_provider_explicit = "cloud_provider" in browser_cfg
     browser_provider = normalize_browser_cloud_provider(
@@ -262,11 +274,11 @@ def get_nous_subscription_features(
     # use_gateway flags — when True, the user explicitly opted into the
     # Tool Gateway via `elevate model`, so direct credentials should NOT
     # prevent gateway routing.
-    web_use_gateway = bool(web_cfg.get("use_gateway"))
-    tts_use_gateway = bool(tts_cfg.get("use_gateway"))
-    browser_use_gateway = bool(browser_cfg.get("use_gateway"))
+    web_use_gateway = _uses_gateway(web_cfg)
+    tts_use_gateway = _uses_gateway(tts_cfg)
+    browser_use_gateway = _uses_gateway(browser_cfg)
     image_gen_cfg = config.get("image_gen") if isinstance(config.get("image_gen"), dict) else {}
-    image_use_gateway = bool(image_gen_cfg.get("use_gateway"))
+    image_use_gateway = _uses_gateway(image_gen_cfg)
 
     direct_exa = bool(get_env_value("EXA_API_KEY"))
     direct_firecrawl = bool(get_env_value("FIRECRAWL_API_KEY") or get_env_value("FIRECRAWL_API_URL"))
