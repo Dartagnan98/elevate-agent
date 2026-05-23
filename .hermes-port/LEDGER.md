@@ -481,5 +481,29 @@ ba32db088 + 4e092c8a3 + 829ded7c2 — branding cleanup batches:
 All pure string changes, no behaviour deltas. Each had a verified
 Elevate-side test pass before commit.
 
-NEXT: continue B4b elevate_cli/ differ files (memory_setup, debug, larger
-diffs deferred) OR drain B8 test-port backlog (444 missing test files).
+35f392c86 — branding cleanup batch 2:
+  - hermes kanban decompose / Hermes Agent board (kanban_decompose.py)
+  - hermes kanban specify / Hermes Agent board (kanban_specify.py)
+  - Hermes docs site / 'hermes model --refresh' (model_catalog.py)
+  - SKIPPED hermes-agent.nousresearch.com URL + hermes-cli/<ver> UA
+    (those tie to docs/build endpoints Elevate does not host yet)
+
+c8d41d6ea — branding cleanup batch 3:
+  - skills_hub.py: ~/.hermes/skills/ docstring + user-facing message;
+    'ships with hermes-agent'; snapshot export field hermes_version ->
+    elevate_version (verified write-only, no reader anywhere)
+  - dep_ensure.py: REAL BUG FIX. _has_hermes_agent_browser renamed,
+    -HermesHome PowerShell param renamed to -ElevateHome to match
+    install.ps1's $ElevateHome — would have silently failed dep installs
+    on Windows.
+  - profile_describer.py: docstring + _SYSTEM_PROMPT board name +
+    meta-narration warning all updated to Elevate branding
+
+Full repo sweep (post-c8d41d6ea): 101 failed / 16770 passed / 246 skipped /
+214 warnings in 402.58s — matches baseline, zero new regressions across all
+this session's batches.
+
+NEXT: continue B4b elevate_cli/ differ files (curator, migrate, bundles,
+backup remain as small-diff candidates; doctor/setup/memory_setup deferred
+as larger Elevate divergence) OR drain B8 test-port backlog (444 missing
+test files; 4 ported this session).
