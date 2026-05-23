@@ -132,7 +132,24 @@ SKIP (do not port - would break Elevate or pure dead weight):
           transcription_tools, tool_result_storage, checkpoint_manager, vision_tools, tts_tool,
           mcp_oauth_manager, registry (TTL cache leak). Real Class B - need hand-merge.
 - [ ] B6 providers/ + plugins/model-providers/
-- [ ] B7 skills / optional-skills (filtered)
+- [x] B7 skills / optional-skills (filtered) - 222 net-new files (117 skills +
+        105 optional-skills) across 14 subcategories: apple/macos-computer-use,
+        autonomous-ai-agents/{hermes-agent,kanban-codex-lane}, creative
+        (baoyu-article-illustrator, claude-design, comfyui, humanizer, p5js,
+        popular-web-designs, pretext, sketch, touchdesigner-mcp, hyperframes,
+        kanban-video-orchestrator, concept-diagrams), devops (kanban-orchestrator,
+        kanban-worker, pinggy-tunnel, watchers), finance (3-statement-model,
+        comps-analysis, dcf-model, excel-author, lbo-model, merger-model,
+        pptx-author, stocks), migration/openclaw-migration, mlops
+        (inference, training), productivity (airtable, google-workspace, linear,
+        teams-meeting-pipeline, here-now, shop-app, shopify), research
+        (darwinian-evolver, osint-investigation, searxng-search),
+        software-development (debugging-hermes-tui-commands,
+        hermes-agent-skill-authoring, node-inspect-debugger, python-debugpy,
+        spike, subagent-driven-development, rest-graphql-debug).
+        Skip-list applied: yuanbao, blockchain. Sed rename pipeline run on all
+        file types. All .py parse cleanly. Pytest baseline preserved:
+        12 failed / 6175 passed / 159 skipped (zero regressions).
 - [ ] B8 tests sweep
 
 ## Notes
