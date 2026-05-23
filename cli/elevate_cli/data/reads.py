@@ -84,8 +84,43 @@ def _heat_label_for(score: int) -> str:
     return "normal"
 
 
+def _read_private_search_buyers_jsonl(
+    source_root: Path,
+) -> list[dict[str, Any]]:
+    """Read the raw pipeline buyer entries from
+    ``<source_root>/mls-private-search/buyers.jsonl``.
+
+    Entries written by the PCS scraper aren't always tied to a CRM
+    contact yet (manual pulls, brand-new buyers). The DB walk only
+    surfaces buyers with a matching contact row, so we overlay the
+    raw pipeline so nothing scored is hidden.
+    """
+    path = source_root / "mls-private-search" / "buyers.jsonl"
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict):
+                    entries.append(entry)
+    except OSError:
+        return []
+    return entries
+
+
 def db_private_search_buyers(
-    conn: sqlite3.Connection, *, limit: int = 50
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    source_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     """DB-backed equivalent of ``_read_private_search_buyers``.
 
@@ -94,6 +129,10 @@ def db_private_search_buyers(
     with ``pcs_buyers`` (per-contact MLS scoring detail). Matches the JSONL
     reader's sort order: score desc (CRM-native preferred over heat), then
     most-recent activity first.
+
+    Pipeline entries written to ``mls-private-search/buyers.jsonl`` that
+    don't yet match a CRM contact (by email/phone) are appended so the
+    scraper's scored buyers stay visible.
 
     Surfaced fields match ``web/src/lib/api-types.ts::BuyerWatchlistEntry``.
     """
@@ -163,7 +202,52 @@ def db_private_search_buyers(
             "tags": [],
             "scrapedAt": row["pcs_last_scraped"],
         })
-    return entries
+
+    # Overlay pipeline entries that don't already correspond to a
+    # CRM contact in the DB walk. Matches the legacy JSONL reader: a
+    # buyer is considered "already covered" if its email or phone
+    # matches one of the DB rows.
+    if source_root is None:
+        try:
+            from elevate_cli.source_connectors import get_source_root_info
+            source_root = Path(get_source_root_info(None)["sourceRoot"])
+        except Exception:
+            source_root = None
+
+    if source_root is not None:
+        pipeline = _read_private_search_buyers_jsonl(source_root)
+        if pipeline:
+            covered_emails = {
+                (e["email"] or "").strip().lower()
+                for e in entries
+                if e.get("email")
+            }
+            covered_phones = {
+                "".join(ch for ch in (e["phone"] or "") if ch.isdigit())
+                for e in entries
+                if e.get("phone")
+            }
+            for raw in pipeline:
+                email = (raw.get("email") or "").strip().lower()
+                phone_digits = "".join(
+                    ch for ch in str(raw.get("phone") or "") if ch.isdigit()
+                )
+                if email and email in covered_emails:
+                    continue
+                if phone_digits and phone_digits in covered_phones:
+                    continue
+                entries.append(dict(raw))
+
+    def _sort_key(entry: dict[str, Any]) -> tuple[int, int, int]:
+        score = entry.get("score")
+        score_val = -int(score) if isinstance(score, (int, float)) else 0
+        days = entry.get("days")
+        days_val = int(days) if isinstance(days, (int, float)) else 9999
+        has_score = 0 if isinstance(score, (int, float)) else 1
+        return (has_score, score_val, days_val)
+
+    entries.sort(key=_sort_key)
+    return entries[: max(int(limit), 1)]
 
 
 # ─── Source inbox ──────────────────────────────────────────────────────
