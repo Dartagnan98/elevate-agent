@@ -233,7 +233,7 @@ def _augment_path_with_known_tools() -> None:
         # Elevate venv Scripts directory — host of the elevate.exe shim itself,
         # also where any pip-installed console scripts land.  Usually already
         # on PATH when the user invokes elevate, but harmless to include.
-        os.path.join(local_appdata, "elevate", "elevate", "venv", "Scripts"),
+        os.path.join(local_appdata, "elevate", "elevate-agent", "venv", "Scripts"),
         # WinGet packages directory — where ``winget install`` drops CLI
         # shims by default (ripgrep lands here as rg.exe).  Covers the case
         # of a system-Git install + ripgrep-via-winget that isn't yet on
