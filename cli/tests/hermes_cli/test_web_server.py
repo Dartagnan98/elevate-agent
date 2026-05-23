@@ -135,7 +135,7 @@ class TestWebServerEndpoints:
         monkeypatch.setattr(
             agent_hub,
             "build_agent_hub_snapshot",
-            lambda: {"agents": [], "gateway": {"running": False}},
+            lambda *args, **kwargs: {"agents": [], "gateway": {"running": False}},
         )
 
         resp = self.client.get("/api/agent-hub")

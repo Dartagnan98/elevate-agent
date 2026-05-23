@@ -26,7 +26,7 @@ from elevate_cli.data.paths import operational_db_path
 
 
 _schema_lock = threading.Lock()
-_schema_ready = False
+_schema_ready_paths: set[str] = set()
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -36,30 +36,28 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA busy_timeout=5000")
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Run pending migrations exactly once per process.
+def _ensure_schema(conn: sqlite3.Connection, db_path: str) -> None:
+    """Run pending migrations exactly once per DB path per process.
 
-    The lock keeps two threads from racing the migrator. Tests that want
-    a fresh schema apply (e.g. between temp DBs) should call
-    :func:`_reset_schema_cache` rather than poking the global directly.
+    The cache is keyed by DB path so tests redirecting ``ELEVATE_HOME`` to
+    different tempdirs each get a fresh migration run on first connect.
+    The lock keeps two threads from racing the migrator.
     """
-    global _schema_ready
-    if _schema_ready:
+    if db_path in _schema_ready_paths:
         return
     with _schema_lock:
-        if _schema_ready:
+        if db_path in _schema_ready_paths:
             return
         migrations.run_pending(conn)
-        _schema_ready = True
+        _schema_ready_paths.add(db_path)
 
 
 def _reset_schema_cache() -> None:
     """Test helper — drop the "schema is up to date" cache so the next
     ``connect()`` re-runs the migrator. Useful when a test redirects
     ``ELEVATE_HOME`` to a fresh tmp dir."""
-    global _schema_ready
     with _schema_lock:
-        _schema_ready = False
+        _schema_ready_paths.clear()
 
 
 @contextmanager
@@ -73,7 +71,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     _apply_pragmas(conn)
     try:
-        _ensure_schema(conn)
+        _ensure_schema(conn, str(path))
         yield conn
         conn.commit()
     except Exception:

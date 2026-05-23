@@ -245,10 +245,50 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS turn_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL,
+    session_id TEXT,
+    session_key TEXT,
+    message_id TEXT,
+    source TEXT,
+    provider TEXT,
+    model TEXT,
+    gateway_tool_profile TEXT,
+    gateway_tool_profile_reason TEXT,
+    selected_toolsets TEXT,
+    requested_toolsets TEXT,
+    configured_toolsets TEXT,
+    loaded_tool_count INTEGER DEFAULT 0,
+    selected_tool_schema_tokens INTEGER DEFAULT 0,
+    configured_tool_schema_tokens INTEGER DEFAULT 0,
+    estimated_tool_schema_savings_tokens INTEGER DEFAULT 0,
+    estimated_tool_schema_savings_pct REAL,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    api_calls INTEGER DEFAULT 0,
+    estimated_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    latency_ms INTEGER DEFAULT 0,
+    tool_calls TEXT,
+    status TEXT,
+    error_type TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_timestamp ON turn_usage(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_source ON turn_usage(source, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_usage_dedup
+    ON turn_usage(source, session_key, message_id)
+    WHERE source <> '' AND session_key <> '' AND message_id <> '';
 """
 
 FTS_SQL = """
@@ -1538,6 +1578,74 @@ class SessionDB:
             return msg_id
 
         return self._execute_write(_do)
+
+    # ------------------------------------------------------------------
+    # Per-turn usage ledger (gateway/usage_ledger.py + agent/insights.py)
+    # ------------------------------------------------------------------
+    _TURN_USAGE_COLUMNS = (
+        "timestamp",
+        "session_id",
+        "session_key",
+        "message_id",
+        "source",
+        "provider",
+        "model",
+        "gateway_tool_profile",
+        "gateway_tool_profile_reason",
+        "selected_toolsets",
+        "requested_toolsets",
+        "configured_toolsets",
+        "loaded_tool_count",
+        "selected_tool_schema_tokens",
+        "configured_tool_schema_tokens",
+        "estimated_tool_schema_savings_tokens",
+        "estimated_tool_schema_savings_pct",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "api_calls",
+        "estimated_cost_usd",
+        "cost_status",
+        "cost_source",
+        "latency_ms",
+        "tool_calls",
+        "status",
+        "error_type",
+    )
+
+    def record_turn_usage(self, row: Dict[str, Any]) -> Optional[int]:
+        """Insert one per-turn usage row, returning its rowid.
+
+        Dedup: rows with the same (source, session_key, message_id) — all
+        non-empty — collapse to a single row via INSERT OR IGNORE against
+        ``idx_turn_usage_dedup``. Duplicates return None.
+        """
+        cols = self._TURN_USAGE_COLUMNS
+        values = tuple(row.get(col) for col in cols)
+        placeholders = ", ".join(["?"] * len(cols))
+        col_list = ", ".join(cols)
+        sql = f"INSERT OR IGNORE INTO turn_usage ({col_list}) VALUES ({placeholders})"
+
+        def _do(conn: sqlite3.Connection) -> Optional[int]:
+            cursor = conn.execute(sql, values)
+            if cursor.rowcount == 0:
+                return None
+            return cursor.lastrowid
+
+        return self._execute_write(_do)
+
+    def recent_turn_usage(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Most-recent turn_usage rows, newest first (timestamp DESC, id DESC)."""
+        safe_limit = max(1, min(int(limit or 20), 500))
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM turn_usage ORDER BY timestamp DESC, id DESC LIMIT ?",
+                (safe_limit,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def replace_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Atomically replace every message for a session.
