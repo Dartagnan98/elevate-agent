@@ -213,7 +213,43 @@ SKIP (do not port - would break Elevate or pure dead weight):
         Skip-list applied: yuanbao, blockchain. Sed rename pipeline run on all
         file types. All .py parse cleanly. Pytest baseline preserved:
         12 failed / 6175 passed / 159 skipped (zero regressions).
-- [ ] B8 tests sweep
+- [ ] B8 tests sweep - blocked on modified-files batches (B2 modified,
+      B3b-e, B4b, B5b-phase3). Probe 2026-05-22: porting tests/providers/,
+      tests/cron/, tests/skills/, tests/agent/lsp/ wholesale produced 158
+      failures / 577 passes - the new tests assume Hermes-side source
+      changes not yet present. Reverted. Test sweep can only land after the
+      paired source ports.
+
+## Session 2026-05-22 summary (additive ports landed)
+Branch `subagent-resilience-2026-05-19` advanced through batches B2 net-new,
+B4a unblocks, B5b-phase2, B6, B7, plugins/ safe-additive (15 commits on top
+of the validated 7-commit baseline). Origin is FROZEN at the 7-commit
+state - everything below this session is LOCAL ONLY.
+
+Cumulative this session:
+- B2 net-new (52 modules: top-level agent/, agent/lsp/, agent/secret_sources/,
+  agent/transports/) - unblocks bundles.py, secrets_cli.py, video_gen_*
+- B4a unblocks: bundles.py + secrets_cli.py (proxy/ + video_generation_tool
+  still deferred, need auth.py refactor + ToolRegistry dynamic_schema_overrides)
+- B5b-phase2: 18 Class A tools across 5 commits + checkpoint_manager test
+  sync (612 ins / 278 del, restores baseline)
+- B6 done: providers/ + plugins/model-providers/ (29 provider profiles)
+- B7 done: 222 skills/optional-skills files
+- plugins/ safe-additive: 47 files (browser, google_meet, image_gen/fal,
+  kanban, observability, platforms/{google_chat,irc}, video_gen)
+
+Pytest end-state: 13 failed / 6198 passed / 159 skipped (flake band).
+Baseline at session start: 12-13 failed / 6175 passed. All "extra" passes
+come from net-new test files landed alongside the source ports.
+
+REMAINING (large hand-merge - cannot be one-shot ported):
+- B2 modified agent/ files (~42 files including run_agent.py refactor)
+- B3b-e gateway hand-merge (per-file hunk-by-hunk preserving Elevate-only
+  security model in webhook.py, agent-bot lanes in config.py/session.py,
+  chunk-splitting in stream_consumer.py)
+- B4b elevate_cli/ differ (54 files; auth.py alone is 7468 vs 4401 lines)
+- B5b-phase3 (14 tools listed above)
+- B8 test sweep (blocked on the above source merges)
 
 ## Notes
 - Elevate runs live for Skyleigh. Never push a batch that fails tests.
