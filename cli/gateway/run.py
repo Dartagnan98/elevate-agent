@@ -59,6 +59,353 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
 
     return _TELEGRAM_COMMAND_MENTION_RE.sub(_replace, text)
 
+
+# ---------------------------------------------------------------------------
+# Gateway provider-error / secret-redaction helpers (pure, no I/O).
+# Ported from Hermes via subagent-resilience-2026-05-19 — pre-PR helpers used
+# by the Telegram delivery path to keep raw provider HTTP envelopes out of
+# mobile chats.  Each helper is module-level, no `self`, no side effects.
+# ---------------------------------------------------------------------------
+_TELEGRAM_NOISY_STATUS_RE = re.compile(
+    r"("  # transient/auxiliary status that should stay in logs, not Telegram chat
+    r"auxiliary\s+.+\s+failed"
+    r"|compression\s+summary\s+failed"
+    r"|fallback\s+context\s+marker"
+    r"|configured\s+compression\s+model\s+.+\s+failed"
+    r"|no\s+auxiliary\s+llm\s+provider\s+configured"
+    r"|auto-lowered\s+compression\s+threshold"
+    r"|preflight\s+compression"
+    r"|rate\s+limited\.\s+waiting\s+\d"
+    r"|retrying\s+in\s+\d"
+    r"|max\s+retries\s+\(\d+\).*(?:trying\s+fallback|exhausted|invalid\s+responses)"
+    r"|stream\s+(?:drop|drop\s+mid\s+tool-call).+retry\s+\d"
+    r"|stale\s+connections\s+from\s+a\s+previous\s+provider\s+issue"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_GATEWAY_PROVIDER_ERROR_RE = re.compile(
+    r"("  # infrastructure/provider error preambles, not ordinary assistant prose
+    r"api\s+(?:call\s+)?failed"
+    r"|provider\s+authentication\s+failed"
+    r"|non-retryable\s+error"
+    r"|rate\s+limited\s+after\s+\d+\s+retries"
+    r"|error\s+code\s*:"
+    r"|\bhttp\s*\d{3}\b"
+    r"|incorrect\s+api\s+key"
+    r"|invalid\s+api\s+key"
+    r")",
+    re.IGNORECASE,
+)
+
+_GATEWAY_PROVIDER_POLICY_RE = re.compile(
+    r"("  # raw provider policy/safety bodies are noisy and may be sensitive
+    r"cybersecurity\s+risk"
+    r"|security\s+policy"
+    r"|safety\s+policy"
+    r"|policy\s+violation"
+    r"|violat(?:e|es|ed|ion)"
+    r"|blocked\s+(?:because|by|under)"
+    r"|request\s+(?:was\s+)?(?:blocked|rejected)"
+    r"|disallowed"
+    r"|moderation"
+    r")",
+    re.IGNORECASE,
+)
+
+_GATEWAY_AUTH_ERROR_RE = re.compile(
+    r"(provider\s+authentication\s+failed|incorrect\s+api\s+key|invalid\s+api\s+key|\b401\b)",
+    re.IGNORECASE,
+)
+
+_GATEWAY_RATE_LIMIT_RE = re.compile(
+    r"(rate\s+limit|rate-limited|\b429\b|quota|usage\s+limit)",
+    re.IGNORECASE,
+)
+
+_GATEWAY_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_\-]{12,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{20,}\b"),
+    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
+)
+
+
+def _gateway_platform_value(platform: Any) -> str:
+    """Return a normalized gateway platform value for enums or raw strings."""
+    return str(getattr(platform, "value", platform) or "").strip().lower()
+
+
+def _redact_gateway_user_facing_secrets(text: str) -> str:
+    """Best-effort secret redaction before text can leave the gateway."""
+    redacted = str(text or "")
+    for pattern in _GATEWAY_SECRET_PATTERNS:
+        redacted = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "[REDACTED]", redacted)
+    return redacted
+
+
+def _gateway_provider_error_reply(text: str) -> str:
+    """Map raw provider/API errors to a short user-safe Telegram reply."""
+    if _GATEWAY_AUTH_ERROR_RE.search(text):
+        return (
+            "⚠️ Provider authentication failed. Check the configured credentials; "
+            "raw provider details are in the gateway logs."
+        )
+    if _GATEWAY_PROVIDER_POLICY_RE.search(text):
+        return (
+            "⚠️ The model provider rejected the request. I kept the raw provider "
+            "error out of chat; check gateway logs for details or try rephrasing."
+        )
+    if _GATEWAY_RATE_LIMIT_RE.search(text):
+        return "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
+    return (
+        "⚠️ The model provider failed after retries. I kept raw provider details "
+        "out of chat; check gateway logs for diagnostics."
+    )
+
+
+_GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
+    r"^\s*(\W*\s*)?("
+    r"api\s+(?:call\s+)?failed"
+    r"|provider\s+authentication\s+failed"
+    r"|non-retryable\s+error"
+    r"|rate\s+limited\s+after\s+\d+\s+retries"
+    r"|error\s+code\s*:"
+    r"|http\s*\d{3}\b"
+    r"|incorrect\s+api\s+key"
+    r"|invalid\s+api\s+key"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_gateway_provider_error(text: str) -> bool:
+    """True when text is infrastructure/provider failure, not normal content.
+
+    Two heuristics combined so the rewrite only fires on actual provider
+    error envelopes, not on assistant prose that happens to mention an
+    HTTP status code:
+
+    1. The text is short — real provider errors are 1–3 lines of envelope
+       text; assistant answers are usually longer.
+    2. AND the error marker appears at the start of the message (optionally
+       behind a punctuation/symbol prefix), not buried mid-paragraph in an
+       explanation like "HTTP 404 means 'not found' — ...".
+    """
+    if not text:
+        return False
+    body = str(text).strip()
+    if len(body) > 400 or body.count("\n") > 4:
+        return False
+    return bool(_GATEWAY_PROVIDER_ERROR_SHAPE_RE.search(body))
+
+
+def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
+    """Sanitize final gateway replies before sending them to high-noise chats.
+
+    Telegram is the operator's mobile inbox, so it should receive concise, safe
+    provider failure categories instead of raw HTTP bodies, request IDs, or
+    policy text.  Other platforms keep the existing behaviour for now.
+    """
+    if not text:
+        return text
+    if _gateway_platform_value(platform) != "telegram":
+        return text
+
+    redacted = _redact_gateway_user_facing_secrets(str(text))
+    if _looks_like_gateway_provider_error(redacted):
+        return _gateway_provider_error_reply(redacted)
+    return redacted
+
+
+def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
+    """Filter/sanitize agent status callbacks before platform delivery."""
+    text = str(message or "").strip()
+    if not text:
+        return None
+    if _gateway_platform_value(platform) != "telegram":
+        return text
+
+    text = _redact_gateway_user_facing_secrets(text)
+    if _TELEGRAM_NOISY_STATUS_RE.search(text):
+        return None
+    if _looks_like_gateway_provider_error(text):
+        return _gateway_provider_error_reply(text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Auto-continue freshness gate.  Stale tool-tail/resume markers can otherwise
+# revive an unrelated old task after a gateway restart when the user's next
+# message starts new work.  Default window: 1 hour (covers
+# agent.gateway_timeout=30min plus runtime slack).  Override via
+# config.yaml agent.gateway_auto_continue_freshness.
+# ---------------------------------------------------------------------------
+_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT = 60 * 60
+
+
+def _coerce_gateway_timestamp(value: Any) -> Optional[float]:
+    """Best-effort conversion of stored gateway timestamps to epoch seconds.
+
+    Missing/unparseable timestamps return None so legacy transcripts keep the
+    historical auto-continue behaviour instead of being silently dropped.
+    Accepts: datetime, epoch seconds (int/float), epoch milliseconds (when
+    the magnitude exceeds year-2286), ISO-8601 strings (with or without a
+    trailing ``Z``), and numeric strings.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.timestamp()
+    if isinstance(value, bool):  # bool is a subclass of int — skip it
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+            return numeric / 1000.0 if numeric > 10_000_000_000 else numeric
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _auto_continue_freshness_window() -> float:
+    """Return the configured auto-continue freshness window in seconds.
+
+    Reads ``ELEVATE_AUTO_CONTINUE_FRESHNESS`` (bridged from
+    ``config.yaml`` ``agent.gateway_auto_continue_freshness`` at gateway
+    startup, same pattern as ``ELEVATE_AGENT_TIMEOUT``).  Falls back to the
+    module default when unset or malformed.  Non-positive values disable
+    the freshness gate (restores the pre-fix "always fresh" behaviour for
+    users who want to opt out).
+    """
+    raw = os.environ.get("ELEVATE_AUTO_CONTINUE_FRESHNESS")
+    if raw is None or raw == "":
+        return float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
+
+
+def _float_env(name: str, default: float) -> float:
+    """Read an env var as float, falling back to ``default`` on typos/empty.
+
+    A misconfigured env var (e.g. ``ELEVATE_AGENT_TIMEOUT=abc``) must not
+    crash the gateway or an agent turn.  Unset/empty also falls back.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _is_fresh_gateway_interruption(
+    value: Any,
+    *,
+    now: Optional[float] = None,
+    window_secs: Optional[float] = None,
+) -> bool:
+    """Return True when an interruption marker is fresh enough to auto-continue.
+
+    Unknown timestamps are treated as fresh for backward compatibility with
+    legacy transcripts (pre-dating timestamp persistence) and with in-memory
+    test scaffolding that constructs history entries without timestamps.
+
+    A non-positive ``window_secs`` disables the gate (always fresh), which
+    restores the pre-fix behaviour for users who opt out via config.
+    """
+    window = (
+        float(window_secs)
+        if window_secs is not None
+        else float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
+    )
+    if window <= 0:
+        return True
+    timestamp = _coerce_gateway_timestamp(value)
+    if timestamp is None:
+        return True
+    current = time.time() if now is None else now
+    return current - timestamp <= window
+
+
+# Assistant-message fields that must survive transcript replay so multi-turn
+# reasoning context, prefix-cache hits, and provider-specific echo
+# requirements all behave the same on the gateway as they do in the CLI.
+_ASSISTANT_REPLAY_FIELDS: tuple = (
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "codex_reasoning_items",
+    "codex_message_items",
+    "finish_reason",
+)
+
+
+def _build_replay_entry(role: str, content: Any, msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a replay entry for a non-tool-calling message, preserving the
+    assistant fields the agent's API builders rely on for multi-turn fidelity.
+
+    Empty values: most fields are dropped when falsy (matching the original
+    behaviour) since an empty list/string for those carries no information.
+    The exception is ``reasoning_content``: DeepSeek/Kimi thinking-mode
+    replay treats an empty string as a meaningful sentinel that
+    ``_copy_reasoning_content_for_api`` upgrades to a single space.
+    Dropping it here would make the gateway send no ``reasoning_content``
+    at all on the next turn, which can cause HTTP 400 from strict
+    thinking providers.
+    """
+    entry: Dict[str, Any] = {"role": role, "content": content}
+    if role == "assistant":
+        for _rkey in _ASSISTANT_REPLAY_FIELDS:
+            if _rkey not in msg:
+                continue
+            _rval = msg.get(_rkey)
+            if _rkey == "reasoning_content":
+                if _rval is None:
+                    continue
+            elif not _rval:
+                continue
+            entry[_rkey] = _rval
+    return entry
+
+
+def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
+    """Return the ``timestamp`` of the last usable transcript row, if any.
+
+    Skips metadata-only rows (``session_meta``, system injections) that are
+    dropped before being handed to the agent.  Returns ``None`` when no
+    usable row carries a timestamp — callers should treat that as "fresh"
+    for backward compatibility.
+    """
+    if not history:
+        return None
+    for msg in reversed(history):
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if not role or role in {"session_meta", "system"}:
+            continue
+        ts = msg.get("timestamp")
+        if ts is not None:
+            return ts
+        return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
 # Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
@@ -116,6 +463,61 @@ from dotenv import load_dotenv  # backward-compat for tests that monkeypatch thi
 from elevate_cli.env_loader import load_elevate_dotenv
 _env_path = _elevate_home / '.env'
 load_elevate_dotenv(elevate_home=_elevate_home, project_env=Path(__file__).resolve().parents[1] / '.env')
+
+
+def _home_target_env_var(platform_name: str) -> str:
+    """Return the configured home-target env var for a platform.
+
+    Consults built-in ``_HOME_TARGET_ENV_VARS`` first, then the plugin
+    registry via ``cron.scheduler._resolve_home_env_var``, then falls back
+    to ``<PLATFORM>_HOME_CHANNEL`` for unknown names.
+    """
+    from cron.scheduler import _resolve_home_env_var
+
+    resolved = _resolve_home_env_var(platform_name)
+    if resolved:
+        return resolved
+    return f"{platform_name.upper()}_HOME_CHANNEL"
+
+
+def _home_thread_env_var(platform_name: str) -> str:
+    """Return the optional thread/topic env var for a platform home target."""
+    return f"{_home_target_env_var(platform_name)}_THREAD_ID"
+
+
+def _restart_notification_pending() -> bool:
+    """Return True when a /restart completion marker is waiting to be delivered."""
+    return (_elevate_home / ".restart_notify.json").exists()
+
+
+def _reload_runtime_env_preserving_config_authority() -> None:
+    """Reload .env for fresh credentials without letting stale .env override config.
+
+    Gateway processes are long-lived, so per-turn code reloads ~/.elevate/.env to
+    pick up rotated API keys. config.yaml remains authoritative for agent budget
+    settings such as agent.max_turns; otherwise a stale ELEVATE_MAX_ITERATIONS in
+    .env can replace the startup bridge on later turns.
+    """
+    load_elevate_dotenv(
+        elevate_home=_elevate_home,
+        project_env=Path(__file__).resolve().parents[1] / '.env',
+    )
+
+    config_path = _elevate_home / 'config.yaml'
+    if not config_path.exists():
+        return
+    try:
+        import yaml as _yaml
+        with open(config_path, encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f) or {}
+        from elevate_cli.config import _expand_env_vars
+        cfg = _expand_env_vars(cfg)
+    except Exception:
+        return
+
+    agent_cfg = cfg.get("agent", {})
+    if isinstance(agent_cfg, dict) and "max_turns" in agent_cfg:
+        os.environ["ELEVATE_MAX_ITERATIONS"] = str(agent_cfg["max_turns"])
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
@@ -436,6 +838,60 @@ def _build_media_placeholder(event) -> str:
     return "\n".join(parts)
 
 
+def _format_duration(seconds: float) -> str:
+    """Format ``seconds`` as ``MM:SS`` or ``HH:MM:SS`` (when >= 1h)."""
+    total = int(round(seconds))
+    if total < 0:
+        total = 0
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+async def _probe_audio_duration(path: str) -> Optional[str]:
+    """Best-effort duration probe. Returns formatted MM:SS / HH:MM:SS, or None on failure."""
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".wav":
+        try:
+            def _wav_duration() -> float:
+                import wave
+                with wave.open(path, "rb") as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate() or 1
+                    return frames / float(rate)
+            secs = await asyncio.to_thread(_wav_duration)
+            return _format_duration(secs)
+        except Exception:
+            pass
+
+    if ext in (".ogg", ".opus", ".oga"):
+        try:
+            def _ogg_duration() -> float:
+                from mutagen.oggopus import OggOpus
+                return float(OggOpus(path).info.length)
+            secs = await asyncio.to_thread(_ogg_duration)
+            return _format_duration(secs)
+        except Exception:
+            pass
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if proc.returncode == 0:
+            return _format_duration(float(stdout.decode().strip()))
+    except Exception:
+        pass
+
+    return None
+
+
 def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
     """Consume and return the full pending event for a session.
 
@@ -583,6 +1039,48 @@ def _normalize_gateway_profile_text(message: Optional[str], channel_prompt: Opti
     return text.strip()
 
 
+def _skill_slug_from_frontmatter(skill_md: Path) -> tuple:
+    """Derive the /command slug and declared frontmatter name from a SKILL.md.
+
+    Matches the exact normalization used by
+    :func:`agent.skill_commands.scan_skill_commands` so the slug here is the
+    same string a user types after the leading ``/`` (e.g. a skill with
+    frontmatter ``name: Stable Diffusion Image Generation`` resolves to
+    ``stable-diffusion-image-generation`` — NOT the parent directory name,
+    which is commonly shorter/different, e.g. ``stable-diffusion``).
+
+    Returns ``(slug, declared_name)`` or ``(None, None)`` when the file
+    can't be read or lacks a ``name:`` in its frontmatter.
+    """
+    try:
+        content = skill_md.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None, None
+    if not content.startswith("---"):
+        return None, None
+    end = content.find("\n---", 3)
+    if end < 0:
+        return None, None
+    declared_name: str | None = None
+    for line in content[3:end].splitlines():
+        line = line.strip()
+        if line.startswith("name:"):
+            raw = line.split(":", 1)[1].strip()
+            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+                raw = raw[1:-1]
+            declared_name = raw.strip()
+            break
+    if not declared_name:
+        return None, None
+    slug = declared_name.lower().replace(" ", "-").replace("_", "-")
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9-]", "", slug)
+    slug = _re.sub(r"-{2,}", "-", slug).strip("-")
+    if not slug:
+        return None, declared_name
+    return slug, declared_name
+
+
 def _check_unavailable_skill(command_name: str) -> str | None:
     """Check if a command matches a known-but-inactive skill.
 
@@ -663,6 +1161,16 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     elif isinstance(model_cfg, dict):
         return model_cfg.get("default") or model_cfg.get("model") or ""
     return ""
+
+
+def _teams_pipeline_plugin_enabled() -> bool:
+    """Return True when the standalone Teams pipeline plugin is enabled."""
+    from elevate_cli.config import cfg_get
+    config = _load_gateway_config()
+    enabled = cfg_get(config, "plugins", "enabled", default=[])
+    if not isinstance(enabled, list):
+        return False
+    return "teams_pipeline" in enabled or "teams-pipeline" in enabled
 
 
 def _resolve_elevate_bin() -> Optional[list[str]]:
@@ -755,6 +1263,103 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
 # can opportunistically resolve a platform adapter without circular imports.
 # Set on each GatewayRunner.__init__ and cleared automatically on GC.
 _gateway_runner_ref: "_weakref.ref" = lambda: None
+
+
+def _normalize_empty_agent_response(
+    agent_result: dict,
+    response: str,
+    *,
+    history_len: int = 0,
+) -> str:
+    """Normalize empty/None agent responses into user-facing messages.
+
+    Consolidates the existing ``failed`` handler and adds a catch-all for
+    the case where the agent did work (api_calls > 0) but returned no text.
+    """
+    if response:
+        return response
+
+    if agent_result.get("failed"):
+        error_detail = agent_result.get("error", "unknown error")
+        error_str = str(error_detail).lower()
+        is_context_failure = any(
+            p in error_str
+            for p in ("context", "token", "too large", "too long", "exceed", "payload")
+        ) or ("400" in error_str and history_len > 50)
+        if is_context_failure:
+            return (
+                "⚠️ Session too large for the model's context window.\n"
+                "Use /compact to compress the conversation, or "
+                "/reset to start fresh."
+            )
+        return (
+            f"The request failed: {str(error_detail)[:300]}\n"
+            "Try again or use /reset to start a fresh session."
+        )
+
+    api_calls = int(agent_result.get("api_calls", 0) or 0)
+    if api_calls > 0 and not agent_result.get("interrupted"):
+        if agent_result.get("partial"):
+            err = agent_result.get("error", "processing incomplete")
+            return f"⚠️ Processing stopped: {str(err)[:200]}. Try again."
+        return (
+            "⚠️ Processing completed but no response was generated. "
+            "This may be a transient error — try sending your message again."
+        )
+
+    return response
+
+
+def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
+    """Return True only when a gateway turn really completed successfully.
+
+    Restart recovery uses ``resume_pending`` as a durable marker for sessions
+    interrupted during gateway drain.  A soft interrupt can still bubble out as
+    a syntactically normal agent result with an empty final response; clearing
+    the marker in that case loses the recovery signal and startup auto-resume
+    has nothing to schedule.
+    """
+    if not isinstance(agent_result, dict):
+        return False
+    if agent_result.get("interrupted"):
+        return False
+    if agent_result.get("failed") or agent_result.get("partial") or agent_result.get("error"):
+        return False
+    if agent_result.get("completed") is False:
+        return False
+    return True
+
+
+def _preserve_queued_followup_history_offset(
+    current_result: dict,
+    followup_result: dict,
+) -> dict:
+    """Carry the outer history offset through queued follow-up drains.
+
+    ``_process_message_background()`` persists transcript rows only once, after the
+    entire in-band queued-follow-up chain returns.  Each recursive ``_run_agent()``
+    call advances ``history_offset`` to the history it received, so without
+    correction the outermost persistence step sees only the *last* queued turn as
+    "new" and silently drops earlier turns from the same drain chain.
+
+    Preserve the earliest (outermost) history offset so the final transcript slice
+    still includes every queued turn that ran during the chain.
+    """
+    if not isinstance(followup_result, dict):
+        return followup_result
+    if not isinstance(current_result, dict):
+        return followup_result
+
+    current_offset = current_result.get("history_offset")
+    followup_offset = followup_result.get("history_offset")
+    if not isinstance(current_offset, int):
+        return followup_result
+    if isinstance(followup_offset, int) and followup_offset <= current_offset:
+        return followup_result
+
+    merged = dict(followup_result)
+    merged["history_offset"] = current_offset
+    return merged
 
 
 class GatewayRunner:
