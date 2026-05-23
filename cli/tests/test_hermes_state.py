@@ -1172,9 +1172,10 @@ class TestSchemaInit:
         assert "turn_usage" in tables
 
     def test_schema_version(self, db):
+        from elevate_state import SCHEMA_VERSION
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 10
+        assert version == SCHEMA_VERSION
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1230,12 +1231,13 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v10
+        # Open with SessionDB — should migrate to current SCHEMA_VERSION
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
+        from elevate_state import SCHEMA_VERSION
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 10
+        assert cursor.fetchone()[0] == SCHEMA_VERSION
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
