@@ -178,20 +178,106 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
 def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
+    ack_target = getattr(args, 'ack', None)
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `elevate`.
     os.environ.setdefault("ELEVATE_INTERACTIVE", "1")
-    
+
+    # Handle `elevate doctor --ack <id>` as a fast path. Persist the ack and
+    # return without running the rest of the diagnostics — the user has
+    # already seen the advisory and just wants to silence it.
+    if ack_target:
+        try:
+            from elevate_cli.security_advisories import (
+                ADVISORIES,
+                ack_advisory,
+            )
+        except Exception as e:
+            print(color(f"Security advisory module unavailable: {e}", Colors.RED))
+            sys.exit(1)
+        valid_ids = {a.id for a in ADVISORIES}
+        if ack_target not in valid_ids:
+            print(color(
+                f"Unknown advisory ID: {ack_target!r}. Known IDs: "
+                f"{', '.join(sorted(valid_ids)) or '(none)'}",
+                Colors.RED,
+            ))
+            sys.exit(2)
+        if ack_advisory(ack_target):
+            print(color(
+                f"  ✓ Acknowledged advisory {ack_target}. "
+                f"It will no longer trigger startup banners.",
+                Colors.GREEN,
+            ))
+        else:
+            print(color(
+                f"  ✗ Failed to persist ack for {ack_target}. "
+                f"Check ~/.elevate/config.yaml is writable.",
+                Colors.RED,
+            ))
+            sys.exit(1)
+        return
+
     issues = []
     manual_issues = []  # issues that can't be auto-fixed
     fixed_count = 0
-    
+
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
     print(color("│                 🩺 Elevate Doctor                        │", Colors.CYAN))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
-    
+
+    # =========================================================================
+    # Check: Security advisories (compromised packages on disk)
+    # =========================================================================
+    print()
+    print(color("◆ Security Advisories", Colors.CYAN, Colors.BOLD))
+    try:
+        from elevate_cli.security_advisories import (
+            detect_compromised,
+            filter_unacked,
+            full_remediation_text,
+            get_acked_ids,
+        )
+        all_hits = detect_compromised()
+        fresh_hits = filter_unacked(all_hits)
+        if fresh_hits:
+            for hit in fresh_hits:
+                check_fail(
+                    f"{hit.advisory.title}",
+                    f"({hit.package}=={hit.installed_version})",
+                )
+                # Print the full remediation block, indented under the
+                # check_fail header so it reads as a single section.
+                for line in full_remediation_text(hit):
+                    if line:
+                        print(f"    {color(line, Colors.YELLOW)}")
+                    else:
+                        print()
+                # Funnel into the action list so the summary block surfaces it
+                # for users who scroll past the section.
+                manual_issues.append(
+                    f"Resolve security advisory {hit.advisory.id}: "
+                    f"uninstall {hit.package}=={hit.installed_version} and "
+                    f"rotate credentials, then run "
+                    f"`elevate doctor --ack {hit.advisory.id}`."
+                )
+            # Acked-but-still-installed: show as informational so the user
+            # knows the package is still on disk after the ack.
+            acked_ids = get_acked_ids()
+            for h in all_hits:
+                if h.advisory.id in acked_ids:
+                    check_warn(
+                        f"{h.package}=={h.installed_version} still installed "
+                        f"(advisory {h.advisory.id} acknowledged)",
+                    )
+        else:
+            check_ok("No active security advisories")
+    except Exception as e:
+        # Never let a bug in the advisory check block the rest of doctor.
+        check_warn(f"Security advisory check failed: {e}")
+
     # =========================================================================
     # Check: Python version
     # =========================================================================
@@ -540,6 +626,34 @@ def run_doctor(args):
             pass
 
     # =========================================================================
+    # Check: xAI Model Retirement (May 15, 2026)
+    # =========================================================================
+    print()
+    print(color("◆ xAI Model Retirement (May 15, 2026)", Colors.CYAN, Colors.BOLD))
+    try:
+        from elevate_cli.config import load_config
+        from elevate_cli.xai_retirement import (
+            MIGRATION_GUIDE_URL,
+            find_retired_xai_refs,
+            format_issue,
+        )
+
+        _xai_cfg = load_config()
+        retired_refs = find_retired_xai_refs(_xai_cfg)
+        if not retired_refs:
+            check_ok("No retired xAI models in config")
+        else:
+            for ref in retired_refs:
+                check_warn(format_issue(ref))
+            check_info(f"Migration guide: {MIGRATION_GUIDE_URL}")
+            manual_issues.append(
+                f"Update {len(retired_refs)} retired xAI model reference(s) "
+                f"in config.yaml — see {MIGRATION_GUIDE_URL}"
+            )
+    except Exception as _xai_check_err:
+        check_warn("xAI retirement check skipped", f"({_xai_check_err})")
+
+    # =========================================================================
     # Check: Auth providers
     # =========================================================================
     print()
@@ -581,6 +695,33 @@ def run_doctor(args):
             check_warn("Google Gemini OAuth", "(not logged in)")
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
+
+    # MiniMax OAuth — separate try/except so an import failure here cannot
+    # disrupt the already-printed Nous/Codex/Gemini rows above.
+    try:
+        from elevate_cli.auth import get_minimax_oauth_auth_status
+        minimax_status = get_minimax_oauth_auth_status() or {}
+        if minimax_status.get("logged_in"):
+            region = minimax_status.get("region", "global")
+            check_ok("MiniMax OAuth", f"(logged in, region={region})")
+        else:
+            check_warn("MiniMax OAuth", "(not logged in)")
+    except Exception:
+        pass
+
+    # xAI OAuth — separate try/except so an import failure here cannot
+    # disrupt the already-printed rows above.
+    try:
+        from elevate_cli.auth import get_xai_oauth_auth_status
+        xai_oauth_status = get_xai_oauth_auth_status() or {}
+        if xai_oauth_status.get("logged_in"):
+            check_ok("xAI OAuth", "(logged in)")
+        else:
+            check_warn("xAI OAuth", "(not logged in)")
+            if xai_oauth_status.get("error"):
+                check_info(xai_oauth_status["error"])
+    except Exception:
+        pass
 
     if _which("codex"):
         check_ok("codex CLI")

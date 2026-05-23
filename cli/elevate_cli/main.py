@@ -7984,6 +7984,14 @@ For more help on a command:
     doctor_parser.add_argument(
         "--fix", action="store_true", help="Attempt to fix issues automatically"
     )
+    doctor_parser.add_argument(
+        "--ack",
+        metavar="ID",
+        help=(
+            "Acknowledge a security advisory by ID and exit. After ack, the "
+            "advisory no longer triggers startup banners or doctor failures."
+        ),
+    )
     doctor_parser.set_defaults(func=cmd_doctor)
 
     # local database bootstrap
