@@ -29,7 +29,14 @@ def test_format_managed_message_homebrew(monkeypatch):
 def test_recommended_update_command_defaults_to_elevate_update(monkeypatch):
     monkeypatch.delenv("ELEVATE_MANAGED", raising=False)
 
-    assert recommended_update_command() == "elevate update"
+    # Also short-circuit the .managed marker path — CI runners may have an
+    # ambient ~/.elevate/.managed if a prior test left ELEVATE_HOME pointing
+    # somewhere with that marker, which would make get_managed_update_command()
+    # return "Update your Nix flake input ..." instead of falling through to
+    # detect_install_method().
+    with patch("elevate_cli.config.get_managed_update_command", return_value=None), \
+         patch("elevate_cli.config.detect_install_method", return_value="git"):
+        assert recommended_update_command() == "elevate update"
 
 
 def test_cmd_update_blocks_managed_homebrew(monkeypatch, capsys):
