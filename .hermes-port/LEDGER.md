@@ -507,3 +507,96 @@ NEXT: continue B4b elevate_cli/ differ files (curator, migrate, bundles,
 backup remain as small-diff candidates; doctor/setup/memory_setup deferred
 as larger Elevate divergence) OR drain B8 test-port backlog (444 missing
 test files; 4 ported this session).
+
+## Session 2026-05-23 (continued) — B4b rebrand batches 4-10
+
+Seven sequential B4b rebrand commits clearing the residual hermes-branded
+strings from elevate_cli/. Each touched only branded literals + a handful
+of internal symbol names; no logic deltas. All LOCAL ONLY.
+
+LANDED (LOCAL ONLY):
+- 7e77f7805 batch 4: curator.py, migrate.py, bundles.py
+  Docstring / prog-name / user-facing print rebrand. Pure sed via
+  /tmp/rebrand-batch4 patterns.
+- 47e0974b8 batch 5: xai_retirement.py, checkpoints.py, fallback_cmd.py,
+  secrets_cli.py
+  All 15 `hermes checkpoints <sub>` examples rebranded, RetirementIssue
+  text + walker, `hermes secrets bitwarden` examples, "Hermes process /
+  invocation / will skip" lines. PRESERVED two hermes-agent.nousresearch.com
+  docs URLs in fallback_cmd (Elevate doesn't host equivalents — 404 worse
+  than brand leak).
+- e78c454f5 batch 6: oneshot.py, slack_cli.py, kanban_diagnostics.py,
+  kanban_db.py
+  HermesCLI -> ElevateCLI class rename, ~/.hermes default path ->
+  ~/.elevate, private helpers _module_hermes_argv / _absolute_hermes_path
+  / _hermes_path_argv / _resolve_hermes_argv / hermes_bin / hermes_home
+  renamed to elevate equivalents in kanban_db. Docstring xref to
+  gateway.run._resolve_hermes_bin updated to _resolve_elevate_bin (Elevate
+  already exports the elevate name).
+- 32faca6b9 batch 7: relaunch.py, stdio.py, send_cmd.py
+  Public `resolve_hermes_bin` -> `resolve_elevate_bin` after verifying zero
+  external callers. stdio.py %LOCALAPPDATA%\hermes\* paths corrected to
+  match install.ps1's actual layout: \elevate for ElevateHome, \elevate\
+  elevate for InstallDir. send_cmd _load_hermes_env -> _load_elevate_env.
+- 4202a3e66 batch 8/9: codex_runtime_switch.py, security_advisories.py,
+  _parser.py, gateway_windows.py, kanban.py, profile_distribution.py
+  - profile_distribution.DistributionManifest.hermes_requires ->
+    elevate_requires with backward-compat alias: from_dict reads both,
+    to_dict writes only elevate_requires. USER_OWNED_EXCLUDE corrected:
+    .hermes_history -> .elevate_history (matches profiles.py line 186);
+    hermes-agent -> elevate-agent (matches GitHub repo + install.sh
+    archive name).
+  - codex_runtime_switch.parse_args: "elevate" added to off/default
+    synonym set alongside "hermes" (kept as muscle-memory alias).
+    hermes-tools MCP server literal preserved (internal callback).
+  - gateway_windows: scheduled-task name Hermes_Gateway ->
+    Elevate_Gateway; %LOCALAPPDATA%\hermes\gateway-service ->
+    \elevate\gateway-service; install-prompt text "elevated Hermes
+    gateway" -> "elevated Elevate gateway" (x3).
+  - kanban: hermes-agent.nousresearch.com/docs URL + docs/hermes-kanban-
+    v1-spec.pdf path PRESERVED (Elevate doesn't host equivalents).
+  - _parser: prog="hermes" -> "elevate"; hermes-agent-dev preserved
+    (skill identifier).
+- c5c3ae16a batch 10: codex_runtime_plugin_migration.py
+  Marker comments now write the elevate-agent variant; legacy
+  hermes-agent markers from pre-rebrand managed sections are recognized
+  on strip via _LEGACY_MIGRATION_MARKERS / _LEGACY_MIGRATION_END_MARKERS
+  tuples so re-runs idempotently replace prior blocks without stranding
+  them. Internal var renames: hermes_cfg/hermes_servers/hermes_config/
+  hermes_home -> elevate equivalents; client_name "hermes-migration" ->
+  "elevate-migration". PRESERVED: "hermes-tools" MCP server name +
+  agent.transports.hermes_tools_mcp_server module path (codex callback
+  surface; rename breaks the wire protocol).
+
+Test net per-batch (run before each commit): pre-batch-8 full sweep
+post-batch-7 = 100 failed / 16771 passed / 246 skipped (one fewer
+failure than the 101 / 16770 pre-session baseline — no regressions, a
+prior flaky test stabilized). Batch 8/9 targeted: 91 tests across the
+6 modules passed clean. Batch 10 targeted: 13 skipped (no codex binary
+in hermetic env), syntax verified.
+
+B4b STATUS post-batch-10:
+- elevate_cli/ files with non-intentional hermes refs remaining: 0.
+  All residual `hermes` strings in scanned files are wire-format
+  identifiers (hermes-tools, hermes_tools_mcp_server), legacy aliases
+  (DistributionManifest.hermes_requires read path, MIGRATION_MARKERS
+  legacy tuple, codex synonym "hermes"), external resource refs
+  (hermes-agent.nousresearch.com URL, Nous-Hermes-3/4 model names),
+  third-party library refs (hermes-ink TUI), or historical-accuracy
+  docstrings ("preserved across Hermes re-ports").
+
+B4b REMAINING (deferred — large divergence or low value):
+- main.py (-4018), gateway.py (-1112), tools_config.py (-1104),
+  config.py (-1047), banner.py (-104): SKIP per scope (Elevate-only
+  feature surfaces).
+- doctor.py (-647), runtime_provider.py (-401 after azure_foundry
+  surgical port): substantial unported logic but high test-break risk.
+- model_switch.py (-395): 509 Hermes-only lines (alias parsing),
+  114 Elevate-only lines — semantic divergence, defer.
+- tips.py (-139): /btw is a SEPARATE command in Elevate vs alias for
+  /background in Hermes — wholesale port loses Elevate semantics, defer.
+- debug.py (-14), skin_engine.py (-14): docstring rewording / Elevate-
+  specific prompt-symbol normalization, low value to port.
+
+NEXT: B2 modified files remaining (smaller agents/ deltas), B8 missing-
+test backlog drain, B3b-e gateway hand-merge.
