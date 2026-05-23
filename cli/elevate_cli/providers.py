@@ -1,5 +1,5 @@
 """
-Single source of truth for provider identity in Elevate.
+Single source of truth for provider identity in Elevate Agent.
 
 Two data sources, merged at runtime:
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Elevate-specific metadata that models.dev doesn't provide.
 
 @dataclass(frozen=True)
-class ElevateOverlay:
+class HermesOverlay:
     """Elevate-specific provider metadata layered on top of models.dev."""
 
     transport: str = "openai_chat"        # openai_chat | anthropic_messages | codex_responses
@@ -43,129 +43,173 @@ class ElevateOverlay:
     base_url_env_var: str = ""            # env var for user-custom base URL
 
 
-ELEVATE_OVERLAYS: Dict[str, ElevateOverlay] = {
-    "openrouter": ElevateOverlay(
+ELEVATE_OVERLAYS: Dict[str, HermesOverlay] = {
+    "openrouter": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
         extra_env_vars=("OPENAI_API_KEY",),
         base_url_env_var="OPENROUTER_BASE_URL",
     ),
-    "nous": ElevateOverlay(
+    "nous": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_device_code",
         base_url_override="https://inference-api.nousresearch.com/v1",
     ),
-    "openai-codex": ElevateOverlay(
+    "openai-codex": HermesOverlay(
         transport="codex_responses",
         auth_type="oauth_external",
         base_url_override="https://chatgpt.com/backend-api/codex",
     ),
-    "qwen-oauth": ElevateOverlay(
+    "xai-oauth": HermesOverlay(
+        transport="codex_responses",
+        auth_type="oauth_external",
+        base_url_override="https://api.x.ai/v1",
+        base_url_env_var="XAI_BASE_URL",
+    ),
+    "qwen-oauth": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
         base_url_override="https://portal.qwen.ai/v1",
         base_url_env_var="ELEVATE_QWEN_BASE_URL",
     ),
-    "google-gemini-cli": ElevateOverlay(
+    "google-gemini-cli": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
         base_url_override="cloudcode-pa://google",
     ),
-    "copilot-acp": ElevateOverlay(
+    "lmstudio": HermesOverlay(
+        transport="openai_chat",
+        auth_type="api_key",
+        extra_env_vars=("LM_API_KEY",),
+        base_url_override="http://127.0.0.1:1234/v1",
+        base_url_env_var="LM_BASE_URL",
+    ),
+    "copilot-acp": HermesOverlay(
         transport="codex_responses",
         auth_type="external_process",
         base_url_override="acp://copilot",
         base_url_env_var="COPILOT_ACP_BASE_URL",
     ),
-    "github-copilot": ElevateOverlay(
+    "github-copilot": HermesOverlay(
         transport="openai_chat",
         extra_env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN"),
     ),
-    "anthropic": ElevateOverlay(
+    "anthropic": HermesOverlay(
         transport="anthropic_messages",
         extra_env_vars=("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     ),
-    "zai": ElevateOverlay(
+    "zai": HermesOverlay(
         transport="openai_chat",
         extra_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         base_url_env_var="GLM_BASE_URL",
     ),
-    "kimi-for-coding": ElevateOverlay(
+    "kimi-for-coding": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="KIMI_BASE_URL",
     ),
-    "stepfun": ElevateOverlay(
+    "stepfun": HermesOverlay(
         transport="openai_chat",
         extra_env_vars=("STEPFUN_API_KEY",),
         base_url_override="https://api.stepfun.ai/step_plan/v1",
         base_url_env_var="STEPFUN_BASE_URL",
     ),
-    "minimax": ElevateOverlay(
+    "minimax": HermesOverlay(
         transport="anthropic_messages",
         base_url_env_var="MINIMAX_BASE_URL",
     ),
-    "minimax-cn": ElevateOverlay(
+    "minimax-oauth": HermesOverlay(
+        transport="anthropic_messages",
+        auth_type="oauth_external",
+        base_url_override="https://api.minimax.io/anthropic",
+    ),
+    "minimax-cn": HermesOverlay(
         transport="anthropic_messages",
         base_url_env_var="MINIMAX_CN_BASE_URL",
     ),
-    "deepseek": ElevateOverlay(
+    "deepseek": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="DEEPSEEK_BASE_URL",
     ),
-    "alibaba": ElevateOverlay(
+    "alibaba": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="DASHSCOPE_BASE_URL",
     ),
-    "alibaba-coding-plan": ElevateOverlay(
+    "alibaba-coding-plan": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="ALIBABA_CODING_PLAN_BASE_URL",
     ),
-    "vercel": ElevateOverlay(
+    "vercel": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
     ),
-    "opencode": ElevateOverlay(
+    "opencode": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
         base_url_env_var="OPENCODE_ZEN_BASE_URL",
     ),
-    "opencode-go": ElevateOverlay(
+    "opencode-go": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
         base_url_env_var="OPENCODE_GO_BASE_URL",
     ),
-    "kilo": ElevateOverlay(
+    "kilo": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
         base_url_env_var="KILOCODE_BASE_URL",
     ),
-    "huggingface": ElevateOverlay(
+    "huggingface": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
         base_url_env_var="HF_BASE_URL",
     ),
-    "xai": ElevateOverlay(
+    "novita": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="NOVITA_BASE_URL",
+    ),
+    "xai": HermesOverlay(
         transport="codex_responses",
         base_url_override="https://api.x.ai/v1",
         base_url_env_var="XAI_BASE_URL",
     ),
-    "nvidia": ElevateOverlay(
+    "nvidia": HermesOverlay(
         transport="openai_chat",
         base_url_override="https://integrate.api.nvidia.com/v1",
         base_url_env_var="NVIDIA_BASE_URL",
     ),
-    "xiaomi": ElevateOverlay(
+    "xiaomi": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="XIAOMI_BASE_URL",
     ),
-    "arcee": ElevateOverlay(
+    "tencent-tokenhub": HermesOverlay(
+        transport="openai_chat",
+        base_url_env_var="TOKENHUB_BASE_URL",
+    ),
+    "arcee": HermesOverlay(
         transport="openai_chat",
         base_url_override="https://api.arcee.ai/api/v1",
         base_url_env_var="ARCEE_BASE_URL",
     ),
-    "ollama-cloud": ElevateOverlay(
+    "gmi": HermesOverlay(
         transport="openai_chat",
+        extra_env_vars=("GMI_API_KEY",),
+        base_url_override="https://api.gmi-serving.com/v1",
+        base_url_env_var="GMI_BASE_URL",
+    ),
+    "ollama-cloud": HermesOverlay(
+        transport="openai_chat",
+        base_url_override="https://ollama.com/v1",
         base_url_env_var="OLLAMA_BASE_URL",
+    ),
+    # Azure Foundry: supports both OpenAI-style and Anthropic-style endpoints.
+    # The transport is determined at runtime from config.yaml model.api_mode.
+    "azure-foundry": HermesOverlay(
+        transport="openai_chat",  # default; overridden by api_mode in config
+        base_url_env_var="AZURE_FOUNDRY_BASE_URL",
+    ),
+    "bedrock": HermesOverlay(
+        transport="bedrock_converse",
+        auth_type="aws_sdk",
     ),
 }
 
@@ -207,6 +251,10 @@ ALIASES: Dict[str, str] = {
     "x-ai": "xai",
     "x.ai": "xai",
     "grok": "xai",
+    "grok-oauth": "xai-oauth",
+    "xai-oauth": "xai-oauth",
+    "x-ai-oauth": "xai-oauth",
+    "xai-grok-oauth": "xai-oauth",
 
     # nvidia
     "nim": "nvidia",
@@ -277,9 +325,19 @@ ALIASES: Dict[str, str] = {
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
 
+    # novita
+    "novita-ai": "novita",
+    "novitaai": "novita",
+
     # xiaomi
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+
+    # tencent
+    "tencent": "tencent-tokenhub",
+    "tokenhub": "tencent-tokenhub",
+    "tencent-cloud": "tencent-tokenhub",
+    "tencentmaas": "tencent-tokenhub",
 
     # bedrock
     "aws": "bedrock",
@@ -290,6 +348,10 @@ ALIASES: Dict[str, str] = {
     # arcee
     "arcee-ai": "arcee",
     "arceeai": "arcee",
+
+    # gmi
+    "gmi-cloud": "gmi",
+    "gmicloud": "gmi",
 
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
@@ -313,6 +375,9 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "copilot-acp": "GitHub Copilot ACP",
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
+    "gmi": "GMI Cloud",
+    "tencent-tokenhub": "Tencent TokenHub",
+    "lmstudio": "LM Studio",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
     "ollama-cloud": "Ollama Cloud",
@@ -540,6 +605,12 @@ def resolve_custom_provider(
     if not requested:
         return None
 
+    # If the stored provider is the bare string "custom" (corrupt state
+    # from a prior model-switch bug), fall back to the first custom
+    # provider entry so existing configs self-heal.  (GH #17478)
+    bare_custom_fallback = requested == "custom"
+    first_valid = None
+
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
@@ -554,6 +625,10 @@ def resolve_custom_provider(
         if not display_name or not api_url:
             continue
 
+        # Stash the first valid entry for bare-"custom" fallback
+        if first_valid is None:
+            first_valid = (display_name, api_url)
+
         slug = custom_provider_slug(display_name)
         if requested not in {display_name.lower(), slug}:
             continue
@@ -564,6 +639,21 @@ def resolve_custom_provider(
             transport="openai_chat",
             api_key_env_vars=(),
             base_url=api_url,
+            is_aggregator=False,
+            auth_type="api_key",
+            source="user-config",
+        )
+
+    # Self-heal: bare "custom" matched nothing — return first valid entry
+    if bare_custom_fallback and first_valid:
+        dname, aurl = first_valid
+        slug = custom_provider_slug(dname)
+        return ProviderDef(
+            id=slug,
+            name=dname,
+            transport="openai_chat",
+            api_key_env_vars=(),
+            base_url=aurl,
             is_aggregator=False,
             auth_type="api_key",
             source="user-config",
