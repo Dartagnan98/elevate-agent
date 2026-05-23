@@ -86,6 +86,16 @@ def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
             continue
         platforms[plat_name] = _build_from_sessions(plat_name)
 
+    # Include plugin-registered platforms (dynamic enum members aren't in
+    # Platform.__members__, so the loop above misses them).
+    try:
+        from gateway.platform_registry import platform_registry
+        for entry in platform_registry.plugin_entries():
+            if entry.name not in _SKIP_SESSION_DISCOVERY and entry.name not in platforms:
+                platforms[entry.name] = _build_from_sessions(entry.name)
+    except Exception:
+        pass
+
     directory = {
         "updated_at": datetime.now().isoformat(),
         "platforms": platforms,
@@ -222,6 +232,14 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     channels = directory.get("platforms", {}).get(platform_name, [])
     if not channels:
         return None
+
+    # 0. Exact ID match — case-sensitive, no normalization. Lets callers pass
+    # raw platform IDs (e.g. Slack "C0B0QV5434G") even when the format guard
+    # in _parse_target_ref hasn't recognized them as explicit.
+    raw = name.strip()
+    for ch in channels:
+        if ch.get("id") == raw:
+            return ch["id"]
 
     query = _normalize_channel_query(name)
 
