@@ -414,3 +414,26 @@ Test sweep at session end:
     empty_soul_md_adds_nothing, test_skill_commands disable_template_vars).
   Baseline at session start: 1798 passing. Net +149 tests from new ports
   and paired test pulls (memory, models_dev, moonshot, credentials).
+
+## 2026-05-23 (continued) — auxiliary_client lands
+
+a73e748d5 auxiliary_client wholesale port (+1924 lines) + paired tests.
+
+All 6 heavy-hitter B2 carried files complete:
+  - codex_responses_adapter (900c606bf)
+  - context_compressor (5f9944907)
+  - credential_pool (03af93aaf)
+  - model_metadata (cde257835)
+  - anthropic_adapter (0770d2b28)
+  - auxiliary_client (a73e748d5) <-- this session
+
+Elevate-only surgical re-adds in auxiliary_client:
+  _CODEX_AUX_MODEL constant, _try_codex() helper, codex in
+  _get_provider_chain (5 entries vs Hermes 4), codex auto-fallback
+  in resolve_provider_client, _OR_HEADERS backwards-compat alias.
+
+tests/agent/: 2018 passing, 1 skipped, 3 baseline failures.
+Net +71 tests from this session.
+
+NEXT: B2 modified files remaining are smaller / lower risk. Pick from
+the B2 differ list or move to B4b elevate_cli/ files (task #11).
