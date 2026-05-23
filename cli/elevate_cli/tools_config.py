@@ -11,12 +11,16 @@ the `platform_toolsets` key.
 
 import json as _json
 import logging
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 
 from elevate_cli.config import (
+    cfg_get,
     load_config, save_config, get_env_value, save_env_value,
 )
 from elevate_cli.colors import Colors, color
@@ -25,7 +29,7 @@ from elevate_cli.nous_subscription import (
     get_nous_subscription_features,
 )
 from tools.tool_backend_helpers import fal_key_is_configured, managed_nous_tools_enabled
-from utils import base_url_hostname
+from utils import base_url_hostname, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +82,72 @@ CONFIGURABLE_TOOLSETS = [
 _DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "rl", "spotify", "video", "computer"}
 
 
+def _xai_credentials_present() -> bool:
+    """Cheap, side-effect-free check for usable xAI credentials.
+
+    Used to auto-enable any future ``x_search`` toolset when the user has
+    either completed xAI Grok OAuth (SuperGrok subscription) or set
+    ``XAI_API_KEY``. Does NOT hit the network — only inspects the local
+    auth store and environment. The tool's runtime ``check_fn`` still
+    gates schema registration if creds later expire or get revoked.
+    """
+    try:
+        from elevate_cli.auth import _read_xai_oauth_tokens
+
+        _read_xai_oauth_tokens()
+        return True
+    except Exception:
+        pass
+    try:
+        from tools.xai_http import get_env_value as _xai_get_env_value
+
+        if str(_xai_get_env_value("XAI_API_KEY") or "").strip():
+            return True
+    except Exception:
+        pass
+    return bool(str(os.environ.get("XAI_API_KEY") or "").strip())
+
+
+# Platform-scoped toolsets: only appear in the `elevate tools` checklist for
+# these platforms, and only resolve/save for these platforms.  A toolset
+# absent from this map is available on every platform (current behaviour).
+#
+# Use this for tools whose APIs only make sense on one platform (Discord
+# server admin, Slack workspace admin, etc.).  Keeps every other platform's
+# checklist from filling up with irrelevant toggles.
+_TOOLSET_PLATFORM_RESTRICTIONS: Dict[str, Set[str]] = {}
+
+
+def _toolset_allowed_for_platform(ts_key: str, platform: str) -> bool:
+    """Return True if ``ts_key`` is configurable on ``platform``.
+
+    Toolsets without a restriction entry are allowed everywhere (the default).
+    """
+    allowed = _TOOLSET_PLATFORM_RESTRICTIONS.get(ts_key)
+    return allowed is None or platform in allowed
+
+
 def _get_effective_configurable_toolsets():
     """Return CONFIGURABLE_TOOLSETS + any plugin-provided toolsets.
 
     Plugin toolsets are appended at the end so they appear after the
-    built-in toolsets in the TUI checklist.
+    built-in toolsets in the TUI checklist. A plugin whose toolset key
+    already appears in ``CONFIGURABLE_TOOLSETS`` is skipped — bundled
+    plugins (e.g. ``plugins/spotify``) share their toolset key with the
+    built-in entry, and we want the built-in label/description to win.
+    Without the dedupe, ``elevate tools`` → "reconfigure existing" would
+    list the same toolset twice.
     """
     result = list(CONFIGURABLE_TOOLSETS)
+    seen = {ts_key for ts_key, _, _ in result}
     try:
         from elevate_cli.plugins import discover_plugins, get_plugin_toolsets
         discover_plugins()  # idempotent — ensures plugins are loaded
-        result.extend(get_plugin_toolsets())
+        for entry in get_plugin_toolsets():
+            if entry[0] in seen:
+                continue
+            seen.add(entry[0])
+            result.append(entry)
     except Exception:
         pass
     return result
@@ -379,6 +438,74 @@ TOOLSET_ENV_REQUIREMENTS = {
 
 # ─── Post-Setup Hooks ─────────────────────────────────────────────────────────
 
+def _pip_install(
+    args: List[str],
+    *,
+    timeout: int = 300,
+    capture_output: bool = True,
+):
+    """Install Python packages from a post-setup hook.
+
+    Strategy (in order):
+    1. ``uv pip install`` if uv is on PATH — fast, doesn't need pip in the venv.
+    2. ``python -m pip install`` — works on stdlib venvs.
+    3. ``python -m ensurepip --upgrade`` then retry pip — covers ``uv venv``
+       which creates a venv WITHOUT pip.
+
+    Why this exists: the Windows installer creates the venv via ``uv venv``,
+    which doesn't seed pip. Post-setup hooks that shelled out to
+    ``[sys.executable, '-m', 'pip', 'install', ...]`` failed with
+    ``No module named pip`` on every fresh install. uv-first sidesteps that.
+
+    Returns the ``subprocess.CompletedProcess`` from whichever tier succeeded
+    (or the last failure for the caller to inspect).
+    """
+    venv_root = Path(sys.executable).parent.parent
+    uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_root)}
+
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        try:
+            result = subprocess.run(
+                [uv_bin, "pip", "install", *args],
+                capture_output=capture_output, text=True, timeout=timeout,
+                env=uv_env,
+            )
+            if result.returncode == 0:
+                return result
+            # Fall through to pip — uv may have failed for an unrelated reason
+            # (resolution conflict, network), and pip might handle it.
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    pip_cmd = [sys.executable, "-m", "pip"]
+    try:
+        # Probe for pip; bootstrap via ensurepip if missing (uv venv lacks it).
+        probe = subprocess.run(
+            pip_cmd + ["--version"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if probe.returncode != 0:
+            raise FileNotFoundError("pip not in venv")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+                capture_output=True, text=True, timeout=120, check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            # Synthesize a result so callers see a clean failure path.
+            return subprocess.CompletedProcess(
+                pip_cmd, returncode=1, stdout="",
+                stderr=f"pip not available and ensurepip failed: {e}",
+            )
+
+    return subprocess.run(
+        pip_cmd + ["install", *args],
+        capture_output=capture_output, text=True, timeout=timeout,
+    )
+
+
 def _run_post_setup(post_setup_key: str):
     """Run post-setup hooks for tools that need extra installation steps."""
     if post_setup_key == "kittentts":
@@ -388,28 +515,69 @@ def _run_post_setup(post_setup_key: str):
             return
         except ImportError:
             pass
-        import subprocess
         _print_info("    Installing kittentts (~25-80MB model, CPU-only)...")
         wheel_url = (
             "https://github.com/KittenML/KittenTTS/releases/download/"
             "0.8.1/kittentts-0.8.1-py3-none-any.whl"
         )
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-U", wheel_url, "soundfile", "--quiet"],
-                capture_output=True, text=True, timeout=300,
-            )
+            result = _pip_install(["-U", wheel_url, "soundfile", "--quiet"], timeout=300)
             if result.returncode == 0:
                 _print_success("    kittentts installed")
                 _print_info("    Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo")
                 _print_info("    Models: KittenML/kitten-tts-nano-0.8-int8 (25MB), micro (41MB), mini (80MB)")
             else:
                 _print_warning("    kittentts install failed:")
-                _print_info(f"      {result.stderr.strip()[:300]}")
-                _print_info(f"    Run manually: python -m pip install -U '{wheel_url}' soundfile")
+                _print_info(f"      {(result.stderr or '').strip()[:300]}")
+                _print_info(f"    Run manually: uv pip install -U '{wheel_url}' soundfile")
         except subprocess.TimeoutExpired:
             _print_warning("    kittentts install timed out (>5min)")
-            _print_info(f"    Run manually: python -m pip install -U '{wheel_url}' soundfile")
+            _print_info(f"    Run manually: uv pip install -U '{wheel_url}' soundfile")
+
+    elif post_setup_key == "piper":
+        try:
+            __import__("piper")
+            _print_success("    piper-tts is already installed")
+        except ImportError:
+            _print_info("    Installing piper-tts (~14MB wheel, voices downloaded on first use)...")
+            try:
+                result = _pip_install(["-U", "piper-tts", "--quiet"], timeout=300)
+                if result.returncode == 0:
+                    _print_success("    piper-tts installed")
+                else:
+                    _print_warning("    piper-tts install failed:")
+                    _print_info(f"      {(result.stderr or '').strip()[:300]}")
+                    _print_info("    Run manually: uv pip install -U piper-tts")
+                    return
+            except subprocess.TimeoutExpired:
+                _print_warning("    piper-tts install timed out (>5min)")
+                _print_info("    Run manually: uv pip install -U piper-tts")
+                return
+        _print_info("    Default voice: en_US-lessac-medium (downloaded on first TTS call)")
+        _print_info("    Full voice list: https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md")
+        _print_info("    Switch voices by setting tts.piper.voice in ~/.elevate/config.yaml")
+
+    elif post_setup_key == "ddgs":
+        try:
+            __import__("ddgs")
+            _print_success("    ddgs is already installed")
+        except ImportError:
+            _print_info("    Installing ddgs (DuckDuckGo search package)...")
+            try:
+                result = _pip_install(["-U", "ddgs", "--quiet"], timeout=300)
+                if result.returncode == 0:
+                    _print_success("    ddgs installed")
+                else:
+                    _print_warning("    ddgs install failed:")
+                    _print_info(f"      {(result.stderr or '').strip()[:300]}")
+                    _print_info("    Run manually: uv pip install -U ddgs")
+                    return
+            except subprocess.TimeoutExpired:
+                _print_warning("    ddgs install timed out (>5min)")
+                _print_info("    Run manually: uv pip install -U ddgs")
+                return
+        _print_info("    No API key required. DuckDuckGo enforces server-side rate limits.")
+        _print_info("    Pair with an extract provider if you also need web_extract.")
 
     elif post_setup_key == "spotify":
         # Run the full `elevate auth spotify` flow — if the user has no
@@ -447,7 +615,6 @@ def _run_post_setup(post_setup_key: str):
             tinker_dir = PROJECT_ROOT / "tinker-atropos"
             if tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
                 _print_info("    Installing tinker-atropos submodule...")
-                import subprocess
                 uv_bin = shutil.which("uv")
                 if uv_bin:
                     result = subprocess.run(
@@ -528,10 +695,16 @@ def _get_platform_tools(
     include_default_mcp_servers: bool = True,
 ) -> Set[str]:
     """Resolve which individual toolset names are enabled for a platform."""
-    from toolsets import resolve_toolset
+    from toolsets import TOOLSETS, resolve_toolset
 
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
+
+    # Track whether the user explicitly saved an empty list — that's a
+    # "disable everything" signal that must defeat downstream recovery.
+    explicit_empty = (
+        isinstance(toolset_names, list) and len(toolset_names) == 0
+    )
 
     if toolset_names is None or not isinstance(toolset_names, list):
         default_ts = PLATFORMS[platform]["default_toolset"]
@@ -542,6 +715,8 @@ def _get_platform_tools(
     toolset_names = [str(ts) for ts in toolset_names]
 
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+    plugin_ts_keys = _get_plugin_toolset_keys()
+    platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
 
     # If the saved list contains any configurable keys directly, the user
     # has explicitly configured this platform — use direct membership.
@@ -551,7 +726,10 @@ def _get_platform_tools(
     has_explicit_config = any(ts in configurable_keys for ts in toolset_names)
 
     if has_explicit_config:
-        enabled_toolsets = {ts for ts in toolset_names if ts in configurable_keys}
+        enabled_toolsets = {
+            ts for ts in toolset_names
+            if ts in configurable_keys and _toolset_allowed_for_platform(ts, platform)
+        }
         # Self-heal: a builtin toolset shipped AFTER this allowlist was last
         # saved would otherwise be silently dropped (the bug that hid the
         # browser toolset from older configs). known_builtin_toolsets records
@@ -568,8 +746,43 @@ def _get_platform_tools(
         for ts_key in configurable_keys:
             if ts_key in enabled_toolsets or ts_key in _DEFAULT_OFF_TOOLSETS:
                 continue
+            if not _toolset_allowed_for_platform(ts_key, platform):
+                continue
             if ts_key not in known_builtin:
                 enabled_toolsets.add(ts_key)
+
+        # Mixed config: composite toolset alongside configurables (e.g.
+        # ``[elevate-cli, spotify]`` after enabling Spotify via ``elevate
+        # tools``). Without expansion the composite name is silently dropped,
+        # leaving sessions with only the configurable opt-ins and no native
+        # tools. Mirror the else-branch's subset inference, but apply
+        # _DEFAULT_OFF_TOOLSETS only to the implicit expansion — anything the
+        # user explicitly listed (e.g. ``spotify``) must survive.
+        composite_tools = set()
+        for ts_name in toolset_names:
+            if ts_name in configurable_keys or ts_name in plugin_ts_keys:
+                continue
+            if ts_name not in TOOLSETS:
+                continue
+            composite_tools.update(resolve_toolset(ts_name))
+
+        if composite_tools:
+            expanded = set()
+            for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
+                if not _toolset_allowed_for_platform(ts_key, platform):
+                    continue
+                ts_tools = set(resolve_toolset(ts_key))
+                if ts_tools and ts_tools.issubset(composite_tools):
+                    expanded.add(ts_key)
+
+            default_off = set(_DEFAULT_OFF_TOOLSETS)
+            if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
+                default_off.remove(platform)
+            if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
+                default_off.remove("homeassistant")
+            expanded -= default_off
+
+            enabled_toolsets |= expanded
     else:
         # No explicit config — fall back to resolving composite toolset names
         # (e.g. "elevate-cli") to individual tool names and reverse-mapping.
@@ -579,13 +792,64 @@ def _get_platform_tools(
 
         enabled_toolsets = set()
         for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
+            if not _toolset_allowed_for_platform(ts_key, platform):
+                continue
             ts_tools = set(resolve_toolset(ts_key))
             if ts_tools and ts_tools.issubset(all_tool_names):
                 enabled_toolsets.add(ts_key)
+
         default_off = set(_DEFAULT_OFF_TOOLSETS)
-        if platform in default_off:
+        # Legacy safety: if the platform's own name matches a default-off
+        # toolset (e.g. `homeassistant` platform + `homeassistant` toolset),
+        # keep that toolset enabled on first install.  Skip this dodge for
+        # platform-restricted toolsets — those are always opt-in even on
+        # their own platform.
+        if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
             default_off.remove(platform)
+        # Home Assistant is already runtime-gated by its check_fn (requires
+        # HASS_TOKEN to register any tools). When a user has configured
+        # HASS_TOKEN, they've explicitly opted in — don't also strip it via
+        # _DEFAULT_OFF_TOOLSETS, which would silently drop HA from platforms
+        # (e.g. cron) that run through _get_platform_tools without an
+        # explicit saved toolset list.
+        if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
+            default_off.remove("homeassistant")
         enabled_toolsets -= default_off
+
+    # Recover non-configurable platform toolsets (e.g. discord, feishu_doc,
+    # feishu_drive).  These are part of the platform's default composite but
+    # absent from CONFIGURABLE_TOOLSETS, so they can't appear in the TUI
+    # checklist or in a user-saved config.  Must run in BOTH branches —
+    # otherwise saving via `elevate tools` (which flips has_explicit_config
+    # to True) silently drops them.  Skip entirely when the user saved an
+    # explicit empty list — that's a clear "disable everything" signal and
+    # must not be overridden by recovery.
+    if not explicit_empty:
+        _plat_info = PLATFORMS.get(platform)
+        _default_ts = _plat_info["default_toolset"] if _plat_info else f"elevate-{platform}"
+        platform_tool_universe = set(resolve_toolset(_default_ts))
+        configurable_tool_universe = set()
+        for ck in configurable_keys:
+            configurable_tool_universe.update(resolve_toolset(ck))
+        claimed = set()
+        for ts_key in enabled_toolsets:
+            claimed.update(resolve_toolset(ts_key))
+        skip = configurable_keys | plugin_ts_keys | platform_default_keys
+        skip |= {k for k in TOOLSETS if k.startswith("elevate-")}
+        skip |= set(_DEFAULT_OFF_TOOLSETS) - {platform}
+        for ts_key, ts_def in TOOLSETS.items():
+            if ts_key in skip:
+                continue
+            if ts_def.get("includes"):
+                continue
+            ts_tools = set(resolve_toolset(ts_key))
+            if not ts_tools or not ts_tools.issubset(platform_tool_universe):
+                continue
+            if ts_tools.issubset(configurable_tool_universe):
+                continue
+            if not ts_tools.issubset(claimed):
+                enabled_toolsets.add(ts_key)
+                claimed.update(ts_tools)
 
     # Plugin toolsets: enabled by default unless explicitly disabled, or
     # unless the toolset is in _DEFAULT_OFF_TOOLSETS (e.g. spotify —
@@ -594,7 +858,6 @@ def _get_platform_tools(
     # A plugin toolset is "known" for a platform once `elevate tools`
     # has been saved for that platform (tracked via known_plugin_toolsets).
     # Unknown plugins default to enabled; known-but-absent = disabled.
-    plugin_ts_keys = _get_plugin_toolset_keys()
     if plugin_ts_keys:
         known_map = config.get("known_plugin_toolsets", {})
         known_for_platform = set(known_map.get(platform, []))
@@ -612,7 +875,6 @@ def _get_platform_tools(
 
     # Preserve any explicit non-configurable toolset entries (for example,
     # custom toolsets or MCP server names saved in platform_toolsets).
-    platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
     explicit_passthrough = {
         ts
         for ts in toolset_names
@@ -647,6 +909,16 @@ def _get_platform_tools(
     else:
         enabled_toolsets.update(explicit_mcp_servers)
 
+    # Honor agent.disabled_toolsets from config.yaml — allows users to
+    # globally suppress specific toolsets (e.g. "memory") across all
+    # platforms without per-platform toolset configuration.  This runs
+    # last so it overrides everything above.
+    agent_cfg = config.get("agent") or {}
+    disabled_toolsets = agent_cfg.get("disabled_toolsets") or []
+    if disabled_toolsets:
+        disabled_set = {str(ts) for ts in disabled_toolsets}
+        enabled_toolsets -= disabled_set
+
     return enabled_toolsets
 
 
@@ -657,6 +929,14 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     that were already in the config for this platform.
     """
     config.setdefault("platform_toolsets", {})
+
+    # Drop platform-scoped toolsets that don't apply here.  Prevents the
+    # "Configure all platforms" checklist (or a hand-edited config.yaml)
+    # from turning on, say, the `discord` toolset for Telegram.
+    enabled_toolset_keys = {
+        ts for ts in enabled_toolset_keys
+        if _toolset_allowed_for_platform(ts, platform)
+    }
 
     # Get the set of all configurable toolset keys (built-in + plugin)
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
@@ -669,9 +949,10 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
 
     # Get existing toolsets for this platform
-    existing_toolsets = config.get("platform_toolsets", {}).get(platform, [])
+    existing_toolsets = cfg_get(config, "platform_toolsets", platform, default=[])
     if not isinstance(existing_toolsets, list):
         existing_toolsets = []
+    existing_toolsets = [str(ts) for ts in existing_toolsets]
 
     # Preserve any entries that are NOT configurable toolsets and NOT platform
     # defaults (i.e. only MCP server names should be preserved)
@@ -679,6 +960,11 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
         entry for entry in existing_toolsets
         if entry not in configurable_keys and entry not in platform_default_keys
     }
+    # Opening `elevate tools` is the user's opt-in to reconfigure tools, so treat
+    # saving from the picker as consent to clear the "no_mcp" sentinel. The
+    # picker has no checkbox for no_mcp, so without this users who once set it
+    # by hand could never re-enable MCP servers through the UI.
+    preserved_entries.discard("no_mcp")
 
     # Merge preserved entries with new enabled toolsets
     config["platform_toolsets"][platform] = sorted(enabled_toolset_keys | preserved_entries)
@@ -793,7 +1079,7 @@ def _estimate_tool_tokens() -> Dict[str, int]:
     return _tool_token_cache
 
 
-def _prompt_toolset_checklist(platform_label: str, enabled: Set[str]) -> Set[str]:
+def _prompt_toolset_checklist(platform_label: str, enabled: Set[str], platform: str = "cli") -> Set[str]:
     """Multi-select checklist of toolsets. Returns set of selected toolset keys."""
     from elevate_cli.curses_ui import curses_checklist
     from toolsets import resolve_toolset
@@ -801,7 +1087,12 @@ def _prompt_toolset_checklist(platform_label: str, enabled: Set[str]) -> Set[str
     # Pre-compute per-tool token counts (cached after first call).
     tool_tokens = _estimate_tool_tokens()
 
-    effective = _get_effective_configurable_toolsets()
+    effective_all = _get_effective_configurable_toolsets()
+    # Drop platform-scoped toolsets that don't apply to this platform.
+    effective = [
+        (k, l, d) for (k, l, d) in effective_all
+        if _toolset_allowed_for_platform(k, platform)
+    ]
 
     labels = []
     for ts_key, ts_label, ts_desc in effective:
@@ -890,15 +1181,138 @@ def _plugin_image_gen_providers() -> list[dict]:
             continue
         if not isinstance(schema, dict):
             continue
-        rows.append(
-            {
-                "name": schema.get("name", provider.display_name),
-                "badge": schema.get("badge", ""),
-                "tag": schema.get("tag", ""),
-                "env_vars": schema.get("env_vars", []),
-                "image_gen_plugin_name": provider.name,
-            }
-        )
+        row = {
+            "name": schema.get("name", provider.display_name),
+            "badge": schema.get("badge", ""),
+            "tag": schema.get("tag", ""),
+            "env_vars": schema.get("env_vars", []),
+            "image_gen_plugin_name": provider.name,
+        }
+        if schema.get("post_setup"):
+            row["post_setup"] = schema["post_setup"]
+        rows.append(row)
+    return rows
+
+
+def _plugin_video_gen_providers() -> list[dict]:
+    """Build picker-row dicts from plugin-registered video gen providers.
+
+    Mirrors :func:`_plugin_image_gen_providers` — every video backend is a
+    plugin. Returns ``[]`` when no Video Generation category is wired up
+    in ``TOOL_CATEGORIES`` (current Elevate state); the helper is a no-op
+    until a ``video_gen`` category is added.
+    """
+    try:
+        from agent.video_gen_registry import list_providers
+        from elevate_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        providers = list_providers()
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    for provider in providers:
+        try:
+            schema = provider.get_setup_schema()
+        except Exception:
+            continue
+        if not isinstance(schema, dict):
+            continue
+        row = {
+            "name": schema.get("name", provider.display_name),
+            "badge": schema.get("badge", ""),
+            "tag": schema.get("tag", ""),
+            "env_vars": schema.get("env_vars", []),
+            "video_gen_plugin_name": provider.name,
+        }
+        if schema.get("post_setup"):
+            row["post_setup"] = schema["post_setup"]
+        rows.append(row)
+    return rows
+
+
+def _plugin_web_search_providers() -> list[dict]:
+    """Build picker-row dicts from plugin-registered web search providers.
+
+    Each row populates both ``web_backend`` (legacy field consumed by setup +
+    selection helpers) and ``web_search_plugin_name`` (informational marker)
+    so the picker behaves identically whether a provider is hardcoded or
+    plugin-registered.
+    """
+    try:
+        from agent.web_search_registry import list_providers as _list_web_providers
+        from elevate_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        providers = _list_web_providers()
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    for provider in providers:
+        name = getattr(provider, "name", None)
+        if not name:
+            continue
+        try:
+            schema = provider.get_setup_schema()
+        except Exception:
+            continue
+        if not isinstance(schema, dict):
+            continue
+        row = {
+            "name": schema.get("name", provider.display_name),
+            "badge": schema.get("badge", ""),
+            "tag": schema.get("tag", ""),
+            "env_vars": schema.get("env_vars", []),
+            "web_backend": name,
+            "web_search_plugin_name": name,
+        }
+        if schema.get("post_setup"):
+            row["post_setup"] = schema["post_setup"]
+        rows.append(row)
+    return rows
+
+
+def _plugin_browser_providers() -> list[dict]:
+    """Build picker-row dicts from plugin-registered cloud browser providers.
+
+    Each returned dict mirrors the legacy ``TOOL_CATEGORIES["browser"]``
+    schema (``name`` / ``badge`` / ``tag`` / ``env_vars`` /
+    ``browser_provider`` / ``post_setup``) so the picker behaves identically
+    whether a provider was hardcoded or plugin-registered.
+    """
+    try:
+        from agent.browser_registry import list_providers as _list_browser_providers
+        from elevate_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        providers = _list_browser_providers()
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    for provider in providers:
+        name = getattr(provider, "name", None)
+        if not name:
+            continue
+        try:
+            schema = provider.get_setup_schema()
+        except Exception:
+            continue
+        if not isinstance(schema, dict):
+            continue
+        row = {
+            "name": schema.get("name", provider.display_name),
+            "badge": schema.get("badge", ""),
+            "tag": schema.get("tag", ""),
+            "env_vars": schema.get("env_vars", []),
+            "browser_provider": name,
+            "browser_plugin_name": name,
+        }
+        if schema.get("post_setup"):
+            row["post_setup"] = schema["post_setup"]
+        rows.append(row)
     return rows
 
 
@@ -918,7 +1332,52 @@ def _visible_providers(cat: dict, config: dict) -> list[dict]:
     if cat.get("name") == "Image Generation":
         visible.extend(_plugin_image_gen_providers())
 
+    # Inject plugin-registered video_gen backends — no-op until a
+    # ``video_gen`` category is added to ``TOOL_CATEGORIES``.
+    if cat.get("name") == "Video Generation":
+        visible.extend(_plugin_video_gen_providers())
+
+    # Mirror image_gen for web search backends. No-op for category names
+    # that don't match the plugin-driven shape.
+    if cat.get("name") == "Web Search & Extract":
+        visible.extend(_plugin_web_search_providers())
+
+    # Mirror image_gen for cloud browser backends. No-op for category
+    # names that don't match the plugin-driven shape.
+    if cat.get("name") == "Browser Automation":
+        visible.extend(_plugin_browser_providers())
+
     return visible
+
+
+_POST_SETUP_INSTALLED: Dict[str, callable] = {
+    # post_setup_key -> predicate(): True when the install side-effect
+    # is already satisfied. Used by `_toolset_needs_configuration_prompt`
+    # to force the provider-setup flow when a no-key provider still needs
+    # a binary/dependency install (otherwise an already-configured user
+    # who toggles the toolset on via `elevate tools` gets a silent no-op
+    # because the gate sees "no env vars to ask about" and skips the
+    # provider-setup flow that would have run the post_setup hook).
+    #
+    # Only entries here are gated; other post_setup hooks (kittentts,
+    # piper, etc.) keep their existing behaviour. Add an entry when
+    # (a) the post_setup is the ONLY install side-effect for a no-key
+    # provider, and (b) an installed-state check is cheap and doesn't
+    # trigger a heavy import.
+}
+
+
+def _post_setup_already_installed(post_setup_key: str) -> bool:
+    """Return True when the post_setup install side-effect is satisfied."""
+    predicate = _POST_SETUP_INSTALLED.get(post_setup_key)
+    if predicate is None:
+        # No install-state check registered → assume satisfied (don't
+        # change behaviour for hooks we haven't explicitly opted in).
+        return True
+    try:
+        return bool(predicate())
+    except Exception:
+        return True
 
 
 def _toolset_needs_configuration_prompt(ts_key: str, config: dict) -> bool:
@@ -926,6 +1385,15 @@ def _toolset_needs_configuration_prompt(ts_key: str, config: dict) -> bool:
     cat = TOOL_CATEGORIES.get(ts_key)
     if not cat:
         return not _toolset_has_keys(ts_key, config)
+
+    # If any visible provider has a registered post_setup install-state
+    # check that hasn't been satisfied, force the configuration flow so
+    # `_configure_provider` invokes `_run_post_setup` and the install
+    # actually runs.
+    for provider in _visible_providers(cat, config):
+        post_setup = provider.get("post_setup")
+        if post_setup and not _post_setup_already_installed(post_setup):
+            return True
 
     if ts_key == "tts":
         tts_cfg = config.get("tts", {})
@@ -1479,7 +1947,7 @@ def _reconfigure_tool(config: dict):
         cat = TOOL_CATEGORIES.get(ts_key)
         reqs = TOOLSET_ENV_REQUIREMENTS.get(ts_key)
         if cat or reqs:
-            if _toolset_has_keys(ts_key, config):
+            if _toolset_has_keys(ts_key, config) or _toolset_enabled_for_reconfigure(ts_key, config):
                 configurable.append((ts_key, ts_label))
 
     if not configurable:
@@ -1503,6 +1971,28 @@ def _reconfigure_tool(config: dict):
         _reconfigure_simple_requirements(ts_key)
 
     save_config(config)
+
+
+def _toolset_enabled_for_reconfigure(ts_key: str, config: dict) -> bool:
+    """Return True if a configurable toolset is enabled anywhere.
+
+    Reconfigure must include enabled-but-unconfigured categories so users can
+    finish provider/API-key setup without disabling and re-enabling the toolset.
+    """
+    for platform in PLATFORMS:
+        if not _toolset_allowed_for_platform(ts_key, platform):
+            continue
+        try:
+            enabled = _get_platform_tools(
+                config,
+                platform,
+                include_default_mcp_servers=False,
+            )
+        except Exception:
+            continue
+        if ts_key in enabled:
+            return True
+    return False
 
 
 def _configure_tool_category_for_reconfig(ts_key: str, cat: dict, config: dict):
@@ -1715,7 +2205,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
             checklist_preselected = current_enabled - _DEFAULT_OFF_TOOLSETS
 
             # Show checklist
-            new_enabled = _prompt_toolset_checklist(pinfo["label"], checklist_preselected)
+            new_enabled = _prompt_toolset_checklist(pinfo["label"], checklist_preselected, pkey)
 
             added = new_enabled - current_enabled
             removed = current_enabled - new_enabled
@@ -1859,7 +2349,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
         current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
 
         # Show checklist
-        new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled)
+        new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled, pkey)
 
         if new_enabled != current_enabled:
             added = new_enabled - current_enabled
@@ -2071,7 +2561,11 @@ def _apply_mcp_change(config: dict, targets: List[str], action: str) -> Set[str]
 
 def _print_tools_list(enabled_toolsets: set, mcp_servers: dict, platform: str = "cli"):
     """Print a summary of enabled/disabled toolsets and MCP tool filters."""
-    effective = _get_effective_configurable_toolsets()
+    effective_all = _get_effective_configurable_toolsets()
+    effective = [
+        (k, l, d) for (k, l, d) in effective_all
+        if _toolset_allowed_for_platform(k, platform)
+    ]
     builtin_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
 
     print(f"Built-in toolsets ({platform}):")
@@ -2136,6 +2630,20 @@ def tools_disable_enable_command(args):
         for name in unknown_toolsets:
             _print_error(f"Unknown toolset '{name}'")
         toolset_targets = [t for t in toolset_targets if t in valid_toolsets]
+
+    # Reject platform-scoped toolsets on platforms that don't allow them.
+    restricted_targets = [
+        t for t in toolset_targets
+        if not _toolset_allowed_for_platform(t, platform)
+    ]
+    if restricted_targets:
+        for name in restricted_targets:
+            allowed = sorted(_TOOLSET_PLATFORM_RESTRICTIONS.get(name) or set())
+            _print_error(
+                f"Toolset '{name}' is not available on platform '{platform}' "
+                f"(only: {', '.join(allowed)})"
+            )
+        toolset_targets = [t for t in toolset_targets if t not in restricted_targets]
 
     if toolset_targets:
         _apply_toolset_change(config, platform, toolset_targets, action)
