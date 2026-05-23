@@ -575,6 +575,14 @@ prior flaky test stabilized). Batch 8/9 targeted: 91 tests across the
 6 modules passed clean. Batch 10 targeted: 13 skipped (no codex binary
 in hermetic env), syntax verified.
 
+Final full sweep at HEAD (post-batch-10 + LEDGER commit cd409f530):
+**98 failed / 16773 passed / 246 skipped / 214 warnings in 302.68s** —
+THREE fewer failures and three more passes than the 101 / 16770 pre-
+session baseline. Zero new regressions across all seven rebrand
+commits (7e77f7805, 47e0974b8, e78c454f5, 32faca6b9, 4202a3e66,
+c5c3ae16a, plus this LEDGER commit). Flaky-test stabilization in
+preceding commits accounts for the net improvement.
+
 B4b STATUS post-batch-10:
 - elevate_cli/ files with non-intentional hermes refs remaining: 0.
   All residual `hermes` strings in scanned files are wire-format
