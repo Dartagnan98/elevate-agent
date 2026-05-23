@@ -14,7 +14,10 @@ import sys
 from pathlib import Path
 
 from elevate_cli.config import get_elevate_home, get_env_path, get_project_root, load_config
+from elevate_cli.env_loader import load_elevate_dotenv
 from elevate_constants import display_elevate_home
+
+from agent.skill_utils import is_excluded_skill_path
 
 
 def _get_git_commit(project_root: Path) -> str:
@@ -33,12 +36,16 @@ def _get_git_commit(project_root: Path) -> str:
 
 
 def _redact(value: str) -> str:
-    """Redact all but first 4 and last 4 chars."""
+    """Redact all but first 4 and last 4 chars.
+
+    Thin wrapper over :func:`agent.redact.mask_secret`. Returns ``""`` for
+    an empty value (matches the historical behavior of this helper —
+    callers like the dump renderer rely on falsy emptiness).
+    """
     if not value:
         return ""
-    if len(value) < 12:
-        return "***"
-    return value[:4] + "..." + value[-4:]
+    from agent.redact import mask_secret
+    return mask_secret(value)
 
 
 def _gateway_status() -> str:
@@ -66,6 +73,8 @@ def _count_skills(elevate_home: Path) -> int:
         return 0
     count = 0
     for item in skills_dir.rglob("SKILL.md"):
+        if is_excluded_skill_path(item):
+            continue
         count += 1
     return count
 
@@ -193,15 +202,11 @@ def run_dump(args):
     show_keys = getattr(args, "show_keys", False)
 
     # Load env from .env file so key checks work
-    from dotenv import load_dotenv
     env_path = get_env_path()
-    if env_path.exists():
-        try:
-            load_dotenv(env_path, encoding="utf-8")
-        except UnicodeDecodeError:
-            load_dotenv(env_path, encoding="latin-1")
-    # Also try project .env as dev fallback
-    load_dotenv(get_project_root() / ".env", override=False, encoding="utf-8")
+    load_elevate_dotenv(
+        elevate_home=env_path.parent,
+        project_env=get_project_root() / ".env",
+    )
 
     project_root = get_project_root()
     elevate_home = get_elevate_home()

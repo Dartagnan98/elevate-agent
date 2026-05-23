@@ -216,8 +216,8 @@ _elevate() {{
     typeset -A opt_args
 
     _arguments -C \\
-        '(-h --help){{-h,--help}}[Show help and exit]' \\
-        '(-V --version){{-V,--version}}[Show version and exit]' \\
+        '(-)'{{-h,--help}}'[Show help and exit]' \\
+        '(-)'{{-V,--version}}'[Show version and exit]' \\
         '(-p --profile){{-p,--profile}}[Profile name]:profile:_elevate_profiles' \\
         '1:command:->commands' \\
         '*::arg:->args'

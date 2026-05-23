@@ -11,7 +11,6 @@ hot-reloaded by the webhook adapter without a gateway restart.
 """
 
 import json
-import os
 import re
 import secrets
 import time
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Dict
 
 from elevate_constants import display_elevate_home
+from utils import atomic_replace
 
 
 _SUBSCRIPTIONS_FILENAME = "webhook_subscriptions.json"
@@ -52,7 +52,7 @@ def _save_subscriptions(subs: Dict[str, dict]) -> None:
         json.dumps(subs, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    os.replace(str(tmp_path), str(path))
+    atomic_replace(tmp_path, path)
 
 
 def _get_webhook_config() -> dict:
@@ -123,11 +123,11 @@ def webhook_command(args):
     if not _require_webhook_enabled():
         return
 
-    if sub in ("subscribe", "add"):
+    if sub in {"subscribe", "add"}:
         _cmd_subscribe(args)
-    elif sub in ("list", "ls"):
+    elif sub in {"list", "ls"}:
         _cmd_list(args)
-    elif sub in ("remove", "rm"):
+    elif sub in {"remove", "rm"}:
         _cmd_remove(args)
     elif sub == "test":
         _cmd_test(args)
