@@ -463,4 +463,23 @@ agent+cli sweep: 2456 passing / 7 pre-existing failures (verified pre-
 existing by stashing and re-running on HEAD). Zero new regressions from
 this session's source-code changes. Net +400 tests vs prior baseline.
 
-NEXT: continue B4b elevate_cli/ differ files OR drain B8 test-port backlog.
+Full repo sweep:
+  - pre-azure-port: 101 failed, 16699 passed, 246 skipped (293s)
+  - post-azure-port: 101 failed, 16770 passed, 246 skipped (+71 from
+    azure_foundry + 4 ported test files; zero new regressions)
+
+ba32db088 + 4e092c8a3 + 829ded7c2 — branding cleanup batches:
+  - HermesAgent/1.0 UA -> ElevateAgent/1.0 (models.py copilot fallback)
+  - HermesCLI / hermes_home docstrings (goals.py)
+  - HermesOverlay class -> ElevateOverlay (providers.py, +internal refs)
+  - hermes-agent/azure-detect UA (azure_detect.py)
+  - 'Shared helpers for attaching Hermes' (browser_connect.py)
+  - Hermes openai-codex comment refs (codex_models.py)
+  - 'run `hermes model`' user-facing guidance (inventory.py)
+  - Hermes docstring refs (pt_input_extras.py)
+  - hermes-agent's tool vocabulary (session_recap.py)
+All pure string changes, no behaviour deltas. Each had a verified
+Elevate-side test pass before commit.
+
+NEXT: continue B4b elevate_cli/ differ files (memory_setup, debug, larger
+diffs deferred) OR drain B8 test-port backlog (444 missing test files).
