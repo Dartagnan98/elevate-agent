@@ -89,7 +89,19 @@ MAX_CONSECUTIVE_FAILURES = 3
 RETRY_DELAY_SECONDS = 2
 BACKOFF_DELAY_SECONDS = 30
 SESSION_EXPIRED_ERRCODE = -14
+RATE_LIMIT_ERRCODE = -2  # iLink frequency limit — backoff and retry
 MESSAGE_DEDUP_TTL_SECONDS = 300
+
+
+def _is_stale_session_ret(
+    ret: "Optional[int]", errcode: "Optional[int]", errmsg: "Optional[str]",
+) -> bool:
+    """True when iLink returns ret=-2 / errcode=-2 with 'unknown error',
+    which is a stale-session signal (same as errcode=-14) rather than
+    a genuine rate limit."""
+    if ret != RATE_LIMIT_ERRCODE and errcode != RATE_LIMIT_ERRCODE:
+        return False
+    return (errmsg or "").lower() == "unknown error"
 
 MEDIA_IMAGE = 1
 MEDIA_VIDEO = 2
@@ -535,17 +547,21 @@ async def _upload_ciphertext(
     Accepts either a constructed CDN URL (from upload_param) or a direct
     upload_full_url — both use POST with the raw ciphertext as the body.
     """
-    timeout = aiohttp.ClientTimeout(total=120)
-    async with session.post(upload_url, data=ciphertext, headers={"Content-Type": "application/octet-stream"}, timeout=timeout) as response:
-        if response.status == 200:
-            encrypted_param = response.headers.get("x-encrypted-param")
-            if encrypted_param:
-                await response.read()
-                return encrypted_param
+    # Use asyncio.wait_for() instead of aiohttp ClientTimeout to avoid
+    # "Timeout context manager should be used inside a task" errors when
+    # invoked via asyncio.run_coroutine_threadsafe() from cron jobs.
+    async def _do_upload() -> str:
+        async with session.post(upload_url, data=ciphertext, headers={"Content-Type": "application/octet-stream"}) as response:
+            if response.status == 200:
+                encrypted_param = response.headers.get("x-encrypted-param")
+                if encrypted_param:
+                    await response.read()
+                    return encrypted_param
+                raw = await response.text()
+                raise RuntimeError(f"CDN upload missing x-encrypted-param header: {raw[:200]}")
             raw = await response.text()
-            raise RuntimeError(f"CDN upload missing x-encrypted-param header: {raw[:200]}")
-        raw = await response.text()
-        raise RuntimeError(f"CDN upload HTTP {response.status}: {raw[:200]}")
+            raise RuntimeError(f"CDN upload HTTP {response.status}: {raw[:200]}")
+    return await asyncio.wait_for(_do_upload(), timeout=120)
 
 
 async def _download_bytes(
@@ -554,10 +570,13 @@ async def _download_bytes(
     url: str,
     timeout_seconds: float = 60.0,
 ) -> bytes:
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    async with session.get(url, timeout=timeout) as response:
-        response.raise_for_status()
-        return await response.read()
+    # Use asyncio.wait_for() instead of aiohttp ClientTimeout to avoid
+    # "Timeout context manager should be used inside a task" errors.
+    async def _do_download() -> bytes:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            return await response.read()
+    return await asyncio.wait_for(_do_download(), timeout=timeout_seconds)
 
 
 _WEIXIN_CDN_ALLOWLIST: frozenset[str] = frozenset(
@@ -1203,7 +1222,12 @@ class WeixinAdapter(BasePlatformAdapter):
             logger.debug("[%s] Token lock unavailable (non-fatal): %s", self.name, exc)
 
         self._poll_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector())
-        self._send_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector())
+        # Disable aiohttp's built-in ClientTimeout (total=None) to prevent
+        # "Timeout context manager should be used inside a task" errors when
+        # send() is invoked via asyncio.run_coroutine_threadsafe() from cron.
+        # Timeout is managed externally via asyncio.wait_for() in _api_post/_api_get.
+        _no_aiohttp_timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None)
+        self._send_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector(), timeout=_no_aiohttp_timeout)
         self._token_store.restore(self._account_id)
         self._poll_task = asyncio.create_task(self._poll_loop(), name="weixin-poll")
         self._mark_connected()
@@ -1253,7 +1277,8 @@ class WeixinAdapter(BasePlatformAdapter):
                 ret = response.get("ret", 0)
                 errcode = response.get("errcode", 0)
                 if ret not in (0, None) or errcode not in (0, None):
-                    if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
+                    if (ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE
+                            or _is_stale_session_ret(ret, errcode, response.get("errmsg"))):
                         logger.error("[%s] Session expired; pausing for 10 minutes", self.name)
                         await asyncio.sleep(600)
                         consecutive_failures = 0
@@ -1518,6 +1543,7 @@ class WeixinAdapter(BasePlatformAdapter):
                         is_session_expired = (
                             ret == SESSION_EXPIRED_ERRCODE
                             or errcode == SESSION_EXPIRED_ERRCODE
+                            or _is_stale_session_ret(ret, errcode, resp.get("errmsg"))
                         )
                         # Session expired — strip token and retry once
                         if is_session_expired and not retried_without_token and context_token:
@@ -1530,6 +1556,28 @@ class WeixinAdapter(BasePlatformAdapter):
                                 "[%s] session expired for %s; retrying without context_token",
                                 self.name, _safe_id(chat_id),
                             )
+                            continue
+                        # Rate limit (-2) — backoff and retry
+                        is_rate_limited = (
+                            ret == RATE_LIMIT_ERRCODE
+                            or errcode == RATE_LIMIT_ERRCODE
+                        )
+                        if is_rate_limited:
+                            errmsg = resp.get("errmsg") or resp.get("msg") or "rate limited"
+                            # Record the error so we raise a descriptive
+                            # RuntimeError (instead of AssertionError) if the
+                            # loop exhausts with the server still rate-limiting.
+                            last_error = RuntimeError(
+                                f"iLink sendmessage rate limited: ret={ret} errcode={errcode} errmsg={errmsg}"
+                            )
+                            if attempt >= self._send_chunk_retries:
+                                break
+                            wait = self._send_chunk_retry_delay_seconds * 3  # 3x backoff for rate limit
+                            logger.warning(
+                                "[%s] rate limited for %s; backing off %.1fs before retry",
+                                self.name, _safe_id(chat_id), wait,
+                            )
+                            await asyncio.sleep(wait)
                             continue
                         errmsg = resp.get("errmsg") or resp.get("msg") or "unknown error"
                         raise RuntimeError(
@@ -1572,7 +1620,7 @@ class WeixinAdapter(BasePlatformAdapter):
         _, image_cleaned = self.extract_images(cleaned_content)
         local_files, final_content = self.extract_local_files(image_cleaned)
 
-        _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a"}
+        _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a", ".flac"}
         _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
         _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -1769,10 +1817,14 @@ class WeixinAdapter(BasePlatformAdapter):
             raise ValueError(f"Blocked unsafe URL (SSRF protection): {url}")
 
         assert self._send_session is not None
-        async with self._send_session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-            response.raise_for_status()
-            data = await response.read()
-            suffix = Path(url.split("?", 1)[0]).suffix or ".bin"
+        # Use asyncio.wait_for() instead of aiohttp ClientTimeout to avoid
+        # "Timeout context manager should be used inside a task" errors.
+        async def _do_fetch():
+            async with self._send_session.get(url) as response:
+                response.raise_for_status()
+                return await response.read()
+        data = await asyncio.wait_for(_do_fetch(), timeout=30)
+        suffix = Path(url.split("?", 1)[0]).suffix or ".bin"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
             handle.write(data)
             return handle.name
