@@ -284,6 +284,7 @@ def get_nous_subscription_features(
     direct_firecrawl = bool(get_env_value("FIRECRAWL_API_KEY") or get_env_value("FIRECRAWL_API_URL"))
     direct_parallel = bool(get_env_value("PARALLEL_API_KEY"))
     direct_tavily = bool(get_env_value("TAVILY_API_KEY"))
+    direct_searxng = bool(get_env_value("SEARXNG_URL"))
     direct_fal = fal_key_is_configured()
     direct_openai_tts = bool(resolve_openai_audio_api_key())
     direct_elevenlabs = bool(get_env_value("ELEVENLABS_API_KEY"))
@@ -327,10 +328,18 @@ def get_nous_subscription_features(
             or (web_backend == "firecrawl" and direct_firecrawl)
             or (web_backend == "parallel" and direct_parallel)
             or (web_backend == "tavily" and direct_tavily)
+            or (web_backend == "searxng" and direct_searxng)
+            # Per-capability overrides: search_backend or extract_backend may be set
+            # without web.backend (using the new split config from #20061)
+            or (web_search_backend == "searxng" and direct_searxng)
+            or (web_search_backend == "exa" and direct_exa)
+            or (web_search_backend == "firecrawl" and direct_firecrawl)
+            or (web_search_backend == "parallel" and direct_parallel)
+            or (web_search_backend == "tavily" and direct_tavily)
         )
     )
     web_available = bool(
-        managed_web_available or direct_exa or direct_firecrawl or direct_parallel or direct_tavily
+        managed_web_available or direct_exa or direct_firecrawl or direct_parallel or direct_tavily or direct_searxng
     )
 
     image_managed = image_tool_enabled and managed_image_available and not direct_fal
@@ -416,8 +425,8 @@ def get_nous_subscription_features(
             managed_by_nous=web_managed,
             direct_override=web_active and not web_managed,
             toolset_enabled=web_tool_enabled,
-            current_provider=web_backend or "",
-            explicit_configured=bool(web_backend),
+            current_provider=web_backend or web_search_backend or "",
+            explicit_configured=bool(web_backend or web_search_backend),
         ),
         "image_gen": NousFeatureState(
             key="image_gen",
@@ -568,6 +577,7 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
         ),
         "browser": bool(
             get_env_value("BROWSER_USE_API_KEY")
+            or (get_env_value("BROWSERBASE_API_KEY") and get_env_value("BROWSERBASE_PROJECT_ID"))
         ),
     }
 
@@ -576,7 +586,7 @@ _GATEWAY_DIRECT_LABELS = {
     "web": "Firecrawl/Exa/Parallel/Tavily key",
     "image_gen": "FAL key",
     "tts": "OpenAI/ElevenLabs key",
-    "browser": "Browser Use key",
+    "browser": "Browser Use/Browserbase key",
 }
 
 _ALL_GATEWAY_KEYS = ("web", "image_gen", "tts", "browser")
@@ -612,10 +622,10 @@ def get_gateway_eligible_tools(
     # no direct keys exist — we only skip the prompt for tools where
     # use_gateway was explicitly set.
     opted_in = {
-        "web": bool((config.get("web") if isinstance(config.get("web"), dict) else {}).get("use_gateway")),
-        "image_gen": bool((config.get("image_gen") if isinstance(config.get("image_gen"), dict) else {}).get("use_gateway")),
-        "tts": bool((config.get("tts") if isinstance(config.get("tts"), dict) else {}).get("use_gateway")),
-        "browser": bool((config.get("browser") if isinstance(config.get("browser"), dict) else {}).get("use_gateway")),
+        "web": _uses_gateway(config.get("web")),
+        "image_gen": _uses_gateway(config.get("image_gen")),
+        "tts": _uses_gateway(config.get("tts")),
+        "browser": _uses_gateway(config.get("browser")),
     }
 
     unconfigured: list[str] = []
