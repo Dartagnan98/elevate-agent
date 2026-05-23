@@ -1,9 +1,9 @@
 """
-Elevate Uninstaller.
+Elevate Agent Uninstaller.
 
 Provides options for:
 - Full uninstall: Remove everything including configs and data
-- Keep data: Remove install links/code but keep ~/.elevate/ (configs, sessions, logs)
+- Keep data: Remove code but keep ~/.elevate/ (configs, sessions, logs)
 """
 
 import os
@@ -27,74 +27,6 @@ def log_warn(msg: str):
 def get_project_root() -> Path:
     """Get the project installation directory."""
     return Path(__file__).parent.parent.resolve()
-
-
-def _path_contains_git_checkout(path: Path) -> bool:
-    """Return True when path is inside a Git checkout.
-
-    Running ``elevate uninstall`` from a developer checkout should not delete
-    the source tree by default. Packaged/copied installs normally do not include
-    Git metadata and remain removable.
-    """
-    try:
-        resolved = path.resolve()
-        home = Path.home().resolve()
-    except Exception:
-        resolved = path
-        home = Path.home()
-
-    for candidate in (resolved, *resolved.parents):
-        if (candidate / ".git").exists():
-            return True
-        if candidate == home:
-            break
-    return False
-
-
-def _is_obviously_unsafe_code_path(path: Path) -> bool:
-    """Guard against catastrophic path detection failures."""
-    try:
-        resolved = path.resolve()
-        home = Path.home().resolve()
-    except Exception:
-        return True
-
-    unsafe = {
-        Path("/").resolve(),
-        home,
-        home / ".local",
-        home / ".local" / "bin",
-        home / ".elevate",
-    }
-    return resolved in unsafe
-
-
-def should_remove_project_root(
-    project_root: Path,
-    elevate_home: Path,
-    force: bool = False,
-) -> tuple[bool, str]:
-    """Decide whether uninstall may remove the code directory."""
-    if force:
-        return True, "forced by --delete-source-checkout"
-
-    if _is_obviously_unsafe_code_path(project_root):
-        return False, "path is too broad to remove automatically"
-
-    try:
-        project_resolved = project_root.resolve()
-        home_resolved = elevate_home.resolve()
-    except Exception:
-        project_resolved = project_root
-        home_resolved = elevate_home
-
-    if _path_contains_git_checkout(project_resolved):
-        return False, "source checkout detected"
-
-    if home_resolved in project_resolved.parents or project_resolved.parent == home_resolved:
-        return True, "installed under ELEVATE_HOME"
-
-    return True, "standalone copied install"
 
 
 def find_shell_configs() -> list:
@@ -132,8 +64,8 @@ def remove_path_from_shell_configs():
             skip_next = False
             
             for line in content.split('\n'):
-                # Skip the "# Elevate" comment and following line
-                if '# Elevate' in line or '# elevate' in line:
+                # Skip the "# Elevate Agent" comment and following line
+                if '# Elevate Agent' in line or '# elevate' in line:
                     skip_next = True
                     continue
                 if skip_next and ('elevate' in line.lower() and 'PATH' in line):
@@ -186,12 +118,13 @@ def remove_wrapper_script():
 
 
 def uninstall_gateway_service():
-    """Stop and uninstall the gateway service (systemd, launchd) and kill any
-    standalone gateway processes.
+    """Stop and uninstall the gateway service (systemd, launchd, Windows
+    Scheduled Task / Startup folder) and kill any standalone gateway processes.
 
     Delegates to the gateway module which handles:
     - Linux: user + system systemd services (with proper DBUS env setup)
     - macOS: launchd plists
+    - Windows: Scheduled Task + Startup-folder fallback, via ``gateway_windows``
     - All platforms: standalone ``elevate gateway run`` processes
     - Termux/Android: skips systemd (no systemd on Android), still kills standalone processes
     """
@@ -235,7 +168,7 @@ def uninstall_gateway_service():
 
                 scope = "system" if is_system else "user"
                 try:
-                    if is_system and os.geteuid() != 0:
+                    if is_system and os.geteuid() != 0:  # windows-footgun: ok — Linux systemd uninstall path, guarded by `if system == "Linux"` above
                         log_warn(f"System gateway service exists at {unit_path} "
                                  f"but needs sudo to remove")
                         continue
@@ -269,7 +202,161 @@ def uninstall_gateway_service():
         except Exception as e:
             log_warn(f"Could not remove launchd gateway service: {e}")
 
+    # 4. Windows: uninstall Scheduled Task + Startup-folder entry.  The
+    #    gateway_windows module already knows how to locate and remove both
+    #    code paths (schtasks /Delete + .cmd unlink) and how to stop any
+    #    running detached pythonw gateway process.  We call into it so the
+    #    uninstall logic stays in exactly one place.
+    elif system == "Windows":
+        try:
+            from elevate_cli import gateway_windows
+            if gateway_windows.is_installed() or gateway_windows.is_task_registered() \
+                    or gateway_windows.is_startup_entry_installed():
+                try:
+                    gateway_windows.stop()
+                except Exception as e:
+                    log_warn(f"Could not stop Windows gateway cleanly: {e}")
+                try:
+                    gateway_windows.uninstall()
+                    log_success("Removed Windows gateway (Scheduled Task + Startup entry)")
+                    stopped_something = True
+                except Exception as e:
+                    log_warn(f"Could not fully uninstall Windows gateway: {e}")
+        except Exception as e:
+            log_warn(f"Could not check Windows gateway service: {e}")
+
     return stopped_something
+
+
+# ============================================================================
+# Windows-specific uninstall helpers
+# ============================================================================
+#
+# The installer (``scripts/install.ps1``) does four Windows-only things that
+# ``remove_path_from_shell_configs`` / ``remove_wrapper_script`` don't cover:
+#
+#   1. Sets User-scope env vars ``ELEVATE_HOME`` and ``ELEVATE_GIT_BASH_PATH``
+#      via ``[Environment]::SetEnvironmentVariable(..., "User")``.  These
+#      don't live in ~/.bashrc — they're in the Windows registry at
+#      HKCU\Environment.
+#   2. Prepends to User-scope ``PATH`` (same registry location) entries
+#      like ``%LOCALAPPDATA%\elevate\git\cmd``, ``%LOCALAPPDATA%\elevate\git\bin``,
+#      ``%LOCALAPPDATA%\elevate\git\usr\bin``, ``%LOCALAPPDATA%\elevate\node``.
+#      Again not in any rc file — only accessible via the registry or the
+#      .NET [Environment] API.
+#   3. Downloads PortableGit to ``%LOCALAPPDATA%\elevate\git\`` and Node to
+#      ``%LOCALAPPDATA%\elevate\node\`` as user-scoped, isolated copies.
+#      These are ~200MB combined and serve no purpose after uninstall.
+#   4. On the ``elevate dashboard`` + gateway paths, drops files into
+#      ``%LOCALAPPDATA%\elevate\gateway-service\`` and sometimes
+#      ``%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`` — the
+#      latter is handled by ``gateway_windows.uninstall()`` already.
+#
+# Running a PowerShell one-liner per operation is overkill and fragile on
+# locked-down machines (Constrained Language Mode, restricted ExecutionPolicy).
+# Direct registry writes via ``winreg`` work without spawning any subprocess
+# and apply immediately for new shells (SendMessage WM_SETTINGCHANGE would
+# be nicer but requires ctypes and buys us nothing — the user will log out
+# or open a new terminal anyway).
+
+
+def _elevate_path_markers(elevate_home: Path) -> list[str]:
+    """Path-entry substrings that identify Elevate-owned User-PATH entries."""
+    root = str(elevate_home).rstrip("\\/")
+    # Match on prefix so sub-entries (git\cmd, git\bin, git\usr\bin, node, etc.)
+    # all get swept.  Also match the bare elevate install dir.
+    markers = [root + "\\elevate", root + "\\git", root + "\\node", root + "\\venv"]
+    # Also match if ELEVATE_HOME was customised to somewhere else — find-and-nuke
+    # any entry whose path component contains "elevate".  We don't want to catch
+    # unrelated entries like "celevate-foo" or "ephemeralfile", so we look for
+    # backslash-elevate as a word-ish boundary.
+    return markers
+
+
+def remove_path_from_windows_registry(elevate_home: Path) -> list[str]:
+    """Strip Elevate-owned entries from User-scope PATH in the registry.
+
+    Returns the list of removed path entries.  Operates on HKCU\\Environment,
+    same key the installer wrote to via ``[Environment]::SetEnvironmentVariable``.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return []  # not on Windows, nothing to do
+
+    removed: list[str] = []
+    key_path = "Environment"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                path_value, path_type = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                return []
+            # Preserve REG_EXPAND_SZ vs REG_SZ so unexpanded %VARS% survive.
+            entries = [e for e in path_value.split(";") if e]
+            markers = _elevate_path_markers(elevate_home)
+            kept: list[str] = []
+            for entry in entries:
+                entry_norm = entry.rstrip("\\/")
+                matched = any(entry_norm.lower().startswith(m.lower()) for m in markers)
+                if matched:
+                    removed.append(entry)
+                else:
+                    kept.append(entry)
+            if removed:
+                new_value = ";".join(kept)
+                winreg.SetValueEx(key, "Path", 0, path_type, new_value)
+    except OSError as e:
+        log_warn(f"Could not edit User PATH in registry: {e}")
+    return removed
+
+
+def remove_elevate_env_vars_windows() -> list[str]:
+    """Delete ELEVATE_HOME and ELEVATE_GIT_BASH_PATH from User-scope env vars."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    removed: list[str] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            for name in ("ELEVATE_HOME", "ELEVATE_GIT_BASH_PATH"):
+                try:
+                    winreg.QueryValueEx(key, name)
+                except FileNotFoundError:
+                    continue
+                try:
+                    winreg.DeleteValue(key, name)
+                    removed.append(name)
+                except OSError as e:
+                    log_warn(f"Could not delete {name} from User env: {e}")
+    except OSError as e:
+        log_warn(f"Could not open User Environment key: {e}")
+    return removed
+
+
+def remove_portable_tooling_windows(elevate_home: Path) -> list[Path]:
+    """Delete PortableGit and Node installs the Windows installer created under
+    ``%LOCALAPPDATA%\\elevate\\``.  Only called on full uninstall; they're
+    isolated from any system Git / Node so they cannot break other tools."""
+    removed: list[Path] = []
+    for sub in ("git", "node", "gateway-service"):
+        target = elevate_home / sub
+        if target.exists():
+            try:
+                shutil.rmtree(target, ignore_errors=False)
+                removed.append(target)
+            except Exception as e:
+                log_warn(f"Could not remove {target}: {e}")
+    return removed
+
+
+def _is_windows() -> bool:
+    import sys
+    return sys.platform == "win32"
 
 
 def _is_default_elevate_home(elevate_home: Path) -> bool:
@@ -356,17 +443,6 @@ def run_uninstall(args):
     """
     project_root = get_project_root()
     elevate_home = get_elevate_home()
-    dry_run = bool(getattr(args, "dry_run", False))
-    assume_yes = bool(getattr(args, "yes", False))
-    arg_full = bool(getattr(args, "full", False))
-    arg_all_profiles = bool(getattr(args, "all_profiles", False))
-    arg_keep_profiles = bool(getattr(args, "keep_profiles", False))
-    arg_delete_source_checkout = bool(getattr(args, "delete_source_checkout", False))
-    remove_project_root, project_root_reason = should_remove_project_root(
-        project_root,
-        elevate_home,
-        force=arg_delete_source_checkout,
-    )
 
     # Detect named profiles when uninstalling from the default root —
     # offer to clean them up too instead of leaving zombie ELEVATE_HOMEs
@@ -376,7 +452,7 @@ def run_uninstall(args):
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA, Colors.BOLD))
-    print(color("│          ▲ Elevate Agent Uninstaller              │", Colors.MAGENTA, Colors.BOLD))
+    print(color("│            ⚕ Elevate Agent Uninstaller                  │", Colors.MAGENTA, Colors.BOLD))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.MAGENTA, Colors.BOLD))
     print()
     
@@ -394,61 +470,32 @@ def run_uninstall(args):
             running = " (gateway running)" if getattr(p, "gateway_running", False) else ""
             print(f"  • {p.name}{running}: {p.path}")
         print()
-
-    if dry_run:
-        print(color("Dry Run Plan:", Colors.YELLOW, Colors.BOLD))
-        print("  - Stop and uninstall the Elevate gateway service")
-        print("  - Kill standalone Elevate gateway processes")
-        print("  - Remove Elevate PATH entries from shell config files")
-        print("  - Remove elevate command links from ~/.local/bin and /usr/local/bin")
-        if remove_project_root:
-            print(f"  - Remove installation directory: {project_root} ({project_root_reason})")
-        else:
-            print(f"  - Keep source code directory: {project_root} ({project_root_reason})")
-            print("    Use --delete-source-checkout to remove this directory too.")
-        if arg_full:
-            print(f"  - Remove Elevate data directory: {elevate_home}")
-            if named_profiles and not arg_keep_profiles:
-                profile_names = ", ".join(p.name for p in named_profiles)
-                print(f"  - Remove named profiles: {profile_names}")
-        else:
-            print(f"  - Keep Elevate data directory: {elevate_home}")
+    
+    # Ask for confirmation
+    print(color("Uninstall Options:", Colors.YELLOW, Colors.BOLD))
+    print()
+    print("  1) " + color("Keep data", Colors.GREEN) + " - Remove code only, keep configs/sessions/logs")
+    print("     (Recommended - you can reinstall later with your settings intact)")
+    print()
+    print("  2) " + color("Full uninstall", Colors.RED) + " - Remove everything including all data")
+    print("     (Warning: This deletes all configs, sessions, and logs permanently)")
+    print()
+    print("  3) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
+    print()
+    
+    try:
+        choice = input(color("Select option [1/2/3]: ", Colors.BOLD)).strip()
+    except (KeyboardInterrupt, EOFError):
         print()
-        print("No changes made.")
+        print("Cancelled.")
         return
     
-    if assume_yes:
-        full_uninstall = arg_full
-    elif arg_full:
-        full_uninstall = True
-    else:
-        # Ask for confirmation
-        print(color("Uninstall Options:", Colors.YELLOW, Colors.BOLD))
+    if choice == "3" or choice.lower() in {"c", "cancel", "q", "quit", "n", "no"}:
         print()
-        print("  1) " + color("Keep data", Colors.GREEN) + " - Remove code only, keep configs/sessions/logs")
-        if not remove_project_root:
-            print("     Source checkout will be kept unless --delete-source-checkout is used")
-        print("     (Recommended - you can reinstall later with your settings intact)")
-        print()
-        print("  2) " + color("Full uninstall", Colors.RED) + " - Remove everything including all data")
-        print("     (Warning: This deletes all configs, sessions, and logs permanently)")
-        print()
-        print("  3) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
-        print()
-
-        try:
-            choice = input(color("Select option [1/2/3]: ", Colors.BOLD)).strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            print("Cancelled.")
-            return
-
-        if choice == "3" or choice.lower() in ("c", "cancel", "q", "quit", "n", "no"):
-            print()
-            print("Uninstall cancelled.")
-            return
-
-        full_uninstall = (choice == "2")
+        print("Uninstall cancelled.")
+        return
+    
+    full_uninstall = (choice == "2")
 
     # When doing a full uninstall from the default profile, also offer to
     # remove any named profiles — stopping their gateway services, unlinking
@@ -456,26 +503,21 @@ def run_uninstall(args):
     # those leave zombie services and data behind.
     remove_profiles = False
     if full_uninstall and named_profiles:
-        if arg_keep_profiles:
-            remove_profiles = False
-        elif assume_yes or arg_all_profiles:
-            remove_profiles = True
-        else:
+        print()
+        print(color("Other profiles will NOT be removed by default.", Colors.YELLOW))
+        print(f"Found {len(named_profiles)} named profile(s): " +
+              ", ".join(p.name for p in named_profiles))
+        print()
+        try:
+            resp = input(color(
+                f"Also stop and remove these {len(named_profiles)} profile(s)? [y/N]: ",
+                Colors.BOLD
+            )).strip().lower()
+        except (KeyboardInterrupt, EOFError):
             print()
-            print(color("Other profiles will NOT be removed by default.", Colors.YELLOW))
-            print(f"Found {len(named_profiles)} named profile(s): " +
-                  ", ".join(p.name for p in named_profiles))
-            print()
-            try:
-                resp = input(color(
-                    f"Also stop and remove these {len(named_profiles)} profile(s)? [y/N]: ",
-                    Colors.BOLD
-                )).strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                print()
-                print("Cancelled.")
-                return
-            remove_profiles = resp in ("y", "yes")
+            print("Cancelled.")
+            return
+        remove_profiles = resp in {"y", "yes"}
 
     # Final confirmation
     print()
@@ -489,24 +531,20 @@ def run_uninstall(args):
                 Colors.RED
             ))
     else:
-        if remove_project_root:
-            print("This will remove the Elevate code but keep your configuration and data.")
-        else:
-            print("This will remove Elevate commands/services but keep your source checkout and data.")
+        print("This will remove the Elevate code but keep your configuration and data.")
     
     print()
-    if not assume_yes:
-        try:
-            confirm = input(f"Type '{color('yes', Colors.YELLOW)}' to confirm: ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            print("Cancelled.")
-            return
-
-        if confirm != "yes":
-            print()
-            print("Uninstall cancelled.")
-            return
+    try:
+        confirm = input(f"Type '{color('yes', Colors.YELLOW)}' to confirm: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print("Cancelled.")
+        return
+    
+    if confirm != "yes":
+        print()
+        print("Uninstall cancelled.")
+        return
     
     print()
     print(color("Uninstalling...", Colors.CYAN, Colors.BOLD))
@@ -517,14 +555,36 @@ def run_uninstall(args):
     if not uninstall_gateway_service():
         log_info("No gateway service or processes found")
     
-    # 2. Remove PATH entries from shell configs
+    # 2. Remove PATH entries from shell configs (POSIX) AND from the Windows
+    #    User-scope registry.  Both helpers no-op on the wrong platform so we
+    #    can safely call them unconditionally.
     log_info("Removing PATH entries from shell configs...")
     removed_configs = remove_path_from_shell_configs()
     if removed_configs:
         for config in removed_configs:
             log_success(f"Updated {config}")
     else:
-        log_info("No PATH entries found to remove")
+        log_info("No PATH entries found to remove in shell rc files")
+
+    if _is_windows():
+        log_info("Removing PATH entries from Windows User environment...")
+        # Expand %LOCALAPPDATA% etc. in elevate_home so the marker matching is
+        # against fully resolved paths — installer writes literal strings
+        # like C:\Users\<u>\AppData\Local\elevate\git\cmd, not %LOCALAPPDATA%.
+        removed_path_entries = remove_path_from_windows_registry(Path(os.path.expandvars(str(elevate_home))))
+        if removed_path_entries:
+            for entry in removed_path_entries:
+                log_success(f"Removed from User PATH: {entry}")
+        else:
+            log_info("No Elevate-owned PATH entries in User environment")
+
+        log_info("Removing ELEVATE_HOME / ELEVATE_GIT_BASH_PATH User env vars...")
+        removed_env = remove_elevate_env_vars_windows()
+        if removed_env:
+            for name in removed_env:
+                log_success(f"Removed User env var: {name}")
+        else:
+            log_info("No Elevate-set User env vars to remove")
     
     # 3. Remove wrapper script
     log_info("Removing elevate command...")
@@ -535,13 +595,13 @@ def run_uninstall(args):
     else:
         log_info("No wrapper script found")
     
-    # 4. Remove installation directory (code) when it is an installed copy.
-    log_info("Checking installation directory...")
+    # 4. Remove installation directory (code)
+    log_info("Removing installation directory...")
     
     # Check if we're running from within the install dir
     # We need to be careful here
     try:
-        if project_root.exists() and remove_project_root:
+        if project_root.exists():
             # If the install is inside ~/.elevate/, just remove the elevate subdir
             if elevate_home in project_root.parents or project_root.parent == elevate_home:
                 shutil.rmtree(project_root)
@@ -550,11 +610,24 @@ def run_uninstall(args):
                 # Installation is somewhere else entirely
                 shutil.rmtree(project_root)
                 log_success(f"Removed {project_root}")
-        elif project_root.exists():
-            log_info(f"Keeping {project_root} ({project_root_reason})")
     except Exception as e:
         log_warn(f"Could not fully remove {project_root}: {e}")
         log_info("You may need to manually remove it")
+
+    # 4b. Remove Windows-only installer artifacts that are NOT user data:
+    #     PortableGit, bundled Node, gateway-service dir.  Installer put them
+    #     under ELEVATE_HOME but they're install tooling, not config — safe to
+    #     remove even in "keep data" mode.  If we're doing a full uninstall
+    #     the step-5 rmtree(elevate_home) would sweep them anyway; calling
+    #     this helper there is a no-op since they'll already be gone.
+    if _is_windows():
+        log_info("Removing Windows installer artifacts (PortableGit, Node, gateway-service)...")
+        removed_artifacts = remove_portable_tooling_windows(elevate_home)
+        if removed_artifacts:
+            for path in removed_artifacts:
+                log_success(f"Removed {path}")
+        else:
+            log_info("No Windows installer artifacts to remove")
     
     # 5. Optionally remove ~/.elevate/ data directory (and named profiles)
     if full_uninstall:
@@ -590,11 +663,18 @@ def run_uninstall(args):
         print(f"  {elevate_home}/")
         print()
         print("To reinstall later with your existing settings:")
-        print(color("  cd path/to/elevate/cli && ./setup-elevate.sh", Colors.DIM))
+        if _is_windows():
+            print(color("  iex (irm https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.ps1)", Colors.DIM))
+        else:
+            print(color("  curl -fsSL https://raw.githubusercontent.com/NousResearch/elevate/main/scripts/install.sh | bash", Colors.DIM))
         print()
-    
-    print(color("Reload your shell to complete the process:", Colors.YELLOW))
-    print("  source ~/.bashrc  # or ~/.zshrc")
+
+    if _is_windows():
+        print(color("Open a new terminal (PowerShell / Windows Terminal) to pick up", Colors.YELLOW))
+        print(color("the updated User PATH and environment variables.", Colors.YELLOW))
+    else:
+        print(color("Reload your shell to complete the process:", Colors.YELLOW))
+        print("  source ~/.bashrc  # or ~/.zshrc")
     print()
-    print("Thank you for using Elevate! ▲")
+    print("Thank you for using Elevate Agent! ⚕")
     print()
