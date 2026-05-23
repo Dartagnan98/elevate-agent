@@ -612,7 +612,12 @@ class TestFallbackNoCallback:
         _clear_approval_state()
 
     def test_no_callback_returns_approval_required(self):
-        """Without a registered callback, the old approval_required path is used."""
+        """Without a registered callback, the fallback returns pending_approval.
+
+        PR #6d495d9e7 renamed the LLM-visible status from ``approval_required``
+        to ``pending_approval`` to make the state distinguishable from a
+        failed tool call.
+        """
         from tools.approval import check_all_command_guards, _pending
 
         os.environ["ELEVATE_EXEC_ASK"] = "1"
@@ -624,4 +629,5 @@ class TestFallbackNoCallback:
             os.environ.pop("ELEVATE_SESSION_KEY", None)
 
         assert result["approved"] is False
-        assert result.get("status") == "approval_required"
+        assert result.get("status") == "pending_approval"
+        assert result.get("approval_pending") is True
