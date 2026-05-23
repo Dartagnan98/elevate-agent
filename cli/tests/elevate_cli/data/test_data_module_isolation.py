@@ -58,6 +58,11 @@ _ALLOWLIST: dict[str, str] = {
     # route through elevate_cli.data helpers in Sprint 2 after the
     # backfill in Sprint 1E proves out.
     "source_connectors.py": "legacy connector writes, refactored in Sprint 2",
+    # One-shot Apple Contacts backfill that seeds identities/contacts
+    # from macOS AddressBook + chat.db. Routes through elevate_cli.data
+    # helpers in Sprint 2 once apple-messages becomes a first-class
+    # connector; today it owns its identities/contacts writes.
+    "apple_contacts_backfill.py": "one-shot backfill, refactored in Sprint 2 alongside apple-messages connector",
 }
 
 # Tables we want to lock down. Anything writing these from outside the
