@@ -352,8 +352,10 @@ TOOLSETS = {
     "elevate-discord": {
         "description": "Discord bot toolset - full access (terminal has safety checks via dangerous command approval)",
         "tools": _ELEVATE_CORE_TOOLS + [
-            # Discord server introspection & management (gated on DISCORD_BOT_TOKEN via check_fn)
-            "discord_server",
+            # Discord read-only (always available when DISCORD_BOT_TOKEN set)
+            "discord",
+            # Discord admin/write actions (gated on capability + allowlist)
+            "discord_admin",
         ],
         "includes": []
     },
