@@ -547,6 +547,45 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
+def _locked_entitlements(frontmatter: Dict[str, Any]) -> List[str]:
+    """Return any required entitlements that are NOT active under the
+    current access profile. Empty list means the skill is unlocked.
+
+    Failures in the access module are treated as "no requirements" —
+    we never block a skill because the access config couldn't load.
+    """
+    try:
+        from elevate_cli.access import (
+            is_entitlement_active,
+            load_access_config,
+            required_entitlements_from_frontmatter,
+        )
+    except Exception:
+        return []
+
+    try:
+        required = required_entitlements_from_frontmatter(frontmatter) or []
+    except Exception:
+        return []
+    if not required:
+        return []
+
+    try:
+        access_config = load_access_config()
+    except Exception:
+        return []
+
+    return [
+        ent for ent in required
+        if not is_entitlement_active(ent, access_config)
+    ]
+
+
+def _skill_entitlements_allowed(frontmatter: Dict[str, Any]) -> bool:
+    """True when the skill has no locked entitlements."""
+    return not _locked_entitlements(frontmatter)
+
+
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     """Recursively find all skills in ~/.elevate/skills/ and external dirs.
 
@@ -584,6 +623,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 frontmatter, body = _parse_frontmatter(content)
 
                 if not skill_matches_platform(frontmatter):
+                    continue
+
+                if not _skill_entitlements_allowed(frontmatter):
                     continue
 
                 name = frontmatter.get("name", skill_dir.name)[:MAX_NAME_LENGTH]
@@ -1100,6 +1142,24 @@ def skill_view(
                     "success": False,
                     "error": f"Skill '{name}' is not supported on this platform.",
                     "readiness_status": SkillReadinessStatus.UNSUPPORTED.value,
+                },
+                ensure_ascii=False,
+            )
+
+        locked_entitlements = _locked_entitlements(parsed_frontmatter)
+        if locked_entitlements:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Skill '{name}' requires an entitlement that is not "
+                        "active on this install: "
+                        + ", ".join(locked_entitlements)
+                    ),
+                    "readiness_status": "locked",
+                    "access": {
+                        "locked_entitlements": list(locked_entitlements),
+                    },
                 },
                 ensure_ascii=False,
             )
