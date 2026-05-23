@@ -25,6 +25,7 @@ import signal
 import tempfile
 import threading
 import time
+import weakref as _weakref
 from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
@@ -750,6 +751,12 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
     return None
 
 
+# Weakref to the running GatewayRunner so tools (send_message_tool, etc.)
+# can opportunistically resolve a platform adapter without circular imports.
+# Set on each GatewayRunner.__init__ and cleared automatically on GC.
+_gateway_runner_ref: "_weakref.ref" = lambda: None
+
+
 class GatewayRunner:
     """
     Main gateway controller.
@@ -776,6 +783,10 @@ class GatewayRunner:
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
+        # Publish a weakref so tools can resolve the running gateway runner
+        # without importing it (send_message_tool / approval / etc).
+        global _gateway_runner_ref
+        _gateway_runner_ref = _weakref.ref(self)
 
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.

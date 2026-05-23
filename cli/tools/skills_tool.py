@@ -40,7 +40,7 @@ SKILL.md Format (YAML Frontmatter, agentskills.io compatible):
       commands: [curl, jq]        #   Command checks remain advisory only.
     compatibility: Requires X     # Optional (agentskills.io)
     metadata:                     # Optional, arbitrary key-value (agentskills.io)
-      elevate:
+      hermes:
         tags: [fine-tuning, llm]
         related_skills: [peft, lora]
     ---
@@ -68,8 +68,6 @@ Usage:
 
 import json
 import logging
-import hashlib
-from collections import OrderedDict
 
 from elevate_constants import get_elevate_home, display_elevate_home
 import os
@@ -79,6 +77,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
 
 from tools.registry import registry, tool_error
+from elevate_cli.config import cfg_get
+from utils import env_var_enabled
+from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -101,51 +102,10 @@ _PLATFORM_MAP = {
     "windows": "win32",
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
-_REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
+_REMOTE_ENV_BACKENDS = frozenset(
+    {"docker", "singularity", "modal", "ssh", "daytona", "vercel_sandbox"}
+)
 _secret_capture_callback = None
-_SKILL_VIEW_SESSION_CACHE: "OrderedDict[str, set[tuple[str, str, str]]]" = OrderedDict()
-_SKILL_VIEW_CACHE_MAX_TASKS = 128
-_SKILL_VIEW_CACHE_MAX_ENTRIES_PER_TASK = 64
-
-
-def _skill_view_duplicate_payload(
-    *,
-    task_id: str = None,
-    name: str,
-    file_path: str = None,
-    content: str,
-    skill_dir: str = None,
-    rel_path: str = None,
-) -> Optional[dict]:
-    """Return a compact duplicate response for repeated skill_view calls."""
-    if not task_id or not isinstance(content, str):
-        return None
-    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
-    task_key = str(task_id)
-    cache_key = (str(name or ""), str(file_path or ""), digest)
-    seen = _SKILL_VIEW_SESSION_CACHE.setdefault(task_key, set())
-    _SKILL_VIEW_SESSION_CACHE.move_to_end(task_key)
-    while len(_SKILL_VIEW_SESSION_CACHE) > _SKILL_VIEW_CACHE_MAX_TASKS:
-        _SKILL_VIEW_SESSION_CACHE.popitem(last=False)
-    if cache_key not in seen:
-        if len(seen) >= _SKILL_VIEW_CACHE_MAX_ENTRIES_PER_TASK:
-            seen.clear()
-        seen.add(cache_key)
-        return None
-    return {
-        "cached_duplicate": True,
-        "content": (
-            "This exact skill content was already returned earlier in this "
-            "session. Reuse the prior instructions instead of loading the same "
-            "skill again. If a specific linked file is needed, call skill_view "
-            "with that file_path."
-        ),
-        "content_chars": len(content),
-        "content_sha256": digest,
-        "path": rel_path,
-        "skill_dir": skill_dir,
-    }
 
 
 def load_env() -> Dict[str, str]:
@@ -168,7 +128,6 @@ class SkillReadinessStatus(str, Enum):
     AVAILABLE = "available"
     SETUP_NEEDED = "setup_needed"
     UNSUPPORTED = "unsupported"
-    LOCKED = "locked"
 
 
 # Prompt injection detection — shared by local-skill and plugin-skill paths.
@@ -407,7 +366,7 @@ def _capture_required_environment_variables(
 
 
 def _is_gateway_surface() -> bool:
-    if os.getenv("ELEVATE_GATEWAY_SESSION"):
+    if env_var_enabled("ELEVATE_GATEWAY_SESSION"):
         return True
     from gateway.session_context import get_session_env
     return bool(get_session_env("ELEVATE_SESSION_PLATFORM"))
@@ -445,56 +404,6 @@ def _remaining_required_environment_names(
         if name in missing_names or not _is_env_var_persisted(name, env_snapshot):
             remaining.append(name)
     return remaining
-
-
-def _check_onboarding_requirements(required_keys: List[str]) -> List[str]:
-    """Validate per-realtor onboarding inputs against the admin-setup forms.
-
-    A skill declares the admin-setup item keys it consumes via the
-    ``requires_onboarding`` frontmatter list. Any declared key whose item is not
-    in a ready state (configured / connected / manual) is returned, so the skill
-    is reported as ``setup_needed`` instead of running with missing config.
-
-    Returns human-readable strings for the missing items, or [] when everything
-    is ready. Fails open: if the admin-setup store is unavailable, returns []
-    rather than blocking a skill on an infra error.
-    """
-    wanted = [str(k).strip() for k in required_keys if str(k).strip()]
-    if not wanted:
-        return []
-    try:
-        from elevate_cli.data import connect, get_admin_setup
-        from elevate_cli.data.admin_setup import READY_STATUSES
-    except Exception:
-        return []
-    try:
-        with connect() as conn:
-            snapshot = get_admin_setup(conn)
-    except Exception:
-        logger.debug(
-            "admin-setup snapshot unavailable for onboarding check", exc_info=True
-        )
-        return []
-
-    items = snapshot.get("items") if isinstance(snapshot, dict) else None
-    if not isinstance(items, list):
-        return []
-    by_key = {
-        str(it.get("key")): it
-        for it in items
-        if isinstance(it, dict) and it.get("key")
-    }
-    missing: List[str] = []
-    for key in wanted:
-        item = by_key.get(key)
-        if item is None:
-            missing.append(f"{key} (unknown onboarding field)")
-            continue
-        status = str(item.get("status") or "missing")
-        if status not in READY_STATUSES:
-            label = str(item.get("label") or key)
-            missing.append(f"{label} [{status}]")
-    return missing
 
 
 def _gateway_setup_hint() -> str:
@@ -630,7 +539,7 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         skills_cfg = config.get("skills", {})
         resolved_platform = platform or os.getenv("ELEVATE_PLATFORM") or _get_session_platform()
         if resolved_platform:
-            platform_disabled = skills_cfg.get("platform_disabled", {}).get(resolved_platform)
+            platform_disabled = cfg_get(skills_cfg, "platform_disabled", resolved_platform)
             if platform_disabled is not None:
                 return name in platform_disabled
         return name in skills_cfg.get("disabled", [])
@@ -638,36 +547,12 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
-def _evaluate_skill_access(frontmatter: Dict[str, Any], config: Optional[dict] = None):
-    """Return the local access decision for a skill frontmatter block."""
-    try:
-        from elevate_cli.access import evaluate_skill_access
-
-        return evaluate_skill_access(frontmatter, config=config)
-    except Exception:
-        logger.debug("Could not evaluate skill access", exc_info=True)
-        return None
-
-
-def _locked_skill_response(name: str, decision) -> str:
-    payload = {
-        "success": False,
-        "error": (
-            f"Skill '{name}' is locked for the current Elevate access profile. "
-            f"{decision.reason}"
-        ),
-        "readiness_status": SkillReadinessStatus.LOCKED.value,
-        "access": decision.to_dict(),
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     """Recursively find all skills in ~/.elevate/skills/ and external dirs.
 
     Args:
         skip_disabled: If True, return ALL skills regardless of disabled
-            state (used by ``elevate skills`` config UI). Default False
+            state (used by ``hermes skills`` config UI). Default False
             filters out disabled skills.
 
     Returns:
@@ -677,13 +562,6 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     skills = []
     seen_names: set = set()
-    config = None
-    try:
-        from elevate_cli.config import load_config
-
-        config = load_config()
-    except Exception:
-        config = None
 
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
@@ -712,9 +590,6 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if name in seen_names:
                     continue
                 if name in disabled:
-                    continue
-                access_decision = _evaluate_skill_access(frontmatter, config=config)
-                if access_decision is not None and not access_decision.allowed:
                     continue
 
                 description = frontmatter.get("description", "")
@@ -847,7 +722,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
 
         # Extract unique categories
         categories = sorted(
-            set(s.get("category") for s in all_skills if s.get("category"))
+            {s.get("category") for s in all_skills if s.get("category")}
         )
 
         return json.dumps(
@@ -872,6 +747,9 @@ def _serve_plugin_skill(
     skill_md: Path,
     namespace: str,
     bare: str,
+    *,
+    preprocess: bool = True,
+    session_id: str | None = None,
 ) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from elevate_cli.plugins import _get_disabled_plugins, get_plugin_manager
@@ -882,7 +760,7 @@ def _serve_plugin_skill(
                 "success": False,
                 "error": (
                     f"Plugin '{namespace}' is disabled. "
-                    f"Re-enable with: elevate plugins enable {namespace}"
+                    f"Re-enable with: hermes plugins enable {namespace}"
                 ),
             },
             ensure_ascii=False,
@@ -911,10 +789,6 @@ def _serve_plugin_skill(
             },
             ensure_ascii=False,
         )
-
-    access_decision = _evaluate_skill_access(parsed_frontmatter)
-    if access_decision is not None and not access_decision.allowed:
-        return _locked_skill_response(f"{namespace}:{bare}", access_decision)
 
     # Injection scan — log but still serve (matches local-skill behaviour)
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
@@ -945,11 +819,26 @@ def _serve_plugin_skill(
     except Exception:
         banner = ""
 
+    rendered_content = content
+    if preprocess:
+        try:
+            from agent.skill_preprocessing import preprocess_skill_content
+
+            rendered_content = preprocess_skill_content(
+                content,
+                skill_md.parent,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.debug(
+                "Could not preprocess plugin skill %s:%s", namespace, bare, exc_info=True
+            )
+
     return json.dumps(
         {
             "success": True,
             "name": f"{namespace}:{bare}",
-            "content": f"{banner}{content}" if banner else content,
+            "content": f"{banner}{rendered_content}" if banner else rendered_content,
             "description": description,
             "linked_files": None,
             "readiness_status": SkillReadinessStatus.AVAILABLE.value,
@@ -958,7 +847,12 @@ def _serve_plugin_skill(
     )
 
 
-def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
+def skill_view(
+    name: str,
+    file_path: str = None,
+    task_id: str = None,
+    preprocess: bool = True,
+) -> str:
     """
     View the content of a skill or a specific file within a skill directory.
 
@@ -967,11 +861,15 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             Qualified names like "plugin:skill" resolve to plugin-provided skills.
         file_path: Optional path to a specific file within the skill (e.g., "references/api.md")
         task_id: Optional task identifier used to probe the active backend
+        preprocess: Apply configured SKILL.md template and inline shell rendering
+            to main skill content. Internal slash/preload callers disable this
+            because they render the skill message themselves.
 
     Returns:
         JSON string with skill content or error message
     """
     try:
+        local_category_name: str | None = None
         # ── Qualified name dispatch (plugin skills) ──────────────────
         # Names containing ':' are routed to the plugin skill registry.
         # Bare names fall through to the existing flat-tree scan below.
@@ -1012,7 +910,13 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                         },
                         ensure_ascii=False,
                     )
-                return _serve_plugin_skill(plugin_skill_md, namespace, bare)
+                return _serve_plugin_skill(
+                    plugin_skill_md,
+                    namespace,
+                    bare,
+                    preprocess=preprocess,
+                    session_id=task_id,
+                )
 
             # Plugin exists but this specific skill is missing?
             available = pm.list_plugin_skills(namespace)
@@ -1026,8 +930,12 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     },
                     ensure_ascii=False,
                 )
-            # Plugin itself not found — fall through to flat-tree scan
-            # which will return a normal "not found" with suggestions.
+            # Plugin itself not found — fall through to flat-tree scan.
+            # Categorized local skills also use `category:skill` in config and
+            # gateway prompts, so preserve that form and translate it to the
+            # on-disk `category/skill` path during the local scan below.
+            if bare:
+                local_category_name = f"{namespace}/{bare}"
 
         from agent.skill_utils import get_external_skills_dirs
 
@@ -1049,40 +957,83 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         skill_dir = None
         skill_md = None
 
-        # Search all dirs: local first, then external (first match wins)
+        # Collision detection: collect ALL candidates across every dir using
+        # every lookup strategy (direct path, recursive by parent dir name,
+        # legacy flat <name>.md). If more than one matches, refuse and tell
+        # the caller — silent shadowing of a local skill by a same-named
+        # external skill is a real bug class (`/skills` shows one, agent
+        # loaded the other) so we surface it loudly instead of guessing.
+        from agent.skill_utils import iter_skill_index_files
+
+        candidates: List[Tuple[Optional[Path], Path]] = []  # (skill_dir, skill_md)
+        seen_md: set = set()
+
+        def _record(sd: Optional[Path], smd: Path) -> None:
+            try:
+                key = smd.resolve()
+            except Exception:
+                key = smd
+            if key in seen_md:
+                return
+            seen_md.add(key)
+            candidates.append((sd, smd))
+
         for search_dir in all_dirs:
-            # Try direct path first (e.g., "mlops/axolotl")
+            # Strategy 1: direct path (e.g., "mlops/axolotl" or bare "axolotl"
+            # at the top of the dir).
             direct_path = search_dir / name
             if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
-                skill_dir = direct_path
-                skill_md = direct_path / "SKILL.md"
-                break
+                _record(direct_path, direct_path / "SKILL.md")
             elif direct_path.with_suffix(".md").exists():
-                skill_md = direct_path.with_suffix(".md")
-                break
+                _record(None, direct_path.with_suffix(".md"))
 
-        # Search by directory name across all dirs
-        if not skill_md:
-            for search_dir in all_dirs:
-                from agent.skill_utils import iter_skill_index_files
+            # Strategy 1b: categorized form for plugin namespace fall-through
+            # (e.g., a "myplugin:explore" name with no plugin registered also
+            # tries the on-disk path "myplugin/explore").
+            if local_category_name:
+                categorized_path = search_dir / local_category_name
+                if categorized_path.is_dir() and (categorized_path / "SKILL.md").exists():
+                    _record(categorized_path, categorized_path / "SKILL.md")
+                elif categorized_path.with_suffix(".md").exists():
+                    _record(None, categorized_path.with_suffix(".md"))
 
-                for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
-                    if found_skill_md.parent.name == name:
-                        skill_dir = found_skill_md.parent
-                        skill_md = found_skill_md
-                        break
-                if skill_md:
-                    break
+            # Strategy 2: recursive by directory name (catches nested skills
+            # like "foundations/runtime/explore-codebase" called by bare name).
+            for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
+                if found_skill_md.parent.name == name:
+                    _record(found_skill_md.parent, found_skill_md)
 
-        # Legacy: flat .md files
-        if not skill_md:
-            for search_dir in all_dirs:
-                for found_md in search_dir.rglob(f"{name}.md"):
-                    if found_md.name != "SKILL.md":
-                        skill_md = found_md
-                        break
-                if skill_md:
-                    break
+            # Strategy 3: legacy flat <name>.md files anywhere under the dir.
+            for found_md in search_dir.rglob(f"{name}.md"):
+                if found_md.name != "SKILL.md":
+                    _record(None, found_md)
+
+        if len(candidates) > 1:
+            paths = [str(smd) for _, smd in candidates]
+            logging.getLogger(__name__).warning(
+                "Skill name collision for '%s': %d candidates — %s",
+                name, len(candidates), "; ".join(paths),
+            )
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Ambiguous skill name '{name}': {len(candidates)} skills "
+                        "match across your local skills dir and external_dirs. "
+                        "Refusing to guess — load one explicitly by its categorized path."
+                    ),
+                    "matches": paths,
+                    "hint": (
+                        "Pass the full relative path instead of the bare name "
+                        "(e.g., 'category/skill-name'), or rename one of the "
+                        "colliding skills so each name is unique."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+        if candidates:
+            skill_dir, skill_md = candidates[0]
 
         if not skill_md or not skill_md.exists():
             available = [s["name"] for s in _sort_skills(_find_all_skills())[:20]]
@@ -1161,15 +1112,11 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     "success": False,
                     "error": (
                         f"Skill '{resolved_name}' is disabled. "
-                        "Enable it with `elevate skills` or inspect the files directly on disk."
+                        "Enable it with `hermes skills` or inspect the files directly on disk."
                     ),
                 },
                 ensure_ascii=False,
             )
-
-        access_decision = _evaluate_skill_access(parsed_frontmatter)
-        if access_decision is not None and not access_decision.allowed:
-            return _locked_skill_response(resolved_name, access_decision)
 
         # If a specific file path is requested, read that instead
         if file_path and skill_dir:
@@ -1221,7 +1168,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                             available_files["assets"].append(rel)
                         elif rel.startswith("scripts/"):
                             available_files["scripts"].append(rel)
-                        elif f.suffix in [
+                        elif f.suffix in {
                             ".md",
                             ".py",
                             ".yaml",
@@ -1229,7 +1176,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                             ".json",
                             ".tex",
                             ".sh",
-                        ]:
+                        }:
                             available_files["other"].append(rel)
 
                 # Remove empty categories
@@ -1321,15 +1268,15 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     )
 
         # Read tags/related_skills with backward compat:
-        # Check metadata.elevate.* first (agentskills.io convention), fall back to top-level
-        elevate_meta = {}
+        # Check metadata.hermes.* first (agentskills.io convention), fall back to top-level
+        hermes_meta = {}
         metadata = frontmatter.get("metadata")
         if isinstance(metadata, dict):
-            elevate_meta = metadata.get("elevate", {}) or {}
+            hermes_meta = metadata.get("hermes", {}) or {}
 
-        tags = _parse_tags(elevate_meta.get("tags") or frontmatter.get("tags", ""))
+        tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
         related_skills = _parse_tags(
-            elevate_meta.get("related_skills") or frontmatter.get("related_skills", "")
+            hermes_meta.get("related_skills") or frontmatter.get("related_skills", "")
         )
 
         # Build linked files structure for clear discovery
@@ -1417,20 +1364,20 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     exc_info=True,
                 )
 
-        # Validate per-realtor onboarding inputs ("whatever's variable") against
-        # the admin-setup forms. The first time a skill runs, this checks that
-        # the onboarding fields it consumes are filled in; anything not ready
-        # blocks the skill with a named-missing message instead of running blind.
-        required_onboarding_raw = frontmatter.get("requires_onboarding", [])
-        if isinstance(required_onboarding_raw, str):
-            required_onboarding_raw = [required_onboarding_raw]
-        if not isinstance(required_onboarding_raw, list):
-            required_onboarding_raw = []
-        missing_onboarding: list = _check_onboarding_requirements(
-            required_onboarding_raw
-        )
-        if missing_onboarding:
-            setup_needed = True
+        rendered_content = content
+        if preprocess:
+            try:
+                from agent.skill_preprocessing import preprocess_skill_content
+
+                rendered_content = preprocess_skill_content(
+                    content,
+                    skill_dir,
+                    session_id=task_id,
+                )
+            except Exception:
+                logger.debug(
+                    "Could not preprocess skill content for %s", skill_name, exc_info=True
+                )
 
         result = {
             "success": True,
@@ -1438,6 +1385,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             "description": frontmatter.get("description", ""),
             "tags": tags,
             "related_skills": related_skills,
+            "content": rendered_content,
             "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
@@ -1448,7 +1396,6 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             "required_commands": [],
             "missing_required_environment_variables": remaining_missing_required_envs,
             "missing_credential_files": missing_cred_files,
-            "missing_onboarding": missing_onboarding,
             "missing_required_commands": [],
             "setup_needed": setup_needed,
             "setup_skipped": capture_result["setup_skipped"],
@@ -1469,8 +1416,6 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                 f"env ${env_name}" for env_name in remaining_missing_required_envs
             ] + [
                 f"file {path}" for path in missing_cred_files
-            ] + [
-                f"onboarding: {item}" for item in missing_onboarding
             ]
             setup_note = _build_setup_note(
                 SkillReadinessStatus.SETUP_NEEDED,
@@ -1487,19 +1432,6 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
-
-        duplicate_payload = _skill_view_duplicate_payload(
-            task_id=task_id,
-            name=skill_name,
-            file_path=file_path,
-            content=content,
-            skill_dir=str(skill_dir) if skill_dir else None,
-            rel_path=rel_path,
-        )
-        if duplicate_payload:
-            result.update(duplicate_payload)
-        else:
-            result["content"] = content
 
         return json.dumps(result, ensure_ascii=False)
 
@@ -1600,14 +1532,36 @@ registry.register(
     check_fn=check_skills_requirements,
     emoji="📚",
 )
+def _skill_view_with_bump(args, **kw):
+    """Invoke skill_view, then bump view_count on success. Best-effort: a
+    telemetry failure never breaks the tool call."""
+    name = args.get("name", "")
+    result = skill_view(
+        name, file_path=args.get("file_path"), task_id=kw.get("task_id")
+    )
+    try:
+        parsed = json.loads(result)
+        if isinstance(parsed, dict) and parsed.get("success"):
+            # Use the resolved skill name from the payload when present —
+            # qualified forms ("plugin:skill") return with the canonical name.
+            resolved = parsed.get("name") or name
+            if resolved:
+                from tools.skill_usage import bump_use, bump_view
+                bump_view(str(resolved))
+                # A skill_view tool call is the agent actively loading the skill
+                # to act on it — that counts as use, not just a browse/view.
+                # Curator's stale timer keys off last_used_at (see agent/curator.py).
+                bump_use(str(resolved))
+    except Exception:
+        pass
+    return result
+
+
 registry.register(
     name="skill_view",
     toolset="skills",
     schema=SKILL_VIEW_SCHEMA,
-    handler=lambda args, **kw: skill_view(
-        args.get("name", ""), file_path=args.get("file_path"), task_id=kw.get("task_id")
-    ),
+    handler=_skill_view_with_bump,
     check_fn=check_skills_requirements,
     emoji="📚",
-    max_result_size_chars=40_000,
 )

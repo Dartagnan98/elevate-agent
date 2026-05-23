@@ -26,8 +26,10 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from elevate_constants import get_elevate_home
+from elevate_constants import get_bundled_skills_dir, get_elevate_home
+from agent.skill_utils import is_excluded_skill_path
 from typing import Dict, List, Tuple
+from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
@@ -35,26 +37,16 @@ logger = logging.getLogger(__name__)
 ELEVATE_HOME = get_elevate_home()
 SKILLS_DIR = ELEVATE_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
-PAID_SKILL_PATH_PREFIXES = (
-    "real-estate-admin/",
-)
-PAID_SKILL_PATHS = {
-    "lead-scorer",
-    "outreach-lanes",
-    "social-content-engine",
-}
 
 
 def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
 
     Checks ELEVATE_BUNDLED_SKILLS env var first (set by Nix wrapper),
-    then falls back to the relative path from this source file.
+    then a wheel-installed data dir, then falls back to the relative
+    path from this source file.
     """
-    env_override = os.getenv("ELEVATE_BUNDLED_SKILLS")
-    if env_override:
-        return Path(env_override)
-    return Path(__file__).parent.parent / "skills"
+    return get_bundled_skills_dir(Path(__file__).parent.parent / "skills")
 
 
 def _read_manifest() -> Dict[str, str]:
@@ -106,7 +98,7 @@ def _write_manifest(entries: Dict[str, str]):
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, MANIFEST_FILE)
+            atomic_replace(tmp_path, MANIFEST_FILE)
         except BaseException:
             try:
                 os.unlink(tmp_path)
@@ -138,26 +130,7 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
     return fallback
 
 
-def _include_paid_bundled_skills() -> bool:
-    value = os.getenv("ELEVATE_INCLUDE_PAID_BUNDLED_SKILLS", "").strip().lower()
-    return value in {"1", "true", "yes", "on", "all"}
-
-
-def _is_paid_skill_path(skill_dir: Path, bundled_dir: Path) -> bool:
-    try:
-        rel = skill_dir.relative_to(bundled_dir).as_posix()
-    except ValueError:
-        return False
-    return rel in PAID_SKILL_PATHS or any(
-        rel.startswith(prefix) for prefix in PAID_SKILL_PATH_PREFIXES
-    )
-
-
-def _discover_bundled_skills(
-    bundled_dir: Path,
-    *,
-    include_paid: bool | None = None,
-) -> List[Tuple[str, Path]]:
+def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
     """
     Find all SKILL.md files in the bundled directory.
     Returns list of (skill_name, skill_directory_path) tuples.
@@ -166,16 +139,10 @@ def _discover_bundled_skills(
     if not bundled_dir.exists():
         return skills
 
-    if include_paid is None:
-        include_paid = _include_paid_bundled_skills()
-
     for skill_md in bundled_dir.rglob("SKILL.md"):
-        path_str = str(skill_md)
-        if "/.git/" in path_str or "/.github/" in path_str or "/.hub/" in path_str:
+        if is_excluded_skill_path(skill_md):
             continue
         skill_dir = skill_md.parent
-        if not include_paid and _is_paid_skill_path(skill_dir, bundled_dir):
-            continue
         skill_name = _read_skill_name(skill_md, skill_dir.name)
         skills.append((skill_name, skill_dir))
 
@@ -222,19 +189,8 @@ def sync_skills(quiet: bool = False) -> dict:
 
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest()
-    include_paid = _include_paid_bundled_skills()
-    bundled_skills = _discover_bundled_skills(bundled_dir, include_paid=include_paid)
+    bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
-    all_bundled_skills = (
-        bundled_skills
-        if include_paid
-        else _discover_bundled_skills(bundled_dir, include_paid=True)
-    )
-    gated_skills = {
-        name: path
-        for name, path in all_bundled_skills
-        if name not in bundled_names and _is_paid_skill_path(path, bundled_dir)
-    }
 
     copied = []
     updated = []
@@ -265,7 +221,7 @@ def sync_skills(quiet: bool = False) -> dict:
                         print(
                             f"  ⚠ {skill_name}: bundled version shipped but you "
                             f"already have a local skill by this name — yours "
-                            f"was kept. Run `elevate skills reset {skill_name}` "
+                            f"was kept. Run `hermes skills reset {skill_name}` "
                             f"to replace it with the bundled version."
                         )
                 else:
@@ -334,18 +290,7 @@ def sync_skills(quiet: bool = False) -> dict:
 
     # Clean stale manifest entries (skills removed from bundled dir)
     cleaned = sorted(set(manifest.keys()) - bundled_names)
-    removed_paid = []
     for name in cleaned:
-        gated_src = gated_skills.get(name)
-        if gated_src:
-            dest = _compute_relative_dest(gated_src, bundled_dir)
-            origin_hash = manifest.get(name, "")
-            if dest.exists() and origin_hash and _dir_hash(dest) == origin_hash:
-                try:
-                    shutil.rmtree(dest)
-                    removed_paid.append(name)
-                except (OSError, IOError) as e:
-                    logger.debug("Could not remove gated bundled skill %s: %s", dest, e)
         del manifest[name]
 
     # Also copy DESCRIPTION.md files for categories (if not already present)
@@ -367,7 +312,6 @@ def sync_skills(quiet: bool = False) -> dict:
         "skipped": skipped,
         "user_modified": user_modified,
         "cleaned": cleaned,
-        "removed_paid": removed_paid,
         "total_bundled": len(bundled_skills),
     }
 
@@ -399,7 +343,7 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     manifest = _read_manifest()
     bundled_dir = _get_bundled_dir()
     bundled_skills = _discover_bundled_skills(bundled_dir)
-    bundled_by_name = {skill_name: skill_dir for skill_name, skill_dir in bundled_skills}
+    bundled_by_name = dict(bundled_skills)
 
     in_manifest = name in manifest
     is_bundled = name in bundled_by_name
@@ -410,7 +354,7 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
             "action": "not_in_manifest",
             "message": (
                 f"'{name}' is not a tracked bundled skill. Nothing to reset. "
-                f"(Hub-installed skills use `elevate skills uninstall`.)"
+                f"(Hub-installed skills use `hermes skills uninstall`.)"
             ),
             "synced": None,
         }
@@ -463,7 +407,7 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     else:
         action = "manifest_cleared"
         message = (
-            f"Cleared manifest entry for '{name}'. Future `elevate update` runs "
+            f"Cleared manifest entry for '{name}'. Future `hermes update` runs "
             f"will re-baseline against your current copy and accept upstream changes."
         )
 
@@ -479,7 +423,12 @@ if __name__ == "__main__":
         f"{result['skipped']} unchanged",
     ]
     if result["user_modified"]:
-        parts.append(f"{len(result['user_modified'])} user-modified (kept)")
+        names = result["user_modified"]
+        MAX_SHOW = 5
+        shown = ", ".join(names[:MAX_SHOW])
+        if len(names) > MAX_SHOW:
+            shown += f", +{len(names) - MAX_SHOW} more"
+        parts.append(f"{len(names)} user-modified (kept): {shown}")
     if result["cleaned"]:
         parts.append(f"{len(result['cleaned'])} cleaned from manifest")
     print(f"\nDone: {', '.join(parts)}. {result['total_bundled']} total bundled.")

@@ -71,6 +71,22 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     return get_elevate_home() / "optional-skills"
 
 
+def get_bundled_skills_dir(default: Path | None = None) -> Path:
+    """Return the bundled skills directory for source and packaged installs.
+
+    Resolution order:
+        1. ``ELEVATE_BUNDLED_SKILLS`` env var (Nix wrapper / explicit override)
+        2. Caller-supplied ``default`` (typically the source-checkout path)
+        3. ``<ELEVATE_HOME>/skills`` last-resort
+    """
+    override = os.getenv("ELEVATE_BUNDLED_SKILLS", "").strip()
+    if override:
+        return Path(override)
+    if default is not None:
+        return default
+    return get_elevate_home() / "skills"
+
+
 def get_elevate_dir(new_subpath: str, old_name: str) -> Path:
     """Resolve a Elevate subdirectory with backward compatibility.
 

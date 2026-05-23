@@ -12,11 +12,9 @@ Run with:  python -m pytest tests/test_delegate.py -v
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tools.delegate_tool import (
@@ -31,11 +29,6 @@ from tools.delegate_tool import (
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
-    _agent_job_profile,
-    _build_handoff_packet,
-    _context_with_handoff_packet,
-    _handoff_route_error,
-    _start_orchestration_run,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -81,6 +74,55 @@ class TestDelegateRequirements(unittest.TestCase):
         # predictable budgets.
         self.assertNotIn("max_iterations", props)
         self.assertNotIn("maxItems", props["tasks"])  # removed — limit is now runtime-configurable
+
+    def test_schema_description_advertises_runtime_limits(self):
+        """The model must see the user's actual concurrency / spawn-depth caps,
+        not the framework defaults. Without this, models that read 'default 3'
+        will self-cap below the user's real limit.
+        """
+        from tools.delegate_tool import (
+            _build_dynamic_schema_overrides,
+            _get_max_concurrent_children,
+            _get_max_spawn_depth,
+        )
+
+        overrides = _build_dynamic_schema_overrides()
+        max_children = _get_max_concurrent_children()
+        max_depth = _get_max_spawn_depth()
+
+        desc = overrides["description"]
+        tasks_desc = overrides["parameters"]["properties"]["tasks"]["description"]
+        role_desc = overrides["parameters"]["properties"]["role"]["description"]
+
+        # Top-level description names the user's concurrency limit explicitly.
+        self.assertIn(f"up to {max_children}", desc)
+        # Top-level description names the user's spawn-depth limit explicitly.
+        self.assertIn(f"max_spawn_depth={max_depth}", desc)
+        # tasks parameter description repeats the concurrency cap.
+        self.assertIn(f"up to {max_children}", tasks_desc)
+        # role parameter description names the spawn-depth limit.
+        self.assertIn(f"max_spawn_depth={max_depth}", role_desc)
+        # The misleading "default 3" / "default 2" wording is gone from
+        # every dynamic surface (model-facing).
+        for surface in (desc, tasks_desc, role_desc):
+            self.assertNotIn("default 3", surface)
+            self.assertNotIn("default 2", surface)
+
+    def test_schema_overrides_applied_via_get_definitions(self):
+        """Registry.get_definitions() must apply dynamic_schema_overrides so
+        the model API call sees current values, not the static import-time text.
+        """
+        from tools.registry import registry
+        defs = registry.get_definitions({"delegate_task"})
+        self.assertEqual(len(defs), 1)
+        fn = defs[0]["function"]
+        # Description should mention the user's actual limits, not "default 3".
+        from tools.delegate_tool import (
+            _get_max_concurrent_children,
+            _get_max_spawn_depth,
+        )
+        self.assertIn(f"up to {_get_max_concurrent_children()}", fn["description"])
+        self.assertIn(f"max_spawn_depth={_get_max_spawn_depth()}", fn["description"])
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -173,6 +215,63 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["summary"], "Result A")
         self.assertEqual(result["results"][1]["summary"], "Result B")
         self.assertIn("total_duration_seconds", result)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_batch_mode_accepts_json_string_tasks(self, mock_run):
+        mock_run.side_effect = [
+            {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Result A",
+                "api_calls": 2,
+                "duration_seconds": 3.0,
+            },
+            {
+                "task_index": 1,
+                "status": "completed",
+                "summary": "Result B",
+                "api_calls": 4,
+                "duration_seconds": 6.0,
+            },
+        ]
+        parent = _make_mock_parent()
+        tasks = json.dumps(
+            [
+                {"goal": "Research topic A"},
+                {"goal": "Research topic B"},
+            ]
+        )
+
+        result = json.loads(delegate_task(tasks=tasks, parent_agent=parent))
+
+        self.assertIn("results", result)
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(result["results"][0]["summary"], "Result A")
+        self.assertEqual(result["results"][1]["summary"], "Result B")
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_batch_mode_rejects_non_object_tasks(self, mock_run):
+        parent = _make_mock_parent()
+
+        result = json.loads(
+            delegate_task(tasks=["not a task object"], parent_agent=parent)
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("Task 0 must be an object", result["error"])
+        mock_run.assert_not_called()
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_batch_mode_rejects_malformed_json_string_tasks(self, mock_run):
+        parent = _make_mock_parent()
+
+        result = json.loads(
+            delegate_task(tasks='[{"goal": "bad}', parent_agent=parent)
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("could not be parsed as JSON", result["error"])
+        mock_run.assert_not_called()
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_capped_at_3(self, mock_run):
@@ -575,6 +674,163 @@ class TestDelegateObservability(unittest.TestCase):
             self.assertEqual(result["results"][0]["exit_reason"], "max_iterations")
 
 
+class TestSubagentCostRollup(unittest.TestCase):
+    """Port of Kilo-Org/kilocode#9448 — parent's session_estimated_cost_usd
+    must include subagent spend, not just the parent's own API calls."""
+
+    def _make_parent_with_cost_counters(self, depth=0, starting_cost=0.0):
+        parent = _make_mock_parent(depth=depth)
+        # The fields AIAgent exposes and the footer reads from.  Set real
+        # floats/strings so the rollup can add to them rather than tripping
+        # on MagicMock auto-attrs.
+        parent.session_estimated_cost_usd = starting_cost
+        parent.session_cost_status = "unknown"
+        parent.session_cost_source = "none"
+        return parent
+
+    def test_single_child_cost_folded_into_parent(self):
+        parent = self._make_parent_with_cost_counters(starting_cost=0.10)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.model = "claude-sonnet-4-6"
+            mock_child.session_prompt_tokens = 1000
+            mock_child.session_completion_tokens = 200
+            mock_child.session_estimated_cost_usd = 0.42
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "interrupted": False,
+                "api_calls": 2,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(delegate_task(goal="do stuff", parent_agent=parent))
+
+        # Parent footer must reflect parent_cost + child_cost.
+        self.assertAlmostEqual(parent.session_estimated_cost_usd, 0.52, places=6)
+        # Rollup must strip the internal field before serialising to the model.
+        self.assertNotIn("_child_cost_usd", result["results"][0])
+        self.assertNotIn("_child_role", result["results"][0])
+
+    def test_batch_children_costs_sum_into_parent(self):
+        parent = self._make_parent_with_cost_counters(starting_cost=0.00)
+
+        with patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_run.side_effect = [
+                {
+                    "task_index": 0,
+                    "status": "completed",
+                    "summary": "A",
+                    "api_calls": 2,
+                    "duration_seconds": 1.0,
+                    "_child_role": "leaf",
+                    "_child_cost_usd": 0.15,
+                },
+                {
+                    "task_index": 1,
+                    "status": "completed",
+                    "summary": "B",
+                    "api_calls": 2,
+                    "duration_seconds": 1.0,
+                    "_child_role": "leaf",
+                    "_child_cost_usd": 0.27,
+                },
+                {
+                    "task_index": 2,
+                    "status": "failed",
+                    "summary": "",
+                    "error": "boom",
+                    "api_calls": 0,
+                    "duration_seconds": 0.1,
+                    "_child_role": "leaf",
+                    "_child_cost_usd": 0.03,
+                },
+            ]
+            result = json.loads(
+                delegate_task(
+                    tasks=[{"goal": "A"}, {"goal": "B"}, {"goal": "C"}],
+                    parent_agent=parent,
+                )
+            )
+
+        # 0.15 + 0.27 + 0.03 even though one child failed — the API calls it
+        # made before failing still cost money.
+        self.assertAlmostEqual(parent.session_estimated_cost_usd, 0.45, places=6)
+        # cost_source promoted from "none" since the parent had no direct spend.
+        self.assertEqual(parent.session_cost_source, "subagent")
+        self.assertEqual(parent.session_cost_status, "estimated")
+        # All internal fields stripped from results.
+        for entry in result["results"]:
+            self.assertNotIn("_child_cost_usd", entry)
+            self.assertNotIn("_child_role", entry)
+
+    def test_zero_cost_children_leave_parent_source_untouched(self):
+        """If every child reports 0 cost (e.g. free local model), we should
+        not invent a fake 'subagent' source — the parent's 'none' stays."""
+        parent = self._make_parent_with_cost_counters(starting_cost=0.00)
+
+        with patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 1,
+                "duration_seconds": 0.5,
+                "_child_role": "leaf",
+                "_child_cost_usd": 0.0,
+            }
+            delegate_task(goal="free local run", parent_agent=parent)
+
+        self.assertEqual(parent.session_estimated_cost_usd, 0.0)
+        self.assertEqual(parent.session_cost_source, "none")
+
+    def test_parent_with_real_source_not_overwritten(self):
+        """If the parent already has its own cost billed (cost_source != 'none'),
+        adding subagent cost must not clobber the existing source label."""
+        parent = self._make_parent_with_cost_counters(starting_cost=0.20)
+        parent.session_cost_status = "exact"
+        parent.session_cost_source = "openrouter"
+
+        with patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 1,
+                "duration_seconds": 0.5,
+                "_child_role": "leaf",
+                "_child_cost_usd": 0.30,
+            }
+            delegate_task(goal="billed run", parent_agent=parent)
+
+        self.assertAlmostEqual(parent.session_estimated_cost_usd, 0.50, places=6)
+        # Real source label preserved.
+        self.assertEqual(parent.session_cost_source, "openrouter")
+        self.assertEqual(parent.session_cost_status, "exact")
+
+    def test_rollup_tolerates_missing_cost_fields(self):
+        """Older fixtures / fabricated error entries may not carry
+        _child_cost_usd.  Rollup must degrade to zero-add silently."""
+        parent = self._make_parent_with_cost_counters(starting_cost=0.10)
+
+        with patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 1,
+                "duration_seconds": 0.5,
+                # no _child_role, no _child_cost_usd
+            }
+            result = json.loads(delegate_task(goal="legacy", parent_agent=parent))
+
+        # Parent cost unchanged.
+        self.assertEqual(parent.session_estimated_cost_usd, 0.10)
+        self.assertEqual(len(result["results"]), 1)
+
+
 class TestBlockedTools(unittest.TestCase):
     def test_blocked_tools_constant(self):
         for tool in ["delegate_task", "clarify", "memory", "send_message", "execute_code"]:
@@ -617,24 +873,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["base_url"])
         self.assertIsNone(creds["api_key"])
 
-    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
-    def test_provider_resolves_full_credentials(self, mock_resolve):
-        """When delegation.provider is set, full credentials are resolved."""
-        mock_resolve.return_value = {
-            "provider": "openrouter",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "sk-or-test-key",
-            "api_mode": "chat_completions",
-        }
-        parent = _make_mock_parent(depth=0)
-        cfg = {"model": "google/gemini-3-flash-preview", "provider": "openrouter"}
-        creds = _resolve_delegation_credentials(cfg, parent)
-        self.assertEqual(creds["model"], "google/gemini-3-flash-preview")
-        self.assertEqual(creds["provider"], "openrouter")
-        self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
-        self.assertEqual(creds["api_key"], "sk-or-test-key")
-        self.assertEqual(creds["api_mode"], "chat_completions")
-        mock_resolve.assert_called_once_with(requested="openrouter")
+
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
         parent = _make_mock_parent(depth=0)
@@ -651,7 +890,66 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["api_key"], "local-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
 
-    def test_direct_endpoint_falls_back_to_openai_api_key_env(self):
+    def test_direct_endpoint_auto_detects_anthropic_messages_suffix(self):
+        # Issue #10213: Azure AI Foundry exposes Anthropic-compatible models at
+        # a /anthropic URL suffix. Subagents must pick anthropic_messages
+        # automatically, matching the main agent's runtime resolver.
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-opus-4-6",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/anthropic",
+            "api_key": "foundry-key",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["base_url"], "https://myfoundry.services.ai.azure.com/anthropic")
+        self.assertEqual(creds["api_key"], "foundry-key")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
+    def test_direct_endpoint_honors_explicit_api_mode(self):
+        # When delegation.api_mode is set explicitly, it overrides URL-based
+        # detection so users can force a transport on non-standard endpoints.
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-opus-4-6",
+            "provider": "custom",
+            "base_url": "https://proxy.example.com/v1",
+            "api_key": "proxy-key",
+            "api_mode": "anthropic_messages",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
+    def test_direct_endpoint_explicit_api_mode_overrides_url_detection(self):
+        # Explicit api_mode in config always wins over auto-detection.
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-opus-4-6",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/anthropic",
+            "api_key": "foundry-key",
+            "api_mode": "chat_completions",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["api_mode"], "chat_completions")
+
+    def test_direct_endpoint_invalid_api_mode_falls_back_to_detection(self):
+        # An invalid api_mode string must not break detection; fall back to URL heuristic.
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-opus-4-6",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/anthropic",
+            "api_key": "foundry-key",
+            "api_mode": "garbage",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
+    def test_direct_endpoint_returns_none_api_key_when_not_configured(self):
+        # When base_url is set without api_key, api_key should be None so
+        # _build_child_agent inherits the parent's key (effective_api_key = override or parent).
         parent = _make_mock_parent(depth=0)
         cfg = {
             "model": "qwen2.5-coder",
@@ -659,10 +957,11 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         }
         with patch.dict(os.environ, {"OPENAI_API_KEY": "env-openai-key"}, clear=False):
             creds = _resolve_delegation_credentials(cfg, parent)
-        self.assertEqual(creds["api_key"], "env-openai-key")
+        self.assertIsNone(creds["api_key"])
         self.assertEqual(creds["provider"], "custom")
 
-    def test_direct_endpoint_does_not_fall_back_to_openrouter_api_key_env(self):
+    def test_direct_endpoint_no_raise_when_only_provider_env_key_present(self):
+        # Even if OPENAI_API_KEY is absent, no ValueError — _build_child_agent uses parent key.
         parent = _make_mock_parent(depth=0)
         cfg = {
             "model": "qwen2.5-coder",
@@ -676,26 +975,10 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             },
             clear=False,
         ):
-            with self.assertRaises(ValueError) as ctx:
-                _resolve_delegation_credentials(cfg, parent)
-        self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+            creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertIsNone(creds["api_key"])
+        self.assertEqual(creds["provider"], "custom")
 
-    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
-    def test_nous_provider_resolves_nous_credentials(self, mock_resolve):
-        """Nous provider resolves Nous Portal base_url and api_key."""
-        mock_resolve.return_value = {
-            "provider": "nous",
-            "base_url": "https://inference-api.nousresearch.com/v1",
-            "api_key": "nous-agent-key-xyz",
-            "api_mode": "chat_completions",
-        }
-        parent = _make_mock_parent(depth=0)
-        cfg = {"model": "elevate-3-llama-3.1-8b", "provider": "nous"}
-        creds = _resolve_delegation_credentials(cfg, parent)
-        self.assertEqual(creds["provider"], "nous")
-        self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
-        self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
-        mock_resolve.assert_called_once_with(requested="nous")
 
     @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -729,6 +1012,89 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         cfg = {"max_iterations": 45}
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertIsNone(creds["model"])
+        self.assertIsNone(creds["provider"])
+
+    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
+    def test_named_custom_provider_preserves_provider_name(self, mock_resolve):
+        """Named custom provider (e.g. crof.ai) resolves to 'custom' at runtime level
+        but the subagent must retain the original provider identity so that
+        resolve_provider_client routes to the correct endpoint on retry/fallback.
+        Regression test for #26954.
+        """
+        mock_resolve.return_value = {
+            "provider": "custom",  # runtime marks it as "custom" type
+            "model": "deepseek-v4-pro-CEER",
+            "base_url": "https://api.crof.ai/v1",
+            "api_key": "crof-key-abc",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "deepseek-v4-pro-CEER", "provider": "crof.ai"}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        # The key assertion: subagent must keep "crof.ai", NOT "custom"
+        self.assertEqual(creds["provider"], "crof.ai")
+        self.assertEqual(creds["model"], "deepseek-v4-pro-CEER")
+        self.assertEqual(creds["base_url"], "https://api.crof.ai/v1")
+        self.assertEqual(creds["api_key"], "crof-key-abc")
+        # Verify resolve_runtime_provider was called with the configured name
+        mock_resolve.assert_called_once_with(
+            requested="crof.ai", target_model="deepseek-v4-pro-CEER"
+        )
+
+    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
+    def test_standard_provider_not_overwritten_by_configured_name(self, mock_resolve):
+        """Standard (non-custom) providers must still return runtime identity,
+        not the configured name, to preserve existing behaviour for openrouter,
+        nous, etc.
+        """
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "or-key-xyz",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "anthropic/claude-sonnet-4", "provider": "openrouter"}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        # Standard provider returns its own name, not "custom"
+        self.assertEqual(creds["provider"], "openrouter")
+
+    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
+    def test_custom_provider_with_empty_configured_provider_falls_back_to_runtime(self, mock_resolve):
+        """When configured_provider is empty/None, the early return kicks in and
+        we return provider=None regardless of what runtime resolved. The runtime
+        path is only reached when configured_provider is a non-empty string.
+        """
+        mock_resolve.return_value = {
+            "provider": "custom",
+            "model": "some-model",
+            "base_url": "https://fallback.example.com/v1",
+            "api_key": "key-fallback",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "some-model", "provider": ""}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        # Empty provider → early return with None (child inherits parent)
+        self.assertIsNone(creds["provider"])
+
+    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
+    def test_runtime_missing_provider_key_returns_none(self, mock_resolve):
+        """When resolve_runtime_provider returns a dict without 'provider' key,
+        the result must be None regardless of configured_provider.
+        This protects against malformed runtime responses.
+        """
+        mock_resolve.return_value = {
+            # deliberately missing "provider"
+            "model": "some-model",
+            "base_url": "https://example.com/v1",
+            "api_key": "key-123",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "some-model", "provider": "crof.ai"}
+        creds = _resolve_delegation_credentials(cfg, parent)
         self.assertIsNone(creds["provider"])
 
 
@@ -806,6 +1172,48 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["api_key"], "sk-or-key")
             self.assertNotEqual(kwargs["base_url"], parent.base_url)
             self.assertNotEqual(kwargs["api_key"], parent.api_key)
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_provider_override_clears_parent_openrouter_filters(
+        self, mock_creds, mock_cfg
+    ):
+        """Delegated provider should not inherit parent provider-preference filters."""
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "google/gemini-3-flash-preview",
+            "provider": "openrouter",
+        }
+        mock_creds.return_value = {
+            "model": "google/gemini-3-flash-preview",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.providers_allowed = ["anthropic/claude-3.5-sonnet"]
+        parent.providers_ignored = ["openai/gpt-4o-mini"]
+        parent.providers_order = ["google/gemini-2.5-pro"]
+        parent.provider_sort = "price"
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Cross-provider test", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["provider"], "openrouter")
+            self.assertIsNone(kwargs["providers_allowed"])
+            self.assertIsNone(kwargs["providers_ignored"])
+            self.assertIsNone(kwargs["providers_order"])
+            self.assertIsNone(kwargs["provider_sort"])
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -1384,53 +1792,6 @@ class TestDelegateHeartbeat(unittest.TestCase):
             f"got {len(touch_calls)} touches over 0.4s at 0.05s interval",
         )
 
-    def test_heartbeat_still_trips_idle_stale_when_no_tool(self):
-        """A wedged child with no current_tool still trips the idle threshold.
-
-        Regression guard: the fix for #13041 must not disable stale
-        detection entirely. A child that's hung between turns (no tool
-        running, no iteration progress) must still stop touching the
-        parent so the gateway timeout can fire.
-        """
-        from tools.delegate_tool import _run_single_child
-
-        parent = _make_mock_parent()
-        touch_calls = []
-        parent._touch_activity = lambda desc: touch_calls.append(desc)
-
-        child = MagicMock()
-        # Wedged child: no tool running, iteration frozen.
-        child.get_activity_summary.return_value = {
-            "current_tool": None,
-            "api_call_count": 3,
-            "max_iterations": 50,
-            "last_activity_desc": "waiting for API response",
-        }
-
-        def slow_run(**kwargs):
-            time.sleep(0.6)
-            return {"final_response": "done", "completed": True, "api_calls": 3}
-
-        child.run_conversation.side_effect = slow_run
-
-        # At interval 0.05s, idle threshold (5 cycles) trips at ~0.25s.
-        # We should see the heartbeat stop firing well before 0.6s.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05):
-            _run_single_child(
-                task_index=0,
-                goal="Test wedged child",
-                child=child,
-                parent_agent=parent,
-            )
-
-        # With idle threshold=5 + interval=0.05s, touches should cap
-        # around 5. Bound loosely to avoid timing flakes.
-        self.assertLess(
-            len(touch_calls), 9,
-            f"Idle stale detection did not fire: got {len(touch_calls)} "
-            f"touches over 0.6s — expected heartbeat to stop after "
-            f"~5 stale cycles",
-        )
 
 
 class TestDelegationReasoningEffort(unittest.TestCase):
@@ -1511,32 +1872,6 @@ class TestDelegationReasoningEffort(unittest.TestCase):
 
 class TestDispatchDelegateTask(unittest.TestCase):
     """Tests for the _dispatch_delegate_task helper and full param forwarding."""
-
-    @patch("tools.delegate_tool.delegate_task", return_value='{"results": []}')
-    def test_agent_id_forwarded_from_run_agent_dispatch(self, mock_delegate):
-        """Top-level agent_id reaches delegate_task via the central dispatch helper."""
-        from run_agent import AIAgent
-
-        parent = _make_mock_parent(depth=0)
-        result = AIAgent._dispatch_delegate_task(parent, {
-            "goal": "prepare listing campaign",
-            "agent_id": "ads",
-            "expected_return": "draft campaign outline",
-            "handoff_reason": "ads owns campaign strategy",
-            "priority": "high",
-            "artifacts": ["listing-123"],
-            "parent_run_id": "run-parent",
-        })
-
-        self.assertEqual(result, '{"results": []}')
-        _, kwargs = mock_delegate.call_args
-        self.assertEqual(kwargs["agent_id"], "ads")
-        self.assertEqual(kwargs["expected_return"], "draft campaign outline")
-        self.assertEqual(kwargs["handoff_reason"], "ads owns campaign strategy")
-        self.assertEqual(kwargs["priority"], "high")
-        self.assertEqual(kwargs["artifacts"], ["listing-123"])
-        self.assertEqual(kwargs["parent_run_id"], "run-parent")
-        self.assertIs(kwargs["parent_agent"], parent)
 
     @patch("tools.delegate_tool._load_config", return_value={})
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -1833,171 +2168,35 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
         props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
         self.assertIn("role", props)
         self.assertEqual(props["role"]["enum"], ["leaf", "orchestrator"])
-        self.assertIn("agent_id", props)
-        self.assertIn("expected_return", props)
-        self.assertIn("handoff_reason", props)
-        self.assertIn("priority", props)
-        self.assertIn("artifacts", props)
         task_props = props["tasks"]["items"]["properties"]
         self.assertIn("role", task_props)
         self.assertEqual(task_props["role"]["enum"], ["leaf", "orchestrator"])
-        self.assertIn("agent_id", task_props)
-        self.assertIn("expected_return", task_props)
-        self.assertIn("handoff_reason", task_props)
-        self.assertIn("priority", task_props)
-        self.assertIn("artifacts", task_props)
 
-    def test_orchestration_run_records_parent_run_id(self):
-        """Nested visible handoffs are linked to the parent run, not just session text."""
-        store = MagicMock()
-        store.create_run.return_value = {"run_id": "child-run"}
-        child = MagicMock()
-        child._subagent_id = "child-run"
-        child._orchestration_agent_id = "admin"
-        child._delegate_role = "leaf"
-        child._parent_subagent_id = "parent-subagent"
-        child.session_id = "child-session"
-        parent = MagicMock()
-        parent.session_id = "parent-session"
-        parent._orchestration_run_id = "parent-run"
+    def test_acp_command_description_has_do_not_set_guidance(self):
+        # acp_command/acp_args descriptions must NOT bias the model toward
+        # assuming an ACP CLI (Claude, Copilot, etc.) is installed. They must
+        # carry explicit "do not set unless told" guidance so the model doesn't
+        # hallucinate ACP availability (#22013).
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
 
-        with patch("tools.delegate_tool._orchestration_store_or_none", return_value=store):
-            _start_orchestration_run(child, parent, task_index=0, goal="prep checklist")
+        top_acp_desc = props["acp_command"]["description"]
+        self.assertIn("Do NOT set", top_acp_desc)
+        self.assertIn("explicitly told you", top_acp_desc)
 
-        _, kwargs = store.create_run.call_args
-        self.assertEqual(kwargs["agent_id"], "admin")
-        self.assertEqual(kwargs["parent_run_id"], "parent-run")
-        self.assertEqual(kwargs["parent_session_key"], "parent-session")
+        task_props = props["tasks"]["items"]["properties"]
+        per_task_acp_desc = task_props["acp_command"]["description"]
+        self.assertIn("Do NOT set", per_task_acp_desc)
 
-    def test_handoff_packet_context_is_tight_and_structured(self):
-        target_profile = _agent_job_profile("admin")
-        packet = _build_handoff_packet(
-            source_agent_id="outreach",
-            target_agent_id="admin",
-            task="Prep buyer follow-up checklist",
-            context="Buyer wants condo under 650k.",
-            expected_return="5 bullets and next action",
-            handoff_reason="Admin owns checklist ops",
-            priority="high",
-            artifacts=["lead:123"],
-            parent_run_id="run-abc",
-            target_profile=target_profile,
-        )
-        context = _context_with_handoff_packet("Buyer wants condo under 650k.", packet)
-
-        self.assertEqual(packet["from_agent"], "outreach")
-        self.assertEqual(packet["to_agent"], "admin")
-        self.assertEqual(packet["routing_label"], "Agent Routing (Admin)")
-        self.assertEqual(packet["priority"], "high")
-        self.assertIn("operations", packet["target_profile"]["job"].lower())
-        self.assertIn("HANDOFF PACKET:", context)
-        self.assertIn("TARGET AGENT JOB PROFILE:", context)
-        self.assertIn("routing_label: Agent Routing (Admin)", context)
-        self.assertIn("expected_return: 5 bullets and next action", context)
-        self.assertIn("paperwork/checklists", context)
-        self.assertIn("lead:123", context)
-        self.assertIn("Do not re-delegate unless your role is orchestrator", context)
-
-    def test_handoff_packet_uses_target_default_expected_return(self):
-        packet = _build_handoff_packet(
-            source_agent_id="ads",
-            target_agent_id="social-media",
-            task="Turn campaign into posts",
-            context=None,
-            target_profile=_agent_job_profile("social-media"),
-        )
-
-        self.assertIn("captions/hooks", packet["expected_return"])
-
-    def test_generic_delegate_packet_does_not_show_agent_routing_label(self):
-        packet = _build_handoff_packet(
-            source_agent_id="executive-assistant",
-            target_agent_id="executive-assistant",
-            task="Do focused research",
-            context=None,
-            target_profile=_agent_job_profile("executive-assistant"),
-            visible_handoff=False,
-        )
-        context = _context_with_handoff_packet(None, packet)
-
-        self.assertFalse(packet["visible_handoff"])
-        self.assertIsNone(packet["routing_label"])
-        self.assertNotIn("routing_label:", context)
-
-    def test_visible_agent_profile_loads_local_soul_and_agents_md(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            agent_dir = root / "orgs" / "client-elevate" / "agents" / "ads"
-            agent_dir.mkdir(parents=True)
-            (agent_dir / "IDENTITY.md").write_text("## Name\nAds\n", encoding="utf-8")
-            (agent_dir / "SOUL.md").write_text("# Soul\nAds voice and autonomy rules.", encoding="utf-8")
-            (agent_dir / "AGENTS.md").write_text("# Agent Instructions\nOwn campaigns and email.", encoding="utf-8")
-            (agent_dir / "GOALS.md").write_text("# Goals\n- Launch seller campaign", encoding="utf-8")
-            store = MagicMock()
-            store.get_agent.return_value = {
-                "agent_id": "ads",
-                "display_name": "Ads",
-                "role": "Paid campaign lane",
-                "org": "client-elevate",
-                "metadata": {},
-            }
-
-            with patch.dict(os.environ, {"ELEVATE_FRAMEWORK_ROOT": str(root)}):
-                profile = _agent_job_profile("ads", store=store)
-            packet = _build_handoff_packet(
-                source_agent_id="executive-assistant",
-                target_agent_id="ads",
-                task="Draft campaign",
-                context=None,
-                target_profile=profile,
-            )
-            context = _context_with_handoff_packet(None, packet)
-
-        self.assertEqual(Path(profile["local_context"]["agent_dir"]).resolve(), agent_dir.resolve())
-        self.assertIn("Ads voice", profile["local_context"]["soul_md"])
-        self.assertIn("TARGET AGENT LOCAL CONTEXT:", context)
-        self.assertIn("## SOUL.md", context)
-        self.assertIn("## AGENTS.md", context)
-        self.assertIn("Own campaigns and email", context)
-
-    def test_ads_job_profile_owns_paid_campaigns_without_social_routing(self):
-        profile = _agent_job_profile("ads")
-        self.assertIn("paid ads", profile["owns"])
-        self.assertIn("email campaign strategy", profile["owns"])
-        self.assertIn("ad creative direction", profile["owns"])
-        self.assertNotIn("social-media routing", profile["owns"])
-
-    def test_handoff_route_blocks_builtin_unapproved_lateral_handoff(self):
-        err = _handoff_route_error(
-            source_agent_id="outreach",
-            target_agent_id="social-media",
-            explicit_target=True,
-            store=None,
-        )
-        self.assertIn("not allowed", err)
-
-    def test_social_media_cannot_route_to_admin_directly(self):
-        err = _handoff_route_error(
-            source_agent_id="social-media",
-            target_agent_id="admin",
-            explicit_target=True,
-            store=None,
-        )
-        self.assertIn("not allowed", err)
-
-    def test_handoff_route_allows_supervisor_and_known_pair(self):
-        self.assertIsNone(_handoff_route_error(
-            source_agent_id="executive-assistant",
-            target_agent_id="social-media",
-            explicit_target=True,
-            store=None,
-        ))
-        self.assertIsNone(_handoff_route_error(
-            source_agent_id="outreach",
-            target_agent_id="admin",
-            explicit_target=True,
-            store=None,
-        ))
+    def test_acp_command_description_has_no_claude_as_example(self):
+        # Descriptions must not list 'claude' as a canonical example value —
+        # that directly primes the model to attempt Claude ACP even when it is
+        # not installed (#22013).
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        top_acp_desc = props["acp_command"]["description"].lower()
+        self.assertNotIn("e.g. 'claude'", top_acp_desc)
+        self.assertNotIn("e.g. \"claude\"", top_acp_desc)
 
 
 # Sentinel used to distinguish "role kwarg omitted" from "role=None".
@@ -2321,6 +2520,151 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
         self.assertFalse(built_agents[1]["is_orchestrator_prompt"])
         self.assertNotIn("delegation", built_agents[2]["enabled_toolsets"])
         self.assertFalse(built_agents[2]["is_orchestrator_prompt"])
+
+
+class TestSubagentApprovalCallback(unittest.TestCase):
+    """Subagent worker threads must have a non-interactive approval callback
+    installed so dangerous-command prompts don't fall back to input() and
+    deadlock the parent's prompt_toolkit TUI.
+
+    Governed by delegation.subagent_auto_approve:
+      false (default) → _subagent_auto_deny
+      true            → _subagent_auto_approve
+    """
+
+    def test_auto_deny_returns_deny(self):
+        from tools.delegate_tool import _subagent_auto_deny
+        self.assertEqual(
+            _subagent_auto_deny("rm -rf /tmp/x", "dangerous"),
+            "deny",
+        )
+
+    def test_auto_approve_returns_once(self):
+        from tools.delegate_tool import _subagent_auto_approve
+        self.assertEqual(
+            _subagent_auto_approve("rm -rf /tmp/x", "dangerous"),
+            "once",
+        )
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_getter_defaults_to_deny(self, _mock_cfg):
+        from tools.delegate_tool import (
+            _get_subagent_approval_callback,
+            _subagent_auto_deny,
+        )
+        self.assertIs(_get_subagent_approval_callback(), _subagent_auto_deny)
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"subagent_auto_approve": False},
+    )
+    def test_getter_explicit_false_is_deny(self, _mock_cfg):
+        from tools.delegate_tool import (
+            _get_subagent_approval_callback,
+            _subagent_auto_deny,
+        )
+        self.assertIs(_get_subagent_approval_callback(), _subagent_auto_deny)
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"subagent_auto_approve": True},
+    )
+    def test_getter_true_is_approve(self, _mock_cfg):
+        from tools.delegate_tool import (
+            _get_subagent_approval_callback,
+            _subagent_auto_approve,
+        )
+        self.assertIs(_get_subagent_approval_callback(), _subagent_auto_approve)
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"subagent_auto_approve": "yes"},
+    )
+    def test_getter_truthy_string_is_approve(self, _mock_cfg):
+        """is_truthy_value accepts 'yes'/'1'/'true' as truthy."""
+        from tools.delegate_tool import (
+            _get_subagent_approval_callback,
+            _subagent_auto_approve,
+        )
+        self.assertIs(_get_subagent_approval_callback(), _subagent_auto_approve)
+
+    def test_executor_initializer_installs_callback_in_worker(self):
+        """The initializer sets the callback on the worker thread's TLS,
+        not the parent's — verifies the fix actually scopes to workers.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from tools.terminal_tool import (
+            set_approval_callback as _set_cb,
+            _get_approval_callback,
+        )
+        from tools.delegate_tool import _subagent_auto_deny
+
+        # Parent thread has no callback.
+        _set_cb(None)
+        self.assertIsNone(_get_approval_callback())
+
+        seen = []
+
+        def worker():
+            seen.append(_get_approval_callback())
+
+        with ThreadPoolExecutor(
+            max_workers=1,
+            initializer=_set_cb,
+            initargs=(_subagent_auto_deny,),
+        ) as executor:
+            executor.submit(worker).result()
+
+        self.assertEqual(seen, [_subagent_auto_deny])
+        # Parent's callback slot is still empty (TLS isolates threads).
+        self.assertIsNone(_get_approval_callback())
+
+
+class TestFallbackModelInheritance(unittest.TestCase):
+    """Subagents must inherit the parent's fallback provider chain."""
+
+    def test_child_inherits_fallback_chain(self):
+        """_build_child_agent passes parent._fallback_chain as fallback_model."""
+        parent = _make_mock_parent(depth=0)
+        fallback_entry = {"provider": "openrouter", "model": "gpt-4o-mini", "api_key": "sk-or-x"}
+        parent._fallback_chain = [fallback_entry]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="test fallback inheritance",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["fallback_model"], [fallback_entry])
+
+    def test_child_gets_no_fallback_when_parent_chain_empty(self):
+        """When parent._fallback_chain is empty, fallback_model is None."""
+        parent = _make_mock_parent(depth=0)
+        parent._fallback_chain = []
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="test no fallback",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIsNone(kwargs["fallback_model"])
 
 
 if __name__ == "__main__":

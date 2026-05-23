@@ -17,6 +17,9 @@ import threading
 import time
 import unicodedata
 from typing import Optional
+from elevate_cli.config import cfg_get
+
+from utils import env_var_enabled, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,32 @@ _approval_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_session_key",
     default="",
 )
+
+
+def _fire_approval_hook(hook_name: str, **kwargs) -> None:
+    """Invoke a plugin lifecycle hook for the approval system.
+
+    Lazy-imports the plugin manager to avoid circular imports (approval.py is
+    imported very early, long before plugins are discovered). Never raises --
+    plugin errors are logged and swallowed.
+
+    Only fires for the two approval-specific hooks in VALID_HOOKS:
+    pre_approval_request, post_approval_response.
+    """
+    try:
+        from elevate_cli.plugins import invoke_hook
+    except Exception:
+        # Plugin system not available in this execution context
+        # (e.g. bare tool-only imports, minimal test environments).
+        return
+    try:
+        invoke_hook(hook_name, **kwargs)
+    except Exception as exc:
+        # invoke_hook() already swallows per-callback errors, so reaching here
+        # means the dispatch layer itself failed. Log and move on -- approval
+        # flow is safety-critical, plugin observability is not.
+        logger.debug("Approval hook %s dispatch failed: %s", hook_name, exc)
+
 
 
 def set_current_session_key(session_key: str) -> contextvars.Token[str]:
@@ -54,13 +83,44 @@ def get_current_session_key(default: str = "default") -> str:
     from gateway.session_context import get_session_env
     return get_session_env("ELEVATE_SESSION_KEY", default)
 
+
+def _get_session_platform() -> str:
+    """Return the current gateway platform from contextvars/env fallback."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("ELEVATE_SESSION_PLATFORM", "") or ""
+    except Exception:
+        return os.getenv("ELEVATE_SESSION_PLATFORM", "") or ""
+
+
+def _is_gateway_approval_context() -> bool:
+    """True when this call is inside a gateway/API session.
+
+    Legacy gateway integrations set ELEVATE_GATEWAY_SESSION in process env.
+    Newer concurrent gateway paths bind ELEVATE_SESSION_PLATFORM via
+    contextvars so approval mode does not depend on process-global flags.
+
+    Cron jobs are NEVER gateway-approval contexts even when they originate
+    from a gateway platform (cron binds ELEVATE_SESSION_PLATFORM via
+    contextvars for delivery routing). Cron approvals are governed by
+    ``approvals.cron_mode`` config, not interactive resolve — letting cron
+    fall through to the gateway branch would submit a pending approval
+    with no listener and block the job indefinitely.
+    """
+    if env_var_enabled("ELEVATE_CRON_SESSION"):
+        return False
+    if env_var_enabled("ELEVATE_GATEWAY_SESSION"):
+        return True
+    return bool(_get_session_platform())
+
 # Sensitive write targets that should trigger approval even when referenced
 # via shell expansions like $HOME or $ELEVATE_HOME.
 _SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
 _ELEVATE_ENV_PATH = (
-    r'(?:~\/\.elevate/|'
-    r'(?:\$home|\$\{home\})/\.elevate/|'
-    r'(?:\$elevate_home|\$\{elevate_home\})/)'
+    r'(?:~\/\.hermes/|'
+    r'(?:\$home|\$\{home\})/\.hermes/|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/)'
     r'\.env\b'
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
@@ -73,8 +133,19 @@ _CREDENTIAL_FILES = (
     r'(?:~|\$home|\$\{home\})/\.'
     r'(?:netrc|pgpass|npmrc|pypirc)\b'
 )
+# macOS: /etc, /var, /tmp, /home are symlinks to /private/{etc,var,tmp,home}.
+# A command written to target /private/etc/sudoers works identically to
+# /etc/sudoers on macOS but bypasses a plain "/etc/" pattern check. Match
+# both forms. Inspired by Claude Code 2.1.113's "dangerous path protection".
+_MACOS_PRIVATE_SYSTEM_PATH = r'/private/(?:etc|var|tmp|home)/'
+# System-config paths that should trigger approval for any write/edit,
+# collapsing /etc, its macOS /private/etc mirror, and /etc/sudoers.d/ into
+# one shared fragment so new DANGEROUS_PATTERNS stay consistent.
+_SYSTEM_CONFIG_PATH = (
+    rf'(?:/etc/|{_MACOS_PRIVATE_SYSTEM_PATH})'
+)
 _SENSITIVE_WRITE_TARGET = (
-    r'(?:/etc/|/dev/sd|'
+    rf'(?:{_SYSTEM_CONFIG_PATH}|/dev/sd|'
     rf'{_SSH_SENSITIVE_PATH}|'
     rf'{_ELEVATE_ENV_PATH}|'
     rf'{_SHELL_RC_FILES}|'
@@ -82,6 +153,161 @@ _SENSITIVE_WRITE_TARGET = (
 )
 _PROJECT_SENSITIVE_WRITE_TARGET = rf'(?:{_PROJECT_ENV_PATH}|{_PROJECT_CONFIG_PATH})'
 _COMMAND_TAIL = r'(?:\s*(?:&&|\|\||;).*)?$'
+
+# =========================================================================
+# Hardline (unconditional) blocklist
+# =========================================================================
+#
+# Commands so catastrophic they should NEVER run via the agent, regardless
+# of --yolo, /yolo, approvals.mode=off, or cron approve mode.  This is a
+# floor below yolo: opting into yolo is the user trusting the agent with
+# their files and services, not trusting it to wipe the disk or power the
+# box off.
+#
+# Hardline only applies to environments that can actually damage the host
+# (local, ssh, container-host cron).  Containerized backends (docker,
+# singularity, modal, daytona) already bypass the dangerous-command layer
+# because nothing they do can touch the host, so we leave that behavior
+# alone.
+#
+# The list is deliberately tiny — only things with no recovery path:
+# filesystem destruction rooted at /, raw block device overwrites, kernel
+# shutdown/reboot, and denial-of-service commands that take the host down.
+# Recoverable-but-costly operations (git reset --hard, rm -rf /tmp/x,
+# chmod -R 777, curl|sh) stay in DANGEROUS_PATTERNS where yolo can pass
+# them through — that's what yolo is for.
+#
+# Inspired by Mercury Agent's permission-hardened blocklist
+# (https://github.com/cosmicstack-labs/mercury-agent).
+
+# Regex fragment matching the *start* of a command (i.e. positions where
+# a shell would begin parsing a new command).  Used by shutdown/reboot
+# patterns so they don't fire on "echo reboot" or "grep 'shutdown' log".
+# Matches: start of string, after command separators (; && || | newline),
+# after subshell openers ( `$(` or backtick ), optionally consuming
+# leading wrapper commands (sudo, env VAR=VAL, exec, nohup, setsid).
+_CMDPOS = (
+    r'(?:^|[;&|\n`]|\$\()'         # start position
+    r'\s*'                          # optional whitespace
+    r'(?:sudo\s+(?:-[^\s]+\s+)*)?'  # optional sudo with flags
+    r'(?:env\s+(?:\w+=\S*\s+)*)?'   # optional env with VAR=VAL pairs
+    r'(?:(?:exec|nohup|setsid|time)\s+)*'  # optional wrapper commands
+    r'\s*'
+)
+
+HARDLINE_PATTERNS = [
+    # rm recursive targeting the root filesystem or protected roots
+    (r'\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)', "recursive delete of root filesystem"),
+    (r'\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)', "recursive delete of system directory"),
+    (r'\brm\s+(-[^\s]*\s+)*(~|\$HOME)(/?|/\*)?(\s|$)', "recursive delete of home directory"),
+    # Filesystem format
+    (r'\bmkfs(\.[a-z0-9]+)?\b', "format filesystem (mkfs)"),
+    # Raw block device overwrites (dd + redirection)
+    (r'\bdd\b[^\n]*\bof=/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*', "dd to raw block device"),
+    (r'>\s*/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b', "redirect to raw block device"),
+    # Fork bomb (classic shell form)
+    (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
+    # Kill every process on the system
+    (r'\bkill\s+(-[^\s]+\s+)*-1\b', "kill all processes"),
+    # System shutdown / reboot — anchor to command position (start of line,
+    # after a command separator, or after sudo/env wrappers) so we don't
+    # false-positive on "echo reboot" or "grep 'shutdown' logs".
+    # _CMDPOS matches start-of-command positions.
+    (_CMDPOS + r'(shutdown|reboot|halt|poweroff)\b', "system shutdown/reboot"),
+    (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
+    (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
+    (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
+]
+
+# Pre-compiled variant used by the hot-path matcher. Building these at module
+# load eliminates the ~2.6 ms cold-cache re.compile fan-out on the first
+# terminal() call per process (12 HARDLINE + 47 DANGEROUS patterns, each
+# potentially evicted from Python's 512-entry ``re._cache`` by unrelated
+# regex work elsewhere in the agent). DANGEROUS_PATTERNS_COMPILED is built
+# at the end of this module after DANGEROUS_PATTERNS is defined.
+_RE_FLAGS = re.IGNORECASE | re.DOTALL
+HARDLINE_PATTERNS_COMPILED = [
+    (re.compile(pattern, _RE_FLAGS), description)
+    for pattern, description in HARDLINE_PATTERNS
+]
+
+
+# =========================================================================
+# Sudo stdin guard — block password guessing via "sudo -S"
+# =========================================================================
+# When SUDO_PASSWORD is not configured, any explicit "sudo -S" in the
+# command is the LLM piping a guessed password via stdin.  This is a
+# brute-force attack vector: the model iterates through candidate
+# passwords, inspects sudo's "Sorry, try again" output, and refines.
+# Treat this as an unconditional block — there is never a legitimate
+# reason for the agent to pipe passwords to sudo -S when no password
+# has been configured.
+_SUDO_STDIN_RE = re.compile(
+    r'(?:^|[;&|`\n]|&&|\|\||\$\()\s*sudo\s+-S\b',
+    re.IGNORECASE)
+
+
+def _check_sudo_stdin_guard(command: str) -> tuple:
+    """Detect ``sudo -S`` (stdin password) without configured SUDO_PASSWORD.
+
+    When SUDO_PASSWORD is set, ``_transform_sudo_command`` injects ``-S``
+    internally — that path is legitimate and handled elsewhere.  This guard
+    only fires when SUDO_PASSWORD is *not* set, meaning the LLM explicitly
+    wrote ``sudo -S`` to pipe a guessed password.
+
+    Returns:
+        (is_blocked: bool, description: str | None)
+    """
+    if "SUDO_PASSWORD" in os.environ:
+        return (False, None)
+    normalized = _normalize_command_for_detection(command).lower()
+    if _SUDO_STDIN_RE.search(normalized):
+        return (True, "sudo password guessing via stdin (sudo -S)")
+    return (False, None)
+
+
+def detect_hardline_command(command: str) -> tuple:
+    """Check if a command matches the unconditional hardline blocklist.
+
+    Returns:
+        (is_hardline, description) or (False, None)
+    """
+    normalized = _normalize_command_for_detection(command).lower()
+    for pattern_re, description in HARDLINE_PATTERNS_COMPILED:
+        if pattern_re.search(normalized):
+            return (True, description)
+    return (False, None)
+
+
+def _hardline_block_result(description: str) -> dict:
+    """Build the standard block result for a hardline match."""
+    return {
+        "approved": False,
+        "hardline": True,
+        "message": (
+            f"BLOCKED (hardline): {description}. "
+            "This command is on the unconditional blocklist and cannot "
+            "be executed via the agent — not even with --yolo, /yolo, "
+            "approvals.mode=off, or cron approve mode. If you genuinely "
+            "need to run it, run it yourself in a terminal outside the "
+            "agent."
+        ),
+    }
+
+
+def _sudo_stdin_block_result(description: str) -> dict:
+    """Build the standard block result for sudo stdin guard."""
+    return {
+        "approved": False,
+        "message": (
+            f"BLOCKED: {description}. "
+            "Do not pipe passwords to 'sudo -S' — this is a brute-force "
+            "attack vector. Set SUDO_PASSWORD in your .env file if the "
+            "agent needs passwordless sudo, or run the sudo command "
+            "manually in your own terminal."
+        ),
+    }
+
 
 # =========================================================================
 # Dangerous command patterns
@@ -99,12 +325,21 @@ DANGEROUS_PATTERNS = [
     (r'\bdd\s+.*if=', "disk copy"),
     (r'>\s*/dev/sd', "write to block device"),
     (r'\bDROP\s+(TABLE|DATABASE)\b', "SQL DROP"),
-    (r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', "SQL DELETE without WHERE"),
+    # Use [^\n]* instead of .* so DOTALL mode does not cause a WHERE clause on the
+    # *next* line to satisfy the negative lookahead, silently allowing DELETE without WHERE.
+    (r'\bDELETE\s+FROM\b(?![^\n]*\bWHERE\b)', "SQL DELETE without WHERE"),
     (r'\bTRUNCATE\s+(TABLE)?\s*\w', "SQL TRUNCATE"),
-    (r'>\s*/etc/', "overwrite system config"),
+    (rf'>\s*{_SYSTEM_CONFIG_PATH}', "overwrite system config"),
     (r'\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b', "stop/restart system service"),
     (r'\bkill\s+-9\s+-1\b', "kill all processes"),
     (r'\bpkill\s+-9\b', "force kill processes"),
+    # killall with SIGKILL (parallel to pkill -9). Catches -9 / -KILL /
+    # -s KILL / -SIGKILL forms, and also `killall -r <regex>` broad sweeps
+    # that can wipe out unrelated processes by accident.
+    # Inspired by Claude Code 2.1.113 expanded deny rules.
+    (r'\bkillall\s+(-[^\s]*\s+)*-(9|KILL|SIGKILL)\b', "force kill processes (killall -KILL)"),
+    (r'\bkillall\s+(-[^\s]*\s+)*-s\s+(KILL|SIGKILL|9)\b', "force kill processes (killall -s KILL)"),
+    (r'\bkillall\s+(-[^\s]*\s+)*-r\b', "kill processes by regex (killall -r)"),
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
@@ -116,29 +351,34 @@ DANGEROUS_PATTERNS = [
     (rf'\btee\b.*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config via tee"),
     (rf'>>?\s*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config via redirection"),
     (r'\bxargs\s+.*\brm\b', "xargs with rm"),
-    (r'\bfind\b.*-exec\s+(/\S*/)?rm\b', "find -exec rm"),
+    # find -exec rm / -execdir rm — the -execdir variant (same semantics,
+    # runs in the directory of each match) was previously missed. Claude
+    # Code 2.1.113 tightened their equivalent find rule to stop auto-
+    # approving -exec / -delete flags.
+    (r'\bfind\b.*-exec(?:dir)?\s+(/\S*/)?rm\b', "find -exec/-execdir rm"),
     (r'\bfind\b.*-delete\b', "find -delete"),
     # Gateway lifecycle protection: prevent the agent from killing its own
     # gateway process.  These commands trigger a gateway restart/stop that
     # terminates all running agents mid-work.
-    (r'\belevate\s+gateway\s+(stop|restart)\b', "stop/restart elevate gateway (kills running agents)"),
-    (r'\belevate\s+update\b', "elevate update (restarts gateway, kills running agents)"),
+    (r'\bhermes\s+gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
+    (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
     # Gateway protection: never start gateway outside systemd management
-    (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart elevate-gateway')"),
-    (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart elevate-gateway')"),
+    (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
+    (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     # Self-termination protection: prevent agent from killing its own process
-    (r'\b(pkill|killall)\b.*\b(elevate|gateway|cli\.py)\b', "kill elevate/gateway process (self-termination)"),
+    (r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
     # Self-termination via kill + command substitution (pgrep/pidof).
-    # The name-based pattern above catches `pkill elevate` but not
-    # `kill -9 $(pgrep -f elevate)` because the substitution is opaque
+    # The name-based pattern above catches `pkill hermes` but not
+    # `kill -9 $(pgrep -f hermes)` because the substitution is opaque
     # to regex at detection time. Catch the structural pattern instead.
     (r'\bkill\b.*\$\(\s*pgrep\b', "kill process via pgrep expansion (self-termination)"),
     (r'\bkill\b.*`\s*pgrep\b', "kill process via backtick pgrep expansion (self-termination)"),
-    # File copy/move/edit into sensitive system paths
-    (r'\b(cp|mv|install)\b.*\s/etc/', "copy/move file into /etc/"),
+    # File copy/move/edit into sensitive system paths (/etc/ and macOS
+    # /private/etc/ mirror).
+    (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
     (rf'\b(cp|mv|install)\b.*\s["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config file"),
-    (r'\bsed\s+-[^\s]*i.*\s/etc/', "in-place edit of system config"),
-    (r'\bsed\s+--in-place\b.*\s/etc/', "in-place edit of system config (long flag)"),
+    (rf'\bsed\s+-[^\s]*i.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
+    (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
     (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
@@ -153,6 +393,32 @@ DANGEROUS_PATTERNS = [
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    # Sudo with stdin / askpass / shell / list-privs flags. An LLM-driven
+    # agent has no TTY, so sudo invocations that succeed without human
+    # interaction are those reading the password from stdin (-S/--stdin)
+    # or via an askpass helper (-A/--askpass). The shell-launch (-s) and
+    # list-privileges (-a) flags are also gated since they are
+    # privilege-relevant invocations the agent can chain after acquiring
+    # the password (e.g. read SUDO_PASSWORD from .env -> sudo -S -s ->
+    # root shell). Plain `sudo cmd` (no flag) is TTY-bound and excluded.
+    # `_normalize_command_for_detection` lowercases input before pattern
+    # matching, so case variants of S/s and A/a collapse — both forms
+    # are gated below. Lazy `[^;|&\n]*?` allows flag arguments (e.g.
+    # `sudo -u root -S whoami`) without spanning command separators. See
+    # #17873 category 4.
+    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--stdin\b|-a\b|--askpass\b)',
+     "sudo with privilege flag (stdin/askpass/shell/list)"),
+    # Combined short-flag form: -nS, -ns, -sa, -las — sudo flags packed
+    # into a single -X token. Catches the same threat class.
+    (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
+     "sudo with combined-flag privilege escalation"),
+]
+
+
+# Pre-compiled variant (same rationale as HARDLINE_PATTERNS_COMPILED above).
+DANGEROUS_PATTERNS_COMPILED = [
+    (re.compile(pattern, _RE_FLAGS), description)
+    for pattern, description in DANGEROUS_PATTERNS
 ]
 
 
@@ -208,8 +474,8 @@ def detect_dangerous_command(command: str) -> tuple:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
     command_lower = _normalize_command_for_detection(command).lower()
-    for pattern, description in DANGEROUS_PATTERNS:
-        if re.search(pattern, command_lower, re.IGNORECASE | re.DOTALL):
+    for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
+        if pattern_re.search(command_lower):
             pattern_key = description
             return (True, pattern_key, description)
     return (False, None, None)
@@ -224,10 +490,6 @@ _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
-# Per-session Claude-style permission mode overrides (composer picker).
-# When unset for a session, get_permission_mode() falls back to the
-# config.yaml global default. Cleared by clear_session().
-_session_permission_mode: dict[str, str] = {}
 
 # =========================================================================
 # Blocking gateway approval (mirrors CLI's synchronous input() flow)
@@ -273,8 +535,8 @@ def unregister_gateway_notify(session_key: str) -> None:
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
-        for entry in entries:
-            entry.event.set()
+    for entry in entries:
+        entry.event.set()
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
@@ -347,9 +609,13 @@ def clear_session(session_key: str) -> None:
     with _lock:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
-        _session_permission_mode.pop(session_key, None)
         _pending.pop(session_key, None)
-        _gateway_queues.pop(session_key, None)
+        entries = _gateway_queues.pop(session_key, [])
+    for entry in entries:
+        # Session-boundary cleanup should cancel any blocked approval waits
+        # immediately so the old run can unwind instead of idling until timeout.
+        entry.result = "deny"
+        entry.event.set()
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:
@@ -456,17 +722,47 @@ def prompt_dangerous_approval(command: str, description: str,
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
 
+    # Fail-closed guard: if prompt_toolkit owns the terminal (interactive
+    # CLI session) and no approval callback is registered on this thread,
+    # the input() fallback below would spawn a daemon thread whose read
+    # can never see Enter -- the user's keystrokes go to prompt_toolkit,
+    # not input(), producing an invisible 60s deadlock (issue #15216).
+    # Deny fast and log loudly instead so the caller can surface a real
+    # error to the agent. Any thread that needs interactive approval must
+    # install a callback via tools.terminal_tool.set_approval_callback()
+    # before reaching this point (see delegate_tool.py, run_agent.py
+    # _execute_tool_calls_concurrent / _spawn_background_review for the
+    # established pattern).
+    try:
+        from prompt_toolkit.application.current import get_app_or_none
+        if get_app_or_none() is not None:
+            logger.warning(
+                "Dangerous-command approval requested on a thread with no "
+                "approval callback while prompt_toolkit is active; denying "
+                "to avoid stdin deadlock. command=%r description=%r",
+                command, description,
+            )
+            return "deny"
+    except Exception:
+        # prompt_toolkit not installed, or detection failed -- fall through
+        # to the legacy input() path (safe in non-TUI contexts: scripts,
+        # tests, sshd, etc.).
+        pass
+
     os.environ["ELEVATE_SPINNER_PAUSE"] = "1"
     try:
+        # Resolve the active UI language once per prompt so we don't re-read
+        # config/YAML inside the retry loop below.
+        from agent.i18n import t
         while True:
             print()
-            print(f"  ⚠️  DANGEROUS COMMAND: {description}")
+            print(f"  {t('approval.dangerous_header', description=description)}")
             print(f"      {command}")
             print()
             if allow_permanent:
-                print("      [o]nce  |  [s]ession  |  [a]lways  |  [d]eny")
+                print(t("approval.choose_long"))
             else:
-                print("      [o]nce  |  [s]ession  |  [d]eny")
+                print(t("approval.choose_short"))
             print()
             sys.stdout.flush()
 
@@ -474,7 +770,7 @@ def prompt_dangerous_approval(command: str, description: str,
 
             def get_input():
                 try:
-                    prompt = "      Choice [o/s/a/D]: " if allow_permanent else "      Choice [o/s/D]: "
+                    prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
                     result["choice"] = input(prompt).strip().lower()
                 except (EOFError, OSError):
                     result["choice"] = ""
@@ -484,28 +780,28 @@ def prompt_dangerous_approval(command: str, description: str,
             thread.join(timeout=timeout_seconds)
 
             if thread.is_alive():
-                print("\n      ⏱ Timeout - denying command")
+                print("\n" + t("approval.timeout"))
                 return "deny"
 
             choice = result["choice"]
-            if choice in ('o', 'once'):
-                print("      ✓ Allowed once")
+            if choice in {'o', 'once'}:
+                print(t("approval.allowed_once"))
                 return "once"
-            elif choice in ('s', 'session'):
-                print("      ✓ Allowed for this session")
+            elif choice in {'s', 'session'}:
+                print(t("approval.allowed_session"))
                 return "session"
-            elif choice in ('a', 'always'):
+            elif choice in {'a', 'always'}:
                 if not allow_permanent:
-                    print("      ✓ Allowed for this session")
+                    print(t("approval.allowed_session"))
                     return "session"
-                print("      ✓ Added to permanent allowlist")
+                print(t("approval.allowed_always"))
                 return "always"
             else:
-                print("      ✗ Denied")
+                print(t("approval.denied"))
                 return "deny"
 
     except (EOFError, KeyboardInterrupt):
-        print("\n      ✗ Cancelled")
+        print("\n" + t("approval.cancelled"))
         return "deny"
     finally:
         if "ELEVATE_SPINNER_PAUSE" in os.environ:
@@ -540,34 +836,10 @@ def _get_approval_config() -> dict:
         return {}
 
 
-# Claude-style permission_mode → internal approval mode. acceptEdits and plan
-# both fall back to manual approvals until dedicated agent-runtime support
-# lands; the UI still surfaces them as distinct selectable modes.
-_PERMISSION_MODE_TO_APPROVAL = {
-    "default": "manual",
-    "acceptedits": "manual",
-    "plan": "manual",
-    "bypasspermissions": "off",
-}
-
-
 def _get_approval_mode() -> str:
-    """Read the effective approval mode. Returns 'manual', 'smart', or 'off'.
-
-    ``approvals.permission_mode`` (Claude-style schema) takes precedence over
-    the legacy ``approvals.mode`` when set. The lone exception: a ``default``
-    permission_mode still honors a directly-configured legacy ``smart`` mode so
-    power users on smart approvals are not silently downgraded.
-    """
-    cfg = _get_approval_config()
-    pmode = str(cfg.get("permission_mode", "") or "").strip().lower()
-    if pmode:
-        if pmode == "default":
-            legacy = _normalize_approval_mode(cfg.get("mode", "manual"))
-            if legacy == "smart":
-                return "smart"
-        return _PERMISSION_MODE_TO_APPROVAL.get(pmode, "manual")
-    return _normalize_approval_mode(cfg.get("mode", "manual"))
+    """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
+    mode = _get_approval_config().get("mode", "manual")
+    return _normalize_approval_mode(mode)
 
 
 def _get_approval_timeout() -> int:
@@ -583,8 +855,8 @@ def _get_cron_approval_mode() -> str:
     try:
         from elevate_cli.config import load_config
         config = load_config()
-        mode = str(config.get("approvals", {}).get("cron_mode", "deny")).lower().strip()
-        if mode in ("approve", "off", "allow", "yes"):
+        mode = str(cfg_get(config, "approvals", "cron_mode", default="deny")).lower().strip()
+        if mode in {"approve", "off", "allow", "yes"}:
             return "approve"
         return "deny"
     except Exception:
@@ -653,12 +925,22 @@ def check_dangerous_command(command: str, env_type: str,
     Returns:
         {"approved": True/False, "message": str or None, ...}
     """
-    if env_type in ("docker", "singularity", "modal", "daytona"):
+    if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
         return {"approved": True, "message": None}
+
+    # Hardline floor: commands with no recovery path (rm -rf /, mkfs, dd
+    # to raw device, shutdown/reboot, fork bomb, kill -1) are blocked
+    # unconditionally, BEFORE the yolo bypass.  Opting into yolo is
+    # trusting the agent with your files and services, not trusting it
+    # to wipe the disk or power the box off.
+    is_hardline, hardline_desc = detect_hardline_command(command)
+    if is_hardline:
+        logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
+        return _hardline_block_result(hardline_desc)
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
-    if os.getenv("ELEVATE_YOLO_MODE") or is_current_session_yolo_enabled():
+    if is_truthy_value(os.getenv("ELEVATE_YOLO_MODE")) or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -669,12 +951,12 @@ def check_dangerous_command(command: str, env_type: str,
     if is_approved(session_key, pattern_key):
         return {"approved": True, "message": None}
 
-    is_cli = os.getenv("ELEVATE_INTERACTIVE")
-    is_gateway = os.getenv("ELEVATE_GATEWAY_SESSION")
+    is_cli = env_var_enabled("ELEVATE_INTERACTIVE")
+    is_gateway = _is_gateway_approval_context()
 
     if not is_cli and not is_gateway:
         # Cron sessions: respect cron_mode config
-        if os.getenv("ELEVATE_CRON_SESSION"):
+        if env_var_enabled("ELEVATE_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
                 return {
                     "approved": False,
@@ -688,7 +970,7 @@ def check_dangerous_command(command: str, env_type: str,
                 }
         return {"approved": True, "message": None}
 
-    if is_gateway or os.getenv("ELEVATE_EXEC_ASK"):
+    if is_gateway or env_var_enabled("ELEVATE_EXEC_ASK"):
         submit_pending(session_key, {
             "command": command,
             "pattern_key": pattern_key,
@@ -768,24 +1050,44 @@ def check_all_command_guards(command: str, env_type: str,
     other was shown to the user.
     """
     # Skip containers for both checks
-    if env_type in ("docker", "singularity", "modal", "daytona"):
+    if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
         return {"approved": True, "message": None}
+
+    # Hardline floor: unconditional block for catastrophic commands
+    # (rm -rf /, mkfs, dd to raw device, shutdown/reboot, fork bomb,
+    # kill -1). Applies BEFORE yolo / mode=off / cron approve-mode so
+    # no session-level setting can bypass it.
+    is_hardline, hardline_desc = detect_hardline_command(command)
+    if is_hardline:
+        logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
+        return _hardline_block_result(hardline_desc)
+
+    # == Sudo stdin guard ==
+    # Like the hardline floor above, this is unconditional: there is never a
+    # legitimate reason for the agent to pipe passwords to sudo -S when no
+    # SUDO_PASSWORD has been configured.  This must fire BEFORE the yolo
+    # check so even yolo/smart approval/mode=off cannot bypass it.
+    is_sudo_guess, sudo_guess_desc = _check_sudo_stdin_guard(command)
+    if is_sudo_guess:
+        logger.warning("Sudo stdin guard block: %s (command: %s)",
+                       sudo_guess_desc, command[:200])
+        return _sudo_stdin_block_result(sudo_guess_desc)
 
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if os.getenv("ELEVATE_YOLO_MODE") or is_current_session_yolo_enabled() or approval_mode == "off":
+    if is_truthy_value(os.getenv("ELEVATE_YOLO_MODE")) or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
-    is_cli = os.getenv("ELEVATE_INTERACTIVE")
-    is_gateway = os.getenv("ELEVATE_GATEWAY_SESSION")
-    is_ask = os.getenv("ELEVATE_EXEC_ASK")
+    is_cli = env_var_enabled("ELEVATE_INTERACTIVE")
+    is_gateway = _is_gateway_approval_context()
+    is_ask = env_var_enabled("ELEVATE_EXEC_ASK")
 
     # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
     # flows, we do not block on approvals and we skip external guard work.
     if not is_cli and not is_gateway and not is_ask:
         # Cron sessions: respect cron_mode config
-        if os.getenv("ELEVATE_CRON_SESSION"):
+        if env_var_enabled("ELEVATE_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)
@@ -827,7 +1129,7 @@ def check_all_command_guards(command: str, env_type: str,
     # Previously, tirith "block" was a hard block with no approval prompt.
     # Now both block and warn go through the approval flow so users can
     # inspect the explanation and approve if they understand the risk.
-    if tirith_result["action"] in ("block", "warn"):
+    if tirith_result["action"] in {"block", "warn"}:
         findings = tirith_result.get("findings") or []
         rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
         tirith_key = f"tirith:{rule_id}"
@@ -839,19 +1141,8 @@ def check_all_command_guards(command: str, env_type: str,
         if not is_approved(session_key, pattern_key):
             warnings.append((pattern_key, description, False))
 
-    # Nothing flagged dangerous — but still gate shell-driven file edits
-    # (echo > f, tee, sed -i) under the permission mode, mirroring the
-    # write_file/patch gate. Dangerous file writes are intentionally left
-    # to the warning flow below so the user is not prompted twice.
+    # Nothing to warn about
     if not warnings:
-        if is_file_write_command(command):
-            edit_decision = check_file_edit_approval(command)
-            if not edit_decision.get("approved", True):
-                return {
-                    "approved": False,
-                    "message": edit_decision.get("message")
-                    or "BLOCKED: file edit was not approved.",
-                }
         return {"approved": True, "message": None}
 
     # --- Phase 2.5: Smart approval (auxiliary LLM risk assessment) ---
@@ -910,6 +1201,19 @@ def check_all_command_guards(command: str, env_type: str,
             entry = _ApprovalEntry(approval_data)
             with _lock:
                 _gateway_queues.setdefault(session_key, []).append(entry)
+
+            # Notify plugins that an approval is being requested. Fires before
+            # the gateway notify callback so observers (e.g. macOS notifier
+            # plugins, audit logs, Slack alerts) get the event in real time.
+            _fire_approval_hook(
+                "pre_approval_request",
+                command=command,
+                description=combined_desc,
+                pattern_key=primary_key,
+                pattern_keys=list(all_keys),
+                session_key=session_key,
+                surface="gateway",
+            )
 
             # Notify the user (bridges sync agent thread → async gateway)
             try:
@@ -976,6 +1280,24 @@ def check_all_command_guards(command: str, env_type: str,
                     _gateway_queues.pop(session_key, None)
 
             choice = entry.result
+            # Normalize outcome for the post hook. Unresolved (timeout) and
+            # None both mean the user never responded; report that explicitly
+            # so plugins can distinguish timeout from explicit deny.
+            _outcome = (
+                "timeout" if not resolved
+                else (choice if choice else "timeout")
+            )
+            _fire_approval_hook(
+                "post_approval_response",
+                command=command,
+                description=combined_desc,
+                pattern_key=primary_key,
+                pattern_keys=list(all_keys),
+                session_key=session_key,
+                surface="gateway",
+                choice=_outcome,
+            )
+
             if not resolved or choice is None or choice == "deny":
                 reason = "timed out" if not resolved else "denied by user"
                 return {
@@ -1010,7 +1332,8 @@ def check_all_command_guards(command: str, env_type: str,
         return {
             "approved": False,
             "pattern_key": primary_key,
-            "status": "approval_required",
+            "status": "pending_approval",
+            "approval_pending": True,
             "command": command,
             "description": combined_desc,
             "message": (
@@ -1020,9 +1343,28 @@ def check_all_command_guards(command: str, env_type: str,
 
     # CLI interactive: single combined prompt
     # Hide [a]lways when any tirith warning is present
+    _fire_approval_hook(
+        "pre_approval_request",
+        command=command,
+        description=combined_desc,
+        pattern_key=primary_key,
+        pattern_keys=list(all_keys),
+        session_key=session_key,
+        surface="cli",
+    )
     choice = prompt_dangerous_approval(command, combined_desc,
                                        allow_permanent=not has_tirith,
                                        approval_callback=approval_callback)
+    _fire_approval_hook(
+        "post_approval_response",
+        command=command,
+        description=combined_desc,
+        pattern_key=primary_key,
+        pattern_keys=list(all_keys),
+        session_key=session_key,
+        surface="cli",
+        choice=choice,
+    )
 
     if choice == "deny":
         return {
@@ -1045,310 +1387,6 @@ def check_all_command_guards(command: str, env_type: str,
 
     return {"approved": True, "message": None,
             "user_approved": True, "description": combined_desc}
-
-
-# =========================================================================
-# Claude-style permission modes — runtime enforcement
-# =========================================================================
-# `default` / `acceptEdits` / `plan` / `bypassPermissions` are surfaced in the
-# chat composer and Settings. This section makes `plan` and `acceptEdits`
-# behave for real instead of collapsing to plain `manual` approvals:
-#
-#   plan              — read-only. Mutating tools are blocked at dispatch.
-#   acceptEdits       — file edits auto-approved; other dangerous actions
-#                       still prompt.
-#   default           — file edits prompt once per session (interactive
-#                       sessions only); dangerous commands prompt as before.
-#   bypassPermissions — nothing prompts (maps to approval mode `off`).
-#
-# Non-interactive sessions (cron, batch, autonomous) are NEVER gated on file
-# edits, so autonomous file editing keeps working exactly as before.
-
-PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
-_PERMISSION_MODE_CANON = {m.lower(): m for m in PERMISSION_MODES}
-
-# Tools that only read state — the static allowlist for `plan` (read-only)
-# mode. Builtin tools are classified explicitly here. Tools NOT in this set
-# fall through to is_readonly_tool_name() (a leading-verb heuristic) so that
-# read-only MCP / integration tools are also permitted; everything else is
-# blocked while plan mode is active.
-PLAN_MODE_ALLOWED_TOOLS = frozenset({
-    "read_file", "search_files", "web_search", "web_extract",
-    "session_search", "todo", "clarify", "memory", "delegate_task",
-    "browser_snapshot", "browser_console", "browser_get_images",
-    "browser_vision", "ha_get_state", "ha_list_entities",
-    "ha_list_services", "feishu_doc_read", "feishu_drive_list_comments",
-    "feishu_drive_list_comment_replies", "skills_list", "skill_view",
-    "vision_analyze", "video_analyze", "rl_check_status",
-    "rl_get_current_config", "rl_get_results", "rl_list_environments",
-    "rl_list_runs",
-})
-
-# Leading-verb classification for tools that aren't builtin-classified
-# above (chiefly MCP and integration tools, whose names are registered at
-# runtime). MCP tools are conventionally named ``verb-noun`` / ``verb_noun``.
-_READ_VERBS = frozenset({
-    "get", "list", "search", "read", "fetch", "query", "view", "describe",
-    "show", "find", "lookup", "inspect", "count", "check", "status",
-    "resolve", "snapshot", "screenshot", "console", "logs", "help",
-})
-_WRITE_VERBS = frozenset({
-    "create", "update", "delete", "write", "edit", "send", "post",
-    "remove", "set", "add", "merge", "move", "generate", "export",
-    "upload", "comment", "reply", "run", "start", "stop", "commit",
-    "cancel", "perform", "import", "resize", "copy", "dispatch",
-    "complete", "react", "download", "abort", "call", "click", "fill",
-    "type", "navigate", "press", "scroll", "submit", "publish",
-    "install", "kill", "execute", "open", "close", "switch", "request",
-})
-
-
-def _tool_leading_verb(tool_name: str) -> str:
-    """Return the lowercased leading action verb of a (possibly namespaced)
-    tool name. ``mcp__srv__get-design`` -> ``get``; ``create_folder`` ->
-    ``create``.
-    """
-    base = str(tool_name or "").strip().lower()
-    if "__" in base:
-        base = base.rsplit("__", 1)[-1]
-    tokens = re.split(r"[^a-z0-9]+", base)
-    return next((t for t in tokens if t), "")
-
-
-def is_readonly_tool_name(tool_name: str) -> bool:
-    """Best-effort: does this tool name describe a read-only operation?
-
-    Used in plan mode to permit read-only MCP / integration tools that are
-    not in the static PLAN_MODE_ALLOWED_TOOLS allowlist. Conservative: an
-    unrecognized leading verb is treated as NOT read-only (blocked).
-    """
-    verb = _tool_leading_verb(tool_name)
-    if verb in _WRITE_VERBS:
-        return False
-    return verb in _READ_VERBS
-
-# File-editing tools — gated by check_file_edit_approval().
-FILE_EDIT_TOOLS = frozenset({"write_file", "patch"})
-
-# A single per-session approval key: approving one file edit for the session
-# covers every later edit in that session (mirrors acceptEdits ergonomics).
-_FILE_EDIT_APPROVAL_KEY = "file-edit"
-
-
-def set_session_permission_mode(session_key: str, mode: "str | None") -> None:
-    """Set (or clear) a per-session permission mode override.
-
-    Pass *mode* = None or "" to clear the override so the session falls
-    back to the config.yaml global default.
-    """
-    if not session_key:
-        return
-    canon = _PERMISSION_MODE_CANON.get(str(mode or "").strip().lower())
-    with _lock:
-        if canon is None:
-            _session_permission_mode.pop(session_key, None)
-        else:
-            _session_permission_mode[session_key] = canon
-
-
-def get_session_permission_mode(session_key: str) -> "str | None":
-    """Return the per-session permission mode override, or None if unset."""
-    if not session_key:
-        return None
-    with _lock:
-        return _session_permission_mode.get(session_key)
-
-
-def get_permission_mode() -> str:
-    """Return the active Claude-style permission mode (canonical casing).
-
-    Resolution order:
-    1. per-session override (composer picker) for the active session
-    2. config.yaml global default (Settings page)
-    3. 'default'
-
-    One of: default, acceptEdits, plan, bypassPermissions.
-    """
-    session_key = get_current_session_key(default="")
-    if session_key:
-        with _lock:
-            override = _session_permission_mode.get(session_key)
-        if override:
-            return override
-    cfg = _get_approval_config()
-    raw = str(cfg.get("permission_mode", "") or "").strip().lower()
-    return _PERMISSION_MODE_CANON.get(raw, "default")
-
-
-# Shell forms that write file *content* (vs. ordinary commands). Used to
-# extend file-edit gating to shell-driven edits — output redirection to a
-# file, ``tee``, and ``sed -i`` — so `default` prompts and `acceptEdits`
-# auto-accepts edits made through the shell, not only via write_file/patch.
-_FILE_WRITE_COMMAND_RE = re.compile(
-    r"""(?xi)
-    (?:
-        (?<![0-9&]) >>? \s* (?!/dev/null\b) (?!/dev/std) (?!&) ["']? [^\s"'&|;<>]
-      | (?:^|[\s|&;(]) tee \b (?:\s+-[^\s]+)* \s+ ["']? [^\s"'&|;<>-]
-      | (?:^|[\s|&;(]) sed \b [^|;&]* (?:\s-[a-z]*i\b|\s--in-place\b)
-    )
-    """
-)
-
-
-def is_file_write_command(command: str) -> bool:
-    """Best-effort: does this shell command write content into a file?
-
-    Detects output redirection to a file, ``tee``, and ``sed -i``. False
-    positives only cost one extra (session-scoped) approval prompt.
-    """
-    if not command:
-        return False
-    norm = _normalize_command_for_detection(command)
-    return bool(_FILE_WRITE_COMMAND_RE.search(norm))
-
-
-def is_tool_allowed_in_plan_mode(tool_name: str) -> bool:
-    """Return True if *tool_name* is read-only and safe under plan mode."""
-    return tool_name in PLAN_MODE_ALLOWED_TOOLS
-
-
-def _await_gateway_choice(session_key: str, entry: "_ApprovalEntry") -> tuple:
-    """Block the agent thread until the user resolves *entry* or it times out.
-
-    Returns (resolved: bool, choice: str | None). Fires inactivity heartbeats
-    so the gateway watchdog does not kill the agent mid-prompt.
-    """
-    timeout = _get_approval_config().get("gateway_timeout", 300)
-    try:
-        timeout = int(timeout)
-    except (ValueError, TypeError):
-        timeout = 300
-
-    try:
-        from tools.environments.base import touch_activity_if_due
-    except Exception:  # pragma: no cover
-        touch_activity_if_due = None
-
-    _now = time.monotonic()
-    _deadline = _now + max(timeout, 0)
-    _activity_state = {"last_touch": _now, "start": _now}
-    resolved = False
-    while True:
-        _remaining = _deadline - time.monotonic()
-        if _remaining <= 0:
-            break
-        if entry.event.wait(timeout=min(1.0, _remaining)):
-            resolved = True
-            break
-        if touch_activity_if_due is not None:
-            touch_activity_if_due(_activity_state, "waiting for user approval")
-
-    with _lock:
-        queue = _gateway_queues.get(session_key, [])
-        if entry in queue:
-            queue.remove(entry)
-        if not queue:
-            _gateway_queues.pop(session_key, None)
-    return resolved, entry.result
-
-
-def check_file_edit_approval(path: str, approval_callback=None) -> dict:
-    """Gate a file-edit tool (write_file / patch) on the permission mode.
-
-    - acceptEdits / bypassPermissions -> auto-approved, no prompt
-    - plan                            -> blocked (defensive; dispatch also
-                                          blocks edit tools in plan mode)
-    - default                         -> prompt once per session, but only
-                                          in interactive (CLI / gateway)
-                                          sessions
-
-    Non-interactive sessions (cron, batch, autonomous) are never gated.
-
-    Returns {"approved": bool, "message": str | None}.
-    """
-    pmode = get_permission_mode()
-    if pmode in ("acceptEdits", "bypassPermissions"):
-        return {"approved": True, "message": None}
-    if pmode == "plan":
-        return {
-            "approved": False,
-            "message": (
-                "BLOCKED: plan mode is active (read-only). File edits are "
-                "disabled. Present your plan to the user and ask them to "
-                "switch the permission mode to apply changes."
-            ),
-        }
-
-    if os.getenv("ELEVATE_YOLO_MODE") or is_current_session_yolo_enabled():
-        return {"approved": True, "message": None}
-
-    is_cli = os.getenv("ELEVATE_INTERACTIVE")
-    is_gateway = os.getenv("ELEVATE_GATEWAY_SESSION")
-    if not is_cli and not is_gateway:
-        # cron / batch / autonomous runs are never gated on file edits
-        return {"approved": True, "message": None}
-
-    session_key = get_current_session_key()
-    if is_approved(session_key, _FILE_EDIT_APPROVAL_KEY):
-        return {"approved": True, "message": None}
-
-    description = f"Modify file: {path}" if path else "Modify a file"
-
-    if is_gateway:
-        with _lock:
-            notify_cb = _gateway_notify_cbs.get(session_key)
-        if notify_cb is None:
-            # No user channel registered — allow rather than hang forever
-            # (mirrors the command-guard fallback for headless sessions).
-            return {"approved": True, "message": None}
-        approval_data = {
-            "command": path or "(file edit)",
-            "pattern_key": _FILE_EDIT_APPROVAL_KEY,
-            "pattern_keys": [_FILE_EDIT_APPROVAL_KEY],
-            "description": description,
-        }
-        entry = _ApprovalEntry(approval_data)
-        with _lock:
-            _gateway_queues.setdefault(session_key, []).append(entry)
-        try:
-            notify_cb(approval_data)
-        except Exception as exc:
-            logger.warning("File-edit approval notify failed: %s", exc)
-            with _lock:
-                queue = _gateway_queues.get(session_key, [])
-                if entry in queue:
-                    queue.remove(entry)
-                if not queue:
-                    _gateway_queues.pop(session_key, None)
-            return {
-                "approved": False,
-                "message": "BLOCKED: could not send approval request to user.",
-            }
-        resolved, choice = _await_gateway_choice(session_key, entry)
-    else:
-        choice = prompt_dangerous_approval(
-            path or "(file edit)", description,
-            approval_callback=approval_callback,
-        )
-        resolved = choice is not None
-
-    if not resolved or choice is None or choice == "deny":
-        reason = "timed out" if not resolved else "denied by the user"
-        return {
-            "approved": False,
-            "message": (
-                f"BLOCKED: file edit {reason}. Do NOT retry this edit. "
-                "Ask the user how they want to proceed."
-            ),
-        }
-
-    if choice == "session":
-        approve_session(session_key, _FILE_EDIT_APPROVAL_KEY)
-    elif choice == "always":
-        approve_session(session_key, _FILE_EDIT_APPROVAL_KEY)
-        approve_permanent(_FILE_EDIT_APPROVAL_KEY)
-        save_permanent_allowlist(_permanent_approved)
-    return {"approved": True, "message": None}
 
 
 # Load permanent allowlist from config on module import

@@ -844,6 +844,7 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        openrouter_min_coding_score: Optional[float] = None,
     ):
         """
         Initialize the AI Agent.
