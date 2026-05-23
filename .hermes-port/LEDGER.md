@@ -46,6 +46,31 @@ SKIP (do not port - would break Elevate or pure dead weight):
   - [x] control-plane file write-deny (file_safety.py) - 52 tests pass
   - [x] API key leak to non-authoritative endpoints (runtime_provider.py) - 77 tests pass
 - [ ] B2 agent/ package (run_agent.py refactor) - HIGHEST RISK, do last/carefully
+  - [x] B2 net-new modules (52 files): top-level agent/ (agent_init,
+        agent_runtime_helpers, azure_identity_adapter, background_review,
+        browser_provider+registry, chat_completion_helpers, codex_runtime,
+        conversation_compression, conversation_loop, curator, curator_backup,
+        i18n, image_routing, iteration_budget, lmstudio_reasoning,
+        markdown_tables, message_sanitization, onboarding, plugin_llm,
+        portal_tags, process_bootstrap, skill_bundles, skill_preprocessing,
+        stream_diag, system_prompt, think_scrubber, tool_dispatch_helpers,
+        tool_executor, tool_guardrails, tool_result_classification,
+        video_gen_provider+registry, web_search_provider+registry); agent/lsp/
+        (11 files: __init__, cli, client, eventlog, install, manager,
+        protocol, range_shift, reporter, servers, workspace); agent/secret_sources/
+        (__init__, bitwarden); agent/transports/ (codex_app_server,
+        codex_app_server_session, codex_event_projector, hermes_tools_mcp_server).
+        Tests: 12 failed / 6175 passed / 159 skipped — identical to baseline,
+        0 regressions. No defers; agent_init/conversation_loop/system_prompt
+        have import-time refs to symbols not yet in existing Elevate files
+        (StreamingContextScrubber/memory_manager,
+        set_runtime_main/auxiliary_client,
+        ELEVATE_AGENT_HELP_GUIDANCE/prompt_builder) that will resolve with the
+        modified-files refactor below; nothing currently imports those 3.
+        Unblocks: elevate_cli/bundles (skill_bundles),
+        elevate_cli/secrets_cli (secret_sources),
+        tools/video_generation_tool (video_gen_*).
+  - [ ] B2 modified agent/ files (run_agent.py refactor + companions) — pending
 - [ ] B3 gateway/ non-security deltas
   - [x] B3a low-risk gateway files + 7 new modules (deltas: __init__, delivery,
         display_config, hooks, mirror, session_context, sticker_cache,
