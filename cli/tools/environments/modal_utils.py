@@ -1,6 +1,6 @@
-"""Shared Elevate-side execution flow for Modal transports.
+"""Shared Hermes-side execution flow for Modal transports.
 
-This module deliberately stops at the Elevate boundary:
+This module deliberately stops at the Hermes boundary:
 - command preparation
 - cwd/timeout normalization
 - stdin/sudo shell wrapping
