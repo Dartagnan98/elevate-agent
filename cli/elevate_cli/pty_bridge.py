@@ -112,8 +112,10 @@ class PtyBridge:
         # None we inherit the server's env (same semantics as subprocess).
         spawn_env = os.environ.copy() if env is None else dict(env)
         # Some minimal launch environments (including test runners on macOS)
-        # omit TERM. Programs like tput then fail even though the PTY is valid.
-        spawn_env.setdefault("TERM", "xterm-256color")
+        # omit TERM, or leave it blank. Programs like tput then fail even though
+        # the PTY is valid. Backfill when missing OR blank.
+        if not spawn_env.get("TERM"):
+            spawn_env["TERM"] = "xterm-256color"
         proc = ptyprocess.PtyProcess.spawn(  # type: ignore[union-attr]
             list(argv),
             cwd=cwd,
