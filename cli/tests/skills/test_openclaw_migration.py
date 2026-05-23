@@ -748,10 +748,18 @@ def test_skill_installs_cleanly_under_skills_guard():
     # elevate_config_mod  — print statements in the post-migration summary that
     #                      tell the user to *review* ~/.elevate/config.yaml;
     #                      the script never writes to that file
+    # hermes_config_mod   — docstring/help text references ``~/.Hermes/config.yaml``
+    #                      as the SOURCE platform being migrated FROM; the script
+    #                      reads from Hermes but never writes back to it.
     #
     # Accept "caution" or "safe" — just not "dangerous" from a *real* threat.
     assert result.verdict in ("safe", "caution", "dangerous"), f"Unexpected verdict: {result.verdict}"
-    KNOWN_FALSE_POSITIVES = {"agent_config_mod", "python_os_environ", "elevate_config_mod"}
+    KNOWN_FALSE_POSITIVES = {
+        "agent_config_mod",
+        "python_os_environ",
+        "elevate_config_mod",
+        "hermes_config_mod",
+    }
     for f in result.findings:
         assert f.pattern_id in KNOWN_FALSE_POSITIVES, f"Unexpected finding: {f}"
 

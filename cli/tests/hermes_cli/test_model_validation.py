@@ -602,11 +602,12 @@ class TestValidateCodexAutoCorrection:
         assert result["message"] is None
 
     def test_very_different_name_falls_to_suggestions(self):
-        """Names too different for auto-correction are rejected with a suggestion list."""
+        """Names too different for auto-correction are soft-accepted with a
+        suggestion list (model may still work if account has access to a hidden
+        ID, so we don't hard-reject)."""
         codex_models = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"]
         with patch("elevate_cli.models.provider_model_ids", return_value=codex_models):
             result = validate_requested_model("totally-wrong", "openai-codex")
-        assert result["accepted"] is False
         assert result["recognized"] is False
         assert result.get("corrected_model") is None
         assert "not found" in result["message"]

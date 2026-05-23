@@ -348,10 +348,16 @@ def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
 
 
 def test_build_api_kwargs_codex_preserves_supported_efforts(monkeypatch):
-    """Effort levels natively supported by the Responses API pass through unchanged."""
+    """Effort levels natively supported by the Responses API pass through unchanged.
+
+    The Codex Responses backend only accepts low/medium/high; the codex
+    transport clamps "minimal" → "low" and "xhigh" → "high" before sending
+    (see agent/transports/codex.py _effort_clamp). Only the natively
+    supported set is asserted to pass through unchanged here.
+    """
     _patch_agent_bootstrap(monkeypatch)
 
-    for effort in ("low", "medium", "high", "xhigh"):
+    for effort in ("low", "medium", "high"):
         agent = run_agent.AIAgent(
             model="gpt-5-codex",
             base_url="https://chatgpt.com/backend-api/codex",

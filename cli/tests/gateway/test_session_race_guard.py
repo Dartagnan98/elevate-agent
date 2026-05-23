@@ -408,7 +408,14 @@ def test_explicit_platform_tool_config_is_respected():
         "what should I do next",
     )
 
-    assert toolsets == ["terminal", "web"]
+    # Explicit allowlist is honored for configurable keys; non-configurable
+    # platform-default toolsets (e.g. admin_profile on telegram) get recovered
+    # by _get_platform_tools so they stay available even after an explicit save.
+    assert {"terminal", "web"}.issubset(set(toolsets))
+    # No other CONFIGURABLE toolsets sneak in via self-heal.
+    from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS
+    configurable_keys = {n for n, _, _ in CONFIGURABLE_TOOLSETS}
+    assert set(toolsets) & configurable_keys == {"terminal", "web"}
 
 
 def test_repeated_skill_view_history_is_compacted():
