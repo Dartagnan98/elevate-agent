@@ -9588,9 +9588,19 @@ class AIAgent:
         # still running, interrupted, or switched away from leaves the session
         # at message_count=0: untitled in the sidebar, and empty on reattach
         # (the web transcript merges to [] and wipes to just the typed line).
-        # Idempotent: _last_flushed_db_idx makes the in-loop calls write only
-        # genuinely new messages.
-        self._persist_session(messages, conversation_history)
+        #
+        # Pre-seed _last_flushed_db_idx to the length of the prior turn's
+        # history so this persist (and every persist after) can pass hist=None
+        # safely.  Passing the original ``conversation_history`` once a mid-turn
+        # ``_compress_context`` has fired would skip the entire compressed
+        # message list (start_idx = len(hist) > len(compressed_messages)) and
+        # leave the new session empty on resume.  Carrying the skip cursor on
+        # _last_flushed_db_idx instead means a single ``conversation_history =
+        # None`` after compression is enough — every persist downstream writes
+        # only genuinely new messages, regardless of whether compression ran.
+        if conversation_history and self._last_flushed_db_idx == 0:
+            self._last_flushed_db_idx = len(conversation_history)
+        self._persist_session(messages, None)
 
         # Main conversation loop
         api_call_count = 0
