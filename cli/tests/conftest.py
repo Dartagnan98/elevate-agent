@@ -260,6 +260,13 @@ _ELEVATE_BEHAVIORAL_VARS = frozenset({
     "ELEVATE_BACKGROUND_NOTIFICATIONS",
     "ELEVATE_EXEC_ASK",
     "ELEVATE_HOME_MODE",
+    # Dev-only dashboard unlock used by test_access_profiles.py.
+    # Without explicit blanking, a leak across xdist workers (or any user
+    # shell that exports it) flips every realEstate* pack to True and
+    # breaks tests that assert specific locked-pack states such as
+    # test_activate_install_syncs_dashboard_packs_and_paid_skills.
+    "ELEVATE_DEV_UNLOCK_REAL_ESTATE_DASHBOARDS",
+    "ELEVATE_DEV_MODE",
     "BROWSER_CDP_URL",
     "CAMOFOX_URL",
     # Platform allowlists — not credentials, but if set from any source
