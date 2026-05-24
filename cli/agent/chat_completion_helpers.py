@@ -406,6 +406,20 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     try:
         from providers import get_provider_profile
         _profile = get_provider_profile(agent.provider)
+        # Fallback: when provider attr is unset/generic but the base_url
+        # matches a known endpoint, look up the profile by URL. Keeps
+        # endpoint-only configs (no explicit provider= override) on the
+        # profile path so they get default_max_tokens, thinking, etc.
+        if _profile is None:
+            if _is_kimi:
+                _profile = get_provider_profile(
+                    "kimi-coding-cn" if base_url_host_matches(agent.base_url, "moonshot.cn")
+                    else "kimi-coding"
+                )
+            elif _is_nous:
+                _profile = get_provider_profile("nous")
+            elif _is_or:
+                _profile = get_provider_profile("openrouter")
     except Exception:
         _profile = None
 
