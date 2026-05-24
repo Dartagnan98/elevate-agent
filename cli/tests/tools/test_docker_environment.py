@@ -493,7 +493,10 @@ def test_run_as_host_user_warns_and_skips_when_no_posix_ids(monkeypatch, caplog)
     monkeypatch.delattr(docker_env.os, "getgid", raising=False)
     calls = _mock_subprocess_run(monkeypatch)
 
-    with caplog.at_level(logging.WARNING):
+    # Anchor caplog to the docker_env module logger by name so other tests on
+    # the same xdist worker can't strand caplog propagation (the failure mode
+    # was empty caplog.records under full sweep even though logic ran fine).
+    with caplog.at_level(logging.WARNING, logger=docker_env.logger.name):
         _make_dummy_env(run_as_host_user=True)
 
     run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
