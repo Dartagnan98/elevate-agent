@@ -19,19 +19,19 @@ export async function requireAccess(
     return { ok: false, status: 401, error: "invalid or expired token" };
   }
 
-  const license = findLicenseById(claims.license_id);
+  const license = await findLicenseById(claims.license_id);
 
   if (!license || license.revoked) {
     return { ok: false, status: 403, error: "license revoked" };
   }
 
-  const active = findActiveUser(claims.sub);
+  const active = await findActiveUser(claims.sub);
 
   if (!active) {
     return { ok: false, status: 402, error: "subscription inactive" };
   }
 
-  touchLicense(claims.license_id);
+  await touchLicense(claims.license_id);
 
   return { ok: true, claims, user: active };
 }

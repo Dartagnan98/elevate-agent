@@ -13,6 +13,15 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
+const { autoUpdater } = require("electron-updater");
+const log = require("electron-log");
+
+// Send autoUpdater logs to a file so we can debug what the user saw.
+// Tail with: tail -f ~/Library/Logs/Elevate/main.log
+log.transports.file.level = "info";
+autoUpdater.logger = log;
+autoUpdater.autoDownload = true; // download in background as soon as available
+autoUpdater.autoInstallOnAppQuit = true; // safety net if user ignores the toast
 
 const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
 const HOST = "127.0.0.1";
@@ -36,6 +45,7 @@ let mainWindow = null;
 let overlayWindow = null;
 let overlayWatcher = null;
 let backendProcess = null;
+let updateToastWindow = null;
 
 // The computer-use tool touches this file on every action. The desktop app
 // polls its mtime and shows the screen-edge glow while it is fresh, so the
@@ -549,7 +559,188 @@ ipcMain.handle("desktop:retry", async () => {
 
 ipcMain.handle("desktop:install", async () => runInstaller());
 
-app.whenReady().then(startDesktop);
+// ---------------------------------------------------------------------------
+// Auto-update
+// ---------------------------------------------------------------------------
+// Flow:
+//   1. App boots → checkForUpdates() hits the GitHub release feed.
+//   2. If a newer version is found, autoDownload=true pulls the zip silently.
+//   3. We forward every event to the renderer via `updater:event` so the toast
+//      UI can show progress / "restart to update".
+//   4. User clicks Restart → quitAndInstall() swaps the binary and relaunches.
+//   5. We also re-check every 2 hours while the app is running.
+//
+// Skipped in dev (running from `npm start` rather than a packaged build) — the
+// updater throws "no app-update.yml" without a real install.
+let updateState = { status: "idle", info: null, progress: null, error: null };
+
+// "checking" and "current" stay silent so the toast doesn't flash on every poll.
+const TOAST_VISIBLE_STATES = new Set([
+  "available",
+  "downloading",
+  "ready",
+  "error",
+]);
+// Once the user hits "Later", suppress re-pops for everything *except* a
+// transition into "ready" — that's a new ask (restart now) worth nagging.
+let toastDismissedFor = null; // status string the user dismissed under
+
+function broadcastUpdaterEvent(payload) {
+  const prevStatus = updateState.status;
+  updateState = { ...updateState, ...payload };
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("updater:event", updateState);
+  }
+  if (updateToastWindow && !updateToastWindow.isDestroyed()) {
+    updateToastWindow.webContents.send("updater:event", updateState);
+  }
+  // Reset suppression when we enter "ready" so the user always sees that ask.
+  if (updateState.status === "ready" && prevStatus !== "ready") {
+    toastDismissedFor = null;
+  }
+  if (
+    TOAST_VISIBLE_STATES.has(updateState.status) &&
+    toastDismissedFor !== updateState.status
+  ) {
+    showUpdateToast();
+  }
+}
+
+function createUpdateToast() {
+  if (updateToastWindow && !updateToastWindow.isDestroyed()) return;
+  const display = screen.getPrimaryDisplay();
+  const { x, y, width, height } = display.workArea;
+  // Bottom-right corner, with a small inset off the screen edge.
+  const w = 340;
+  const h = 150;
+  const margin = 16;
+  updateToastWindow = new BrowserWindow({
+    width: w,
+    height: h,
+    x: x + width - w - margin,
+    y: y + height - h - margin,
+    show: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  updateToastWindow.setAlwaysOnTop(true, "floating");
+  if (process.platform === "darwin") {
+    updateToastWindow.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+    });
+  }
+  updateToastWindow.loadFile(path.join(__dirname, "update-toast.html"));
+  updateToastWindow.on("closed", () => {
+    updateToastWindow = null;
+  });
+}
+
+function showUpdateToast() {
+  createUpdateToast();
+  if (!updateToastWindow) return;
+  if (!updateToastWindow.isVisible()) {
+    updateToastWindow.showInactive();
+  }
+}
+
+autoUpdater.on("checking-for-update", () => {
+  broadcastUpdaterEvent({ status: "checking", error: null });
+});
+autoUpdater.on("update-available", (info) => {
+  broadcastUpdaterEvent({ status: "available", info, error: null });
+});
+autoUpdater.on("update-not-available", (info) => {
+  broadcastUpdaterEvent({ status: "current", info, error: null });
+});
+autoUpdater.on("download-progress", (progress) => {
+  broadcastUpdaterEvent({ status: "downloading", progress, error: null });
+});
+autoUpdater.on("update-downloaded", (info) => {
+  broadcastUpdaterEvent({ status: "ready", info, progress: null, error: null });
+});
+autoUpdater.on("error", (err) => {
+  broadcastUpdaterEvent({
+    status: "error",
+    error: err && err.message ? err.message : String(err),
+  });
+});
+
+function kickoffUpdates() {
+  if (!app.isPackaged) {
+    log.info("[updater] skipped — running in dev mode");
+    return;
+  }
+  // First check after a short delay so the main window has time to load and
+  // wire its IPC listener.
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((err) => log.warn("[updater] check failed", err));
+  }, 5_000);
+  // Re-check every 2 hours while the app stays open.
+  setInterval(
+    () => {
+      autoUpdater.checkForUpdates().catch((err) => log.warn("[updater] check failed", err));
+    },
+    2 * 60 * 60 * 1000,
+  );
+}
+
+// Renderer can ask "what's the latest status?" on mount so it doesn't miss
+// events that fired before the listener was attached.
+ipcMain.handle("updater:status", () => updateState);
+
+// Renderer fires this when the user clicks "Restart to update".
+ipcMain.handle("updater:install", () => {
+  if (updateState.status !== "ready") {
+    return { ok: false, message: "Update is not ready yet." };
+  }
+  // setImmediate so the IPC reply is sent before quit kicks in.
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  return { ok: true };
+});
+
+// Toast clicked "Later" — hide window + remember the current state so
+// background events (download-progress) don't re-pop it.
+ipcMain.handle("updater:dismiss-toast", () => {
+  toastDismissedFor = updateState.status;
+  if (updateToastWindow && !updateToastWindow.isDestroyed()) {
+    updateToastWindow.hide();
+  }
+  return { ok: true };
+});
+
+// Manual "check now" button (useful from a Help menu).
+ipcMain.handle("updater:check", async () => {
+  if (!app.isPackaged) {
+    return { ok: false, message: "Updates only run in packaged builds." };
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { ok: true, version: result && result.updateInfo ? result.updateInfo.version : null };
+  } catch (err) {
+    return { ok: false, message: err && err.message ? err.message : String(err) };
+  }
+});
+
+app.whenReady().then(async () => {
+  await startDesktop();
+  kickoffUpdates();
+});
 
 app.on("activate", () => {
   // The hidden overlay window keeps the app alive after the main window is

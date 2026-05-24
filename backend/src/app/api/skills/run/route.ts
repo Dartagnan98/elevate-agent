@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { getEnabledSkill, logSkillInvocation } from "@/lib/store";
+import { effectiveAccess, getEnabledSkill, logSkillInvocation } from "@/lib/store";
 import { requireAccess } from "@/lib/auth-guard";
 import { userCanAccessSkill } from "@/lib/skill-access";
 
@@ -21,11 +21,13 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) return NextResponse.json({ error: "bad request" }, { status: 400 });
   const { skill_name, args } = parsed.data;
 
-  const skill = getEnabledSkill(skill_name);
+  const skill = await getEnabledSkill(skill_name);
 
   if (!skill) return NextResponse.json({ error: "skill not found" }, { status: 404 });
 
-  if (!userCanAccessSkill(user, skill)) {
+  const access_info = await effectiveAccess(user.id);
+  const merged = { ...user, tier: access_info.tier, entitlements: access_info.entitlements };
+  if (!userCanAccessSkill(merged, skill)) {
     return NextResponse.json(
       { error: "skill requires an entitlement or tier this license does not include" },
       { status: 403 },
@@ -36,7 +38,7 @@ export async function POST(req: NextRequest) {
     ? crypto.createHash("sha256").update(JSON.stringify(args)).digest("hex")
     : null;
 
-  logSkillInvocation({
+  await logSkillInvocation({
     user_id: claims.sub,
     skill_name,
     args_hash: argsHash,

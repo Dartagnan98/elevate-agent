@@ -400,3 +400,107 @@ def cmd_license(args) -> int:
         return 0
     print(f"unknown license action: {action}", file=sys.stderr)
     return 2
+
+
+# --- Device-link flow (web-driven activation) ---
+
+def link_device(device_label: Optional[str] = None, *, interval_override: Optional[int] = None) -> License:
+    """OAuth-style device-authorization grant.
+
+    Asks the backend for a short code, prints it + the URL the user should
+    visit, then polls until the user approves or denies on the web. Persists
+    the resulting license locally just like cmd_activate.
+    """
+    base_url = backend_url()
+    label = device_label or os.uname().nodename
+
+    with httpx.Client(timeout=15.0) as client:
+        start = client.post(f"{base_url}/api/device/start", json={"device_label": label})
+    if not start.is_success:
+        raise LicenseError(f"Could not start device link ({start.status_code}): {start.text[:200]}")
+
+    start_data = start.json()
+    device_code = start_data["device_code"]
+    user_code = start_data["user_code"]
+    verification_uri = start_data.get("verification_uri") or f"{base_url}/link"
+    verification_uri_complete = start_data.get("verification_uri_complete")
+    expires_in = int(start_data.get("expires_in", 600))
+    interval = int(interval_override or start_data.get("interval", 5))
+
+    print()
+    print(f"  1. Open: {verification_uri_complete or verification_uri}")
+    print(f"  2. Sign in if prompted, then enter this code: {user_code}")
+    print()
+    print(f"  (waiting up to {expires_in // 60} min — Ctrl-C to cancel)")
+    print()
+    sys.stdout.flush()
+
+    deadline = time.time() + expires_in
+    with httpx.Client(timeout=15.0) as client:
+        while time.time() < deadline:
+            time.sleep(interval)
+            resp = client.post(f"{base_url}/api/device/poll", json={"device_code": device_code})
+            if resp.status_code == 410:
+                raise LicenseError("Device-link request expired or already used. Run `elevate link` again.")
+            if resp.status_code == 403:
+                raise LicenseError("Request was denied on the web.")
+            if not resp.is_success:
+                # Soft errors (rate-limited, transient) — keep polling
+                continue
+            data = resp.json()
+            status = data.get("status")
+            if status == "pending":
+                continue
+            if status == "approved":
+                lic = License(
+                    access_token=data["access_token"],
+                    refresh_token=data["refresh_token"],
+                    license_id=data["license_id"],
+                    tier=data.get("tier", "pro"),
+                    email=data.get("email", ""),
+                    expires_at=_decode_jwt_exp(data["access_token"]),
+                    entitlements=_extract_entitlements(data),
+                )
+                save(lic)
+                sync_license_entitlements(lic)
+                return lic
+
+    raise LicenseError("Device-link request timed out. Run `elevate link` again.")
+
+
+def cmd_link(args) -> int:
+    backend = str(getattr(args, "backend_url", "") or "").strip().rstrip("/")
+    if backend:
+        global BACKEND_URL
+        BACKEND_URL = backend
+        os.environ["ELEVATE_BACKEND_URL"] = backend
+        try:
+            from elevate_cli.config import save_env_value
+            save_env_value("ELEVATE_BACKEND_URL", backend)
+        except Exception:
+            pass
+
+    label = getattr(args, "label", None)
+    sync_skills = not getattr(args, "skip_skill_sync", False)
+
+    try:
+        lic = link_device(label)
+    except KeyboardInterrupt:
+        print("\ncanceled", file=sys.stderr)
+        return 130
+    except LicenseError as e:
+        print(f"link failed: {e}", file=sys.stderr)
+        return 1
+
+    activation = activate_install(lic, sync_skills=sync_skills)
+    print(f"linked {lic.email} ({lic.tier}). license id: {lic.license_id}")
+    print(f"dashboard packs: {_format_enabled_packs(activation.get('packs') or {})}")
+    if sync_skills:
+        if activation.get("skill_error"):
+            print(f"paid skill sync warning: {activation['skill_error']}", file=sys.stderr)
+        elif activation.get("skill_count"):
+            print(f"paid skills ready: {activation['skill_count']} at {activation.get('skills_path')}")
+        else:
+            print("paid skills ready: none returned for this tier")
+    print("next: run `elevate` or `elevate dashboard`.")
+    return 0

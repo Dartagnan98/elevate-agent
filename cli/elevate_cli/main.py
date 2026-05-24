@@ -7564,6 +7564,27 @@ For more help on a command:
     )
     activate_parser.set_defaults(func=elevate_license.cmd_activate)
 
+    link_parser = subparsers.add_parser(
+        "link",
+        help="Link this machine to your Elevate account via the web (no password typed)",
+    )
+    link_parser.add_argument(
+        "--label",
+        default=None,
+        help="Friendly device label (defaults to hostname)",
+    )
+    link_parser.add_argument(
+        "--backend-url",
+        default=None,
+        help="Elevation HQ API origin",
+    )
+    link_parser.add_argument(
+        "--skip-skill-sync",
+        action="store_true",
+        help="Only link the license, skip paid-skill download",
+    )
+    link_parser.set_defaults(func=elevate_license.cmd_link)
+
     subscribe_parser = subparsers.add_parser(
         "subscribe",
         help="Alias for `elevate activate`",

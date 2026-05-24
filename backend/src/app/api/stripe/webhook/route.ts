@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import {
+  findUserById,
   findUserByStripeCustomer,
+  logAdminAction,
   revokeLicensesForUser,
   updateUserSubscription,
 } from "@/lib/store";
@@ -30,6 +32,29 @@ export async function POST(req: NextRequest) {
   }
 
   switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object as Stripe.Checkout.Session;
+      // Pin stripe_customer onto the user as soon as checkout completes —
+      // the subscription event arrives shortly after and the join works
+      // because they share the same customer id.
+      const userId = (session.client_reference_id ||
+        (session.metadata?.elevate_user_id as string | undefined)) as string | null;
+      if (userId && session.customer) {
+        const fresh = await findUserById(userId);
+        if (fresh && !fresh.stripe_customer) {
+          await updateUserSubscription(userId, {
+            stripe_customer: session.customer as string,
+          });
+        }
+        await logAdminAction({
+          actor_user_id: userId,
+          target_user_id: userId,
+          action: "billing.checkout_completed",
+          payload: { session_id: session.id, customer: session.customer },
+        });
+      }
+      break;
+    }
     case "customer.subscription.created":
     case "customer.subscription.updated": {
       const sub = event.data.object as Stripe.Subscription;
@@ -50,12 +75,12 @@ export async function POST(req: NextRequest) {
 }
 
 async function upsertSubscription(sub: Stripe.Subscription) {
-  const user = findUserByStripeCustomer(sub.customer as string);
+  const user = await findUserByStripeCustomer(sub.customer as string);
   if (!user) return;
 
   const tier = sub.items.data[0]?.price.id === process.env.STRIPE_PRICE_BUILDER_MONTHLY ? "builder" : "pro";
 
-  updateUserSubscription(user.id, {
+  await updateUserSubscription(user.id, {
     status: ["active", "trialing"].includes(sub.status)
       ? (sub.status as "active" | "trialing")
       : sub.status === "past_due"
@@ -69,8 +94,8 @@ async function upsertSubscription(sub: Stripe.Subscription) {
 }
 
 async function revokeLicenses(stripeCustomerId: string) {
-  const user = findUserByStripeCustomer(stripeCustomerId);
+  const user = await findUserByStripeCustomer(stripeCustomerId);
   if (!user) return;
 
-  revokeLicensesForUser(user.id);
+  await revokeLicensesForUser(user.id);
 }
