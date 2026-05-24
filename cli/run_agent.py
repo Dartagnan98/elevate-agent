@@ -1075,6 +1075,7 @@ class AIAgent:
         self.provider_sort = provider_sort
         self.provider_require_parameters = provider_require_parameters
         self.provider_data_collection = provider_data_collection
+        self.openrouter_min_coding_score = openrouter_min_coding_score
 
         # Store toolset filtering options
         self.enabled_toolsets = enabled_toolsets
@@ -7491,6 +7492,50 @@ class AIAgent:
             )
         return transformed
 
+    def _model_supports_vision(self) -> bool:
+        """Return True if the active provider+model reports native vision.
+
+        Used to decide whether to strip image content parts from API-bound
+        messages (for non-vision models) or let the provider adapter handle
+        them natively (for vision-capable models).
+        """
+        try:
+            from elevate_cli.config import load_config
+            from agent.image_routing import _lookup_supports_vision
+            cfg = load_config()
+            provider = (getattr(self, "provider", "") or "").strip()
+            model = (getattr(self, "model", "") or "").strip()
+            return _lookup_supports_vision(provider, model, cfg) is True
+        except Exception:
+            return False
+
+    def _prepare_messages_for_non_vision_model(self, api_messages: list) -> list:
+        """Strip native image parts when the active model lacks vision.
+
+        Runs on the chat.completions / codex_responses paths. Vision-capable
+        models pass through unchanged; non-vision models get each image
+        replaced by a cached vision_analyze text description so the turn
+        doesn't fail with "model does not support image input".
+        """
+        if not any(
+            isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
+            for msg in api_messages
+        ):
+            return api_messages
+
+        if self._model_supports_vision():
+            return api_messages
+
+        transformed = copy.deepcopy(api_messages)
+        for msg in transformed:
+            if not isinstance(msg, dict):
+                continue
+            msg["content"] = self._preprocess_anthropic_content(
+                msg.get("content"),
+                str(msg.get("role", "user") or "user"),
+            )
+        return transformed
+
     def _anthropic_preserve_dots(self) -> bool:
         """True when using an anthropic-compatible endpoint that preserves dots in model names.
         Alibaba/DashScope keeps dots (e.g. qwen3.5-plus).
@@ -7588,168 +7633,9 @@ class AIAgent:
                 break
 
     def _build_api_kwargs(self, api_messages: list) -> dict:
-        """Build the keyword arguments dict for the active API mode."""
-        if self.api_mode == "anthropic_messages":
-            _transport = self._get_transport()
-            anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
-            ctx_len = getattr(self, "context_compressor", None)
-            ctx_len = ctx_len.context_length if ctx_len else None
-            ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
-            if ephemeral_out is not None:
-                self._ephemeral_max_output_tokens = None  # consume immediately
-            return _transport.build_kwargs(
-                model=self.model,
-                messages=anthropic_messages,
-                tools=self.tools,
-                max_tokens=ephemeral_out if ephemeral_out is not None else self.max_tokens,
-                reasoning_config=self.reasoning_config,
-                is_oauth=self._is_anthropic_oauth,
-                preserve_dots=self._anthropic_preserve_dots(),
-                context_length=ctx_len,
-                base_url=getattr(self, "_anthropic_base_url", None),
-                fast_mode=(self.request_overrides or {}).get("speed") == "fast",
-            )
-
-        # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
-        # The adapter handles message/tool conversion and boto3 calls directly.
-        if self.api_mode == "bedrock_converse":
-            _bt = self._get_transport()
-            region = getattr(self, "_bedrock_region", None) or "us-east-1"
-            guardrail = getattr(self, "_bedrock_guardrail_config", None)
-            return _bt.build_kwargs(
-                model=self.model,
-                messages=api_messages,
-                tools=self.tools,
-                max_tokens=self.max_tokens or 4096,
-                region=region,
-                guardrail_config=guardrail,
-            )
-
-        if self.api_mode == "codex_responses":
-            _ct = self._get_transport()
-            is_github_responses = (
-                base_url_host_matches(self.base_url, "models.github.ai")
-                or base_url_host_matches(self.base_url, "api.githubcopilot.com")
-            )
-            is_codex_backend = (
-                self.provider == "openai-codex"
-                or (
-                    self._base_url_hostname == "chatgpt.com"
-                    and "/backend-api/codex" in self._base_url_lower
-                )
-            )
-            is_xai_responses = self.provider == "xai" or self._base_url_hostname == "api.x.ai"
-            return _ct.build_kwargs(
-                model=self.model,
-                messages=api_messages,
-                tools=self.tools,
-                reasoning_config=self.reasoning_config,
-                session_id=getattr(self, "session_id", None),
-                max_tokens=self.max_tokens,
-                request_overrides=self.request_overrides,
-                is_github_responses=is_github_responses,
-                is_codex_backend=is_codex_backend,
-                is_xai_responses=is_xai_responses,
-                github_reasoning_extra=self._github_models_reasoning_extra_body() if is_github_responses else None,
-            )
-
-        # ── chat_completions (default) ─────────────────────────────────────
-        _ct = self._get_transport()
-
-        # Provider detection flags
-        _is_qwen = self._is_qwen_portal()
-        _is_or = self._is_openrouter_url()
-        _is_gh = (
-            base_url_host_matches(self._base_url_lower, "models.github.ai")
-            or base_url_host_matches(self._base_url_lower, "api.githubcopilot.com")
-        )
-        _is_nous = "nousresearch" in self._base_url_lower
-        _is_nvidia = "integrate.api.nvidia.com" in self._base_url_lower
-        _is_kimi = (
-            base_url_host_matches(self.base_url, "api.kimi.com")
-            or base_url_host_matches(self.base_url, "moonshot.ai")
-            or base_url_host_matches(self.base_url, "moonshot.cn")
-        )
-
-        # Temperature: _fixed_temperature_for_model may return OMIT_TEMPERATURE
-        # sentinel (temperature omitted entirely), a numeric override, or None.
-        try:
-            from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
-            _ft = _fixed_temperature_for_model(self.model, self.base_url)
-            _omit_temp = _ft is OMIT_TEMPERATURE
-            _fixed_temp = _ft if not _omit_temp else None
-        except Exception:
-            _omit_temp = False
-            _fixed_temp = None
-
-        # Provider preferences (OpenRouter-specific)
-        _prefs: Dict[str, Any] = {}
-        if self.providers_allowed:
-            _prefs["only"] = self.providers_allowed
-        if self.providers_ignored:
-            _prefs["ignore"] = self.providers_ignored
-        if self.providers_order:
-            _prefs["order"] = self.providers_order
-        if self.provider_sort:
-            _prefs["sort"] = self.provider_sort
-        if self.provider_require_parameters:
-            _prefs["require_parameters"] = True
-        if self.provider_data_collection:
-            _prefs["data_collection"] = self.provider_data_collection
-
-        # Anthropic max output for Claude on OpenRouter/Nous
-        _ant_max = None
-        if (_is_or or _is_nous) and "claude" in (self.model or "").lower():
-            try:
-                from agent.anthropic_adapter import _get_anthropic_max_output
-                _ant_max = _get_anthropic_max_output(self.model)
-            except Exception:
-                pass  # fail open — let the proxy pick its default
-
-        # Qwen session metadata precomputed here (promptId is per-call random)
-        _qwen_meta = None
-        if _is_qwen:
-            _qwen_meta = {
-                "sessionId": self.session_id or "elevate",
-                "promptId": str(uuid.uuid4()),
-            }
-
-        # Ephemeral max output override — consume immediately so the next
-        # turn doesn't inherit it.
-        _ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
-        if _ephemeral_out is not None:
-            self._ephemeral_max_output_tokens = None
-
-        return _ct.build_kwargs(
-            model=self.model,
-            messages=api_messages,
-            tools=self.tools,
-            timeout=self._resolved_api_call_timeout(),
-            max_tokens=self.max_tokens,
-            ephemeral_max_output_tokens=_ephemeral_out,
-            max_tokens_param_fn=self._max_tokens_param,
-            reasoning_config=self.reasoning_config,
-            request_overrides=self.request_overrides,
-            session_id=getattr(self, "session_id", None),
-            model_lower=(self.model or "").lower(),
-            is_openrouter=_is_or,
-            is_nous=_is_nous,
-            is_qwen_portal=_is_qwen,
-            is_github_models=_is_gh,
-            is_nvidia_nim=_is_nvidia,
-            is_kimi=_is_kimi,
-            is_custom_provider=self.provider == "custom",
-            ollama_num_ctx=self._ollama_num_ctx,
-            provider_preferences=_prefs or None,
-            qwen_prepare_fn=self._qwen_prepare_chat_messages if _is_qwen else None,
-            qwen_prepare_inplace_fn=self._qwen_prepare_chat_messages_inplace if _is_qwen else None,
-            qwen_session_metadata=_qwen_meta,
-            fixed_temperature=_fixed_temp,
-            omit_temperature=_omit_temp,
-            supports_reasoning=self._supports_reasoning_extra_body(),
-            github_reasoning_extra=self._github_models_reasoning_extra_body() if _is_gh else None,
-            anthropic_max_output=_ant_max,
-        )
+        """Forwarder — see ``agent.chat_completion_helpers.build_api_kwargs``."""
+        from agent.chat_completion_helpers import build_api_kwargs
+        return build_api_kwargs(self, api_messages)
 
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
