@@ -81,14 +81,32 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
     async def get_source_inbox_thread(source_id: str, thread_id: str, limit: int = 200):
         try:
             from elevate_cli.source_connectors import build_thread_context_response
-            from elevate_cli.data import db_thread_context_response, shadow_read
+            from elevate_cli.data import db_thread_context_response
 
-            return shadow_read(
-                endpoint="GET /api/source-inbox/thread",
-                request_args={"sourceId": source_id, "threadId": thread_id, "limit": limit},
-                jsonl_fn=lambda: build_thread_context_response(source_id, thread_id, limit=limit),
-                db_fn=lambda: db_thread_context_response(source_id, thread_id, limit=limit),
-            )
+            # DB is the source of truth for lead cards (Lead Score, Notes,
+            # Property Activity, Send History all key off contacts.id +
+            # events.contact_id). The legacy JSONL reader pulls a thin
+            # slice — last 4000 lead-events globally, contacts.jsonl rows
+            # only — and silently returns empty cards for any Lofty lead
+            # whose enrichment didn't make it into the tail window. Prefer
+            # the DB path; fall back to JSONL only on real DB errors so
+            # the drawer never blanks out.
+            try:
+                return db_thread_context_response(
+                    source_id, thread_id, limit=limit
+                )
+            except ValueError:
+                # Unknown source connector — propagate as 404.
+                raise
+            except Exception:
+                _log.exception(
+                    "db_thread_context_response failed, falling back to JSONL for %s/%s",
+                    source_id,
+                    thread_id,
+                )
+                return build_thread_context_response(
+                    source_id, thread_id, limit=limit
+                )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except Exception as exc:

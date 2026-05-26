@@ -540,14 +540,33 @@ def db_thread_context_response(
             (source_id, thread_id),
         ).fetchone()
 
+        # Lofty leads (and any CRM lead created without an inbound message)
+        # have a contacts row but NO conversations row. Without this fallback
+        # the drawer's contact lookup never runs, so every card (Lead Score,
+        # Notes, Property Activity, Send History) renders empty even though
+        # the contact row in the DB is fully populated. For CRM sources the
+        # thread_id == contacts.id (e.g. "lofty-lead:1138815640363819"), so
+        # try the contact directly if no conversation matches.
+        contact: Any = None
         if conv is not None:
             contact = conn.execute(
                 "SELECT * FROM contacts WHERE id=?",
                 (conv["contact_id"],),
             ).fetchone()
-            if contact is not None:
-                person_name = contact["display_name"] or ""
+        else:
+            contact = conn.execute(
+                "SELECT * FROM contacts WHERE id=?",
+                (thread_id,),
+            ).fetchone()
 
+        if contact is not None:
+            person_name = contact["display_name"] or ""
+
+        # Messages only exist when there's a conversations row. Lofty
+        # leads typically have no inbound message yet, so this block
+        # is a no-op for them — the lead/activity/notes blocks below
+        # still populate from the contacts + events tables.
+        if conv is not None:
             # Codex audit P2 (2026-05-05): bound the messages fetch by
             # safe_limit at the SQL layer instead of loading every event
             # for the conversation and slicing in Python. Threads with
@@ -586,8 +605,9 @@ def db_thread_context_response(
             last_inbound_at = conv["last_inbound_at"]
             last_outbound_at = conv["last_outbound_at"]
 
-            if contact is not None:
-                # Activity: lifecycle events for this contact, newest first.
+        if contact is not None:
+            # Activity: lifecycle events for this contact, newest first.
+            if True:
                 activity_rows = conn.execute(
                     """
                     SELECT id, kind, payload_json, ts
@@ -691,7 +711,7 @@ def db_thread_context_response(
                     "summary": contact["owner_notes"],
                     "emails": emails,
                     "phones": phones,
-                    "channel": conv["channel"],
+                    "channel": conv["channel"] if conv is not None else None,
                     "timestamp": contact["last_activity_at"],
                     "lastSeenAt": contact["last_activity_at"],
                     # Qualification / buyer-seller profile from Lofty.
