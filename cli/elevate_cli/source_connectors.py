@@ -3022,6 +3022,15 @@ def build_thread_context_response(
     safe_limit = max(20, min(int(limit or 200), 500))
     source_dir = _source_dir(source_root, source_id)
 
+    # Frontend profiles emit threadIds as ``<source_id>:<thread_key>`` (see
+    # ``_thread_from_record`` above). When the buyer-search drawer forwards
+    # that string as the URL ``thread_id``, we end up looking for
+    # ``crm:lofty-lead:1138...`` against contacts/conversations stored as
+    # ``lofty-lead:1138...``. Strip the prefix defensively so both shapes
+    # resolve.
+    if thread_id.startswith(f"{source_id}:"):
+        thread_id = thread_id[len(source_id) + 1 :]
+
     # Snapshot reader lock — keep messages/contacts/lead-events consistent
     # against any in-flight CRM sync (Codex audit P1, 2026-05-05).
     # 2026-05-26 fix: per-contact streaming for lead-events. Prior code did

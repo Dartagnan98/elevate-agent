@@ -527,6 +527,17 @@ def db_thread_context_response(
     source = _resolve_source_view(source_root, source_id)
     safe_limit = max(20, min(int(limit or 200), 500))
 
+    # The dashboard builds profile.threadIds as ``<source_id>:<thread_key>``
+    # (see ``_thread_from_record`` in source_connectors.py, line 715), then
+    # the buyer-search row passes ``profile.threadIds[0]`` straight into
+    # ``openThread(sourceId, threadId)``. The route splits source_id off the
+    # URL path but leaves the rest as-is, so we receive
+    # ``thread_id="crm:lofty-lead:1138..."`` even though contacts.id and
+    # conversations.thread_key are stored as ``lofty-lead:1138...``.
+    # Defensively strip a leading ``<source_id>:`` so both URL shapes work.
+    if thread_id.startswith(f"{source_id}:"):
+        thread_id = thread_id[len(source_id) + 1 :]
+
     messages: list[dict[str, Any]] = []
     person_name = ""
     lead_payload: dict[str, Any] | None = None
