@@ -1,15 +1,39 @@
 """
-SQLite-backed fact store with entity resolution and trust scoring.
+Postgres-backed fact store with entity resolution and trust scoring.
 Single-user Elevate memory store plugin.
+
+Historical note (2026-05-24): this module was SQLite-backed and stored
+its tables in ``$ELEVATE_HOME/memory_store.db``. The full migration to
+embedded Postgres landed alongside ``data/migrations_pg/0007_memory_store.sql``
+(schema), ``data/migrations_pg/0008_memory_store_compat_views.sql``
+(legacy table-name views: ``facts`` → ``memory_facts``, etc.) and
+``data/_pg_memory_migrate.py`` (one-shot data copy). After the cutover
+``memory_store.db`` is deprecated and only read once by the migrator.
+
+The connection swap preserves the plugin's API surface:
+
+- ``self._conn`` is now a ``PgConnection`` (from ``elevate_cli.data.connection``)
+  wrapping a long-lived psycopg connection. The shim translates ``?`` →
+  ``%s`` and handles ``INSERT OR IGNORE``, so the existing SQL strings
+  work unchanged.
+- ``_init_db`` is a no-op — schema lives in PG migrations now.
+- FTS5 ``MATCH`` queries were rewritten to use ``tsvector @@
+  websearch_to_tsquery`` against the ``search_tsv`` columns the PG
+  schema maintains via BEFORE INSERT triggers.
+- ``sqlite3.IntegrityError`` catches were replaced with
+  ``psycopg.errors.UniqueViolation``; ``sqlite3.Error`` with
+  ``psycopg.Error``.
 """
 
 import json
 import re
-import sqlite3
+import sqlite3  # noqa: F401 — retained for `sqlite3.Row` type aliases below
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import psycopg
 
 from .embeddings import (
     BaseEmbeddingClient,
@@ -372,6 +396,39 @@ def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
 
 
+def _open_persistent_pg():
+    """Open a long-lived psycopg connection to the embedded PG and wrap
+    it in the sqlite-compatible ``PgConnection`` shim.
+
+    Returns a single dedicated connection (not pool-managed) — the plugin
+    holds it for its full lifetime, the way the SQLite version held a
+    persistent ``sqlite3.Connection``. This bypasses the application
+    pool so plugin work never starves the dashboard/sync workers.
+
+    The shim translates ``?`` → ``%s`` placeholders and ``INSERT OR
+    IGNORE`` → ``ON CONFLICT DO NOTHING``, so the plugin's existing SQL
+    strings work unchanged. It also exposes ``commit()`` / ``rollback()``
+    /``execute()``/``cursor()`` with sqlite3-compatible semantics.
+    """
+    from elevate_cli.data import pg_server
+    from elevate_cli.data.connection import (
+        PgConnection,
+        _APP_DB_NAME,
+        _ensure_schema,
+    )
+    from psycopg.rows import dict_row
+
+    pg_server.ensure_database(_APP_DB_NAME)
+    uri = pg_server.get_uri(_APP_DB_NAME)
+    raw = psycopg.connect(uri, row_factory=dict_row, autocommit=False)
+    conn = PgConnection(raw)
+    # Make sure migrations + memory data import have run. _ensure_schema
+    # is idempotent (process-level flag) so this is a no-op if some
+    # other code path already opened a pool connection.
+    _ensure_schema(conn)
+    return conn
+
+
 class MemoryStore:
     """SQLite-backed fact store with entity resolution and trust scoring."""
 
@@ -382,22 +439,23 @@ class MemoryStore:
         hrr_dim: int = 1024,
         embedding_client: BaseEmbeddingClient | None = None,
     ) -> None:
+        # ``db_path`` is preserved as an attribute for callers that probe
+        # it (tests, doctor, backup tooling), but the holographic store no
+        # longer reads/writes that file. Schema + data live in the central
+        # embedded Postgres now (see module docstring).
         if db_path is None:
             from elevate_constants import get_elevate_home
             db_path = str(get_elevate_home() / "memory_store.db")
         self.db_path = Path(db_path).expanduser()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Don't create the SQLite parent on PG mode — that path is purely
+        # a label now. Tests pass tmp_path/'memory_store.db' and don't
+        # care whether the file exists, just that the attribute is set.
         self.default_trust = _clamp_trust(default_trust)
         self.hrr_dim = hrr_dim
         self.embedding_client = embedding_client
         self._hrr_available = hrr._HAS_NUMPY
-        self._conn: sqlite3.Connection = sqlite3.connect(
-            str(self.db_path),
-            check_same_thread=False,
-            timeout=10.0,
-        )
+        self._conn = _open_persistent_pg()
         self._lock = threading.RLock()
-        self._conn.row_factory = sqlite3.Row
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -405,40 +463,18 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """Create tables, indexes, and triggers if they do not exist. Enable WAL mode."""
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
-        # Migrate: add hrr_vector column if missing (safe for existing databases)
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
-        if "hrr_vector" not in columns:
-            self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
-        fact_column_defaults = {
-            "source_type": "TEXT DEFAULT ''",
-            "source_uri": "TEXT DEFAULT ''",
-            "source_excerpt": "TEXT DEFAULT ''",
-            "observed_at": "TIMESTAMP",
-            "memory_space": "TEXT DEFAULT ''",
-            "status": "TEXT DEFAULT 'active'",
-            "superseded_by": "INTEGER",
-        }
-        for name, definition in fact_column_defaults.items():
-            if name not in columns:
-                self._conn.execute(f"ALTER TABLE facts ADD COLUMN {name} {definition}")
-        journal_columns = {
-            row[1] for row in self._conn.execute("PRAGMA table_info(memory_turn_journal)").fetchall()
-        }
-        if "session_day" not in journal_columns:
-            self._conn.execute(
-                "ALTER TABLE memory_turn_journal ADD COLUMN session_day TEXT NOT NULL DEFAULT ''"
-            )
-            self._conn.execute(
-                """
-                UPDATE memory_turn_journal
-                SET session_day = substr(COALESCE(created_at, CURRENT_DATE), 1, 10)
-                WHERE session_day = ''
-                """
-            )
-        self._conn.commit()
+        """No-op on Postgres.
+
+        Schema, indexes, triggers, FTS (now tsvector + GIN), and column
+        additions all live in the central PG migration set under
+        ``elevate_cli/data/migrations_pg/0007_memory_store.sql`` and
+        ``0008_memory_store_compat_views.sql``. The migration runner
+        is invoked during ``_open_persistent_pg`` via ``_ensure_schema``,
+        so by the time this method is called the schema is guaranteed
+        to be at head. Kept as a method (rather than deleted) so any
+        subclasses or future per-instance setup has a hook.
+        """
+        return
 
     # ------------------------------------------------------------------
     # Public API
@@ -467,6 +503,8 @@ class MemoryStore:
                 raise ValueError("content must not be empty")
 
             try:
+                # PG has no cursor.lastrowid; use RETURNING. The facts view
+                # is auto-updatable and routes the INSERT to memory_facts.
                 cur = self._conn.execute(
                     """
                     INSERT INTO facts (
@@ -475,6 +513,7 @@ class MemoryStore:
                         memory_space
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING fact_id
                     """,
                     (
                         content,
@@ -488,10 +527,12 @@ class MemoryStore:
                         str(memory_space or ""),
                     ),
                 )
+                returned = cur.fetchone()
                 self._conn.commit()
-                fact_id: int = cur.lastrowid  # type: ignore[assignment]
-            except sqlite3.IntegrityError:
+                fact_id = int(returned["fact_id"])
+            except psycopg.errors.UniqueViolation:
                 # Duplicate content — return existing id
+                self._conn.rollback()
                 row = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ?", (content,)
                 ).fetchone()
@@ -516,21 +557,27 @@ class MemoryStore:
         min_trust: float = 0.3,
         limit: int = 10,
     ) -> list[dict]:
-        """Full-text search over facts using FTS5.
+        """Full-text search over facts using PG tsvector.
 
-        Returns a list of fact dicts ordered by FTS5 rank, then trust_score
-        descending. Also increments retrieval_count for matched facts.
+        Returns a list of fact dicts ordered by ts_rank_cd descending,
+        then trust_score descending. Also increments retrieval_count for
+        matched facts. (Was FTS5 in the SQLite era — tsvector / GIN now.)
         """
         with self._lock:
             query = query.strip()
             if not query:
                 return []
 
+            # query is bound twice: once in WHERE, once in ORDER BY for
+            # rank. PG can't reuse a single bind across the two slots
+            # without a CTE — we just pass it twice. Bind order must
+            # match the SQL below: [query, min_trust, (category?), query, limit].
             params: list = [query, min_trust]
             category_clause = ""
             if category is not None:
                 category_clause = "AND f.category = ?"
                 params.append(category)
+            params.append(query)
             params.append(limit)
 
             sql = f"""
@@ -540,12 +587,13 @@ class MemoryStore:
                        f.source_excerpt, f.observed_at, f.memory_space, f.status,
                        f.superseded_by
                 FROM facts f
-                JOIN facts_fts fts ON fts.rowid = f.fact_id
-                WHERE facts_fts MATCH ?
+                WHERE f.search_tsv @@ websearch_to_tsquery('english', ?)
                   AND f.trust_score >= ?
                   AND COALESCE(f.status, 'active') = 'active'
                   {category_clause}
-                ORDER BY fts.rank, f.trust_score DESC
+                ORDER BY ts_rank_cd(f.search_tsv,
+                                    websearch_to_tsquery('english', ?)) DESC,
+                         f.trust_score DESC
                 LIMIT ?
             """
 
@@ -1014,6 +1062,7 @@ class MemoryStore:
                 INSERT INTO memory_injections (
                     session_id, query, content, fact_ids, chunk_ids, source, prompt_chars
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                RETURNING injection_id
                 """,
                 (
                     session_id or "",
@@ -1025,8 +1074,9 @@ class MemoryStore:
                     prompt_chars,
                 ),
             )
+            returned = cur.fetchone()
             self._conn.commit()
-            injection_id = int(cur.lastrowid or 0)
+            injection_id = int(returned["injection_id"]) if returned else 0
         self.record_memory_event(
             "memory.injected",
             session_id=session_id,
@@ -1115,13 +1165,13 @@ class MemoryStore:
         with self._lock:
             for fact_id in verified:
                 cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = MIN(1.0, trust_score + 0.03), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    "UPDATE facts SET trust_score = LEAST(1.0, trust_score + 0.03), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
                     (fact_id,),
                 )
                 boosted += cur.rowcount or 0
             for fact_id in rejected:
                 cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = MAX(0.0, trust_score - 0.01), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    "UPDATE facts SET trust_score = GREATEST(0.0, trust_score - 0.01), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
                     (fact_id,),
                 )
                 decayed += cur.rowcount or 0
@@ -1409,7 +1459,9 @@ class MemoryStore:
                     like_terms,
                 ).fetchall()
             chunk_ids = [int(r["chunk_id"]) for r in chunk_rows]
-            self._conn.execute("DELETE FROM memory_community_reports_fts WHERE community_id = ?", (cluster_id,))
+            # tsvector is maintained by trg_memory_community_reports_tsv on the
+            # underlying memory_community_reports table — no separate FTS table
+            # to clear (the old facts_fts/_fts virtual tables are gone).
             self._conn.execute(
                 """
                 INSERT INTO memory_community_reports (
@@ -1436,10 +1488,6 @@ class MemoryStore:
                     float(cluster["weight"] or 1.0),
                 ),
             )
-            self._conn.execute(
-                "INSERT INTO memory_community_reports_fts (community_id, name, summary, tags, entity_names) VALUES (?, ?, ?, ?, ?)",
-                (cluster_id, name, summary, tags, ",".join(entity_names)),
-            )
             self._conn.commit()
         self.record_memory_event("memory.community.built", session_id=session_id, detail={"community_id": cluster_id, "facts": len(facts), "entities": len(entity_names)})
         return {"built": True, "community_id": cluster_id, "name": name, "summary": summary, "tags": tags, "entity_names": entity_names, "fact_ids": [int(r["fact_id"]) for r in facts], "chunk_ids": chunk_ids}
@@ -1451,22 +1499,29 @@ class MemoryStore:
             return []
         limit = max(1, int(limit or 5))
         with self._lock:
-            params = [query, limit]
+            # PG tsvector + websearch_to_tsquery. ts_rank_cd returns higher =
+            # better; we negate downstream to preserve the legacy
+            # max_rank-normalized "score" math (which used SQLite FTS5's
+            # negative rank where lower = better).
+            params = [query, query, limit]
             sql = """
                 SELECT r.community_id, r.name, r.summary, r.tags, r.entity_names,
                        r.fact_ids_json, r.chunk_ids_json, r.weight, r.updated_at,
-                       memory_community_reports_fts.rank AS fts_rank_raw
-                FROM memory_community_reports_fts
-                JOIN memory_community_reports r ON r.community_id = memory_community_reports_fts.community_id
-                WHERE memory_community_reports_fts MATCH ?
-                ORDER BY memory_community_reports_fts.rank
+                       ts_rank_cd(r.search_tsv,
+                                  websearch_to_tsquery('english', ?)) AS fts_rank_raw
+                FROM memory_community_reports r
+                WHERE r.search_tsv @@ websearch_to_tsquery('english', ?)
+                ORDER BY fts_rank_raw DESC
                 LIMIT ?
             """
             try:
                 rows = self._conn.execute(sql, params).fetchall()
             except Exception:
                 fallback = self._fallback_fts_query(query)
-                rows = self._conn.execute(sql, [fallback, limit]).fetchall() if fallback else []
+                rows = (
+                    self._conn.execute(sql, [fallback, fallback, limit]).fetchall()
+                    if fallback else []
+                )
             if not rows:
                 for cluster in self._conn.execute("SELECT cluster_id FROM memory_clusters ORDER BY updated_at DESC LIMIT 20").fetchall():
                     self.build_community_report(str(cluster["cluster_id"]))
@@ -1545,13 +1600,13 @@ class MemoryStore:
         with self._lock:
             for fid in verified:
                 cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = MIN(1.0, trust_score + 0.05), helpful_count = helpful_count + 1, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    "UPDATE facts SET trust_score = LEAST(1.0, trust_score + 0.05), helpful_count = helpful_count + 1, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
                     (fid,),
                 )
                 boosted += cur.rowcount or 0
             for fid in rejected:
                 cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = MAX(0.0, trust_score - 0.02), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                    "UPDATE facts SET trust_score = GREATEST(0.0, trust_score - 0.02), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
                     (fid,),
                 )
                 decayed += cur.rowcount or 0
@@ -1561,8 +1616,8 @@ class MemoryStore:
                     UPDATE facts
                     SET status = 'archived', updated_at = CURRENT_TIMESTAMP
                     WHERE COALESCE(status, 'active') = 'active'
-                      AND trust_score < ?
-                      AND (julianday('now') - julianday(created_at)) * 24.0 >= ?
+                      AND trust_score < %s
+                      AND EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0 >= %s
                       AND helpful_count = 0
                     """,
                     (float(archive_threshold), int(min_age_hours)),
@@ -1579,8 +1634,8 @@ class MemoryStore:
         with self._lock:
             for table, date_col in (("memory_events", "created_at"), ("memory_injections", "created_at"), ("memory_gaps", "created_at")):
                 cur = self._conn.execute(
-                    f"DELETE FROM {table} WHERE {date_col} < datetime('now', ?)",
-                    (f"-{days} days",),
+                    f"DELETE FROM {table} WHERE {date_col} < NOW() - (interval '1 day' * %s)",
+                    (int(days),),
                 )
                 removed[table] = cur.rowcount or 0
             self._conn.commit()
@@ -1750,13 +1805,18 @@ class MemoryStore:
         )
 
         with self._lock:
+            # PG: explicit ON CONFLICT ... RETURNING. Inserted rows return
+            # turn_id; conflict rows return nothing (DO NOTHING) so we fall
+            # back to a SELECT.
             cur = self._conn.execute(
                 """
-                INSERT OR IGNORE INTO memory_turn_journal (
+                INSERT INTO memory_turn_journal (
                     session_id, session_day, turn_hash, user_content,
                     assistant_content, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (turn_hash) DO NOTHING
+                RETURNING turn_id
                 """,
                 (
                     session_id,
@@ -1767,9 +1827,10 @@ class MemoryStore:
                     created_at_text,
                 ),
             )
+            returned = cur.fetchone()
             self._conn.commit()
-            if cur.rowcount:
-                return int(cur.lastrowid)
+            if returned is not None:
+                return int(returned["turn_id"])
 
             row = self._conn.execute(
                 "SELECT turn_id FROM memory_turn_journal WHERE turn_hash = ?",
@@ -2354,10 +2415,12 @@ class MemoryStore:
                         char_count = excluded.char_count,
                         source_excerpt = excluded.source_excerpt,
                         updated_at = excluded.updated_at
+                    RETURNING chunk_id
                     """,
                     (document_id, idx, chunk, len(chunk), excerpt),
                 )
-                chunk_id = int(cur.lastrowid or 0)
+                returned = cur.fetchone()
+                chunk_id = int(returned["chunk_id"]) if returned else 0
                 if not chunk_id:
                     row = self._conn.execute(
                         "SELECT chunk_id FROM memory_chunks WHERE document_id = ? AND chunk_index = ?",
@@ -2440,7 +2503,10 @@ class MemoryStore:
                 results_by_id[chunk_id] = item
 
         with self._lock:
-            params: list = [query]
+            # PG tsvector + websearch_to_tsquery. Param order:
+            #   [query (ts_rank_cd), query (WHERE), (source_type?), limit].
+            # Fallbacks substitute the query in BOTH leading slots.
+            params: list = [query, query]
             type_clause = ""
             if source_type:
                 type_clause = "AND d.source_type = ?"
@@ -2449,25 +2515,34 @@ class MemoryStore:
             sql = f"""
                 SELECT c.chunk_id, c.document_id, c.chunk_index, c.content,
                        c.char_count, c.source_excerpt, d.source_type, d.source_uri,
-                       d.title, d.metadata_json, c.updated_at, memory_chunks_fts.rank AS fts_rank_raw
-                FROM memory_chunks_fts
-                JOIN memory_chunks c ON c.chunk_id = memory_chunks_fts.rowid
+                       d.title, d.metadata_json, c.updated_at,
+                       ts_rank_cd(c.search_tsv,
+                                  websearch_to_tsquery('english', ?)) AS fts_rank_raw
+                FROM memory_chunks c
                 JOIN memory_documents d ON d.document_id = c.document_id
-                WHERE memory_chunks_fts MATCH ?
+                WHERE c.search_tsv @@ websearch_to_tsquery('english', ?)
                   {type_clause}
-                ORDER BY memory_chunks_fts.rank
+                ORDER BY fts_rank_raw DESC
                 LIMIT ?
             """
+
+            def _fallback_params(fb: str) -> list:
+                # Replace the two leading query slots; preserve type/limit tail.
+                return [fb, fb, *params[2:]]
+
             try:
                 rows = self._conn.execute(sql, params).fetchall()
             except Exception:
                 fallback = self._fallback_fts_query(query)
-                rows = self._conn.execute(sql, [fallback, *params[1:]]).fetchall() if fallback else []
+                rows = (
+                    self._conn.execute(sql, _fallback_params(fallback)).fetchall()
+                    if fallback else []
+                )
             if not rows:
                 fallback = self._fallback_fts_query(query)
                 if fallback and fallback != query:
                     try:
-                        rows = self._conn.execute(sql, [fallback, *params[1:]]).fetchall()
+                        rows = self._conn.execute(sql, _fallback_params(fallback)).fetchall()
                     except Exception:
                         rows = []
             if rows:
@@ -2660,7 +2735,8 @@ class MemoryStore:
                                     """,
                                     (inferred_relation, int(row["relation_id"])),
                                 )
-                            except sqlite3.IntegrityError:
+                            except psycopg.errors.UniqueViolation:
+                                self._conn.rollback()
                                 self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(row["relation_id"]),))
                                 report["relations_pruned"] += 1
                 if not dry_run:
@@ -2692,7 +2768,8 @@ class MemoryStore:
             try:
                 row = self._conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
                 counts[table] = int(row["count"] or 0) if row else 0
-            except sqlite3.Error:
+            except psycopg.Error:
+                self._conn.rollback()
                 counts[table] = 0
         return {"counts": counts, "entity_types": entity_types, "relation_types": relation_types}
 
@@ -2748,7 +2825,8 @@ class MemoryStore:
             for rel in rows:
                 try:
                     self._conn.execute(f"UPDATE memory_relations SET {column} = ?, updated_at = CURRENT_TIMESTAMP WHERE relation_id = ?", (keeper_id, int(rel["relation_id"])))
-                except sqlite3.IntegrityError:
+                except psycopg.errors.UniqueViolation:
+                    self._conn.rollback()
                     self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(rel["relation_id"]),))
         self._conn.execute("DELETE FROM memory_relations WHERE source_entity_id = target_entity_id")
         self._conn.execute("DELETE FROM entities WHERE entity_id = ?", (source_id,))
@@ -3076,28 +3154,13 @@ class MemoryStore:
             # signal, not redundancy; collapsing them corrupts recall ranking.
             # `deleted_dups` stays 0 (kept only for result-schema stability).
 
-            # Forward-only auto_vacuum hint. On a db created with
-            # auto_vacuum=0 this does NOT reclaim anything until a full
-            # offline VACUUM rebuild runs (SQLite semantics), so
-            # incremental_vacuum below is a harmless no-op on the existing
-            # file. Setting the pragma is safe and lets a future offline
-            # rebuild use incremental reclaim. Real reclamation of the bloated
-            # pages is a DEFERRED gateway-stopped `VACUUM`, not done here — we
-            # do not claim space was freed.
-            try:
-                self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            except sqlite3.Error:
-                pass
+            # PG era: SQLite PRAGMAs (auto_vacuum, incremental_vacuum) have
+            # no equivalent — PG manages reclamation via autovacuum, and a
+            # one-shot manual VACUUM cannot run inside a transaction. We
+            # skip the pragma calls entirely; `vacuum_ok` remains True so
+            # downstream callers/log consumers see a clean signal.
             vacuum_ok = True
-            try:
-                if incremental_vacuum_pages > 0:
-                    self._conn.execute(
-                        f"PRAGMA incremental_vacuum({incremental_vacuum_pages})"
-                    )
-                    self._conn.commit()
-            except sqlite3.Error as exc:
-                vacuum_ok = False
-                logger.debug("incremental_vacuum skipped: %s", exc)
+            _ = incremental_vacuum_pages  # retained kwarg for API stability
 
             after_row = self._conn.execute(
                 "SELECT COUNT(*) AS c FROM memory_relations"
@@ -3173,12 +3236,12 @@ class MemoryStore:
                 """
                 SELECT lower(substr(content, 1, 120)) AS signature,
                        COUNT(*) AS count,
-                       GROUP_CONCAT(fact_id) AS fact_ids
+                       STRING_AGG(fact_id::text, ',') AS fact_ids
                 FROM facts
                 GROUP BY signature
-                HAVING count > 1
+                HAVING COUNT(*) > 1
                 ORDER BY count DESC
-                LIMIT ?
+                LIMIT %s
                 """,
                 (limit,),
             ).fetchall()
@@ -3395,12 +3458,14 @@ class MemoryStore:
         if alias_row is not None:
             return int(alias_row["entity_id"])
 
-        # Create new entity
+        # Create new entity (PG uses RETURNING; entities view auto-routes
+        # to memory_entities and the identity sequence handles the PK).
         cur = self._conn.execute(
-            "INSERT INTO entities (name) VALUES (?)", (name,)
+            "INSERT INTO entities (name) VALUES (?) RETURNING entity_id", (name,)
         )
+        returned = cur.fetchone()
         self._conn.commit()
-        return int(cur.lastrowid)  # type: ignore[return-value]
+        return int(returned["entity_id"])
 
     def _link_fact_entity(self, fact_id: int, entity_id: int) -> None:
         """Insert into fact_entities, silently ignore if the link already exists."""
