@@ -406,6 +406,50 @@ def _find_jsonl_record_by_id(
     return match
 
 
+def _stream_jsonl_records_by_id(
+    path: Path,
+    target_id: str,
+    *,
+    id_keys: tuple[str, ...] = ("contact_id", "conversation_id"),
+) -> list[JsonRecord]:
+    """Stream a JSONL file and return every row whose id matches ``target_id``.
+
+    Unlike :func:`_find_jsonl_record_by_id` (which returns a single contact
+    row), this returns the full event list for a given conversation — used by
+    the thread drawer for notes/tasks/activity. Streams the whole file so it
+    doesn't drop events for older leads on long-running CRMs (the prior
+    `tail=True, limit=4000` read silently dropped activity for any contact
+    whose events were ingested earlier than the last 4000 rows; with 2474
+    Lofty leads and 15455 lifetime events, every contact past line 11455 had
+    an empty Property Activity panel).
+    """
+    target = (target_id or "").strip()
+    matches: list[JsonRecord] = []
+    if not target or not path.exists():
+        return matches
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                for key in id_keys:
+                    candidate = value.get(key)
+                    if candidate is None:
+                        continue
+                    if str(candidate).strip() == target:
+                        matches.append(value)
+                        break
+    except OSError:
+        return matches
+    return matches
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         if value in (None, ""):
@@ -2980,10 +3024,11 @@ def build_thread_context_response(
 
     # Snapshot reader lock — keep messages/contacts/lead-events consistent
     # against any in-flight CRM sync (Codex audit P1, 2026-05-05).
-    # Codex audit P2 (2026-05-05): tail-read lead-events so a thread's
-    # most-recent notes/activity are surfaced even when the file has
-    # >4000 lifetime events (prior code took the FIRST 4000, which
-    # silently dropped recent notes on long-running CRM syncs).
+    # 2026-05-26 fix: per-contact streaming for lead-events. Prior code did
+    # `tail=True, limit=4000` which silently dropped activity/notes/tasks
+    # for any contact whose events were ingested earlier than the last 4000
+    # rows. With 2474 Lofty leads and 15455 lifetime events, every contact
+    # past line ~11455 had an empty Property Activity panel.
     with _snapshot_reader_lock(source_dir):
         raw_messages = _read_jsonl_records(source_dir / "messages.jsonl", limit=2000, tail=True)
         # Targeted contact lookup: stream the whole file once and keep only
@@ -2999,7 +3044,11 @@ def build_thread_context_response(
             thread_id,
             id_keys=("contact_id", "id", "source_record_id"),
         )
-        lead_events_iter = _read_jsonl_records(source_dir / "lead-events.jsonl", limit=4000, tail=True)
+        lead_events_iter = _stream_jsonl_records_by_id(
+            source_dir / "lead-events.jsonl",
+            thread_id,
+            id_keys=("contact_id", "conversation_id"),
+        )
 
     messages: list[JsonRecord] = []
     person_name = ""
