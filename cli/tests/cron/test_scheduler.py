@@ -1831,12 +1831,18 @@ class TestSilentDelivery:
             tick(verbose=False)
 
         deliver_mock.assert_not_called()
-        mark_mock.assert_called_once_with(
+        # _process_job now also forwards a short ``summary`` (the error string
+        # when final_response is empty) and the pre-allocated cron
+        # ``session_id`` so the Cron page can link the run to its session
+        # history. We only assert on the fields this test cares about.
+        assert mark_mock.call_count == 1
+        args, kwargs = mark_mock.call_args
+        assert args == (
             "monitor-job",
             False,
             "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
-            delivery_error=None,
         )
+        assert kwargs.get("delivery_error") is None
 
 
 class TestBuildJobPromptSilentHint:
@@ -2226,7 +2232,7 @@ class TestParallelTick:
         barrier = threading.Barrier(2, timeout=5)
         call_order = []
 
-        def mock_run_job(job):
+        def mock_run_job(job, *, session_id=None):
             """Each job hits a barrier — both must be active simultaneously."""
             call_order.append(("start", job["id"]))
             barrier.wait()  # blocks until both threads reach here
@@ -2260,7 +2266,7 @@ class TestParallelTick:
         from gateway.session_context import get_session_env
         seen = {}
 
-        def mock_run_job(job):
+        def mock_run_job(job, *, session_id=None):
             origin = job.get("origin", {})
             # run_job sets ContextVars — verify each job sees its own
             from gateway.session_context import set_session_vars, clear_session_vars
@@ -2300,7 +2306,7 @@ class TestParallelTick:
         monkeypatch.setenv("ELEVATE_CRON_MAX_PARALLEL", "1")
         call_times = []
 
-        def mock_run_job(job):
+        def mock_run_job(job, *, session_id=None):
             import time
             call_times.append(("start", job["id"], time.monotonic()))
             time.sleep(0.05)

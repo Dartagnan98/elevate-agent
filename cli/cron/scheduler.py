@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -1131,14 +1132,29 @@ def _scan_assembled_cron_prompt(assembled: str, job: dict) -> str:
     return assembled
 
 
-def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
-    """Execute a single cron job, applying any per-job profile override."""
+def run_job(
+    job: dict,
+    *,
+    session_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
+    """Execute a single cron job, applying any per-job profile override.
+
+    ``session_id`` lets the caller (``_process_job`` in ``tick``) pre-allocate
+    the cron session id so it can wire ``mark_job_run`` and the
+    ``tui_gateway._sessions`` cleanup without trying to read a variable that
+    lives inside ``_run_job_impl``'s frame. If omitted, ``_run_job_impl``
+    falls back to generating one internally for non-cron callers.
+    """
     job_id = job["id"]
     with _job_profile_context(job_id, job.get("profile")):
-        return _run_job_impl(job)
+        return _run_job_impl(job, session_id=session_id)
 
 
-def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
+def _run_job_impl(
+    job: dict,
+    *,
+    session_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
     
@@ -1319,10 +1335,38 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
-    _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    _cron_session_id = session_id or f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
+
+    # Pre-register this cron session in tui_gateway._sessions so agent
+    # callbacks (_agent_cbs below) emit through the fanout transport to
+    # every open dashboard WS. Without this, tool.start / message.delta
+    # events fire into the void and the cron run looks like nothing
+    # is happening from the user's perspective.
+    _tg_cron_callbacks: dict = {}
+    try:
+        from tui_gateway import server as _tg_server
+        import collections as _collections
+        _tg_server._sessions[_cron_session_id] = {
+            "transport": _tg_server._fanout_transport,
+            "events": _collections.deque(maxlen=_tg_server._EVENT_RING_MAXLEN),
+            "events_lock": threading.Lock(),
+            "events_seq": 0,
+            "running_tools": {},
+            "history": [],
+            "history_lock": threading.Lock(),
+            "tool_started_at": {},
+            "tool_progress_mode": "auto",
+            "show_reasoning": False,
+            "is_cron": True,
+            "job_id": job_id,
+        }
+        _tg_cron_callbacks = _tg_server._agent_cbs(_cron_session_id)
+    except Exception as _e:
+        logger.debug("Cron live-broadcast wiring unavailable: %s", _e)
+        _tg_cron_callbacks = {}
 
     agent = None
 
@@ -1583,6 +1627,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
+            **_tg_cron_callbacks,
         )
         
         # Run the agent with an *inactivity*-based timeout: the job can run
@@ -1860,8 +1905,19 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
+            # Pre-allocate the cron session id here so the mark_job_run /
+            # tui_gateway cleanup paths below can reference it on BOTH the
+            # success and exception branches. The id matches the format
+            # ``_run_job_impl`` would have generated internally; passing it
+            # in keeps the gateway-side session key and the dashboard sidebar
+            # parser ("cron_{job_id}_{timestamp}") in agreement.
+            _cron_session_id = (
+                f"cron_{job['id']}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+            )
             try:
-                success, output, final_response, error = run_job(job)
+                success, output, final_response, error = run_job(
+                    job, session_id=_cron_session_id
+                )
 
                 output_file = save_job_output(job["id"], output)
                 if verbose:
@@ -1894,13 +1950,42 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                # Build a short status summary from the agent's reply so the
+                # Cron page can show WHAT happened, not just "ok". Strip
+                # SILENT marker and quoted-prompt echoes; cap mark_job_run
+                # at 600 chars so the JSON stays readable.
+                _summary_src = (final_response or "").strip()
+                if SILENT_MARKER in _summary_src.upper():
+                    _summary_src = ""
+                if not _summary_src and success:
+                    _summary_src = "(silent run — no agent reply)"
+                elif not _summary_src and error:
+                    _summary_src = error
+                mark_job_run(
+                    job["id"], success, error,
+                    delivery_error=delivery_error,
+                    summary=_summary_src,
+                    session_id=_cron_session_id,
+                )
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
-                mark_job_run(job["id"], False, str(e))
+                mark_job_run(
+                    job["id"], False, str(e),
+                    summary=str(e),
+                    session_id=_cron_session_id,
+                )
                 return False
+            finally:
+                # Drop the synthetic cron session from tui_gateway so the
+                # _sessions dict doesn't grow unbounded across thousands of
+                # cron runs. The event ring + history are GC'd with it.
+                try:
+                    from tui_gateway import server as _tg_server
+                    _tg_server._sessions.pop(_cron_session_id, None)
+                except Exception:
+                    pass
 
         # Partition due jobs: jobs with a per-job workdir and/or profile touch
         # process-global runtime state inside run_job. Workdir jobs temporarily

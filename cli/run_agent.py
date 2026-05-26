@@ -834,6 +834,7 @@ class AIAgent:
         thread_id: str = None,
         gateway_session_key: str = None,
         skip_context_files: bool = False,
+        load_soul_identity: bool = False,
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
@@ -915,6 +916,10 @@ class AIAgent:
         self._print_fn = None
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
+        # Cron jobs pass load_soul_identity=True so the user's ~/.elevate/SOUL.md
+        # identity still loads even when project context files are skipped.
+        # agent/system_prompt.py reads agent.load_soul_identity directly.
+        self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self.persist_session = persist_session
         self._credential_pool = credential_pool

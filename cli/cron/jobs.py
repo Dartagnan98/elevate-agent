@@ -927,15 +927,22 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 summary: Optional[str] = None,
+                 session_id: Optional[str] = None):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
+
+    ``summary`` is the agent's final assistant message (truncated). Surfaced
+    on the Cron page so the user can see WHAT happened, not just "ok".
+    ``session_id`` is the cron_<jobid>_<ts> id the run executed under, so
+    the UI can deep-link from job card → session transcript.
     """
     with _jobs_file_lock:
         jobs = load_jobs()
@@ -947,6 +954,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                if summary is not None:
+                    # Cap at 600 chars — anything longer belongs in the
+                    # session transcript, not the job card. Strip control
+                    # chars so the dashboard doesn't choke on stray ANSI.
+                    _s = str(summary).strip()
+                    if len(_s) > 600:
+                        _s = _s[:597].rstrip() + "..."
+                    job["last_summary"] = _s
+                if session_id is not None:
+                    job["last_session_id"] = str(session_id)
                 
                 # Increment completed count
                 if job.get("repeat"):
