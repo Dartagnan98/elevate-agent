@@ -366,6 +366,46 @@ def _read_jsonl_records(path: Path, *, limit: int = 12, tail: bool = False) -> l
     return sorted(records, key=_record_timestamp, reverse=True)
 
 
+def _find_jsonl_record_by_id(
+    path: Path,
+    target_id: str,
+    *,
+    id_keys: tuple[str, ...] = ("id", "contact_id", "source_record_id"),
+) -> JsonRecord | None:
+    """Stream a JSONL file and return the last row whose id matches ``target_id``.
+
+    Unbounded by file size and uses constant memory — designed for the thread
+    drawer's contact/lead lookup, which previously used a 2000-row preview read
+    and silently dropped any record past that mark. Returns the LAST matching
+    row so an updated record (re-synced contact) wins over a stale earlier one.
+    """
+    target = (target_id or "").strip()
+    if not target or not path.exists():
+        return None
+    match: JsonRecord | None = None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                for key in id_keys:
+                    candidate = value.get(key)
+                    if candidate is None:
+                        continue
+                    if str(candidate).strip() == target:
+                        match = value
+                        break
+    except OSError:
+        return match
+    return match
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         if value in (None, ""):
@@ -758,6 +798,15 @@ def _is_message_draft_task(record: JsonRecord) -> bool:
         for key in ("task_type", "title", "summary", "tags", "channel", "target_ui_surfaces")
     )
     if "connector_setup" in haystack:
+        return False
+    # Synthetic CRM lead-arrival records (Lofty sync emits one per lead with
+    # task_type=lead_follow_up + approval_required=False). These belong in
+    # Hot Leads / contact records, not "Approve replies". 2026-05-25.
+    task_type = str(record.get("task_type") or "").strip().lower()
+    if task_type == "lead_follow_up":
+        return False
+    # Explicit opt-out wins over keyword sniffing.
+    if record.get("approval_required") is False:
         return False
     if record.get("approval_required") is True:
         return True
@@ -1770,10 +1819,10 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
     )
     # Continuous DB writethrough — same pattern as Lofty/CRM sync (Codex
     # audit P0, 2026-05-05). Pushes the just-written JSONL into
-    # operational.db so identity-first resolution sees the apple-messages
+    # operational Postgres so identity-first resolution sees the apple-messages
     # handles immediately, no manual ``elevate migrate-data`` needed.
     try:
-        _writethrough_to_operational_db(source_dir)
+        _walk_jsonl_into_pg(source_dir)
     except Exception as exc:  # noqa: BLE001
         _write_json(
             source_dir / "artifacts" / "last-db-writethrough-error.json",
@@ -1933,20 +1982,23 @@ def _render_crm_prompt() -> str:
         "   Note: jsonl line counts may be lower than source.json record_counts because\n"
         "   the jsonl is the latest snapshot (may be incremental), while record_counts\n"
         "   is cumulative across all syncs. Use record_counts for the totals.\n"
-        "4. VERIFY the walker wrote rows into operational.db (real schema — these are\n"
-        "   the only tables the walker actually populates):\n"
-        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM contacts;\"\n"
-        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM events WHERE kind='lifecycle_change';\"  -- lead-events live here\n"
-        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM conversations;\"\n"
-        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM identities;\"\n"
-        "     sqlite3 ~/.elevate/data/operational.db \"SELECT COUNT(*) FROM identity_conflicts WHERE resolved_at IS NULL;\"\n"
+        "4. VERIFY the walker wrote rows into the operational Postgres DB (real schema —\n"
+        "   these are the only tables the walker actually populates). Use the\n"
+        "   `elevate_db` tool (preferred) or psql against the embedded socket:\n"
+        "     elevate_db \"SELECT COUNT(*) FROM contacts\"\n"
+        "     elevate_db \"SELECT COUNT(*) FROM events WHERE kind='lifecycle_change'\"  -- lead-events live here\n"
+        "     elevate_db \"SELECT COUNT(*) FROM conversations\"\n"
+        "     elevate_db \"SELECT COUNT(*) FROM identities\"\n"
+        "     elevate_db \"SELECT COUNT(*) FROM identity_conflicts WHERE resolved_at IS NULL\"\n"
+        "   (Fallback if elevate_db is unavailable: `psql -h ~/.elevate/pgdata -U postgres -d elevate_operational -c \"SELECT COUNT(*) FROM contacts\"`)\n"
         "   Counts should be > 0 and roughly match source.json record_counts. If DB\n"
         "   is empty but jsonl is populated, the writethrough is broken — flag it loudly.\n"
         "   NOTE: there is no `tasks` table by design — tasks live as JSONL only\n"
         "   (see reads.py). Don't query it. There is no `lead_events` table either —\n"
         "   lead lifecycle changes are stored in `events` with kind='lifecycle_change'.\n"
+        "   DO NOT touch ~/.elevate/data/operational.db — that SQLite file is deprecated.\n"
         "5. Spot-check 2 real rows are coherent (use REAL column names):\n"
-        "     sqlite3 ~/.elevate/data/operational.db \"SELECT id, display_name, primary_phone, primary_email FROM contacts ORDER BY updated_at DESC LIMIT 2;\"\n"
+        "     elevate_db \"SELECT id, display_name, primary_phone, primary_email FROM contacts ORDER BY updated_at DESC LIMIT 2\"\n"
         "   Both rows should have a real display_name plus primary_phone OR primary_email.\n"
         "   If they're empty strings or duplicates, the adapter mapping is broken — flag it.\n"
         "6. Report back with a CSV-style summary (use REAL table/column names):\n"
@@ -2337,7 +2389,11 @@ def build_source_inbox_response(
                 totals["hotThreads"] += 1
             threads.append(thread)
 
-        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=100):
+        # Read newest entries — the crm tasks.jsonl in particular accumulates
+        # thousands of lead_follow_up records, and the head-of-file 100 are
+        # almost always old. Without tail=True, freshly-appended message_draft
+        # tasks (the things the user actually needs to approve) never show up.
+        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=500, tail=True):
             if not _is_message_draft_task(record):
                 continue
             task_id = _task_key(record)
@@ -2536,7 +2592,11 @@ def _collect_drafts_for_db_inbox(
         task_states = _as_dict(ui_state.get("tasks"))
         task_state_by_source[source_id] = task_states
 
-        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=100):
+        # Read newest entries — the crm tasks.jsonl in particular accumulates
+        # thousands of lead_follow_up records, and the head-of-file 100 are
+        # almost always old. Without tail=True, freshly-appended message_draft
+        # tasks (the things the user actually needs to approve) never show up.
+        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=500, tail=True):
             if not _is_message_draft_task(record):
                 continue
             task_id = _task_key(record)
@@ -2568,6 +2628,72 @@ def _collect_drafts_for_db_inbox(
             if persisted_thread_id:
                 seen_thread_drafts.add((source_id, persisted_thread_id))
             drafts.append(draft)
+
+    # Source of truth: any send_queue row in pending_approval that isn't
+    # already represented by a tasks.jsonl entry. Crons that write directly
+    # to send_queue (e.g. run_fresh_first_touch_cron.py) sometimes race with
+    # the tasks.jsonl append, or the jsonl head-of-file gets shadowed by
+    # thousands of older lead_follow_up rows. Reading the PG table here
+    # makes the /leads inbox self-healing.
+    try:
+        pending_sends = _odb.list_recent_sends(
+            statuses=("pending_approval",), limit=max_drafts * 4
+        )
+    except Exception:
+        pending_sends = []
+
+    for send in pending_sends:
+        if len(drafts) >= max_drafts:
+            break
+        source_id = str(send.get("sourceId") or "")
+        thread_id_str = str(send.get("threadId") or "")
+        if not source_id or not thread_id_str:
+            continue
+        if (source_id, thread_id_str) in seen_thread_drafts:
+            continue
+        source = source_by_id.get(source_id) or {"id": source_id, "label": source_id}
+        payload = _as_dict(send.get("payload"))
+        recipient = _as_dict(payload.get("recipient"))
+        person_name = (
+            str(recipient.get("person_name") or "").strip()
+            or str(payload.get("person_name") or "").strip()
+            or "Client"
+        )
+        draft_text = str(payload.get("draft_text") or "").strip() or "Draft text has not been generated yet."
+        queue_id = str(send.get("id") or "")
+        task_id = str(send.get("taskId") or queue_id)
+        channel = str(send.get("channel") or "")
+        generated_id = f"{source_id}:send-queue:{queue_id}"
+        if generated_id in seen_drafts:
+            continue
+        seen_drafts.add(generated_id)
+        seen_thread_drafts.add((source_id, thread_id_str))
+        synthesized: JsonRecord = {
+            "id": generated_id,
+            "sourceId": source_id,
+            "sourceLabel": str(source.get("label") or source_id),
+            "taskId": task_id,
+            "threadId": thread_id_str,
+            "contactId": recipient.get("contact_id") or payload.get("contact_id"),
+            "conversationId": recipient.get("conversation_id"),
+            "personName": person_name,
+            "channel": channel,
+            "title": f"Approve first-touch draft for {person_name}",
+            "draftText": draft_text,
+            "context": "",
+            "latestAt": str(send.get("createdAt") or send.get("updatedAt") or ""),
+            "status": "pending",
+            "approvalRequired": True,
+            "generated": False,
+            "fallback": False,
+            "record": {},
+        }
+        thread_meta = _meta_by_key.get((source_id, thread_id_str))
+        if thread_meta:
+            synthesized["score"] = thread_meta.get("score")
+            synthesized["leadLabel"] = thread_meta.get("label")
+            synthesized["scoreReason"] = thread_meta.get("reason")
+        drafts.append(synthesized)
 
     for thread in threads:
         if len(drafts) >= max_drafts:
@@ -2860,7 +2986,19 @@ def build_thread_context_response(
     # silently dropped recent notes on long-running CRM syncs).
     with _snapshot_reader_lock(source_dir):
         raw_messages = _read_jsonl_records(source_dir / "messages.jsonl", limit=2000, tail=True)
-        contacts_iter = _read_jsonl_records(source_dir / "contacts.jsonl", limit=2000)
+        # Targeted contact lookup: stream the whole file once and keep only
+        # the row whose contact_id/id matches this thread. The prior
+        # `_read_jsonl_records(limit=2000)` silently dropped any contact past
+        # row 2000, breaking the Lead Score / Stage / Tags panel for hot
+        # leads on CRMs with >2000 contacts (Skyleigh's Lofty hit this at
+        # 2474 contacts — every hot lead appended after row 2000 returned
+        # `lead: null` in the drawer). Streaming a single-row pluck is O(n)
+        # but unbounded by file size and uses constant memory.
+        lead_record: JsonRecord | None = _find_jsonl_record_by_id(
+            source_dir / "contacts.jsonl",
+            thread_id,
+            id_keys=("contact_id", "id", "source_record_id"),
+        )
         lead_events_iter = _read_jsonl_records(source_dir / "lead-events.jsonl", limit=4000, tail=True)
 
     messages: list[JsonRecord] = []
@@ -2878,13 +3016,8 @@ def build_thread_context_response(
     messages.sort(key=lambda m: _parse_record_dt(m.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc))
     messages = messages[-safe_limit:]
 
-    lead_record: JsonRecord | None = None
-    for record in contacts_iter:
-        if str(record.get("contact_id") or record.get("id") or "").strip() == thread_id:
-            lead_record = record
-            if not person_name:
-                person_name = _record_person_name(record)
-            break
+    if lead_record is not None and not person_name:
+        person_name = _record_person_name(lead_record)
 
     activity_records: list[JsonRecord] = []
     notes_records: list[JsonRecord] = []
@@ -3653,7 +3786,7 @@ def sync_generic_crm_source(
     )
     # Continuous DB writethrough — Codex audit P0 (2026-05-05).
     try:
-        _writethrough_to_operational_db(source_dir)
+        _walk_jsonl_into_pg(source_dir)
     except Exception as exc:  # noqa: BLE001
         if errors is not None:
             errors.append(f"db writethrough: {exc}")
@@ -4870,6 +5003,20 @@ def sync_lofty_crm_source(
             + (f" via {source}" if source else "")
             + "."
         )
+        # Carry the full Lofty lead profile through to JSONL so the
+        # migrate.py writethrough can enrich the contacts row. Pre-0012
+        # this only carried name/email/phone/stage and the drawer rendered
+        # blank cards. See migration 0012_lofty_lead_metadata.sql for the
+        # column list and _CONTACT_ENRICHMENT_KEY_MAP in migrate.py for
+        # accepted aliases.
+        def _lead_get(*keys: str) -> Any:
+            for key in keys:
+                if key in lead:
+                    value = lead.get(key)
+                    if value not in (None, ""):
+                        return value
+            return None
+
         base_record = {
             "source_id": "crm",
             "source_record_id": record_id,
@@ -4885,13 +5032,37 @@ def sync_lofty_crm_source(
             "lead_id": lead_id or None,
             "stage": stage or None,
             "lead_source": source or None,
-            "assigned_user": lead.get("assignedUser") or lead.get("assignedAgent"),
+            "assigned_user": _lead_get("assignedUser", "assignedAgent"),
+            "assignedUser": _lead_get("assignedUser", "assignedAgent"),
+            "assignedUserId": _lead_get("assignedUserId", "assigned_user_id"),
+            "leadUserId": _lead_get("leadUserId", "lofty_lead_user_id"),
             "emails": lead.get("emails") or lead.get("email"),
             "phones": lead.get("phones") or lead.get("phone"),
             "score": score,
             "tags": [*tags, "lofty-crm", "crm-lead"],
             "confidence": 0.86,
             "target_ui_surfaces": surfaces,
+            # --- Lofty enrichment (migration 0012) ---
+            "pondId": _lead_get("pondId", "pond_id"),
+            "pondName": _lead_get("pondName", "pond_name"),
+            "referredBy": _lead_get("referredBy", "referred_by"),
+            "opportunity": _lead_get("opportunity"),
+            "buyingTimeFrame": _lead_get("buyingTimeFrame", "buying_time_frame"),
+            "sellingTimeFrame": _lead_get("sellingTimeFrame", "selling_time_frame"),
+            "preQual": _lead_get("preQual", "preQualStatus", "pre_qual_status"),
+            "mortgage": _lead_get("mortgage", "mortgageStatus", "mortgage_status"),
+            "fthb": _lead_get("fthb", "firstTimeHomeBuyer", "first_time_home_buyer"),
+            "hasHouseToSell": _lead_get("hasHouseToSell", "has_house_to_sell", "houseToSell"),
+            "withBuyerAgent": _lead_get("withBuyerAgent", "with_buyer_agent"),
+            "withListingAgent": _lead_get("withListingAgent", "with_listing_agent"),
+            "buyHouseIntent": _lead_get("buyHouseIntent", "buy_house_intent", "buyHouse"),
+            "leadTypes": lead.get("leadTypes") or lead.get("lead_types") or [],
+            "segments": lead.get("segments") or [],
+            "cannotText": _lead_get("cannotText", "cannot_text"),
+            "cannotCall": _lead_get("cannotCall", "cannot_call"),
+            "cannotEmail": _lead_get("cannotEmail", "cannot_email"),
+            "unsubscribed": _lead_get("unsubscribed", "unsubscription"),
+            "hidden": _lead_get("hidden", "hiddenFlag"),
         }
         contact_records.append(base_record)
         conversation_records.append(
@@ -5013,7 +5184,7 @@ def sync_lofty_crm_source(
         },
     )
     try:
-        _writethrough_to_operational_db(source_dir)
+        _walk_jsonl_into_pg(source_dir)
     except Exception as exc:  # noqa: BLE001
         if errors is not None:
             errors.append(f"db writethrough (phase 1): {exc}")
@@ -5185,7 +5356,7 @@ def sync_lofty_crm_source(
     # Phase 1 already ran a writethrough for the bare snapshot; this Phase 3
     # writethrough lands the enrichment lead_events.
     try:
-        _writethrough_to_operational_db(source_dir)
+        _walk_jsonl_into_pg(source_dir)
     except Exception as exc:  # noqa: BLE001
         # Never let the DB writethrough fail the sync; legacy JSONL is
         # still the canonical store under DB shadow-read mode.
@@ -5216,11 +5387,12 @@ def sync_lofty_crm_source(
     return view
 
 
-def _writethrough_to_operational_db(source_dir: Path) -> dict[str, Any]:
-    """Replay the just-written JSONL snapshot through the operational DB
-    walker so DB-primary readers see fresh Lofty data without a manual
-    ``elevate migrate-data`` rerun. Idempotent — every helper underneath
-    ``walk_jsonl_source`` is keyed on source_key / event_hash / etc."""
+def _walk_jsonl_into_pg(source_dir: Path) -> dict[str, Any]:
+    """Replay the just-written JSONL snapshot through the operational
+    Postgres walker so DB-primary readers see fresh data without a
+    manual ``elevate migrate-data`` rerun. Idempotent — every helper
+    underneath ``walk_jsonl_source`` is keyed on source_key /
+    event_hash / etc."""
     from elevate_cli.data import connect as _data_connect
     from elevate_cli.data.migrate import BackfillStats, walk_jsonl_source
 
@@ -5511,35 +5683,31 @@ def _provider_from_admin_profile() -> str:
     """Read admin_setup_profile.crm_provider and normalize to canonical slug.
 
     Returns "" if the admin profile is empty or unreadable. Never raises —
-    this is a soft overlay on top of config.yaml.
+    this is a soft overlay on top of config.yaml. Reads from the Postgres
+    operational store via the standard data layer (was reading the legacy
+    SQLite operational.db directly until the PG cutover).
     """
-    import sqlite3, os
-    db_path = os.path.expanduser("~/.elevate/data/operational.db")
-    if not os.path.exists(db_path):
-        return ""
     try:
-        con = sqlite3.connect(db_path)
+        from elevate_cli.data import connect as _data_connect
     except Exception:
         return ""
     try:
-        con.row_factory = sqlite3.Row
-        try:
-            row = con.execute(
-                "SELECT crm_provider FROM admin_setup_profile WHERE id='default'"
-            ).fetchone()
-        except Exception:
-            return ""
-        if not row:
-            return ""
-        raw = str(row["crm_provider"] or "").strip().lower()
-        if not raw:
-            return ""
-        return _CRM_PROVIDER_ALIASES.get(raw, raw.replace(" ", ""))
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+        with _data_connect() as con:
+            cur = con.execute(
+                "SELECT crm_provider FROM admin_setup_profile WHERE id = %s",
+                ("default",),
+            )
+            row = cur.fetchone()
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    # Row may be a tuple or a Row-like depending on cursor settings.
+    raw_val = row[0] if not hasattr(row, "keys") else row["crm_provider"]
+    raw = str(raw_val or "").strip().lower()
+    if not raw:
+        return ""
+    return _CRM_PROVIDER_ALIASES.get(raw, raw.replace(" ", ""))
 
 
 def _merge_crm(raw: Any) -> JsonRecord:

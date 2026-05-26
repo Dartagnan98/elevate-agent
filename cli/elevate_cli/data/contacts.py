@@ -59,6 +59,36 @@ def _row_to_contact(row: sqlite3.Row) -> dict[str, Any]:
         "pipelineStatus": _get("pipeline_status"),
         "pipelineStatusSetAt": _get("pipeline_status_set_at"),
         "pipelineStatusSetBy": _get("pipeline_status_set_by"),
+        # Lofty/CRM enrichment (migrations 0017_contacts_lofty_fields +
+        # 0012_lofty_lead_metadata). Default to None on rows that
+        # predate the migration so callers don't KeyError.
+        "leadSource": _get("lead_source"),
+        "assignedAgent": _get("assigned_agent"),
+        "crmStage": _get("crm_stage"),
+        "leadScore": _get("lead_score"),
+        "tagsJson": _get("tags_json"),
+        "segmentsJson": _get("segments_json"),
+        "leadTypesJson": _get("lead_types_json"),
+        "crmUserId": _get("crm_user_id"),
+        "loftyLeadUserId": _get("lofty_lead_user_id"),
+        "pondId": _get("pond_id"),
+        "pondName": _get("pond_name"),
+        "referredBy": _get("referred_by"),
+        "opportunity": _get("opportunity"),
+        "buyingTimeFrame": _get("buying_time_frame"),
+        "sellingTimeFrame": _get("selling_time_frame"),
+        "preQualStatus": _get("pre_qual_status"),
+        "hasHouseToSell": _get("has_house_to_sell"),
+        "firstTimeHomeBuyer": _get("first_time_home_buyer"),
+        "withBuyerAgent": _get("with_buyer_agent"),
+        "withListingAgent": _get("with_listing_agent"),
+        "mortgageStatus": _get("mortgage_status"),
+        "buyHouseIntent": _get("buy_house_intent"),
+        "cannotText": bool(_get("cannot_text", 0)),
+        "cannotCall": bool(_get("cannot_call", 0)),
+        "cannotEmail": bool(_get("cannot_email", 0)),
+        "unsubscribed": bool(_get("unsubscribed", 0)),
+        "hidden": bool(_get("hidden", 0)),
     }
 
 
@@ -146,6 +176,49 @@ def find_contacts(
 # ─── Writes ────────────────────────────────────────────────────────────
 
 
+# Lofty enrichment columns the connector writes through. Kept as a
+# module-level whitelist so the INSERT and the UPDATE branches stay in
+# lockstep and a new column only needs to be added in one place.
+#
+# Order matters for the INSERT: it must match the column list in the
+# VALUES clause. Update branch keys off the same list via setattr-style
+# dynamic SET.
+_ENRICHMENT_COLUMNS: tuple[str, ...] = (
+    # Lofty linkage
+    "lofty_lead_user_id",
+    "crm_user_id",
+    "lead_source",
+    "assigned_agent",
+    "crm_stage",
+    "lead_score",
+    "tags_json",
+    "segments_json",
+    "lead_types_json",
+    "pond_id",
+    "pond_name",
+    "referred_by",
+    "opportunity",
+    # Buyer/seller qualification (free-form strings from Lofty)
+    "buying_time_frame",
+    "selling_time_frame",
+    "pre_qual_status",
+    "has_house_to_sell",
+    "first_time_home_buyer",
+    "with_buyer_agent",
+    "with_listing_agent",
+    "mortgage_status",
+    "buy_house_intent",
+    # Consent + visibility flags (0/1 ints)
+    "cannot_text",
+    "cannot_call",
+    "cannot_email",
+    "unsubscribed",
+    "hidden",
+    # Activity timestamp from the source system
+    "last_activity_at",
+)
+
+
 def upsert_contact(
     conn: sqlite3.Connection,
     *,
@@ -157,11 +230,20 @@ def upsert_contact(
     stage: str = "cold",
     source_key: str | None = None,
     ingest_run_id: str | None = None,
+    enrichment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Insert a new contact or update an existing one by id or source_key.
 
     Resolution order: explicit ``contact_id`` > ``source_key`` lookup >
     new contact. Returns the resulting row in dict form.
+
+    ``enrichment`` is an optional dict of {column_name: value} pairs
+    drawn from :data:`_ENRICHMENT_COLUMNS`. Keys outside that whitelist
+    are dropped — keeps the writer immune to schema drift and stops
+    JSONL noise from poisoning the contacts row. None values inside the
+    dict are skipped (treated as "don't touch") so successive sync runs
+    don't blank out enrichment fields that vanished from a later API
+    response.
 
     Does NOT write an event — contact creation is an indirect side
     effect of identity resolution and ingest, so the connector code is
@@ -170,6 +252,22 @@ def upsert_contact(
     events because each one is a direct user/agent action.
     """
     now = now_iso()
+
+    # Pre-filter enrichment payload: keep only whitelisted columns whose
+    # values are not None / empty-string. Empty strings explicitly count
+    # as "no value" so Lofty's "" placeholders don't overwrite real data
+    # on the next sync.
+    enrichment = enrichment or {}
+    clean_enrich: dict[str, Any] = {}
+    for col in _ENRICHMENT_COLUMNS:
+        if col not in enrichment:
+            continue
+        value = enrichment[col]
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        clean_enrich[col] = value
 
     existing: sqlite3.Row | None = None
     if contact_id:
@@ -183,26 +281,34 @@ def upsert_contact(
 
     if existing is None:
         cid = contact_id or new_id()
+        base_cols = (
+            "id", "display_name", "primary_email", "primary_phone",
+            "type", "stage", "source_key", "ingest_run_id",
+            "created_at", "updated_at",
+        )
+        base_vals: list[Any] = [
+            cid,
+            display_name,
+            primary_email,
+            primary_phone,
+            type,
+            stage,
+            source_key,
+            ingest_run_id,
+            now,
+            now,
+        ]
+        # Append enrichment columns in deterministic order.
+        all_cols = list(base_cols)
+        for col in _ENRICHMENT_COLUMNS:
+            if col in clean_enrich:
+                all_cols.append(col)
+                base_vals.append(clean_enrich[col])
+        placeholders = ",".join("?" * len(all_cols))
+        column_list = ", ".join(all_cols)
         conn.execute(
-            """
-            INSERT INTO contacts(
-                id, display_name, primary_email, primary_phone,
-                type, stage, source_key, ingest_run_id,
-                created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                cid,
-                display_name,
-                primary_email,
-                primary_phone,
-                type,
-                stage,
-                source_key,
-                ingest_run_id,
-                now,
-                now,
-            ),
+            f"INSERT INTO contacts({column_list}) VALUES ({placeholders})",
+            base_vals,
         )
         return get_contact(conn, cid)  # type: ignore[return-value]
 
@@ -222,6 +328,18 @@ def upsert_contact(
     if ingest_run_id is not None and ingest_run_id != existing["ingest_run_id"]:
         sets.append("ingest_run_id=?")
         params.append(ingest_run_id)
+    # Enrichment columns — only patch when the new value differs from
+    # what's already on the row. _row_to_contact aside, this keeps
+    # updated_at honest (no UPDATE = no timestamp bump).
+    existing_keys = set(existing.keys()) if hasattr(existing, "keys") else set()
+    for col, value in clean_enrich.items():
+        if col not in existing_keys:
+            # Migration hasn't applied for this column on this DB yet —
+            # skip silently rather than 500 the whole sync.
+            continue
+        if value != existing[col]:
+            sets.append(f"{col}=?")
+            params.append(value)
     if sets:
         sets.append("updated_at=?")
         params.extend([now, cid])

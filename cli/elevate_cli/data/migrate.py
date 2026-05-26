@@ -43,6 +43,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+import psycopg
+
+# Tuple of exception classes raised by either backend on a uniqueness or
+# FK violation. The legacy JSONL replay runs against the central store
+# (Postgres) but reads from sqlite source files; both sides can raise.
+_DB_INTEGRITY_ERRORS: tuple[type[Exception], ...] = (
+    sqlite3.IntegrityError,
+    psycopg.errors.IntegrityError,
+)
+
 from elevate_cli.data import (
     add_identity,
     approve_template,
@@ -473,6 +483,179 @@ def _crm_identity_kind_for_source(source_dir: Path) -> str | None:
     return None
 
 
+def _first_str(*candidates: Any) -> str | None:
+    """Return the first non-empty string value from ``candidates``,
+    flattening lists and pulling .email/.phone/.value/.address from dict
+    entries. Used to collapse Lofty's emails[]/phones[] arrays into a
+    primary_email/primary_phone scalar for the contacts row.
+    """
+    def _scan(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                got = _scan(item)
+                if got:
+                    return got
+            return None
+        if isinstance(value, dict):
+            for key in ("value", "address", "email", "phone", "number", "raw"):
+                got = _scan(value.get(key))
+                if got:
+                    return got
+        return None
+    for c in candidates:
+        got = _scan(c)
+        if got:
+            return got
+    return None
+
+
+# Map JSONL row keys → contacts column names. Drives _build_contact_enrichment.
+# Multiple aliases per column let the dict accept whatever shape the source
+# connector emitted (Lofty camelCase, generic snake_case, the connector's
+# normalized form, etc).
+_CONTACT_ENRICHMENT_KEY_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Lofty linkage
+    ("lead_source",          ("lead_source", "source", "leadSource", "leadSourceLabel")),
+    ("assigned_agent",       ("assigned_agent", "assignedUser", "assignedAgent", "assigned_to")),
+    ("crm_stage",            ("crm_stage", "stage_label", "stage", "loftyStage")),
+    ("lead_score",           ("lead_score", "score", "leadScore")),
+    ("crm_user_id",          ("crm_user_id", "assignedUserId", "assigned_user_id")),
+    ("lofty_lead_user_id",   ("lofty_lead_user_id", "leadUserId")),
+    ("pond_id",              ("pond_id", "pondId")),
+    ("pond_name",            ("pond_name", "pondName")),
+    ("referred_by",          ("referred_by", "referredBy")),
+    ("opportunity",          ("opportunity",)),
+    ("buying_time_frame",    ("buying_time_frame", "buyingTimeFrame")),
+    ("selling_time_frame",   ("selling_time_frame", "sellingTimeFrame")),
+    ("pre_qual_status",      ("pre_qual_status", "preQual", "preQualStatus")),
+    ("has_house_to_sell",    ("has_house_to_sell", "houseToSell", "hasHouseToSell")),
+    ("first_time_home_buyer",("first_time_home_buyer", "fthb", "firstTimeHomeBuyer")),
+    ("with_buyer_agent",     ("with_buyer_agent", "withBuyerAgent")),
+    ("with_listing_agent",   ("with_listing_agent", "withListingAgent")),
+    ("mortgage_status",      ("mortgage_status", "mortgage", "mortgageStatus")),
+    ("buy_house_intent",     ("buy_house_intent", "buyHouse", "buyHouseIntent")),
+)
+
+# Consent + visibility flags — sourced as bools/ints, must coerce to 0/1.
+_CONTACT_ENRICHMENT_FLAG_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cannot_text",  ("cannot_text", "cannotText")),
+    ("cannot_call",  ("cannot_call", "cannotCall")),
+    ("cannot_email", ("cannot_email", "cannotEmail")),
+    ("unsubscribed", ("unsubscribed", "unsubscription", "unsubscribed_flag")),
+    ("hidden",       ("hidden", "hiddenFlag", "hidden_flag")),
+)
+
+
+def _coerce_bool_flag(value: Any) -> int | None:
+    """Coerce JSONL bool/int/str to 0/1 for a CHECK-constrained column.
+    Returns None to mean "don't touch" — the column stays at default."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if int(value) else 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if not v:
+            return None
+        if v in {"1", "true", "yes", "y", "t"}:
+            return 1
+        if v in {"0", "false", "no", "n", "f"}:
+            return 0
+    return None
+
+
+def _build_contact_enrichment(row: dict[str, Any]) -> dict[str, Any]:
+    """Pull Lofty/CRM enrichment from a contacts.jsonl row into a flat
+    {column_name: value} dict suitable for ``upsert_contact(enrichment=)``.
+
+    All keys are nullable. Values that came in as Lofty's empty-string
+    placeholder are dropped here so a successive sync that re-pulls a
+    blank field doesn't blank out a previously-populated row.
+    """
+    enrich: dict[str, Any] = {}
+
+    for col, keys in _CONTACT_ENRICHMENT_KEY_MAP:
+        for key in keys:
+            if key not in row:
+                continue
+            value = row[key]
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            enrich[col] = value
+            break
+
+    # lead_score is INTEGER 0-100 — coerce safely, drop if non-numeric.
+    if "lead_score" in enrich:
+        try:
+            score = int(enrich["lead_score"])
+            enrich["lead_score"] = max(0, min(100, score))
+        except (TypeError, ValueError):
+            del enrich["lead_score"]
+
+    # tags[] (list of tagName strings) → tags_json (JSON-encoded array).
+    tags_value = row.get("tags")
+    if isinstance(tags_value, list):
+        tag_names: list[str] = []
+        for item in tags_value:
+            if isinstance(item, str) and item.strip():
+                tag_names.append(item.strip())
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("tagName") or item.get("label")
+                if isinstance(name, str) and name.strip():
+                    tag_names.append(name.strip())
+        if tag_names:
+            enrich["tags_json"] = json.dumps(sorted(set(tag_names)))
+    elif isinstance(tags_value, str) and tags_value.strip().startswith("["):
+        # Already JSON-encoded — accept verbatim if it parses cleanly.
+        try:
+            parsed = json.loads(tags_value)
+            if isinstance(parsed, list):
+                enrich["tags_json"] = tags_value.strip()
+        except (TypeError, ValueError):
+            pass
+
+    # segments[] and lead_types[] — same pattern, but lead_types contains
+    # ints (1=Seller, 2=Buyer, 3=Renter, -1=Other).
+    for src_key, dest_col in (("segments", "segments_json"), ("leadTypes", "lead_types_json"), ("lead_types", "lead_types_json")):
+        value = row.get(src_key)
+        if isinstance(value, list) and value:
+            try:
+                enrich[dest_col] = json.dumps(value)
+            except (TypeError, ValueError):
+                pass
+
+    # Consent + visibility flags.
+    for col, keys in _CONTACT_ENRICHMENT_FLAG_MAP:
+        for key in keys:
+            if key not in row:
+                continue
+            coerced = _coerce_bool_flag(row[key])
+            if coerced is not None:
+                enrich[col] = coerced
+                break
+
+    # last_activity_at: Lofty timestamp on the row. Connector already
+    # writes this into the JSONL as `timestamp` / `last_seen_at` /
+    # `lastActivityTime`. Prefer ISO-ish shape — the column is TEXT, so
+    # we don't enforce strict parsing here.
+    for key in ("last_activity_at", "lastActivityAt", "last_seen_at", "lastActivityTime", "timestamp"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            enrich["last_activity_at"] = value.strip()
+            break
+
+    return enrich
+
+
 def walk_jsonl_source(
     source_dir: Path,
     *,
@@ -576,11 +759,31 @@ def walk_jsonl_source(
                 name_to_write = _better_display_name(existing_name, candidate_name)
             else:
                 name_to_write = candidate_name
+            # Step 3.5: build the enrichment dict from the JSONL row.
+            # Pulls Lofty/CRM lead metadata (source, score, stage label,
+            # tags, qualification fields, consent flags, pond) that the
+            # connector emits into contacts.jsonl. _build_contact_enrichment
+            # is a pure dict-builder; upsert_contact filters by whitelist
+            # so unknown JSONL keys don't reach the DB.
+            enrichment = _build_contact_enrichment(row)
+            # Pull primary email/phone out of the lead's emails[]/phones[]
+            # arrays. The JSONL row stores the raw array under "emails"
+            # and "phones" (singular forms aliased on read). Take the
+            # first non-empty entry as the canonical contact field.
+            primary_email = _first_str(
+                row.get("primary_email"), row.get("email"), row.get("emails")
+            )
+            primary_phone = _first_str(
+                row.get("primary_phone"), row.get("phone"), row.get("phones")
+            )
             contact = upsert_contact(
                 conn,
                 contact_id=resolved_id,
                 source_key=None if resolved_id else source_key,
                 display_name=name_to_write,
+                primary_email=primary_email,
+                primary_phone=primary_phone,
+                enrichment=enrichment,
             )
             contact_by_native[native] = contact["id"]
             if existing_id:
@@ -745,7 +948,7 @@ def walk_jsonl_source(
                     )
                 except Exception:
                     pass
-            except sqlite3.IntegrityError:
+            except _DB_INTEGRITY_ERRORS:
                 stats.messages_skipped += 1
         except Exception as exc:
             stats.errors.append(f"{source_id}/messages:{thread_key}@{ts}: {exc}")
@@ -809,7 +1012,7 @@ def walk_jsonl_source(
                 source_id=source_id,
             )
             stats.lifecycle_events += 1
-        except sqlite3.IntegrityError:
+        except _DB_INTEGRITY_ERRORS:
             pass  # event_hash already present
         except Exception as exc:
             stats.errors.append(

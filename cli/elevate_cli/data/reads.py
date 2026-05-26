@@ -626,26 +626,94 @@ def db_thread_context_response(
                     )
 
                 # Lead detail block — pulled straight from contacts row.
+                # Convert the row to a dict so we can use .get() — the
+                # Lofty enrichment columns (migration 0012) are optional
+                # in older DBs and KeyError'ing here would 500 the drawer.
+                try:
+                    contact_dict = dict(contact)
+                except (TypeError, ValueError):
+                    contact_dict = {
+                        k: contact[k] for k in contact.keys()  # type: ignore[attr-defined]
+                    }
+
                 emails = (
                     [contact["primary_email"]] if contact["primary_email"] else []
                 )
                 phones = (
                     [contact["primary_phone"]] if contact["primary_phone"] else []
                 )
+
+                # Tags: stored as JSON text; decode for the UI.
+                tags_raw = contact_dict.get("tags_json")
+                tags_list: list[Any] = []
+                if isinstance(tags_raw, str) and tags_raw.strip():
+                    try:
+                        parsed = json.loads(tags_raw)
+                        if isinstance(parsed, list):
+                            tags_list = [str(t) for t in parsed if t]
+                    except (TypeError, json.JSONDecodeError):
+                        tags_list = []
+
+                # Same trick for segments / leadTypes — drawer surfaces both.
+                def _decode_json_list(key: str) -> list[Any]:
+                    raw = contact_dict.get(key)
+                    if not isinstance(raw, str) or not raw.strip():
+                        return []
+                    try:
+                        parsed = json.loads(raw)
+                    except (TypeError, json.JSONDecodeError):
+                        return []
+                    return parsed if isinstance(parsed, list) else []
+
+                segments_list = _decode_json_list("segments_json")
+                lead_types_list = _decode_json_list("lead_types_json")
+
+                # Lofty's lead_score (0-100, behavioral) takes priority for
+                # display; fall back to our heat_score so older rows still
+                # show a number.
+                lofty_score = contact_dict.get("lead_score")
+                fallback_score = contact_dict.get("heat_score")
+                display_score = (
+                    lofty_score if lofty_score is not None else fallback_score
+                )
+
                 lead_payload = {
                     "leadId": contact["id"],
                     "displayName": contact["display_name"] or person_name,
                     "stage": contact["stage"],
-                    "leadSource": None,
-                    "assignedUser": None,
-                    "score": None,
-                    "tags": [],
+                    "crmStage": contact_dict.get("crm_stage"),
+                    "leadSource": contact_dict.get("lead_source"),
+                    "assignedUser": contact_dict.get("assigned_agent"),
+                    "score": display_score,
+                    "tags": tags_list,
+                    "segments": segments_list,
+                    "leadTypes": lead_types_list,
                     "summary": contact["owner_notes"],
                     "emails": emails,
                     "phones": phones,
                     "channel": conv["channel"],
                     "timestamp": contact["last_activity_at"],
                     "lastSeenAt": contact["last_activity_at"],
+                    # Qualification / buyer-seller profile from Lofty.
+                    "buyingTimeFrame": contact_dict.get("buying_time_frame"),
+                    "sellingTimeFrame": contact_dict.get("selling_time_frame"),
+                    "preQualStatus": contact_dict.get("pre_qual_status"),
+                    "mortgageStatus": contact_dict.get("mortgage_status"),
+                    "firstTimeHomeBuyer": contact_dict.get("first_time_home_buyer"),
+                    "hasHouseToSell": contact_dict.get("has_house_to_sell"),
+                    "withBuyerAgent": contact_dict.get("with_buyer_agent"),
+                    "withListingAgent": contact_dict.get("with_listing_agent"),
+                    "buyHouseIntent": contact_dict.get("buy_house_intent"),
+                    "opportunity": contact_dict.get("opportunity"),
+                    "referredBy": contact_dict.get("referred_by"),
+                    "pondId": contact_dict.get("pond_id"),
+                    "pondName": contact_dict.get("pond_name"),
+                    # Consent flags — drive the contact toolbar in the drawer.
+                    "cannotText": bool(contact_dict.get("cannot_text") or 0),
+                    "cannotCall": bool(contact_dict.get("cannot_call") or 0),
+                    "cannotEmail": bool(contact_dict.get("cannot_email") or 0),
+                    "unsubscribed": bool(contact_dict.get("unsubscribed") or 0),
+                    "hidden": bool(contact_dict.get("hidden") or 0),
                 }
 
     source_block: dict[str, Any]
