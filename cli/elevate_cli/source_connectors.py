@@ -2433,11 +2433,18 @@ def build_source_inbox_response(
                 totals["hotThreads"] += 1
             threads.append(thread)
 
-        # Read newest entries — the crm tasks.jsonl in particular accumulates
-        # thousands of lead_follow_up records, and the head-of-file 100 are
-        # almost always old. Without tail=True, freshly-appended message_draft
-        # tasks (the things the user actually needs to approve) never show up.
-        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=500, tail=True):
+        # 2026-05-26: drop tail=True. The CRM sync's tasks.jsonl rewrite
+        # preserves drafts at the HEAD of the file (preserved_tasks +
+        # task_records, source_connectors.py:3799) and then appends fresh
+        # lead_follow_up rows. tail=True was the right pick before the
+        # preserve change landed (c6ba97cae) — at that point drafts were
+        # always at the bottom because the file was rewritten from scratch.
+        # Now the opposite is true: tail=True reads only follow-up
+        # tombstones and silently drops every message_draft. For Skyleigh's
+        # Lofty workspace that meant 182 pending drafts → 0 in the inbox.
+        # Bump the limit so a head-scan still picks them all up even after
+        # several sync cycles.
+        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
             if not _is_message_draft_task(record):
                 continue
             task_id = _task_key(record)
@@ -2636,11 +2643,18 @@ def _collect_drafts_for_db_inbox(
         task_states = _as_dict(ui_state.get("tasks"))
         task_state_by_source[source_id] = task_states
 
-        # Read newest entries — the crm tasks.jsonl in particular accumulates
-        # thousands of lead_follow_up records, and the head-of-file 100 are
-        # almost always old. Without tail=True, freshly-appended message_draft
-        # tasks (the things the user actually needs to approve) never show up.
-        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=500, tail=True):
+        # 2026-05-26: drop tail=True. The CRM sync's tasks.jsonl rewrite
+        # preserves drafts at the HEAD of the file (preserved_tasks +
+        # task_records, source_connectors.py:3799) and then appends fresh
+        # lead_follow_up rows. tail=True was the right pick before the
+        # preserve change landed (c6ba97cae) — at that point drafts were
+        # always at the bottom because the file was rewritten from scratch.
+        # Now the opposite is true: tail=True reads only follow-up
+        # tombstones and silently drops every message_draft. For Skyleigh's
+        # Lofty workspace that meant 182 pending drafts → 0 in the inbox.
+        # Bump the limit so a head-scan still picks them all up even after
+        # several sync cycles.
+        for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
             if not _is_message_draft_task(record):
                 continue
             task_id = _task_key(record)
