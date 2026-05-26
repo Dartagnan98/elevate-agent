@@ -796,7 +796,13 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # Determine api_mode from provider / base URL / model
         fb_api_mode = "chat_completions"
         fb_base_url = str(fb_client.base_url)
-        _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
+        # Elevate's AIAgent never had ``_is_azure_openai_url`` ported from
+        # Hermes (we don't use Azure OpenAI), so default to False if the
+        # method isn't on the agent. Keeps the fallback path safe to run
+        # without a NameError when no Azure provider is configured.
+        _fb_is_azure = getattr(
+            agent, "_is_azure_openai_url", lambda _url: False
+        )(fb_base_url)
         if fb_provider == "openai-codex":
             fb_api_mode = "codex_responses"
         elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
