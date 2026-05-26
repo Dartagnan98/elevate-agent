@@ -364,13 +364,40 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
     elif schedule["kind"] == "interval":
         minutes = schedule["minutes"]
+        anchor_weekday = schedule.get("anchor_weekday")
+        anchor_time = schedule.get("anchor_time")
         if last_run_at:
-            # Next run is last_run + interval
-            last = _ensure_aware(datetime.fromisoformat(last_run_at))
-            next_run = last + timedelta(minutes=minutes)
+            base = _ensure_aware(datetime.fromisoformat(last_run_at))
         else:
-            # First run is now + interval
-            next_run = now + timedelta(minutes=minutes)
+            base = now
+
+        # Anchored intervals (e.g. "every Sunday at 03:00") must re-snap to the
+        # configured weekday + wall-clock time on every advance. Pure interval
+        # arithmetic from last_run_at drifts permanently after the first delayed
+        # fire (see Memory benchmark Sunday-slot drift, 2026-05-20).
+        if minutes >= 1440 and (anchor_weekday is not None or anchor_time):
+            hh, mm = 0, 0
+            if anchor_time:
+                try:
+                    hh, mm = (int(x) for x in str(anchor_time).split(":", 1))
+                except (ValueError, AttributeError):
+                    hh, mm = 0, 0
+            candidate = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if anchor_weekday is not None:
+                days_ahead = (int(anchor_weekday) - candidate.weekday()) % 7
+                candidate = candidate + timedelta(days=days_ahead)
+                # Must be strictly after base; if not, jump one full week.
+                while candidate <= base:
+                    candidate = candidate + timedelta(days=7)
+            else:
+                # Daily anchor (anchor_time only): if today's anchor moment has
+                # already passed, roll to tomorrow.
+                while candidate <= base:
+                    candidate = candidate + timedelta(days=1)
+            return candidate.isoformat()
+
+        # Plain interval — last (or now) + period.
+        next_run = base + timedelta(minutes=minutes)
         return next_run.isoformat()
 
     elif schedule["kind"] == "cron":

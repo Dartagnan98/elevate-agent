@@ -162,6 +162,46 @@ class TestComputeNextRun:
         # Should be ~30 minutes from last run
         assert next_dt > datetime.now().astimezone() + timedelta(minutes=29)
 
+    def test_interval_anchored_weekly_resnaps_after_drift(self):
+        # Regression: Memory maintenance benchmark drifted off Sunday after a
+        # delayed fire. Anchored intervals must re-snap to (weekday, time),
+        # not just add `minutes` to last_run_at.
+        schedule = {
+            "kind": "interval",
+            "minutes": 10080,
+            "anchor_weekday": 6,  # Sunday (Python: Mon=0..Sun=6)
+            "anchor_time": "03:00",
+        }
+        # last_run on a Wednesday at 22:09 PT (simulating a delayed fire)
+        last_run = "2026-05-20T22:09:44-07:00"
+        result = compute_next_run(schedule, last_run_at=last_run)
+        next_dt = datetime.fromisoformat(result)
+        assert next_dt.weekday() == 6, f"expected Sunday, got weekday {next_dt.weekday()}"
+        assert (next_dt.hour, next_dt.minute) == (3, 0)
+        # Must be strictly after last_run (no infinite re-fire of same moment)
+        assert next_dt > datetime.fromisoformat(last_run)
+
+    def test_interval_anchored_daily_resnaps_to_time(self):
+        schedule = {
+            "kind": "interval",
+            "minutes": 1440,
+            "anchor_time": "03:00",
+        }
+        last_run = "2026-05-20T22:09:44-07:00"
+        result = compute_next_run(schedule, last_run_at=last_run)
+        next_dt = datetime.fromisoformat(result)
+        assert (next_dt.hour, next_dt.minute) == (3, 0)
+        assert next_dt > datetime.fromisoformat(last_run)
+
+    def test_interval_unanchored_uses_pure_arithmetic(self):
+        # No anchor fields → preserve existing behaviour: last + period.
+        schedule = {"kind": "interval", "minutes": 60}
+        last_run = "2026-05-20T22:09:44-07:00"
+        result = compute_next_run(schedule, last_run_at=last_run)
+        next_dt = datetime.fromisoformat(result)
+        expected = datetime.fromisoformat(last_run) + timedelta(minutes=60)
+        assert next_dt == expected
+
     def test_cron_returns_future(self):
         pytest.importorskip("croniter")
         schedule = {"kind": "cron", "expr": "* * * * *"}  # every minute
