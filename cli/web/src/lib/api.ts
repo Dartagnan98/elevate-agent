@@ -103,11 +103,22 @@ declare global {
 }
 let _sessionToken: string | null = null;
 const SESSION_HEADER = "X-Elevate-Session-Token";
+const GET_CACHE = new Map<
+  string,
+  {
+    expiresAt: number;
+    promise: Promise<unknown>;
+  }
+>();
 
 function setSessionHeader(headers: Headers, token: string): void {
   if (!headers.has(SESSION_HEADER)) {
     headers.set(SESSION_HEADER, token);
   }
+}
+
+function clearGetCache(): void {
+  GET_CACHE.clear();
 }
 
 export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -117,12 +128,38 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
   if (token) {
     setSessionHeader(headers, token);
   }
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET") {
+    clearGetCache();
+  }
   const res = await fetch(`${BASE}${url}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);
   }
+  if (method !== "GET") {
+    clearGetCache();
+  }
   return res.json();
+}
+
+function cachedFetchJSON<T>(url: string, ttlMs: number): Promise<T> {
+  const tokenKey = window.__ELEVATE_SESSION_TOKEN__ ? "session" : "anonymous";
+  const key = `${tokenKey}:${url}`;
+  const now = Date.now();
+  const cached = GET_CACHE.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.promise as Promise<T>;
+  }
+
+  const promise = fetchJSON<T>(url).catch((error) => {
+    if (GET_CACHE.get(key)?.promise === promise) {
+      GET_CACHE.delete(key);
+    }
+    throw error;
+  });
+  GET_CACHE.set(key, { expiresAt: now + ttlMs, promise });
+  return promise;
 }
 
 async function fetchBlob(url: string, init?: RequestInit): Promise<BlobResponse> {
@@ -155,9 +192,10 @@ async function getSessionToken(): Promise<string> {
 }
 
 export const api = {
-  getStatus: () => fetchJSON<StatusResponse>("/api/status"),
-  getAccessStatus: () => fetchJSON<AccessStatusResponse>("/api/access"),
-  getLicenseStatus: () => fetchJSON<LicenseStatusResponse>("/api/license/status"),
+  getStatus: () => cachedFetchJSON<StatusResponse>("/api/status", 1_000),
+  getAccessStatus: () => cachedFetchJSON<AccessStatusResponse>("/api/access", 5_000),
+  getLicenseStatus: () =>
+    cachedFetchJSON<LicenseStatusResponse>("/api/license/status", 5_000),
   activateLicense: (email: string, password: string, backendUrl?: string) =>
     fetchJSON<LicenseActivateResponse>("/api/license/activate", {
       method: "POST",
@@ -183,7 +221,7 @@ export const api = {
     });
     if (options?.includeTotal === false) qs.set("include_total", "false");
     if (options?.includeDetails) qs.set("include_details", "true");
-    return fetchJSON<PaginatedSessions>(`/api/sessions?${qs.toString()}`);
+    return cachedFetchJSON<PaginatedSessions>(`/api/sessions?${qs.toString()}`, 1_000);
   },
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
@@ -426,7 +464,10 @@ export const api = {
 
   // Cron jobs
   getCronJobs: (options?: { compact?: boolean }) =>
-    fetchJSON<CronJob[]>(`/api/cron/jobs${options?.compact ? "?compact=true" : ""}`),
+    cachedFetchJSON<CronJob[]>(
+      `/api/cron/jobs${options?.compact ? "?compact=true" : ""}`,
+      2_000,
+    ),
   createCronJob: (job: CronJobCreateRequest) =>
     fetchJSON<CronJob>("/api/cron/jobs", {
       method: "POST",
@@ -669,7 +710,7 @@ export const api = {
   },
 
   // Skills & Toolsets
-  getSkills: () => fetchJSON<SkillInfo[]>("/api/skills"),
+  getSkills: () => cachedFetchJSON<SkillInfo[]>("/api/skills", 3_000),
   toggleSkill: (name: string, enabled: boolean) =>
     fetchJSON<{ ok: boolean }>("/api/skills/toggle", {
       method: "PUT",
@@ -682,7 +723,7 @@ export const api = {
     const qs = path ? `?path=${encodeURIComponent(path)}` : "";
     return fetchJSON<SkillFileResponse>(`/api/skills/${encodeURIComponent(name)}/file${qs}`);
   },
-  getToolsets: () => fetchJSON<ToolsetInfo[]>("/api/tools/toolsets"),
+  getToolsets: () => cachedFetchJSON<ToolsetInfo[]>("/api/tools/toolsets", 5_000),
 
   // Session search (FTS5)
   searchSessions: (q: string) =>
@@ -778,9 +819,9 @@ export const api = {
   updateElevate: () =>
     fetchJSON<ActionResponse>("/api/elevate/update", { method: "POST" }),
   getUpdateStatus: (refresh = false) =>
-    fetchJSON<UpdateStatusResponse>(
-      `/api/elevate/update/status${refresh ? "?refresh=true" : ""}`,
-    ),
+    refresh
+      ? fetchJSON<UpdateStatusResponse>("/api/elevate/update/status?refresh=true")
+      : cachedFetchJSON<UpdateStatusResponse>("/api/elevate/update/status", 30_000),
   getActionStatus: (name: string, lines = 200) =>
     fetchJSON<ActionStatusResponse>(
       `/api/actions/${encodeURIComponent(name)}/status?lines=${lines}`,
@@ -835,7 +876,10 @@ export const api = {
       qs.set("include_harness", String(options.includeHarness));
     }
     const suffix = qs.toString();
-    return fetchJSON<AgentHubSnapshot>(`/api/agent-hub${suffix ? `?${suffix}` : ""}`);
+    return cachedFetchJSON<AgentHubSnapshot>(
+      `/api/agent-hub${suffix ? `?${suffix}` : ""}`,
+      1_500,
+    );
   },
   updateAgent: (
     agentId: string,

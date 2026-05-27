@@ -60,14 +60,16 @@ export function LoginCard({ onAuthChange }: Props) {
   // regains focus, re-fetch status so the form/card flips without a reload.
   useEffect(() => {
     const handler = () => loadStatus();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") handler();
+    };
     window.addEventListener("elevate:auth-changed", handler);
     window.addEventListener("focus", handler);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") handler();
-    });
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("elevate:auth-changed", handler);
       window.removeEventListener("focus", handler);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [loadStatus]);
 

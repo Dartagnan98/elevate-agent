@@ -87,40 +87,6 @@ import { Toast } from "@/components/Toast";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
-const ConfigPage = lazy(() => import("@/pages/ConfigPage"));
-const DocsPage = lazy(() => import("@/pages/DocsPage"));
-const EnvPage = lazy(() => import("@/pages/EnvPage"));
-const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
-const LogsPage = lazy(() => import("@/pages/LogsPage"));
-const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
-const CronPage = lazy(() => import("@/pages/CronPage"));
-const SkillsPage = lazy(() => import("@/pages/SkillsPage"));
-const ChatPage = lazy(() => import("@/pages/ChatPage"));
-const AgentHubPage = lazy(() => import("@/pages/AgentHubPage"));
-const DesktopSetupPage = lazy(() => import("@/pages/DesktopSetupPage"));
-const ProjectPage = lazy(() => import("@/pages/ProjectPage"));
-const RealEstateAdminPage = lazy(() =>
-  import("@/pages/real-estate-hub/admin").then((m) => ({ default: m.RealEstateAdminPage })),
-);
-const RealEstateTemplatesPage = lazy(() => import("@/pages/RealEstateTemplatesPage"));
-const RealEstateLeadsPage = lazy(() =>
-  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage })),
-);
-const RealEstateMemoryPage = lazy(() =>
-  import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage })),
-);
-const RealEstateSocialMediaPage = lazy(() =>
-  import("@/pages/real-estate-hub/social").then((m) => ({ default: m.RealEstateSocialMediaPage })),
-);
-const RealEstateTasksPage = lazy(() =>
-  import("@/pages/real-estate-hub/tasks").then((m) => ({ default: m.RealEstateTasksPage })),
-);
-const RealEstateTodayPage = lazy(() =>
-  import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage })),
-);
-const AgentOnboardingPage = lazy(() =>
-  import("@/pages/agent-onboarding").then((m) => ({ default: m.AgentOnboardingPage })),
-);
 import { useI18n } from "@/i18n";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
@@ -129,6 +95,118 @@ import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { FullWindowAurora } from "@/components/FullWindowAurora";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
+
+const loadConfigPage = () => import("@/pages/ConfigPage");
+const loadDocsPage = () => import("@/pages/DocsPage");
+const loadEnvPage = () => import("@/pages/EnvPage");
+const loadSessionsPage = () => import("@/pages/SessionsPage");
+const loadLogsPage = () => import("@/pages/LogsPage");
+const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
+const loadCronPage = () => import("@/pages/CronPage");
+const loadSkillsPage = () => import("@/pages/SkillsPage");
+const loadChatPage = () => import("@/pages/ChatPage");
+const loadAgentHubPage = () => import("@/pages/AgentHubPage");
+const loadDesktopSetupPage = () => import("@/pages/DesktopSetupPage");
+const loadProjectPage = () => import("@/pages/ProjectPage");
+const loadRealEstateAdminPage = () =>
+  import("@/pages/real-estate-hub/admin").then((m) => ({ default: m.RealEstateAdminPage }));
+const loadRealEstateTemplatesPage = () => import("@/pages/RealEstateTemplatesPage");
+const loadRealEstateLeadsPage = () =>
+  import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage }));
+const loadRealEstateMemoryPage = () =>
+  import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage }));
+const loadRealEstateSocialMediaPage = () =>
+  import("@/pages/real-estate-hub/social").then((m) => ({ default: m.RealEstateSocialMediaPage }));
+const loadRealEstateTasksPage = () =>
+  import("@/pages/real-estate-hub/tasks").then((m) => ({ default: m.RealEstateTasksPage }));
+const loadRealEstateTodayPage = () =>
+  import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage }));
+const loadAgentOnboardingPage = () =>
+  import("@/pages/agent-onboarding").then((m) => ({ default: m.AgentOnboardingPage }));
+
+const ConfigPage = lazy(loadConfigPage);
+const DocsPage = lazy(loadDocsPage);
+const EnvPage = lazy(loadEnvPage);
+const SessionsPage = lazy(loadSessionsPage);
+const LogsPage = lazy(loadLogsPage);
+const AnalyticsPage = lazy(loadAnalyticsPage);
+const CronPage = lazy(loadCronPage);
+const SkillsPage = lazy(loadSkillsPage);
+const ChatPage = lazy(loadChatPage);
+const AgentHubPage = lazy(loadAgentHubPage);
+const DesktopSetupPage = lazy(loadDesktopSetupPage);
+const ProjectPage = lazy(loadProjectPage);
+const RealEstateAdminPage = lazy(loadRealEstateAdminPage);
+const RealEstateTemplatesPage = lazy(loadRealEstateTemplatesPage);
+const RealEstateLeadsPage = lazy(loadRealEstateLeadsPage);
+const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
+const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
+const RealEstateTasksPage = lazy(loadRealEstateTasksPage);
+const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
+const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
+
+const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
+  "/today": loadRealEstateTodayPage,
+  "/leads": loadRealEstateLeadsPage,
+  "/admin": loadRealEstateAdminPage,
+  "/admin/templates": loadRealEstateTemplatesPage,
+  "/social-media": loadRealEstateSocialMediaPage,
+  "/tasks": loadRealEstateTasksPage,
+  "/memory": loadRealEstateMemoryPage,
+  "/hub": loadAgentHubPage,
+  "/chat": loadChatPage,
+  "/desktop-setup": loadDesktopSetupPage,
+  "/agent-onboarding": loadAgentOnboardingPage,
+  "/project": loadProjectPage,
+  "/sessions": loadSessionsPage,
+  "/analytics": loadAnalyticsPage,
+  "/logs": loadLogsPage,
+  "/cron": loadCronPage,
+  "/skills": loadSkillsPage,
+  "/config": loadConfigPage,
+  "/env": loadEnvPage,
+  "/docs": loadDocsPage,
+};
+
+const PRELOADED_ROUTES = new Set<string>();
+
+function normalizePreloadPath(path: string): string {
+  const base = path.split(/[?#]/)[0]?.replace(/\/$/, "") || "/";
+  if (base === "/marketing") return "/social-media";
+  if (base === "/listings" || base === "/deals") return "/admin";
+  if (base === "/approvals") return "/today";
+  return base;
+}
+
+function preloadRoute(path: string): void {
+  const key = normalizePreloadPath(path);
+  const loader = ROUTE_PRELOADERS[key];
+  if (!loader || PRELOADED_ROUTES.has(key)) return;
+  PRELOADED_ROUTES.add(key);
+  void loader().catch(() => {
+    PRELOADED_ROUTES.delete(key);
+  });
+}
+
+function scheduleRouteWarmup(paths: string[]): () => void {
+  let cancelled = false;
+  const uniquePaths = Array.from(new Set(paths)).filter(Boolean);
+  const timers: number[] = [];
+  const start = window.setTimeout(() => {
+    uniquePaths.forEach((path, index) => {
+      const id = window.setTimeout(() => {
+        if (!cancelled) preloadRoute(path);
+      }, index * 90);
+      timers.push(id);
+    });
+  }, 350);
+  timers.push(start);
+
+  return () => {
+    cancelled = true;
+    timers.forEach((id) => window.clearTimeout(id));
+  };
+}
 
 function RootRedirect() {
   return <Navigate to="/today" replace />;
@@ -509,7 +587,6 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    setAccessChecked(false);
     api
       .getAccessStatus()
       .then((status) => {
@@ -556,21 +633,53 @@ export default function App() {
     // existing auth-changed event only fires on local login/logout, which
     // misses remote revocations entirely.
     const onFocus = () => setAccessVersion((v) => v + 1);
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", () => {
+    const onVisibility = () => {
       if (document.visibilityState === "visible") onFocus();
-    });
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     const interval = window.setInterval(onFocus, 30_000);
 
     return () => {
       window.removeEventListener("elevate:auth-changed", handler);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(interval);
     };
   }, []);
 
   const realEstatePacks = accessStatus?.packs ?? DEFAULT_REAL_ESTATE_PACKS;
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
+
+  useEffect(() => {
+    preloadRoute(pathname);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!licenseChecked || !licenseStatus?.authenticated || !accessChecked) return;
+    const warmPaths = [
+      embeddedChat ? "/chat" : "/hub",
+      realEstateDashboard ? "/today" : "/hub",
+      realEstatePacks.realEstateSales ? "/leads" : "",
+      realEstatePacks.realEstateAdmin ? "/admin" : "",
+      realEstatePacks.realEstateMarketing ? "/social-media" : "",
+      "/tasks",
+      "/memory",
+      "/skills",
+      "/cron",
+      "/hub",
+    ];
+    return scheduleRouteWarmup(warmPaths);
+  }, [
+    accessChecked,
+    embeddedChat,
+    licenseChecked,
+    licenseStatus?.authenticated,
+    realEstateDashboard,
+    realEstatePacks.realEstateAdmin,
+    realEstatePacks.realEstateMarketing,
+    realEstatePacks.realEstateSales,
+  ]);
 
   const builtinRoutes = useMemo(
     () => buildAccessControlledBuiltinRoutes(embeddedChat, realEstatePacks, !accessChecked),
@@ -730,6 +839,7 @@ export default function App() {
               embeddedChat={embeddedChat}
               navItems={navItems}
               onNavigate={closeMobile}
+              onPreloadRoute={preloadRoute}
               onToggleSidebar={toggleSidebar}
               readyToLoad={accessChecked}
               realEstatePacks={realEstatePacks}
@@ -910,6 +1020,7 @@ function DesktopSidebar({
   embeddedChat,
   navItems,
   onNavigate,
+  onPreloadRoute,
   onToggleSidebar,
   readyToLoad,
   realEstatePacks,
@@ -917,6 +1028,7 @@ function DesktopSidebar({
   embeddedChat: boolean;
   navItems: NavItem[];
   onNavigate: () => void;
+  onPreloadRoute?: (path: string) => void;
   onToggleSidebar: () => void;
   readyToLoad: boolean;
   realEstatePacks: RealEstatePackAccess;
@@ -1189,6 +1301,7 @@ function DesktopSidebar({
     realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
   const go = (path: string) => {
+    onPreloadRoute?.(path);
     navigate(path);
     onNavigate();
   };
@@ -1529,6 +1642,7 @@ function DesktopSidebar({
                     label={item.label}
                     path={item.path}
                     onNavigate={go}
+                    onPreload={onPreloadRoute}
                   />
                 ))}
               </div>
@@ -1545,11 +1659,41 @@ function DesktopSidebar({
           </SidebarSectionLabel>
           {!collapsedSections.agent && (
             <div className="space-y-0.5">
-              <SidebarAction icon={Bot} label="Agent Hub" path="/hub" onNavigate={go} />
-              <SidebarAction icon={ListChecks} label="Tasks" path="/tasks" onNavigate={go} />
-              <SidebarAction icon={Brain} label="Memory" path="/memory" onNavigate={go} />
-              <SidebarAction icon={Puzzle} label="Skills" path="/skills" onNavigate={go} />
-              <SidebarAction icon={Clock} label="Automations" path="/cron" onNavigate={go} />
+              <SidebarAction
+                icon={Bot}
+                label="Agent Hub"
+                path="/hub"
+                onNavigate={go}
+                onPreload={onPreloadRoute}
+              />
+              <SidebarAction
+                icon={ListChecks}
+                label="Tasks"
+                path="/tasks"
+                onNavigate={go}
+                onPreload={onPreloadRoute}
+              />
+              <SidebarAction
+                icon={Brain}
+                label="Memory"
+                path="/memory"
+                onNavigate={go}
+                onPreload={onPreloadRoute}
+              />
+              <SidebarAction
+                icon={Puzzle}
+                label="Skills"
+                path="/skills"
+                onNavigate={go}
+                onPreload={onPreloadRoute}
+              />
+              <SidebarAction
+                icon={Clock}
+                label="Automations"
+                path="/cron"
+                onNavigate={go}
+                onPreload={onPreloadRoute}
+              />
             </div>
           )}
         </div>
@@ -1604,6 +1748,7 @@ function DesktopSidebar({
               openSession(latest);
               return;
             }
+            onPreloadRoute?.("/cron");
             navigate(`/cron#cron-job-${jobId}`);
             onNavigate();
           }}
@@ -1627,6 +1772,7 @@ function DesktopSidebar({
                     label={navLabel(item)}
                     path={item.path}
                     onNavigate={go}
+                    onPreload={onPreloadRoute}
                   />
                 ))}
               </div>
@@ -1696,19 +1842,25 @@ function SidebarAction({
   icon: Icon,
   label,
   onNavigate,
+  onPreload,
   path,
   primary = false,
 }: {
   icon: ComponentType<{ className?: string }>;
   label: string;
   onNavigate: (path: string) => void;
+  onPreload?: (path: string) => void;
   path: string;
   primary?: boolean;
 }) {
+  const handleIntent = () => onPreload?.(path);
   return (
     <NavLink
       to={path}
       end={path === "/today" || path === "/hub" || path === "/sessions"}
+      onFocus={handleIntent}
+      onPointerEnter={handleIntent}
+      onTouchStart={handleIntent}
       onClick={(event) => {
         event.preventDefault();
         onNavigate(path);
