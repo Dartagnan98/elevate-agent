@@ -43,6 +43,18 @@ dependencies = [
   # Replaces POSIX-only os.kill / os.killpg idioms that silently break
   # on Windows.
   "psutil>=7.0,<8",
+  # Embedded Postgres data layer.  pgserver ships a bundled Postgres 16
+  # binary (~80MB, one-time download into ~/.cache/pgserver/) so end users
+  # don't have to install Postgres themselves; psycopg[binary] is the
+  # async driver the gateway uses.  Required at first boot — gateway
+  # crashes on import without these.
+  "pgserver>=0.1.4,<1",
+  "psycopg[binary]>=3.3.4,<4",
+  "psycopg-pool>=3.3.1,<4",
+  # Note: pgvector is a Postgres-side EXTENSION (CREATE EXTENSION vector),
+  # bundled inside pgserver's Postgres 16 binary.  No Python-side import.
+  # Vectors are currently stored as bytea; the extension is loaded so the
+  # schema can later move to native vector(N) columns without re-init.
 ]
 
 [project.optional-dependencies]

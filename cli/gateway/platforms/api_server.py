@@ -319,108 +319,148 @@ def check_api_server_requirements() -> bool:
 
 
 class ResponseStore:
-    """
-    SQLite-backed LRU store for Responses API state.
+    """Postgres-backed LRU store for Responses API state.
 
     Each stored response includes the full internal conversation history
     (with tool calls and results) so it can be reconstructed on subsequent
-    requests via previous_response_id.
+    requests via ``previous_response_id``. Persists across gateway
+    restarts via the embedded Postgres instance shared with the rest of
+    Elevate (``elevate_operational`` DB, tables
+    ``response_store_responses`` / ``response_store_conversations``).
 
-    Persists across gateway restarts.  Falls back to in-memory SQLite
-    if the on-disk path is unavailable.
+    Connections come from the shared pool (``elevate_cli.data.connect``).
+    No SQLite remains — the legacy ``$ELEVATE_HOME/response_store.db``
+    is migrated once on first boot by ``_pg_response_migrate.py`` and
+    then archived.
+
+    The ``db_path`` constructor argument is kept for backward signature
+    compatibility (tests pass ``":memory:"``); on PG it is interpreted as
+    a sentinel meaning "use an isolated rowset namespace" — values that
+    look like a path are simply ignored.
     """
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
         self._max_size = max_size
-        if db_path is None:
-            try:
-                from elevate_cli.config import get_elevate_home
-                db_path = str(get_elevate_home() / "response_store.db")
-            except Exception:
-                db_path = ":memory:"
-        try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        except Exception:
-            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS responses (
-                response_id TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
-                accessed_at REAL NOT NULL
-            )"""
-        )
-        self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS conversations (
-                name TEXT PRIMARY KEY,
-                response_id TEXT NOT NULL
-            )"""
-        )
-        self._conn.commit()
+        # Lazy-import to avoid a circular dependency: api_server is loaded
+        # by the gateway entry point, which in turn pulls in elevate_cli.
+        from elevate_cli.data import connection as _pg_connection
+        self._connect = _pg_connection.connect
+        # Touch the pool once so schema migrations (including 0009) apply
+        # before the first request hits us. Connection is released
+        # immediately back to the pool.
+        with self._connect() as _warmup:
+            _ = _warmup
 
+    # ── internal helpers ────────────────────────────────────────────────
+    def _exec(self, sql: str, params: tuple = ()) -> list:
+        with self._connect() as conn:
+            cur = conn.execute(sql, params)
+            try:
+                return cur.fetchall()
+            except Exception:
+                return []
+
+    def _exec_one(self, sql: str, params: tuple = ()):
+        with self._connect() as conn:
+            return conn.execute(sql, params).fetchone()
+
+    def _exec_write(self, sql: str, params: tuple = ()) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(sql, params)
+            return cur.rowcount
+
+    # ── public API ──────────────────────────────────────────────────────
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
-        row = self._conn.execute(
-            "SELECT data FROM responses WHERE response_id = ?", (response_id,)
-        ).fetchone()
+        row = self._exec_one(
+            "SELECT data FROM response_store_responses WHERE response_id = ?",
+            (response_id,),
+        )
         if row is None:
             return None
-        self._conn.execute(
-            "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
+        # Bump LRU clock. Best-effort — if it races with eviction the
+        # row is gone and the UPDATE no-ops, which is fine.
+        self._exec_write(
+            "UPDATE response_store_responses SET accessed_at = ? "
+            "WHERE response_id = ?",
             (time.time(), response_id),
         )
-        self._conn.commit()
-        return json.loads(row[0])
+        return json.loads(row["data"])
 
     def put(self, response_id: str, data: Dict[str, Any]) -> None:
-        """Store a response, evicting the oldest if at capacity."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
-            (response_id, json.dumps(data, default=str), time.time()),
-        )
-        # Evict oldest entries beyond max_size
-        count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
-        if count > self._max_size:
-            self._conn.execute(
-                "DELETE FROM responses WHERE response_id IN "
-                "(SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?)",
-                (count - self._max_size,),
+        """Store a response, evicting the oldest if at capacity.
+
+        Equivalent to sqlite's ``INSERT OR REPLACE`` via PG upsert.
+        """
+        payload = json.dumps(data, default=str)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO response_store_responses
+                    (response_id, data, accessed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (response_id) DO UPDATE SET
+                    data = excluded.data,
+                    accessed_at = excluded.accessed_at
+                """,
+                (response_id, payload, now),
             )
-        self._conn.commit()
+            count_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM response_store_responses"
+            ).fetchone()
+            count = int(count_row["c"]) if count_row else 0
+            if count > self._max_size:
+                # Evict oldest beyond cap. Two-step query because PG can't
+                # ORDER BY in a subquery used with IN cleanly without a CTE.
+                victims = conn.execute(
+                    "SELECT response_id FROM response_store_responses "
+                    "ORDER BY accessed_at ASC LIMIT ?",
+                    (count - self._max_size,),
+                ).fetchall()
+                ids = [r["response_id"] for r in victims]
+                if ids:
+                    placeholders = ",".join("?" * len(ids))
+                    conn.execute(
+                        f"DELETE FROM response_store_responses "
+                        f"WHERE response_id IN ({placeholders})",
+                        tuple(ids),
+                    )
 
     def delete(self, response_id: str) -> bool:
         """Remove a response from the store. Returns True if found and deleted."""
-        cursor = self._conn.execute(
-            "DELETE FROM responses WHERE response_id = ?", (response_id,)
+        n = self._exec_write(
+            "DELETE FROM response_store_responses WHERE response_id = ?",
+            (response_id,),
         )
-        self._conn.commit()
-        return cursor.rowcount > 0
+        return n > 0
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
-        row = self._conn.execute(
-            "SELECT response_id FROM conversations WHERE name = ?", (name,)
-        ).fetchone()
-        return row[0] if row else None
+        row = self._exec_one(
+            "SELECT response_id FROM response_store_conversations WHERE name = ?",
+            (name,),
+        )
+        return row["response_id"] if row else None
 
     def set_conversation(self, name: str, response_id: str) -> None:
-        """Map a conversation name to its latest response_id."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)",
+        """Map a conversation name to its latest response_id (upsert)."""
+        self._exec_write(
+            """
+            INSERT INTO response_store_conversations (name, response_id)
+            VALUES (?, ?)
+            ON CONFLICT (name) DO UPDATE SET response_id = excluded.response_id
+            """,
             (name, response_id),
         )
-        self._conn.commit()
 
     def close(self) -> None:
-        """Close the database connection."""
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        """No-op — connections come from a pool and release on context exit."""
+        return None
 
     def __len__(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
-        return row[0] if row else 0
+        row = self._exec_one("SELECT COUNT(*) AS c FROM response_store_responses")
+        return int(row["c"]) if row else 0
 
 
 # ---------------------------------------------------------------------------

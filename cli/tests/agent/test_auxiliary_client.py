@@ -1468,3 +1468,41 @@ class TestAnthropicExplicitApiKey:
 
         assert client is not None
         assert mock_build.call_args.args[0] == "explicit-fallback-key"
+
+
+class TestCodexCompletionsAdapter:
+    def test_recovers_streamed_text_when_final_response_output_is_none(self):
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+
+        class _Event:
+            def __init__(self, event_type, delta=""):
+                self.type = event_type
+                self.delta = delta
+
+        class _BrokenStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                yield _Event("response.output_text.delta", "Recovered ")
+                yield _Event("response.output_text.delta", "title")
+                raise TypeError("'NoneType' object is not iterable")
+
+        class _Responses:
+            def stream(self, **_kwargs):
+                return _BrokenStream()
+
+        client = MagicMock()
+        client.responses = _Responses()
+
+        response = _CodexCompletionsAdapter(client, "gpt-5.5").create(
+            messages=[
+                {"role": "system", "content": "title only"},
+                {"role": "user", "content": "make a title"},
+            ]
+        )
+
+        assert response.choices[0].message.content == "Recovered title"

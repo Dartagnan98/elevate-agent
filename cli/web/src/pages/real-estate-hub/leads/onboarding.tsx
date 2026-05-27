@@ -362,33 +362,41 @@ function LeadsOnboardingWizard({
   const navigate = useNavigate();
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
 
+  const promptForConnector = useCallback(async (connector: SourceConnectorStatus) => {
+    const existing = (connector.prompt || "").trim();
+    if (existing) return existing;
+    const resp = await api.getSourceConnectorPrompt(connector.id);
+    return (resp.prompt || "").trim();
+  }, []);
+
   const runPrompt = useCallback(
-    (connector: SourceConnectorStatus) => {
+    async (connector: SourceConnectorStatus) => {
       setRunningPromptId(connector.id);
-      const prompt = (connector.prompt || "").trim();
-      if (!prompt) {
-        setRunningPromptId(null);
-        return;
-      }
-      const ts = String(Date.now());
-      const seedText = `Source connector: ${connector.label} (${connector.id})\n\n${prompt}`;
       try {
-        window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, seedText);
-      } catch {
-        // sessionStorage disabled — navigate anyway, user can paste manually.
+        const prompt = await promptForConnector(connector);
+        if (!prompt) return;
+        const ts = String(Date.now());
+        const seedText = `Source connector: ${connector.label} (${connector.id})\n\n${prompt}`;
+        try {
+          window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, seedText);
+        } catch {
+          // sessionStorage disabled — navigate anyway, user can paste manually.
+        }
+        navigate(`/chat?new=${ts}&seed=${ts}`);
+      } finally {
+        setRunningPromptId(null);
       }
-      navigate(`/chat?new=${ts}&seed=${ts}`);
     },
-    [navigate],
+    [navigate, promptForConnector],
   );
 
   const copyPrompt = useCallback(async (connector: SourceConnectorStatus) => {
     try {
-      await navigator.clipboard.writeText(connector.prompt || "");
+      await navigator.clipboard.writeText(await promptForConnector(connector));
     } catch {
       // clipboard unavailable — silent fail
     }
-  }, []);
+  }, [promptForConnector]);
 
   type TemplateEditor =
     | { mode: "create"; lane: string; name: string; body: string }
@@ -712,8 +720,8 @@ function LeadsOnboardingWizard({
                             size="sm"
                             variant="default"
                             className="ml-auto h-7 gap-1 px-2 text-[11.5px]"
-                            disabled={runningPromptId === connector.id || !connector.prompt}
-                            onClick={() => runPrompt(connector)}
+                            disabled={runningPromptId === connector.id}
+                            onClick={() => void runPrompt(connector)}
                             aria-label={`Run setup prompt for ${connector.label}`}
                           >
                             <Play className="h-3 w-3" />
@@ -724,7 +732,6 @@ function LeadsOnboardingWizard({
                             variant="ghost"
                             className="h-7 px-2"
                             onClick={() => void copyPrompt(connector)}
-                            disabled={!connector.prompt}
                             aria-label={`Copy setup prompt for ${connector.label}`}
                             title="Copy prompt text"
                           >

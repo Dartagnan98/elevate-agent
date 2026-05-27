@@ -1051,12 +1051,30 @@ _store_cache: dict[str, OrchestrationStore] = {}
 _store_cache_lock = threading.Lock()
 
 
-def get_orchestration_store(db_path: Optional[Path | str] = None) -> OrchestrationStore:
-    path = Path(db_path) if db_path else _default_db_path()
-    key = str(path.resolve()) if path != Path(":memory:") else f":memory:{time.time_ns()}"
-    with _store_cache_lock:
-        store = _store_cache.get(key)
-        if store is None:
-            store = OrchestrationStore(path)
-            _store_cache[key] = store
-        return store
+def get_orchestration_store(db_path: Optional[Path | str] = None):
+    """Return the orchestration store.
+
+    Default path: the embedded Postgres-backed
+    ``OrchestrationStorePg``. The legacy SQLite ``OrchestrationStore`` is
+    still available when an explicit ``db_path`` is supplied (used by
+    tests + the one-shot data-migration script in
+    ``elevate_cli/data/_aux_data_migrate.py``).
+    """
+    if db_path is not None:
+        path = Path(db_path)
+        key = (
+            str(path.resolve())
+            if path != Path(":memory:")
+            else f":memory:{time.time_ns()}"
+        )
+        with _store_cache_lock:
+            store = _store_cache.get(key)
+            if store is None:
+                store = OrchestrationStore(path)
+                _store_cache[key] = store
+            return store
+
+    # Default: Postgres-backed singleton.
+    from elevate_cli.data.orchestration import get_orchestration_store_pg
+
+    return get_orchestration_store_pg()

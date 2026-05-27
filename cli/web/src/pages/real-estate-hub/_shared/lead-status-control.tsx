@@ -3,7 +3,7 @@ import { Loader2 } from "lucide-react";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
-import type { SourceInboxProfileStatus } from "@/lib/api";
+import type { SourceInboxProfileStatus, SourceInboxResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const STATUS_OPTIONS: Array<{ value: SourceInboxProfileStatus | "none"; label: string }> = [
@@ -46,7 +46,7 @@ export function LeadStatusControl({
 }: {
   profileId: string;
   status: SourceInboxProfileStatus | null;
-  onChanged?: () => void | Promise<void>;
+  onChanged?: (nextInbox?: SourceInboxResponse) => void | Promise<void>;
   className?: string;
   selectClassName?: string;
   selectButtonClassName?: string;
@@ -61,8 +61,8 @@ export function LeadStatusControl({
     setError(null);
     try {
       const value = next === "none" ? null : (next as SourceInboxProfileStatus);
-      await api.updateSourceInboxProfile(profileId, value);
-      await onChanged?.();
+      const nextInbox = await api.updateSourceInboxProfile(profileId, value);
+      await onChanged?.(nextInbox);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

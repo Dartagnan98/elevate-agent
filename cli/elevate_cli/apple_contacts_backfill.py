@@ -206,11 +206,12 @@ def _extract_handle_from_display_name(display_name: str | None) -> tuple[str | N
     return None, None
 
 
-def _safe_check_identity_conflicts_table(conn: sqlite3.Connection) -> bool:
+def _safe_check_identity_conflicts_table(conn) -> bool:
     """identity_conflicts was added in an early migration; guard against
-    older DBs missing it."""
+    older DBs missing it. Postgres lookup via information_schema."""
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_conflicts'"
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_name='identity_conflicts'"
     ).fetchone()
     return row is not None
 

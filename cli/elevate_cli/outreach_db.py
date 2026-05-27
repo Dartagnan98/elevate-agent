@@ -1,8 +1,17 @@
-"""SQLite store for outreach templates, draft attempts, and outcomes.
+"""Outreach store for templates, draft attempts, send queue, and outcomes.
 
-Lives at <tools_root>/data/outreach/outreach.db. The schema is small on purpose:
-the agent picks a template, writes a draft, the human approves, and we record
-which template produced which message and whether the lead replied.
+Originally a sqlite file at ``<tools_root>/data/outreach/outreach.db``;
+now backed by the central embedded Postgres (DB ``elevate_operational``)
+via ``elevate_cli.data.connection``. The on-disk schema lives in
+``data/migrations_pg/0011_outreach_store.sql`` and is applied on the
+first ``data.connection.connect()`` call in the process. Legacy sqlite
+rows are imported once by ``_pg_outreach_migrate.py`` (sentinel 9009)
+on first boot after the cutover.
+
+Call sites still use unprefixed table names (``templates``,
+``draft_attempts``, etc.); migration 0011 ships compat views over the
+prefixed ``outreach_*`` tables so this SQL surface keeps working
+unchanged.
 """
 
 from __future__ import annotations
@@ -16,8 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+import psycopg
+
 from elevate_cli.config import load_config
 from elevate_cli.source_connectors import _candidate_tools_root
+from elevate_cli.data import connection as _data_connection
 
 
 LANES = ("new-outreach", "hot-leads-watcher", "follow-ups")
@@ -87,197 +99,95 @@ def _now() -> str:
 
 
 def db_path() -> Path:
+    """Legacy on-disk sqlite path.
+
+    Still computed so callers that probe / archive the old file have a
+    stable answer, but no longer opened — the live store is PG. The
+    one-shot importer (``_pg_outreach_migrate.py``) reads from this
+    location on first boot and is idempotent thereafter.
+    """
     config = load_config()
     root = _candidate_tools_root(config) / "data" / "outreach"
     root.mkdir(parents=True, exist_ok=True)
     return root / "outreach.db"
 
 
-@contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
-    path = db_path()
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
-    try:
-        _ensure_schema(conn)
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+# Module-level guard so the v2 template seed runs at most once per process
+# (and only when the PG ``outreach_meta`` row is missing). Skipping the
+# probe round-trip on every connect() shaves a few ms off hot paths like
+# the draft pipeline that opens dozens of short-lived connections.
+_SEEDED_THIS_PROCESS = False
 
 
 @contextmanager
-def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """Explicit IMMEDIATE transaction for multi-write atomicity.
+def connect() -> Iterator[Any]:
+    """Open a PG-backed outreach connection.
 
-    Use when callers need an exclusive write lock for the whole block (e.g. approve
-    -> enqueue must atomically pair the task-state flip with the send_queue insert).
+    Delegates to ``data.connection.connect()`` so the connection comes
+    from the shared pool, picks up schema migrations on the first call,
+    and commits-or-rolls-back on context exit. The yielded object is a
+    ``PgConnection`` shim with the sqlite-style ``execute() / cursor() /
+    row[0|"col"] / executescript()`` surface, so the 80+ call sites in
+    this module keep working unchanged.
+
+    The legacy sqlite path (``db_path()``) is not touched here — the
+    one-shot importer handles it once at gateway boot.
     """
-    if conn.in_transaction:
-        conn.execute("ROLLBACK")
-    conn.execute("BEGIN IMMEDIATE")
-    try:
+    with _data_connection.connect() as conn:
+        _maybe_seed_templates(conn)
         yield conn
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS templates (
-            id TEXT PRIMARY KEY,
-            lane TEXT NOT NULL,
-            name TEXT NOT NULL,
-            body TEXT NOT NULL,
-            channel TEXT NOT NULL DEFAULT 'any',
-            active INTEGER NOT NULL DEFAULT 1,
-            uses INTEGER NOT NULL DEFAULT 0,
-            replies INTEGER NOT NULL DEFAULT 0,
-            wins INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+@contextmanager
+def transaction(conn) -> Iterator[Any]:
+    """Explicit write-transaction wrapper, atomic over multiple statements.
 
-        CREATE INDEX IF NOT EXISTS idx_templates_lane ON templates(lane, active);
+    Sqlite-era contract was ``BEGIN IMMEDIATE`` so concurrent writers
+    serialize cleanly (approve → enqueue must atomically pair the
+    task-state flip with the send_queue insert). PG gives us the same
+    guarantee through MVCC + the outer
+    ``data.connection.transaction()`` wrapper, which rolls back on
+    exception and commits on clean exit.
+    """
+    with _data_connection.transaction(conn):
+        yield conn
 
-        -- (lane, name) is the natural key for templates — the seed list keys
-        -- on it and seed_all_templates() relies on it for idempotent re-seeds.
-        -- The UNIQUE INDEX is created after a defensive de-dupe pass below
-        -- so legacy DBs don't fail the migration.
 
-        CREATE TABLE IF NOT EXISTS draft_attempts (
-            id TEXT PRIMARY KEY,
-            template_id TEXT NOT NULL,
-            lane TEXT NOT NULL,
-            source_id TEXT,
-            thread_id TEXT,
-            task_id TEXT,
-            status TEXT NOT NULL DEFAULT 'drafted',
-            created_at TEXT NOT NULL,
-            outcome_recorded_at TEXT,
-            outcome TEXT,
-            FOREIGN KEY(template_id) REFERENCES templates(id)
-        );
+def _maybe_seed_templates(conn) -> None:
+    """Seed the v2 template set on first PG connection if not already seeded.
 
-        CREATE INDEX IF NOT EXISTS idx_attempts_template ON draft_attempts(template_id);
-        CREATE INDEX IF NOT EXISTS idx_attempts_thread ON draft_attempts(thread_id);
+    The DDL itself lives in ``0011_outreach_store.sql`` (tables + indexes
+    + compat views) so we don't need the sqlite-era ``CREATE TABLE IF NOT
+    EXISTS`` / additive-column / unique-index dance here. What this
+    function preserves is the seed-once behaviour: any fresh install
+    (and the cutover from the empty 0-byte sqlite file on
+    Dartagnan's box) needs the SEED_TEMPLATES set inserted into the
+    new PG tables so the agent has lanes to draft against. ``INSERT OR
+    IGNORE INTO templates`` keeps user-edited templates intact — only
+    new (lane, name) pairs get inserted.
+    """
+    global _SEEDED_THIS_PROCESS
+    if _SEEDED_THIS_PROCESS:
+        return
 
-        CREATE TABLE IF NOT EXISTS send_queue (
-            id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            source_id TEXT NOT NULL,
-            thread_id TEXT NOT NULL,
-            task_id TEXT NOT NULL,
-            channel TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'queued',
-            attempts INTEGER NOT NULL DEFAULT 0,
-            next_retry_at TEXT,
-            last_error TEXT,
-            provider_message_id TEXT,
-            attempt_id TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_send_queue_status ON send_queue(status, next_retry_at);
-        CREATE INDEX IF NOT EXISTS idx_send_queue_task ON send_queue(source_id, thread_id, task_id);
-
-        CREATE TABLE IF NOT EXISTS thread_meta (
-            source_id TEXT NOT NULL,
-            thread_id TEXT NOT NULL,
-            score INTEGER NOT NULL DEFAULT 0,
-            label TEXT NOT NULL DEFAULT 'unknown',
-            reason TEXT,
-            scored_by TEXT,
-            scored_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (source_id, thread_id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_thread_meta_label ON thread_meta(label);
-        CREATE INDEX IF NOT EXISTS idx_thread_meta_score ON thread_meta(score);
-
-        CREATE TABLE IF NOT EXISTS lane_config (
-            lane TEXT PRIMARY KEY,
-            enabled_channels_json TEXT NOT NULL DEFAULT '[]',
-            updated_at TEXT NOT NULL
-        );
-
-        -- Phase 5 (composio inbound): O(1) provider-message dedupe.
-        -- Replaces the prior strategy of streaming the full messages.jsonl
-        -- on every tick — that scaled with file size and was unbounded.
-        -- We key on (toolkit, provider_message_id) because pmids are only
-        -- unique within a toolkit's namespace.
-        CREATE TABLE IF NOT EXISTS inbound_seen (
-            toolkit TEXT NOT NULL,
-            provider_message_id TEXT NOT NULL,
-            seen_at TEXT NOT NULL,
-            PRIMARY KEY (toolkit, provider_message_id)
-        );
-        """
-    )
-
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(templates)")}
-    if "status" not in cols:
-        conn.execute("ALTER TABLE templates ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
-    if "rationale" not in cols:
-        conn.execute("ALTER TABLE templates ADD COLUMN rationale TEXT")
-
-    # Defensive de-dupe before enforcing UNIQUE(lane, name). For each
-    # (lane, name) keep the most recently updated row — the rest are
-    # almost always re-seed leftovers and never had distinct content the
-    # user cared about. This MUST run before the unique index creation
-    # below, or the index creation will fail on legacy DBs.
-    dupe_rows = conn.execute(
-        """
-        SELECT id FROM templates
-        WHERE id NOT IN (
-            SELECT id FROM (
-                SELECT id, ROW_NUMBER() OVER (
-                    PARTITION BY lane, name
-                    ORDER BY updated_at DESC, created_at DESC, id
-                ) AS rn
-                FROM templates
-            )
-            WHERE rn = 1
-        )
-        """
-    ).fetchall()
-    if dupe_rows:
-        ids = [r["id"] for r in dupe_rows]
-        conn.executemany("DELETE FROM templates WHERE id = ?", [(i,) for i in ids])
-
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_templates_lane_name ON templates(lane, name)"
-    )
-
-    # v2 adds: hot-leads-watcher × 2 (Open house live, Just-listed match),
-    # follow-ups × 4 (GIF nudge, Market update, Breakup, Referral ask).
-    # INSERT OR IGNORE keeps any user-edited templates intact — only new
-    # (lane, name) pairs get inserted.
     seeded_marker = _read_meta(conn, "seeded_v2")
-    if not seeded_marker:
-        for lane, items in SEED_TEMPLATES.items():
-            for item in items:
-                _insert_template(
-                    conn,
-                    lane=lane,
-                    name=item["name"],
-                    body=item["body"],
-                    or_ignore=True,
-                )
-        _write_meta(conn, "seeded_v2", _now())
-        # Backfill the v1 marker so older code paths still see "seeded".
-        _write_meta(conn, "seeded_v1", _now())
+    if seeded_marker:
+        _SEEDED_THIS_PROCESS = True
+        return
+
+    for lane, items in SEED_TEMPLATES.items():
+        for item in items:
+            _insert_template(
+                conn,
+                lane=lane,
+                name=item["name"],
+                body=item["body"],
+                or_ignore=True,
+            )
+    _write_meta(conn, "seeded_v2", _now())
+    # Backfill the v1 marker so older code paths still see "seeded".
+    _write_meta(conn, "seeded_v1", _now())
+    _SEEDED_THIS_PROCESS = True
 
 
 def _read_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -477,6 +387,33 @@ def pick_template(lane: str, *, channel: str = "any", epsilon: float = 0.2) -> d
     return templates[0]
 
 
+def record_use_in_transaction(
+    conn: sqlite3.Connection,
+    template_id: str,
+    *,
+    lane: str,
+    source_id: str | None,
+    thread_id: str | None,
+    task_id: str | None,
+) -> str:
+    """Record one template use on an already-open transaction."""
+    lane = _normalize_lane(lane)
+    attempt_id = uuid.uuid4().hex
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO draft_attempts (id, template_id, lane, source_id, thread_id, task_id, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'drafted', ?)
+        """,
+        (attempt_id, template_id, lane, source_id, thread_id, task_id, now),
+    )
+    conn.execute(
+        "UPDATE templates SET uses = uses + 1, updated_at = ? WHERE id = ?",
+        (now, template_id),
+    )
+    return attempt_id
+
+
 def record_use(
     template_id: str,
     *,
@@ -485,22 +422,15 @@ def record_use(
     thread_id: str | None,
     task_id: str | None,
 ) -> str:
-    lane = _normalize_lane(lane)
-    attempt_id = uuid.uuid4().hex
-    now = _now()
     with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO draft_attempts (id, template_id, lane, source_id, thread_id, task_id, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'drafted', ?)
-            """,
-            (attempt_id, template_id, lane, source_id, thread_id, task_id, now),
+        return record_use_in_transaction(
+            conn,
+            template_id,
+            lane=lane,
+            source_id=source_id,
+            thread_id=thread_id,
+            task_id=task_id,
         )
-        conn.execute(
-            "UPDATE templates SET uses = uses + 1, updated_at = ? WHERE id = ?",
-            (now, template_id),
-        )
-    return attempt_id
 
 
 def record_outcome(attempt_id: str, outcome: str) -> dict[str, Any]:

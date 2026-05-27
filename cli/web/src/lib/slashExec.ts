@@ -125,8 +125,7 @@ export async function executeSlash({
           return "error";
         }
         // The model gets the full SKILL.md via sendSkill; the transcript
-        // shows only the `/command` bubble + this one-line confirmation.
-        sys(`⚡ loaded skill: ${d.name}`);
+        // should only show the `/command` bubble the user already typed.
         await sendSkill(msg, d.name, arg);
         return "sent";
       }

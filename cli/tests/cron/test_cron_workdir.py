@@ -219,8 +219,12 @@ class TestTickWorkdirPartition:
         import threading
         calls: list[tuple[str, bool]] = []
 
-        def fake_run_job(job):
+        def fake_run_job(job, *, session_id=None):
             # Return a minimal tuple matching run_job's signature.
+            # session_id kwarg added 2026-05-25 so _process_job in tick()
+            # can pre-allocate the cron session id and pass it through to
+            # _run_job_impl (which previously held it in a local that
+            # _process_job couldn't reach — see the NameError fix).
             calls.append((job["id"], threading.current_thread().name))
             return True, "output", "response", None
 
@@ -242,6 +246,61 @@ class TestTickWorkdirPartition:
         main_thread_name = threading.current_thread().name
         workdir_thread_name = next(t for jid, t in calls if jid == "a")
         assert workdir_thread_name == main_thread_name
+
+    def test_process_job_exception_branch_does_not_nameerror(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Regression lock: 2026-05-25 NameError in _process_job's except branch.
+
+        Before the fix, ``_process_job`` (nested in ``tick``) referenced
+        ``_cron_session_id`` which only existed inside ``_run_job_impl``'s
+        local frame. Any exception in ``run_job`` short-circuited into the
+        ``except Exception`` handler, which then crashed with
+        ``NameError: name '_cron_session_id' is not defined`` and lost the
+        original error from the cron status. We now pre-allocate the
+        session id in ``_process_job`` and pass it through.
+        """
+        import logging
+        import cron.scheduler as sched
+
+        monkeypatch.setattr(
+            sched, "get_due_jobs",
+            lambda: [{"id": "boom", "name": "Boom", "workdir": None}],
+        )
+        monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
+
+        def exploding_run_job(job, *, session_id=None):
+            raise RuntimeError("simulated failure inside run_job")
+
+        monkeypatch.setattr(sched, "run_job", exploding_run_job)
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+
+        seen: dict = {}
+
+        def capture_mark(job_id, success, error, **kwargs):
+            seen["job_id"] = job_id
+            seen["success"] = success
+            seen["error"] = error
+            seen["session_id"] = kwargs.get("session_id")
+
+        monkeypatch.setattr(sched, "mark_job_run", capture_mark)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        with caplog.at_level(logging.ERROR, logger="cron.scheduler"):
+            sched.tick(verbose=False)
+
+        # mark_job_run must have been reached with the simulated error,
+        # not with a stray "name '_cron_session_id' is not defined".
+        assert seen.get("job_id") == "boom"
+        assert seen.get("success") is False
+        assert "simulated failure inside run_job" in (seen.get("error") or "")
+        assert (seen.get("session_id") or "").startswith("cron_boom_")
+
+        # And the log message logged by _process_job's except handler must
+        # be the simulated error, not a NameError from the handler itself.
+        joined_logs = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "simulated failure inside run_job" in joined_logs
+        assert "name '_cron_session_id' is not defined" not in joined_logs
 
 
 # ---------------------------------------------------------------------------

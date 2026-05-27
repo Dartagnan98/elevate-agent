@@ -380,7 +380,20 @@ def compress_context(
             agent.commit_memory_session(messages)
             agent._session_db.end_session(agent.session_id, "compression")
             old_session_id = agent.session_id
-            agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            _new_sid_base = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            # Preserve the cron_<jobid>_ prefix across compression-driven
+            # session rotation. Without this, the dashboard's per-cron
+            # session list (which groups by `cron_<jobid>_*` prefix in
+            # App.tsx) loses the restarted continuation and the user sees
+            # the cron as "nothing ran" even though the work completed.
+            if old_session_id and old_session_id.startswith("cron_"):
+                _parts = old_session_id.split("_", 3)  # ["cron", "<jobid>", "<ts>", ...]
+                if len(_parts) >= 2:
+                    agent.session_id = f"cron_{_parts[1]}_{_new_sid_base}"
+                else:
+                    agent.session_id = _new_sid_base
+            else:
+                agent.session_id = _new_sid_base
             os.environ["ELEVATE_SESSION_ID"] = agent.session_id
             try:
                 from gateway.session_context import _SESSION_ID

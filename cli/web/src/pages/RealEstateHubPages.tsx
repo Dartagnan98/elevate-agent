@@ -42,6 +42,7 @@ import {
   Plus,
   Radar,
   Repeat,
+  RotateCcw,
   Send,
   Sparkles,
   Trash2,
@@ -67,6 +68,7 @@ import type {
   SourceConnectorStatus,
   SourceInboxDraft,
   SourceInboxProfile,
+  SourceInboxResponse,
   SourceInboxSentItem,
   SourceInboxThread,
 } from "@/lib/api";
@@ -82,6 +84,8 @@ import {
   formatMinutes,
   heatStyles,
   inboundWaitMinutes,
+  leadSectionCount,
+  leadSectionThreads,
   leadThreadBuckets,
   profileWhen,
   threadWhen,
@@ -213,7 +217,7 @@ function LeadProfilesWorkbench({
   profiles,
   threads,
 }: {
-  onChanged: () => Promise<void>;
+  onChanged: (nextInbox?: SourceInboxResponse) => void | Promise<void>;
   showHeader?: boolean;
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
@@ -527,7 +531,7 @@ function LeadProfilesListPage({
   profiles,
   threads,
 }: {
-  onChanged: () => Promise<void>;
+  onChanged: (nextInbox?: SourceInboxResponse) => void | Promise<void>;
   profiles: SourceInboxProfile[];
   threads: SourceInboxThread[];
 }) {
@@ -584,8 +588,8 @@ const LeadBoardRow = memo(function LeadBoardRow({
   const navigate = useNavigate();
 
   const mark = async (action: "done" | "archive") => {
-    await api.updateSourceInboxThread(thread.sourceId, thread.threadId, action);
-    await data.refresh();
+    const nextInbox = await api.updateSourceInboxThread(thread.sourceId, thread.threadId, action);
+    data.setSourceInbox(nextInbox);
   };
 
   const openInChat = async () => {
@@ -669,7 +673,7 @@ const LeadBoardRow = memo(function LeadBoardRow({
     // Minimal lane row: dot + name + status select, whole row clicks open
     // the thread. Status select inside stops propagation so changing the
     // status doesn't navigate. Status mutates the same profile record as
-    // the thread drawer — both surfaces stay in sync via data.refresh().
+    // the thread drawer — the returned source inbox keeps both surfaces in sync.
     const handleRowKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -699,10 +703,12 @@ const LeadBoardRow = memo(function LeadBoardRow({
             onKeyDown={(event) => event.stopPropagation()}
             className="shrink-0"
           >
-            <LeadStatusControl
-              profileId={profile.id}
-              status={profile.status}
-              onChanged={() => data.refresh()}
+              <LeadStatusControl
+                profileId={profile.id}
+                status={profile.status}
+              onChanged={(nextInbox) => {
+                if (nextInbox) data.setSourceInbox(nextInbox);
+              }}
               selectClassName="w-32"
               selectButtonClassName="h-7 px-2 text-xs"
             />
@@ -889,7 +895,8 @@ function DraftMessagesBoard({
         });
       }
       try {
-        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
+        const nextInbox = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
+        data.setSourceInbox(nextInbox);
         if (!isDismiss) {
           setEditingId(null);
           setDraftEdits((current) => {
@@ -898,7 +905,6 @@ function DraftMessagesBoard({
             return next;
           });
         }
-        void data.refresh();
       } catch (error) {
         if (isDismiss) {
           setDismissedIds((current) => {
@@ -1273,7 +1279,14 @@ function DraftMessagesBoard({
                             </span>
                           </>
                         ) : (
-                          draft.generated && (
+                          draft.templateName ? (
+                            <>
+                              <span aria-hidden className="opacity-50">·</span>
+                              <span className="truncate text-muted-foreground/70">
+                                template: {draft.templateName}
+                              </span>
+                            </>
+                          ) : draft.generated && (
                             <>
                               <span aria-hidden className="opacity-50">·</span>
                               <span className="text-muted-foreground/70">suggested</span>
@@ -1341,7 +1354,9 @@ function DraftMessagesBoard({
                         <LeadStatusControl
                           profileId={draftProfile.id}
                           status={draftProfile.status}
-                          onChanged={data.refresh}
+                          onChanged={(nextInbox) => {
+                            if (nextInbox) data.setSourceInbox(nextInbox);
+                          }}
                         />
                       )}
                       {!isEditing && showOpenThread && (
@@ -1458,9 +1473,13 @@ function useProfileLookups(data: HubData) {
     // the bare thread tail so callers can look up using either form
     // (threads have both fields; drafts only have the bare threadId).
     const byThread = new Map<string, SourceInboxProfile>();
+    const byContact = new Map<string, SourceInboxProfile>();
     const byEmail = new Map<string, SourceInboxProfile>();
     const byPhone = new Map<string, SourceInboxProfile>();
     for (const profile of data.sourceInbox?.profiles ?? []) {
+      for (const contactId of profile.contactIds ?? []) {
+        if (contactId) byContact.set(contactId, profile);
+      }
       for (const threadKey of profile.threadIds) {
         if (!threadKey) continue;
         byThread.set(threadKey, profile);
@@ -1479,7 +1498,7 @@ function useProfileLookups(data: HubData) {
         if (key) byPhone.set(key, profile);
       }
     }
-    return { byThread, byEmail, byPhone };
+    return { byThread, byContact, byEmail, byPhone };
   }, [data.sourceInbox?.profiles]);
 }
 
@@ -1491,7 +1510,12 @@ function HotLeadsList({
   threads: SourceInboxThread[];
 }) {
   const { byThread } = useProfileLookups(data);
-  const hot = leadThreadBuckets(threads).hot.slice(0, LANE_LIST_MAX);
+  const hot = leadSectionThreads(
+    threads,
+    data.sourceInbox,
+    "hot",
+    leadThreadBuckets(threads).hot,
+  ).slice(0, LANE_LIST_MAX);
   if (!hot.length) {
     return (
       <p className="px-1 py-1 text-xs text-muted-foreground/80">
@@ -1516,23 +1540,31 @@ function HotLeadsList({
 }
 
 
+type LeadSectionCounts = {
+  hot: number;
+  followUp: number;
+  buyerSearch: number;
+  skipped: number;
+};
+
 function LeadPipelineBoard({
   buyers,
   data,
+  sectionCounts,
   skippedDrafts,
   threads,
 }: {
   buyers: BuyerWatchlistEntry[];
   data: HubData;
+  sectionCounts: LeadSectionCounts;
   skippedDrafts: SourceInboxDraft[];
   threads: SourceInboxThread[];
 }) {
-  const buckets = leadThreadBuckets(threads);
   const lanes = [
-    { value: "hot", label: "Hot leads", count: buckets.hot.length },
-    { value: "follow", label: "Follow-ups", count: buckets.followUp.length },
-    { value: "buyers", label: "Buyer searches", count: buyers.length },
-    { value: "skipped", label: "Recently skipped", count: skippedDrafts.length },
+    { value: "hot", label: "Hot leads", count: sectionCounts.hot },
+    { value: "follow", label: "Follow-ups", count: sectionCounts.followUp },
+    { value: "buyers", label: "Buyer searches", count: sectionCounts.buyerSearch },
+    { value: "skipped", label: "Recently skipped", count: sectionCounts.skipped },
   ];
 
   return (
@@ -1557,8 +1589,14 @@ function LeadPipelineBoard({
           <div className="min-w-0">
             {active === "hot" && <HotLeadsList data={data} threads={threads} />}
             {active === "follow" && <FollowUpThreadsList data={data} threads={threads} />}
-            {active === "buyers" && <PrivateSearchBuyersList buyers={buyers} data={data} />}
-            {active === "skipped" && <SkippedDraftsList data={data} drafts={skippedDrafts} />}
+            {active === "buyers" && (
+              <PrivateSearchBuyersList
+                buyers={buyers}
+                data={data}
+                totalCount={sectionCounts.buyerSearch}
+              />
+            )}
+            {active === "skipped" && <SkippedDraftsList data={data} drafts={skippedDrafts} threads={threads} />}
           </div>
         </>
       )}
@@ -1574,7 +1612,12 @@ function FollowUpThreadsList({
   threads: SourceInboxThread[];
 }) {
   const { byThread } = useProfileLookups(data);
-  const followUps = leadThreadBuckets(threads).followUp.slice(0, LANE_LIST_MAX);
+  const followUps = leadSectionThreads(
+    threads,
+    data.sourceInbox,
+    "follow_up",
+    leadThreadBuckets(threads).followUp,
+  ).slice(0, LANE_LIST_MAX);
   if (!followUps.length) {
     return (
       <p className="px-1 py-1 text-xs text-muted-foreground/80">
@@ -1603,39 +1646,39 @@ const BUYER_PAGE_SIZE = 20;
 function PrivateSearchBuyersList({
   buyers,
   data,
+  totalCount,
 }: {
   buyers: BuyerWatchlistEntry[];
   data: HubData;
+  totalCount: number;
 }) {
-  const { byEmail, byPhone } = useProfileLookups(data);
+  const navigate = useNavigate();
+  const { byContact, byEmail, byPhone } = useProfileLookups(data);
   const [page, setPage] = useState(1);
   const [running, setRunning] = useState(false);
 
-  const pcsLane = AGENT_LANES.find((l) => l.id === "private-searches");
-  const pcsJob = pcsLane ? laneCronJob(pcsLane, data.cronJobs) : undefined;
-
   const runSearch = async () => {
-    if (!pcsLane) return;
     setRunning(true);
     try {
-      let jobId = pcsJob?.id;
-      if (!jobId) {
-        const created = await api.createCronJob({
-          name: pcsLane.cronName,
-          schedule: pcsLane.schedule,
-          prompt: pcsLane.prompt,
-          deliver: "local",
-        });
-        jobId = created?.id;
+      const resp = await api.getSourceConnectorPrompt("xposure-pcs");
+      const prompt = (resp.prompt || "").trim();
+      if (!prompt) return;
+      const seed = String(Date.now());
+      const seedText = `Run source connector: MLS Buyer Searches (xposure-pcs)\n\n${prompt}`;
+      try {
+        window.sessionStorage.setItem(`elevate:chat-seed:${seed}`, seedText);
+      } catch {
+        // sessionStorage disabled — the Chat page still opens, and Settings can copy the prompt.
       }
-      if (jobId) await api.triggerCronJob(jobId);
-      await data.refresh();
+      navigate(`/chat?new=${seed}&seed=${seed}`);
     } finally {
       setRunning(false);
     }
   };
 
   const lookupProfile = (buyer: BuyerWatchlistEntry): SourceInboxProfile | null => {
+    const contactId = (buyer.contactId ?? "").trim();
+    if (contactId && byContact.has(contactId)) return byContact.get(contactId) ?? null;
     const email = (buyer.email ?? "").trim().toLowerCase();
     if (email && byEmail.has(email)) return byEmail.get(email) ?? null;
     const phone = (buyer.phone ?? "").trim();
@@ -1647,6 +1690,7 @@ function PrivateSearchBuyersList({
   const safePage = Math.min(page, totalPages);
   const start = (safePage - 1) * BUYER_PAGE_SIZE;
   const visible = buyers.slice(start, start + BUYER_PAGE_SIZE);
+  const displayedTotal = Math.max(totalCount, buyers.length);
 
   const runButton = (
     <Button
@@ -1661,7 +1705,7 @@ function PrivateSearchBuyersList({
       ) : (
         <Zap className="mr-1.5 h-3.5 w-3.5" />
       )}
-      Run search
+      Open run session
     </Button>
   );
 
@@ -1682,18 +1726,22 @@ function PrivateSearchBuyersList({
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2 px-1">
         <span className="font-mono-ui text-[0.7rem] uppercase tracking-[0.06em] text-muted-foreground/80">
-          {buyers.length} tagged buyer{buyers.length === 1 ? "" : "s"}
+          {buyers.length === displayedTotal
+            ? `${buyers.length} tagged buyer${buyers.length === 1 ? "" : "s"}`
+            : `${buyers.length} of ${displayedTotal} tagged buyers`}
         </span>
         {runButton}
       </div>
       <div className={LANE_LIST_SCROLL_CLASS}>
         {visible.map((buyer) => (
-          <BuyerWatchlistRow
-            key={buyer.id}
-            buyer={buyer}
-            profile={lookupProfile(buyer)}
-            onChanged={() => data.refresh()}
-          />
+            <BuyerWatchlistRow
+              key={buyer.id}
+              buyer={buyer}
+              profile={lookupProfile(buyer)}
+              onChanged={(nextInbox) => {
+                if (nextInbox) data.setSourceInbox(nextInbox);
+              }}
+            />
         ))}
       </div>
       {totalPages > 1 && (
@@ -1715,8 +1763,10 @@ function BuyerWatchlistRow({
 }: {
   buyer: BuyerWatchlistEntry;
   profile: SourceInboxProfile | null;
-  onChanged: () => void | Promise<void>;
+  onChanged: (nextInbox?: SourceInboxResponse) => void | Promise<void>;
 }) {
+  const drawer = useThreadDrawer();
+  const [expanded, setExpanded] = useState(false);
   const tier = (buyer.tier ?? "").toUpperCase();
   const dot =
     tier === "HOT"
@@ -1725,65 +1775,208 @@ function BuyerWatchlistRow({
         ? "bg-warning"
         : "bg-foreground/40";
   const name = buyer.name || "Unnamed buyer";
-  const rowClasses =
-    "group flex w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.03] focus:bg-foreground/[0.04] focus:outline-none";
 
-  // No thread on a buyer-watchlist entry — the row opens the MLS profile
-  // (when present). Status select writes through to the matched profile so
-  // it stays in sync with the thread drawer for that contact.
-  const body = (
-    <>
-      <span aria-hidden="true" className={cn("h-2 w-2 shrink-0 rounded-full", dot)} />
-      <span className="min-w-0 flex-1 truncate text-sm text-foreground">{name}</span>
-      {profile && (
-        <div
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-          }}
-          onKeyDown={(event) => event.stopPropagation()}
-          className="shrink-0"
-        >
-          <LeadStatusControl
-            profileId={profile.id}
-            status={profile.status}
-            onChanged={onChanged}
-            selectClassName="h-7 w-32 px-2 text-xs"
-          />
-        </div>
-      )}
-      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-foreground/60" />
-    </>
-  );
+  const matchedThreadId = profile?.threadIds?.[0] ?? null;
+  const matchedSourceId = profile?.sourceIds?.[0] ?? null;
+  const canOpenThread = Boolean(drawer && profile && matchedThreadId && matchedSourceId);
 
-  if (buyer.profileUrl) {
-    return (
-      <a
-        href={buyer.profileUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`Open MLS profile for ${name}`}
-        className={rowClasses}
-      >
-        {body}
-      </a>
+  const subtitleParts: string[] = [];
+  if (buyer.sourceLabel) subtitleParts.push(buyer.sourceLabel);
+  if (buyer.lastActivity) subtitleParts.push(`active ${isoTimeAgo(buyer.lastActivity)}`);
+  else if (buyer.dateEntered) subtitleParts.push(`added ${isoTimeAgo(buyer.dateEntered)}`);
+  if (typeof buyer.score === "number") {
+    subtitleParts.push(tier && tier !== "PCS" ? `${buyer.score} · ${tier}` : `score ${buyer.score}`);
+  } else if (tier && tier !== "PCS") {
+    subtitleParts.push(tier);
+  }
+  if (buyer.searches?.length) {
+    subtitleParts.push(
+      `${buyer.searches.length} saved search${buyer.searches.length === 1 ? "" : "es"}`,
     );
   }
-  return <div className={rowClasses}>{body}</div>;
+  if (buyer.matchingListings?.length) {
+    subtitleParts.push(
+      `${buyer.matchingListings.length} match${buyer.matchingListings.length === 1 ? "" : "es"}`,
+    );
+  }
+
+  const handleRowClick = () => {
+    if (canOpenThread && drawer) {
+      drawer.openThread(matchedSourceId!, matchedThreadId!);
+      return;
+    }
+    setExpanded((v) => !v);
+  };
+
+  return (
+    <div className="border-b border-border last:border-b-0">
+      <button
+        type="button"
+        onClick={handleRowClick}
+        className="group flex w-full items-start gap-3 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.03] focus:bg-foreground/[0.04] focus:outline-none"
+        aria-expanded={canOpenThread ? undefined : expanded}
+        aria-label={canOpenThread ? `Open inbox for ${name}` : `Show activity for ${name}`}
+      >
+        <span
+          aria-hidden="true"
+          className={cn("mt-1.5 h-2 w-2 shrink-0 rounded-full", dot)}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm text-foreground">{name}</div>
+          {subtitleParts.length > 0 && (
+            <div className="mt-0.5 truncate text-[0.72rem] text-muted-foreground/80">
+              {subtitleParts.join(" · ")}
+            </div>
+          )}
+        </div>
+        {profile && (
+          <div
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
+            className="shrink-0"
+          >
+            <LeadStatusControl
+              profileId={profile.id}
+              status={profile.status}
+              onChanged={onChanged}
+              selectClassName="h-7 w-32 px-2 text-xs"
+            />
+          </div>
+        )}
+        {canOpenThread ? (
+          <ChevronRight className="mt-1 h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-foreground/60" />
+        ) : (
+          <ChevronDown
+            className={cn(
+              "mt-1 h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-transform group-hover:text-foreground/60",
+              expanded && "rotate-180",
+            )}
+          />
+        )}
+      </button>
+
+      {!canOpenThread && expanded && (
+        <div className="space-y-2 border-t border-border/60 bg-foreground/[0.015] px-6 py-3">
+          {(buyer.email || buyer.phone) && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-muted-foreground">
+              {buyer.email && <span className="font-mono-ui">{buyer.email}</span>}
+              {buyer.phone && <span className="font-mono-ui">{buyer.phone}</span>}
+            </div>
+          )}
+          {buyer.searches?.length ? (
+            <div>
+              <div className="font-mono-ui text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/70">
+                Saved searches
+              </div>
+              <ul className="mt-1 space-y-0.5 text-[0.78rem] text-foreground/85">
+                {buyer.searches.map((s, i) => (
+                  <li key={i} className="truncate">· {s}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {buyer.matchingListings?.length ? (
+            <div>
+              <div className="font-mono-ui text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/70">
+                Matching listings
+              </div>
+              <ul className="mt-1 space-y-0.5 text-[0.78rem] text-foreground/85">
+                {buyer.matchingListings.slice(0, 8).map((l, i) => (
+                  <li key={i} className="truncate">· {l}</li>
+                ))}
+                {buyer.matchingListings.length > 8 && (
+                  <li className="text-muted-foreground/70">
+                    + {buyer.matchingListings.length - 8} more
+                  </li>
+                )}
+              </ul>
+            </div>
+          ) : null}
+          {buyer.tags?.length ? (
+            <div className="flex flex-wrap gap-1">
+              {buyer.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-sm border border-border bg-card px-1.5 py-0.5 font-mono-ui text-[0.66rem] text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {!buyer.searches?.length &&
+            !buyer.matchingListings?.length &&
+            !buyer.profileUrl && (
+              <p className="text-[0.72rem] text-muted-foreground/70">
+                No saved-search activity scraped yet. Run the PCS pipeline to pull this
+                buyer{"'"}s Xposure activity, scoring, and matched listings.
+              </p>
+            )}
+          {buyer.profileUrl && (
+            <a
+              href={buyer.profileUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[0.72rem] text-primary hover:underline"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open MLS profile
+            </a>
+          )}
+          {buyer.scrapedAt && (
+            <div className="font-mono-ui text-[0.66rem] uppercase tracking-[0.08em] text-muted-foreground/60">
+              Scraped {isoTimeAgo(buyer.scrapedAt)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function SkippedDraftsList({
   data,
   drafts: draftsOverride,
+  threads,
 }: {
   data: HubData;
   drafts?: SourceInboxDraft[];
+  threads?: SourceInboxThread[];
 }) {
   const drawer = useThreadDrawer();
   const navigate = useNavigate();
   const { byThread } = useProfileLookups(data);
   const allSkipped = draftsOverride ?? data.sourceInbox?.skippedDrafts ?? [];
-  const skipped = allSkipped.slice(0, LANE_LIST_MAX);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+
+  // Build thread lookup by (sourceId, threadId) AND bare threadId so we can
+  // borrow Hot Leads-style heat/name/status from the real thread record.
+  const threadByKey = useMemo(() => {
+    const map = new Map<string, SourceInboxThread>();
+    for (const t of threads ?? []) {
+      if (t.sourceId && t.threadId) map.set(`${t.sourceId}:${t.threadId}`, t);
+      if (t.threadId) map.set(t.threadId, t);
+      if (t.id) map.set(t.id, t);
+    }
+    return map;
+  }, [threads]);
+
+  // Dedupe drafts by thread (one row per person, newest first).
+  const skipped = useMemo(() => {
+    const seen = new Set<string>();
+    const out: SourceInboxDraft[] = [];
+    for (const d of allSkipped) {
+      const key = d.threadId ? `${d.sourceId}:${d.threadId}` : d.id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(d);
+      if (out.length >= LANE_LIST_MAX) break;
+    }
+    return out;
+  }, [allSkipped]);
 
   if (!skipped.length) {
     return (
@@ -1793,9 +1986,22 @@ function SkippedDraftsList({
     );
   }
 
+  const resolveName = (draft: SourceInboxDraft, thread: SourceInboxThread | undefined) => {
+    if (thread?.personName) return thread.personName;
+    const raw = parseIdentity(draft.personName).name;
+    // Filter out channel/source label leaking through as the display name.
+    const blacklist = new Set(
+      [draft.channel, draft.sourceLabel, "Apple Messages", "Email", "SMS", "Messenger", "Instagram", "WhatsApp"]
+        .filter(Boolean)
+        .map((s) => String(s).toLowerCase()),
+    );
+    if (!raw || blacklist.has(raw.toLowerCase())) return "(Unknown contact)";
+    return raw;
+  };
+
   const openThread = (draft: SourceInboxDraft) => {
     if (drawer && draft.threadId) {
-      drawer.openThread(draft.sourceId, draft.threadId);
+      drawer.openThread(draft.sourceId, draft.threadId, { skippedDraft: draft });
       return;
     }
     const params = new URLSearchParams({
@@ -1805,15 +2011,33 @@ function SkippedDraftsList({
     navigate(`/chat?${params.toString()}`);
   };
 
+  const restoreDraft = async (draft: SourceInboxDraft) => {
+    if (restoringId) return;
+    setRestoringId(draft.id);
+    try {
+      const nextInbox = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "restore", draft.draftText);
+      data.setSourceInbox(nextInbox);
+    } catch (error) {
+      console.error("Failed to restore skipped draft", error);
+      window.alert(`Failed to restore draft: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
   return (
     <div className={LANE_LIST_SCROLL_CLASS}>
       {skipped.map((draft) => {
-        const identity = parseIdentity(draft.personName);
+        const thread = (draft.sourceId && draft.threadId
+          ? threadByKey.get(`${draft.sourceId}:${draft.threadId}`)
+          : undefined) ?? (draft.threadId ? threadByKey.get(draft.threadId) : undefined);
+        const displayName = resolveName(draft, thread);
         const profile =
           (draft.sourceId && draft.threadId
             ? byThread.get(`${draft.sourceId}:${draft.threadId}`)
             : null) ??
           (draft.threadId ? byThread.get(draft.threadId) ?? null : null);
+        const heat = thread ? heatStyles(thread.heatLabel) : null;
         const handleKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
@@ -1827,12 +2051,16 @@ function SkippedDraftsList({
             tabIndex={0}
             onClick={() => openThread(draft)}
             onKeyDown={handleKey}
-            aria-label={`Open thread with ${identity.name}`}
+            aria-label={`Open skipped draft for ${displayName}`}
             className="group flex w-full cursor-pointer items-center gap-3 px-3 py-2 transition-colors hover:bg-foreground/[0.03] focus:bg-foreground/[0.04] focus:outline-none"
           >
-            <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/50" />
+            <span
+              aria-label={heat?.label ?? "skipped"}
+              role="img"
+              className={cn("h-2 w-2 shrink-0 rounded-full", heat?.dot ?? "bg-muted-foreground/50")}
+            />
             <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-              {identity.name}
+              {displayName}
             </span>
             {profile && (
               <div
@@ -1843,12 +2071,31 @@ function SkippedDraftsList({
                 <LeadStatusControl
                   profileId={profile.id}
                   status={profile.status}
-                  onChanged={() => data.refresh()}
+                  onChanged={(nextInbox) => {
+                    if (nextInbox) data.setSourceInbox(nextInbox);
+                  }}
                   selectClassName="w-32"
-              selectButtonClassName="h-7 px-2 text-xs"
+                  selectButtonClassName="h-7 px-2 text-xs"
                 />
               </div>
             )}
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                void restoreDraft(draft);
+              }}
+              disabled={restoringId !== null}
+              title="Restore to approval queue"
+              aria-label={`Restore skipped draft for ${displayName}`}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/55 transition hover:bg-muted hover:text-primary disabled:opacity-50"
+            >
+              {restoringId === draft.id ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5" />
+              )}
+            </button>
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-foreground/60" />
           </div>
         );
@@ -3532,7 +3779,13 @@ export function RealEstateLeadsPage() {
     () => allProfiles.filter((profile) => sourceFilter === null || profile.sourceIds.includes(sourceFilter)),
     [allProfiles, sourceFilter],
   );
-  const buyerSearches = data.sourceInbox?.privateSearchBuyers ?? [];
+  const buyerSearches = useMemo(
+    () =>
+      (data.sourceInbox?.privateSearchBuyers ?? []).filter((buyer) => (
+        sourceFilter === null || buyer.source === sourceFilter
+      )),
+    [data.sourceInbox?.privateSearchBuyers, sourceFilter],
+  );
 
   const followUpJobs = data.cronJobs.filter((job) =>
     jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
@@ -3549,8 +3802,38 @@ export function RealEstateLeadsPage() {
     return false;
   });
 
-  const hotLeads = threads.filter((thread) => thread.heatLabel === "hot").length;
-  const followUpThreadCount = leadThreadBuckets(threads).followUp.length;
+  const leadBuckets = leadThreadBuckets(threads);
+  const hotLeadThreads = leadSectionThreads(
+    threads,
+    data.sourceInbox,
+    "hot",
+    leadBuckets.hot,
+  );
+  const followUpThreads = leadSectionThreads(
+    threads,
+    data.sourceInbox,
+    "follow_up",
+    leadBuckets.followUp,
+  );
+  const useBackendLeadSections = sourceFilter === null;
+  const hotLeads = useBackendLeadSections
+    ? leadSectionCount(data.sourceInbox, "hot", hotLeadThreads.length)
+    : hotLeadThreads.length;
+  const followUpThreadCount = useBackendLeadSections
+    ? leadSectionCount(data.sourceInbox, "follow_up", followUpThreads.length)
+    : followUpThreads.length;
+  const buyerSearchCount = useBackendLeadSections
+    ? leadSectionCount(data.sourceInbox, "buyer_search", buyerSearches.length)
+    : buyerSearches.length;
+  const skippedCount = useBackendLeadSections
+    ? leadSectionCount(data.sourceInbox, "skipped", skippedDrafts.length)
+    : skippedDrafts.length;
+  const sectionCounts = {
+    hot: hotLeads,
+    followUp: followUpThreadCount,
+    buyerSearch: buyerSearchCount,
+    skipped: skippedCount,
+  };
   const blockedSources = allSources.filter((source) => source.blocked);
   const pulse = useMemo(() => computeResponsePulse(threads), [threads]);
 
@@ -3639,7 +3922,7 @@ export function RealEstateLeadsPage() {
           <>
             <LeadFilterBar
               active={sourceFilter}
-              buyerSearches={buyerSearches.length}
+              buyerSearches={buyerSearchCount}
               drafts={drafts.length}
               followUps={followUpThreadCount}
               hot={hotLeads}
@@ -3647,7 +3930,7 @@ export function RealEstateLeadsPage() {
               options={filterOptions}
               pulse={pulse}
               profiles={profiles.length}
-              skipped={skippedDrafts.length}
+              skipped={skippedCount}
               threads={threads.length}
             />
 
@@ -3676,7 +3959,13 @@ export function RealEstateLeadsPage() {
 
             {tab === "profiles" ? (
               <LeadProfilesListPage
-                onChanged={refresh}
+                onChanged={(nextInbox) => {
+                  if (nextInbox) {
+                    data.setSourceInbox(nextInbox);
+                  } else {
+                    void refresh();
+                  }
+                }}
                 profiles={profiles}
                 threads={threads}
               />
@@ -3706,6 +3995,7 @@ export function RealEstateLeadsPage() {
                     <LeadPipelineBoard
                       buyers={buyerSearches}
                       data={data}
+                      sectionCounts={sectionCounts}
                       skippedDrafts={skippedDrafts}
                       threads={threads}
                     />

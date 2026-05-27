@@ -5422,6 +5422,34 @@ class AIAgent:
         self._codex_streamed_text_parts: list = []
         for attempt in range(max_stream_retries + 1):
             collected_output_items: list = []
+
+            def _recover_none_output_final_response(exc: Exception):
+                if not isinstance(exc, TypeError) or "'NoneType' object is not iterable" not in str(exc):
+                    return None
+                assembled = "".join(self._codex_streamed_text_parts)
+                if not collected_output_items and not (assembled and not has_tool_calls):
+                    return None
+                output_items = list(collected_output_items)
+                if not output_items and assembled and not has_tool_calls:
+                    output_items = [SimpleNamespace(
+                        type="message",
+                        role="assistant",
+                        status="completed",
+                        content=[SimpleNamespace(type="output_text", text=assembled)],
+                    )]
+                logger.warning(
+                    "Codex stream final response had output=None; recovered %d output items "
+                    "from stream events (%d streamed chars). %s",
+                    len(output_items), len(assembled), self._client_log_context(),
+                )
+                return SimpleNamespace(
+                    status="completed",
+                    model=api_kwargs.get("model"),
+                    output=output_items,
+                    output_text=assembled,
+                    usage=None,
+                )
+
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
@@ -5471,11 +5499,24 @@ class AIAgent:
                                 sum(len(p) for p in self._codex_streamed_text_parts),
                                 self._client_log_context(),
                             )
-                    final_response = stream.get_final_response()
+                    try:
+                        final_response = stream.get_final_response()
+                    except TypeError as exc:
+                        recovered_response = _recover_none_output_final_response(exc)
+                        if recovered_response is None:
+                            raise
+                        return recovered_response
                     # PATCH: ChatGPT Codex backend streams valid output items
-                    # but get_final_response() can return an empty output list.
-                    # Backfill from collected items or synthesize from deltas.
+                    # but get_final_response() can return an empty output list
+                    # or SDK 2.24.0 can surface output=None. Backfill from
+                    # collected items or synthesize from deltas.
                     _out = getattr(final_response, "output", None)
+                    if _out is None:
+                        recovered_response = _recover_none_output_final_response(
+                            TypeError("'NoneType' object is not iterable")
+                        )
+                        if recovered_response is not None:
+                            return recovered_response
                     if isinstance(_out, list) and not _out:
                         if collected_output_items:
                             final_response.output = list(collected_output_items)
@@ -5496,6 +5537,11 @@ class AIAgent:
                                 len(self._codex_streamed_text_parts), len(assembled),
                             )
                     return final_response
+            except TypeError as exc:
+                recovered_response = _recover_none_output_final_response(exc)
+                if recovered_response is not None:
+                    return recovered_response
+                raise
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:
                     logger.debug(

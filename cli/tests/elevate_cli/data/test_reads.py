@@ -37,6 +37,7 @@ from elevate_cli.data import (
     record_inbound,
     record_outbound,
     set_heat,
+    set_pipeline_status,
     shadow_read,
     upsert_contact,
 )
@@ -95,6 +96,7 @@ def test_source_inbox_empty_db_has_correct_shape():
         "toolsRoot", "toolsRootSource", "toolsRootIo", "sourceRoot",
         "limit", "recordCounts", "hiddenCounts", "sources", "profiles",
         "threads", "drafts", "skippedDrafts", "privateSearchBuyers",
+        "leadSections",
     ):
         assert key in response, f"missing top-level key {key!r}"
 
@@ -111,6 +113,8 @@ def test_source_inbox_empty_db_has_correct_shape():
     assert counts["contacts"] == 0
     assert counts["hotThreads"] == 0
     assert counts["drafts"] == 0
+    assert response["leadSections"]["hot"]["count"] == 0
+    assert response["leadSections"]["buyer_search"]["count"] == 0
 
 
 def test_source_inbox_includes_populated_threads():
@@ -162,6 +166,7 @@ def test_source_inbox_includes_populated_threads():
     assert t["outboundCount"] == 0
     assert t["messageCount"] == 1
     assert t["direction"] == "inbound"
+    assert t["leadSectionIds"] == ["hot", "messages"]
 
     counts = response["recordCounts"]
     assert counts["threads"] == 1
@@ -172,14 +177,108 @@ def test_source_inbox_includes_populated_threads():
     assert counts["sources"] == 1
     assert counts["people"] == 1
     assert counts["conversationPeople"] == 1
+    assert response["leadSections"]["hot"]["count"] == 1
+    assert response["leadSections"]["hot"]["threadIds"] == ["apple-messages:t-1"]
+    assert response["leadSections"]["messages"]["count"] == 1
     assert response["profiles"][0]["displayName"] == "Jane Buyer"
     assert response["profiles"][0]["contactIds"] == [contact["id"]]
     assert response["profiles"][0]["conversationIds"] == [conv["id"]]
     assert response["profiles"][0]["threadIds"] == ["apple-messages:t-1"]
     assert response["profiles"][0]["emails"] == ["jane@example.com"]
+    assert response["profiles"][0]["leadSectionIds"] == ["hot", "messages"]
     assert response["profiles"][0]["verifiers"] == [
         {"kind": "email", "value": "jane@example.com", "key": "email:jane@example.com"}
     ]
+
+
+def test_source_inbox_lead_sections_follow_contact_cells():
+    with connect() as conn:
+        contact = upsert_contact(
+            conn,
+            display_name="Tagged Buyer",
+            primary_email="tagged@example.com",
+            source_key="lofty:tagged",
+        )
+        conn.execute(
+            """
+            UPDATE contacts
+            SET heat_label = 'hot',
+                needs_follow_up = 1,
+                buyer_search_active = 1,
+                listing_active = 1
+            WHERE id = ?
+            """,
+            (contact["id"],),
+        )
+
+    response = db_source_inbox_response(limit=16)
+    sections = response["leadSections"]
+
+    assert sections["hot"]["count"] == 1
+    assert sections["hot"]["contactIds"] == [contact["id"]]
+    assert sections["follow_up"]["count"] == 1
+    assert sections["follow_up"]["contactIds"] == [contact["id"]]
+    assert sections["buyer_search"]["count"] == 1
+    assert sections["buyer_search"]["contactIds"] == [contact["id"]]
+    assert sections["listing_active"]["count"] == 1
+    assert sections["listing_active"]["contactIds"] == [contact["id"]]
+
+
+def test_source_inbox_profiles_show_pipeline_status_and_hide_dead():
+    with connect() as conn:
+        contact = upsert_contact(
+            conn,
+            display_name="Status Lead",
+            primary_email="status@example.com",
+            source_key="lofty:status",
+        )
+        conv = get_or_create_conversation(
+            conn,
+            contact_id=contact["id"],
+            source_id="apple-messages",
+            channel="imessage",
+            thread_key="status-thread",
+        )
+        record_inbound(
+            conn,
+            contact_id=contact["id"],
+            conversation_id=conv["id"],
+            channel="imessage",
+            body="Can we talk this week?",
+            source_id="apple-messages",
+            thread_key="status-thread",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        bump_conversation_counters(
+            conn,
+            conv["id"],
+            direction="inbound",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        set_pipeline_status(
+            conn,
+            contact["id"],
+            status="follow_up",
+            actor="operator:test",
+        )
+
+    response = db_source_inbox_response(limit=16)
+    assert response["threads"][0]["threadId"] == "status-thread"
+    assert response["profiles"][0]["status"] == "follow_up"
+    assert response["profiles"][0]["statusUpdatedAt"]
+    assert response["leadSections"]["follow_up"]["contactIds"] == [contact["id"]]
+
+    with connect() as conn:
+        set_pipeline_status(
+            conn,
+            contact["id"],
+            status="dead",
+            actor="operator:test",
+        )
+
+    response = db_source_inbox_response(limit=16)
+    assert response["threads"] == []
+    assert response["profiles"] == []
 
 
 def test_source_inbox_does_not_merge_name_only_profiles():
@@ -243,6 +342,11 @@ def test_source_inbox_includes_private_search_buyers():
     response = db_source_inbox_response(limit=16)
 
     assert [buyer["id"] for buyer in response["privateSearchBuyers"]] == [
+        "buyer-hot",
+        "buyer-low",
+    ]
+    assert response["privateSearchBuyers"][0]["leadSectionIds"] == ["buyer_search"]
+    assert response["leadSections"]["buyer_search"]["buyerIds"] == [
         "buyer-hot",
         "buyer-low",
     ]

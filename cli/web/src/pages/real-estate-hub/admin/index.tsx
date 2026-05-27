@@ -101,7 +101,7 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
     skill: "gmail-doc-router",
     skills: ["gmail-doc-router"],
     deliver: "local",
-    workdir: "/Users/dartagnanpatricio/.elevate/tmp/client-tools",
+    workdir: "",
     prompt:
       "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevate deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.",
   },
@@ -111,7 +111,7 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
     skill: "seller-update",
     skills: ["seller-update"],
     deliver: "local",
-    workdir: "/Users/dartagnanpatricio/.elevate/tmp/client-tools",
+    workdir: "",
     prompt:
       "Run the seller-update skill. Pull ShowingTime feedback/activity for active listings, match each listing to an Elevate deal, write the digest back to SQLite, and create Gmail seller-update drafts. Never send directly.",
   },
@@ -121,13 +121,13 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
     skill: "market-stats-watcher",
     skills: ["market-stats-watcher"],
     deliver: "local",
-    workdir: "/Users/dartagnanpatricio/.elevate/tmp/client-tools",
+    workdir: "",
     prompt:
       "Run the market-stats-watcher skill. Pull fresh market-stat emails and route useful market context into the real estate knowledge/admin workflow. Do not send messages.",
   },
 ];
 
-const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
 type AdminSide = "listing" | "buyer";
 type AdminStageNumber = (typeof ADMIN_STAGE_NUMBERS)[number];
@@ -243,91 +243,100 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   {
     stage: 0,
     stageNumber: "S0",
-    stageLabel: "Commitment",
+    stageLabel: "Pre-CMA",
     labels: {
-      listing: { title: "CMA / Prospect", subtitle: "Appointment + valuation" },
+      listing: { title: "Pre-CMA", subtitle: "Google Form + Lofty contact" },
       buyer: { title: "Intake", subtitle: "Profile + budget" },
     },
   },
   {
     stage: 1,
     stageNumber: "S1",
-    stageLabel: "Intake",
+    stageLabel: "CMA",
     labels: {
-      listing: { title: "Listing Intake", subtitle: "Collect info for listing contract" },
+      listing: { title: "CMA / Evaluation", subtitle: "PDF + pricing story" },
       buyer: { title: "Search Setup", subtitle: "Criteria + MLS" },
     },
   },
   {
     stage: 2,
     stageNumber: "S2",
-    stageLabel: "Docs",
+    stageLabel: "Intake",
     labels: {
-      listing: { title: "Listing Contract / Documents", subtitle: "Create docs + signing" },
+      listing: { title: "Listing Intake", subtitle: "Trigger MLC + missing fields" },
       buyer: { title: "Tours", subtitle: "Route + notes" },
     },
   },
   {
     stage: 3,
     stageNumber: "S3",
-    stageLabel: "Photos",
+    stageLabel: "SkySlope",
     labels: {
-      listing: { title: "Photos Ready", subtitle: "Photo capture + review" },
+      listing: { title: "SkySlope & Matrix Prep", subtitle: "Compliance file + incomplete MLS draft" },
       buyer: { title: "Follow-Up", subtitle: "Feedback + fit" },
     },
   },
   {
     stage: 4,
     stageNumber: "S4",
-    stageLabel: "MLS",
+    stageLabel: "Marketing",
     labels: {
-      listing: { title: "MLS Entry", subtitle: "Listing build + launch prep" },
+      listing: { title: "Marketing Go", subtitle: "Coming-soon + launch assets" },
       buyer: { title: "Offer Prep", subtitle: "Comps + offer paperwork" },
     },
   },
   {
     stage: 5,
     stageNumber: "S5",
-    stageLabel: "Live",
+    stageLabel: "MLS",
     labels: {
-      listing: { title: "Listing Live / Marketing", subtitle: "MLS live + seller updates" },
+      listing: { title: "MLS Entry", subtitle: "Listing build + launch prep" },
       buyer: { title: "Accepted", subtitle: "Lender + docs" },
     },
   },
   {
     stage: 6,
     stageNumber: "S6",
-    stageLabel: "Contract",
+    stageLabel: "Live",
     labels: {
-      listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
+      listing: { title: "Listing Live / Marketing", subtitle: "MLS live + seller updates" },
       buyer: { title: "Conditions", subtitle: "Inspection + property review" },
     },
   },
   {
     stage: 7,
     stageNumber: "S7",
-    stageLabel: "Conditions",
+    stageLabel: "Contract",
     labels: {
-      listing: { title: "Condition Removal", subtitle: "Conditions + lawyer package" },
+      listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
       buyer: { title: "Conditions Removed", subtitle: "Deposit + dates" },
     },
   },
   {
     stage: 8,
     stageNumber: "S8",
-    stageLabel: "Closing",
+    stageLabel: "Conditions",
     labels: {
-      listing: { title: "Closing", subtitle: "Lawyer / conveyance + possession" },
+      listing: { title: "Condition Removal", subtitle: "Conditions + lawyer package" },
       buyer: { title: "Closing", subtitle: "Lawyer + walkthrough" },
     },
   },
   {
     stage: 9,
     stageNumber: "S9",
+    stageLabel: "Closing",
+    labels: {
+      listing: { title: "Closing", subtitle: "Lawyer / conveyance + possession" },
+      buyer: { title: "Possession", subtitle: "Gift + follow-up" },
+    },
+  },
+  {
+    stage: 10,
+    stageNumber: "S10",
     stageLabel: "Closed",
     labels: {
       listing: { title: "Closed", subtitle: "Archive + nurture" },
-      buyer: { title: "Possession", subtitle: "Gift + follow-up" },
+      buyer: { title: "Closed", subtitle: "Archive + nurture" },
     },
   },
 ];
@@ -335,60 +344,66 @@ const ADMIN_COLUMNS: AdminColumn[] = [
 const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminPhaseAutomationInfo>> = {
   listing: {
     0: {
-      agents: ["seller-package", "cma"],
+      agents: ["pre-cma-google-form", "lofty-crm-client-contacts"],
       background: [],
-      moveSignal: "CMA ready + seller package sent",
-      approvalGate: "approve package/draft",
+      moveSignal: "pre-CMA Google Form complete + Lofty contact verified",
+      approvalGate: "confirm missing contact/form details",
     },
     1: {
-      agents: ["mlc", "deal-matcher"],
+      agents: ["cma", "seller-package"],
       background: [],
-      moveSignal: "listing intake complete",
-      approvalGate: "confirm price + launch plan",
+      moveSignal: "CMA PDF/evaluation complete + client says yes",
+      approvalGate: "approve CMA/evaluation before client delivery",
     },
     2: {
-      agents: ["mlc", "signing-package", "skyslope-sync"],
+      agents: ["mlc", "deal-matcher", "signing-package"],
       background: ["gmail-doc-router"],
-      moveSignal: "signed listing contract + docs verified",
-      approvalGate: "approve signing/docs",
+      moveSignal: "MLC intake complete + listing docs ready",
+      approvalGate: "approve docs/signature placements before signing send",
     },
     3: {
-      agents: ["photo-cleanup"],
-      background: [],
-      moveSignal: "photos approved",
-      approvalGate: "human photo approval",
+      agents: ["skyslope-sync", "matrix-incomplete-listing", "deal-matcher"],
+      background: ["gmail-doc-router"],
+      moveSignal: "signed docs saved + SkySlope/Matrix prep complete",
+      approvalGate: "approve Matrix draft before publish",
     },
     4: {
+      agents: ["photo-cleanup", "marketing", "matrix-incomplete-listing"],
+      background: [],
+      moveSignal: "photos cleaned/saved + Marketing Go package ready + Matrix photos uploaded",
+      approvalGate: "answer Marketing Go/photo questions and approve launch assets before external publishing",
+    },
+    5: {
       agents: ["property-lookup", "listing-build"],
       background: [],
       moveSignal: "MLS package approved",
       approvalGate: "approve MLS copy/package",
     },
-    5: {
+    6: {
       agents: ["marketing"],
       background: ["seller-update"],
       moveSignal: "offer accepted",
       approvalGate: "approve outgoing drafts",
     },
-    6: {
+    7: {
       agents: ["offer-review"],
       background: ["gmail-doc-router"],
       moveSignal: "accepted-offer dates verified",
       approvalGate: "review offer terms",
     },
-    7: {
+    8: {
       agents: ["subject-removal", "signing-package"],
       background: ["gmail-doc-router"],
       moveSignal: "conditions removed + deposit verified",
       approvalGate: "confirm condition removal",
     },
-    8: {
+    9: {
       agents: ["closing-admin"],
       background: ["gmail-doc-router"],
       moveSignal: "closing package complete",
       approvalGate: "confirm closing package",
     },
-    9: {
+    10: {
       agents: ["skyslope-sync", "marketing"],
       background: [],
       moveSignal: "file closed + nurture queued",
@@ -406,6 +421,7 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
     7: { agents: [], background: [], moveSignal: "conditions removed" },
     8: { agents: [], background: [], moveSignal: "closing checklist complete" },
     9: { agents: [], background: [], moveSignal: "possession follow-up queued" },
+    10: { agents: [], background: [], moveSignal: "file archived" },
   },
 };
 
@@ -413,38 +429,55 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
 const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminChecklistItem[]>> = {
   listing: {
     0: [
-    { id: "draft-cma-followup", label: "Draft CMA follow-up message" },
-    { id: "pricing-recap", label: "Send pricing recap to seller" },
-    { id: "missing-info-list", label: "Identify info needed before listing paperwork" },
+    { id: "pre_cma_google_form", label: "Pre-CMA Google Form filled" },
+    { id: "lofty_contact_verified", label: "Lofty contact verified / created" },
+    { id: "pre_cma_handoff", label: "Client/property notes saved for CMA" },
     ],
     1: [
-    { id: "workflow_stage_1_complete", label: "Listing details verified" },
+    { id: "cma_pdf_ready", label: "CMA PDF / evaluation ready" },
+    { id: "pricing_story_approved", label: "Pricing story approved" },
+    { id: "client_yes_to_listing", label: "Client said yes to listing" },
     ],
     2: [
-    { id: "workflow_title_ordered", label: "Title ordered" },
-    { id: "workflow_sign_ordered", label: "Sign ordered" },
-    { id: "workflow_stage_2_complete", label: "Signed docs verified" },
+    { id: "mlc_intake_started", label: "MLC intake triggered" },
+    { id: "listing_missing_fields", label: "Missing listing fields surfaced" },
+    { id: "listing_docs_approval", label: "Listing docs/signature placements ready for approval" },
     ],
     3: [
-    { id: "workflow_photos_in_drive", label: "Photos in Drive" },
-    { id: "workflow_jeff_photo_review", label: "Photo review complete" },
-    { id: "workflow_stage_3_complete", label: "Photos approved for listing" },
+    { id: "signed_listing_docs_saved", label: "Signed listing docs saved to Drive" },
+    { id: "skyslope_file_created", label: "SkySlope file created / synced" },
+    { id: "matrix_incomplete_listing_prepped", label: "Matrix/Xposure incomplete listing prepped" },
+    { id: "matrix_missing_fields_surfaced", label: "Matrix missing fields surfaced" },
     ],
     4: [
+    { id: "marketing_go_started", label: "Marketing Go started after SkySlope/Matrix prep" },
+    { id: "photographer_drive_link_received", label: "Photographer Google Drive/photo link received or requested" },
+    { id: "marketing_go_questions_answered", label: "Marketing Go questions answered / blockers surfaced" },
+    { id: "photo_cleanup_complete", label: "Photo cleanup complete" },
+    { id: "cleaned_photos_saved_to_drive", label: "Cleaned photos saved to listing Google Drive folder" },
+    { id: "best_99_matrix_photos_selected", label: "Best 99 Matrix photos selected if photographer sent more than 99" },
+    { id: "matrix_photos_uploaded", label: "Photos uploaded to Matrix/Xposure" },
+    { id: "matrix_listing_finished_with_photos", label: "Matrix listing finished with final photos" },
+    { id: "coming_soon_assets_ready", label: "Coming-soon assets ready" },
+    { id: "landing_page_ready", label: "Landing page ready" },
+    { id: "launch_copy_social_email_ready", label: "Launch copy, social posts, and email assets ready" },
+    { id: "marketing_package_ready_for_approval", label: "Marketing package ready for approval" },
+    ],
+    5: [
     { id: "workflow_evalue_bc_age_verified", label: "Property valuation age verified" },
     { id: "workflow_listing_description_approved", label: "Listing description approved" },
     { id: "workflow_feature_sheet_uploaded", label: "Feature sheet uploaded" },
     { id: "workflow_ai_edited_photos_labelled", label: "AI-edited photos labelled" },
     { id: "workflow_stage_4_complete", label: "MLS package approved" },
     ],
-    5: [
+    6: [
     { id: "workflow_just_listed_blast_sent", label: "Just listed blast sent" },
     { id: "workflow_social_posts_published", label: "Social posts published" },
     { id: "workflow_flodesk_mailout_sent", label: "Flodesk mailout sent" },
     { id: "workflow_lofty_text_blast_sent", label: "Lofty text blast sent" },
     { id: "workflow_stage_5_complete", label: "Live marketing checklist complete" },
     ],
-    6: [
+    7: [
     { id: "workflow_within_24hrs_contract_reviewed", label: "Contract reviewed within 24 hours" },
     { id: "workflow_email_buyer_accepted_offer_checklist_sent", label: "Accepted-offer checklist email sent" },
     { id: "workflow_fintrac_drivers_occupation_employer_captured", label: "FINTRAC details captured" },
@@ -452,14 +485,14 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_moving_checklist_sent", label: "Moving checklist sent" },
     { id: "workflow_stage_6_complete", label: "Accepted-offer admin verified" },
     ],
-    7: [
+    8: [
     { id: "workflow_subject_removal_form_sent", label: "Condition removal / waiver sent" },
     { id: "workflow_title_charges_verified", label: "Title charges verified" },
     { id: "workflow_bir_pds_received", label: "Property disclosure docs received" },
     { id: "workflow_lawyer_info_requested", label: "Lawyer info requested" },
     { id: "workflow_stage_7_complete", label: "Conditions removed / waived" },
     ],
-    8: [
+    9: [
     { id: "workflow_conveyancer_package_sent", label: "Lawyer / conveyancer package sent" },
     { id: "workflow_down_payment_to_trust", label: "Down payment to trust" },
     { id: "workflow_mortgage_instructions_received", label: "Mortgage instructions received" },
@@ -468,7 +501,7 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_funds_released", label: "Funds released" },
     { id: "workflow_stage_8_complete", label: "Closing admin verified" },
     ],
-    9: [
+    10: [
     { id: "workflow_commission_submitted", label: "Commission submitted" },
     { id: "workflow_skyslope_deal_closed", label: "SkySlope deal closed" },
     { id: "workflow_sold_update_sent", label: "Sold update sent" },
@@ -528,6 +561,9 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "thank-you", label: "Thank-you / review / referral drafts queued" },
     { id: "one-week-followup", label: "One-week-after follow-up scheduled" },
     { id: "anniversary", label: "Anniversary reminder added" },
+    ],
+    10: [
+    { id: "buyer-file-archived", label: "Buyer file archived" },
     ],
   },
 };
@@ -689,8 +725,13 @@ function adminPhaseAutomation(side: AdminSide, stage: AdminStageNumber): AdminPh
   return ADMIN_PHASE_AUTOMATIONS[side][stage];
 }
 
+function visibleAdminStages(side: AdminSide): AdminStageNumber[] {
+  return ADMIN_STAGE_NUMBERS.filter((stage) => !(side === "listing" && stage === 5));
+}
+
 function adminNextStage(card: AdminCard): AdminStageNumber | null {
-  if (card.stage >= 9) return null;
+  if (card.stage >= 10) return null;
+  if (card.side === "listing" && card.stage === 4) return 6;
   return (card.stage + 1) as AdminStageNumber;
 }
 
@@ -3018,6 +3059,16 @@ function AdminKanbanSwimlane({
   onCardDragStart: (id: string) => void;
   onCardDrop: (side: AdminSide, stage: AdminStageNumber) => void;
 }) {
+  const visibleStages = visibleAdminStages(side);
+  const visiblePipeline = visibleStages.slice(0, side === "listing" ? 6 : 4).map((stage) => {
+    const column = adminStageDefinition(stage);
+    return {
+      stage,
+      title: column.labels[side].title,
+      subtitle: column.labels[side].subtitle,
+    };
+  });
+
   return (
     <section aria-label={title} className="flex flex-col gap-2">
       <div className="flex items-baseline justify-between gap-3 px-1">
@@ -3026,11 +3077,38 @@ function AdminKanbanSwimlane({
         </span>
         <span className="hidden text-[0.72rem] text-muted-foreground sm:inline">{description}</span>
       </div>
+      {side === "listing" && (
+        <div className="rounded-md border border-border bg-muted/25 px-3 py-2">
+          <div className="mb-1 font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+            Listing pipeline order
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            {visiblePipeline.map((item, index) => (
+              <React.Fragment key={`pipeline-${item.stage}`}>
+                <span
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 font-medium",
+                    item.stage === 0
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-border bg-background text-foreground",
+                  )}
+                  title={item.subtitle}
+                >
+                  {item.title}
+                </span>
+                {index < visiblePipeline.length - 1 && (
+                  <span className="text-muted-foreground">→</span>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      )}
       <div
         className="grid gap-2 overflow-x-auto pb-1"
-        style={{ gridTemplateColumns: `repeat(${ADMIN_STAGE_NUMBERS.length}, 18.5rem)` }}
+        style={{ gridTemplateColumns: `repeat(${visibleStages.length}, 18.5rem)` }}
       >
-        {ADMIN_STAGE_NUMBERS.map((stage) => (
+        {visibleStages.map((stage) => (
           <AdminKanbanColumn
             key={`${side}-${stage}`}
             side={side}
@@ -4918,7 +4996,7 @@ function AdminKanbanBoard() {
 
   const buckets = useMemo(() => {
     const empty = (): Record<AdminStageNumber, AdminCard[]> => ({
-      0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: [], 9: [],
+      0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: [], 9: [], 10: [],
     });
     const byStage: Record<AdminSide, Record<AdminStageNumber, AdminCard[]>> = {
       listing: empty(),

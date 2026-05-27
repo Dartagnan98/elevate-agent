@@ -1,5 +1,6 @@
 import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
+import { useTheme } from "@/themes/context";
 
 export function FullWindowAurora({
   label,
@@ -10,6 +11,9 @@ export function FullWindowAurora({
   title?: string;
   subtitle?: string;
 }) {
+  const { themeName } = useTheme();
+  const logoSrc =
+    themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
   if (typeof document === "undefined") return null;
   return createPortal(
     <div
@@ -19,14 +23,13 @@ export function FullWindowAurora({
     >
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
       <div className="relative flex flex-col items-center text-center">
-        <div className="onboarding-rise flex items-center gap-3">
-          <span
-            aria-hidden
-            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-card text-[15px] font-semibold tracking-tight text-foreground"
-          >
-            E
-          </span>
-          <span className="text-[17px] font-medium tracking-tight text-foreground">Elevate</span>
+        <div className="onboarding-rise flex h-7 items-center">
+          <img
+            src={logoSrc}
+            alt="Elevation"
+            className="h-6 w-auto object-contain"
+            draggable={false}
+          />
         </div>
         <div className="onboarding-rise-delay-1 mt-7 font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
           {label}

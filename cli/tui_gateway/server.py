@@ -175,6 +175,61 @@ sys.stdout = sys.stderr
 _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Live-transport registry for fan-out emits (cron sessions, daemon-side
+# emits with no incoming RPC context).
+#
+# Normal chat: the dashboard opens a WS, server.dispatch() runs RPCs with
+# the WS transport bound via contextvar, and the session's transport gets
+# captured as that WS. Cron sessions don't go through any RPC — they're
+# spawned inside the gateway process by cron/scheduler.py and need a way
+# to broadcast tool/message events to *every* open dashboard so the UI
+# can render live progress. ChatPage already filters by session_id, so a
+# fan-out is safe even if multiple sessions are open elsewhere.
+# ──────────────────────────────────────────────────────────────────────
+_live_transports: set = set()
+_live_transports_lock = threading.Lock()
+
+
+def register_live_transport(t) -> None:
+    """Track a dashboard transport so cron/daemon emits can find it."""
+    with _live_transports_lock:
+        _live_transports.add(t)
+
+
+def unregister_live_transport(t) -> None:
+    """Forget a transport that has disconnected."""
+    with _live_transports_lock:
+        _live_transports.discard(t)
+
+
+class FanoutTransport:
+    """Broadcast frames to every currently-registered dashboard transport.
+
+    Used for sessions created outside any RPC (most notably cron jobs).
+    Writes are best-effort: a dead transport is silently skipped. The
+    underlying WSTransport will mark itself closed and the next /api/ws
+    disconnect-finally will unregister it.
+    """
+
+    def write(self, obj: dict) -> bool:
+        with _live_transports_lock:
+            transports = list(_live_transports)
+        if not transports:
+            return False
+        delivered = False
+        for t in transports:
+            try:
+                if t.write(obj):
+                    delivered = True
+            except Exception:
+                pass
+        return delivered
+
+
+_fanout_transport = FanoutTransport()
+
+
 class _SlashWorker:
     """Persistent ElevateCLI subprocess for slash commands."""
 
@@ -341,7 +396,7 @@ def write_json(obj: dict) -> bool:
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
-    params = {"type": event, "session_id": sid}
+    params = {"type": event, "session_id": sid, "ts": time.time()}
     if payload is not None:
         params["payload"] = payload
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
@@ -1037,6 +1092,7 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
                 "tool_id": tool_call_id,
                 "name": name,
                 "context": _tool_ctx(name, args),
+                "started_at": started_at,
             },
         )
 
@@ -1050,7 +1106,9 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
         started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
         session.setdefault("running_tools", {}).pop(tool_call_id, None)
-    duration_s = time.time() - started_at if started_at else None
+    completed_at = time.time()
+    payload["completed_at"] = completed_at
+    duration_s = completed_at - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
     summary = _tool_summary(name, result, duration_s)
@@ -2835,6 +2893,51 @@ def _(rid, params: dict) -> dict:
 # ── Methods: prompt ──────────────────────────────────────────────────
 
 
+_LICENSE_PATH = Path(_elevate_home) / "license.json"
+_SIGN_IN_URL = (
+    os.environ.get("ELEVATE_BACKEND_URL", "https://api.elevationrealestatehq.com").rstrip("/")
+    + "/login"
+)
+_SIGN_IN_BYPASS = os.environ.get("ELEVATE_SKIP_LICENSE_GATE") == "1"
+
+
+def _license_signed_in() -> bool:
+    """True when ~/.elevate/license.json holds an unexpired access token.
+
+    Mirrors elevate_cli.web_server._license_signed_in so the gateway and
+    the HTTP layer apply the same rule. Returning False blocks prompt.submit
+    and falls back to a sign-in nag rendered in the chat pane.
+    """
+    if _SIGN_IN_BYPASS:
+        return True
+    try:
+        with _LICENSE_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False
+    token = data.get("access_token")
+    expires_at = data.get("expires_at")
+    if not token or not isinstance(expires_at, (int, float)):
+        return False
+    return float(expires_at) > (time.time() + 30)
+
+
+def _emit_sign_in_nag(sid: str) -> None:
+    """Render the sign-in CTA as an assistant turn in the dashboard chat."""
+    body = (
+        "**Sign in to start chatting.**\n\n"
+        "Open the Sign In window (Elevate → Sign In, or press ⌘L) and use your "
+        "Elevation Real Estate HQ account. Send your message again once you're in."
+    )
+    _emit("message.start", sid)
+    _emit("message.delta", sid, {"text": body, "rendered": body})
+    _emit(
+        "message.complete",
+        sid,
+        {"text": body, "rendered": body, "status": "complete"},
+    )
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
@@ -2843,6 +2946,9 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    if not _license_signed_in():
+        _emit_sign_in_nag(sid)
+        return _ok(rid, {"status": "sign_in_required"})
     if agent_id:
         try:
             _apply_agent_lane(session, agent_id)
@@ -3337,6 +3443,9 @@ def _(rid, params: dict) -> dict:
     text, parent = params.get("text", ""), params.get("session_id", "")
     if not text:
         return _err(rid, 4012, "text required")
+    if not _license_signed_in():
+        _emit_sign_in_nag(parent)
+        return _ok(rid, {"status": "sign_in_required"})
     task_id = f"bg_{uuid.uuid4().hex[:6]}"
 
     def run():
@@ -3383,6 +3492,9 @@ def _(rid, params: dict) -> dict:
     text, sid = params.get("text", ""), params.get("session_id", "")
     if not text:
         return _err(rid, 4012, "text required")
+    if not _license_signed_in():
+        _emit_sign_in_nag(sid)
+        return _ok(rid, {"status": "sign_in_required"})
     snapshot = list(session.get("history", []))
 
     def run():

@@ -837,6 +837,18 @@ function JobDetail({
               </div>
             )}
 
+            {job.last_summary && !job.last_error && (
+              <section className="mb-5">
+                <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  <MessageSquare className="h-3 w-3" />
+                  Last run summary
+                </div>
+                <div className="whitespace-pre-wrap rounded-md border border-border bg-card/50 px-3 py-3 text-[12.5px] leading-relaxed text-foreground/90">
+                  {job.last_summary}
+                </div>
+              </section>
+            )}
+
             {/* Prompt */}
             <section>
               <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
@@ -887,6 +899,7 @@ function MetaCell({
 
 export default function CronPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [attention, setAttention] = useState<import("../lib/api-types").CronAttention | null>(null);
   const [loading, setLoading] = useState(true);
   const [searchParams, setSearchParams] = useSearchParams();
   const editParam = searchParams.get("edit");
@@ -942,6 +955,24 @@ export default function CronPage() {
     }, 15_000);
     return () => window.clearInterval(interval);
   }, [loadJobs]);
+
+  /* ---- Load attention rollup ---- */
+  const loadAttention = useCallback(() => {
+    api
+      .getCronAttention()
+      .then(setAttention)
+      .catch(() => {
+        /* silent; banner just won't show */
+      });
+  }, []);
+
+  useEffect(() => {
+    loadAttention();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadAttention();
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, [loadAttention]);
 
   /* ---- Filter ---- */
   const lowerSearch = search.trim().toLowerCase();
@@ -1134,6 +1165,53 @@ export default function CronPage() {
         }
         loading={jobDelete.isDeleting}
       />
+
+      {attention && attention.total > 0 && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/[0.06] px-4 py-3 text-xs">
+          <div className="mb-2 flex items-center gap-2 font-medium text-amber-700 dark:text-amber-300">
+            <AlertCircle className="h-3.5 w-3.5" />
+            <span>Needs attention ({attention.total})</span>
+          </div>
+          <div className="flex flex-col gap-1.5 text-foreground/85">
+            {attention.pending_drafts > 0 && (
+              <div>
+                <span className="font-medium">{attention.pending_drafts}</span>{" "}
+                {attention.pending_drafts === 1 ? "outreach draft" : "outreach drafts"} waiting on review
+              </div>
+            )}
+            {attention.errored_jobs.map((j) => (
+              <button
+                key={`err-${j.id}`}
+                type="button"
+                onClick={() => {
+                  setSelectedId(j.id);
+                  setShowCreate(false);
+                }}
+                className="text-left underline-offset-2 hover:underline"
+              >
+                <span className="text-destructive">Error</span>{" "}
+                <span className="font-medium">{j.name || j.id}</span>
+                {j.last_error ? <span className="text-muted-foreground"> — {j.last_error}</span> : null}
+              </button>
+            ))}
+            {attention.stale_jobs.map((j) => (
+              <button
+                key={`stale-${j.id}`}
+                type="button"
+                onClick={() => {
+                  setSelectedId(j.id);
+                  setShowCreate(false);
+                }}
+                className="text-left underline-offset-2 hover:underline"
+              >
+                <span className="text-amber-700 dark:text-amber-400">Stale</span>{" "}
+                <span className="font-medium">{j.name || j.id}</span>
+                <span className="text-muted-foreground"> — no run in {j.hours_since}h</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ============ Two-pane shell ============ */}
       <div className="grid min-h-[calc(100vh-12rem)] grid-cols-1 gap-0 rounded-md border border-border bg-card md:grid-cols-[280px_minmax(0,1fr)]">

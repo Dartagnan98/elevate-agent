@@ -139,19 +139,14 @@ function connectorVariant(state: SourceConnectorStatus["state"]): "success" | "w
 }
 
 function connectorSetupCopy(connector: SourceConnectorStatus): string {
-  if (connector.initializeBehavior === "local_messages_import") {
-    return connector.sourceExists
-      ? "Re-imports synced Mac Messages into Elevate's local message index: people, conversations, messages, and conversation-days."
-      : "Reads the synced Mac Messages database and builds a local Elevate message index for lead context.";
-  }
-  if (connector.initializeBehavior === "composio_social_setup") {
-    return connector.sourceExists
-      ? "Refreshes the local Composio social setup record and next operator step. Add social accounts inside Composio, then run a sync/import."
-      : "Sets up Composio as the social account hub for metrics, DMs, comments, lead moments, content tasks, and approval-gated replies.";
+  // Server-side blueprint description is the source of truth. Fall back to a
+  // generic line only if the backend didn't ship one (older API).
+  if (connector.description && connector.description.trim()) {
+    return connector.description;
   }
   return connector.sourceExists
-    ? "Refreshes the local agent setup task and prompt for building the real connector. It does not fabricate demo lead data."
-    : "Creates a local setup task for the agent/operator to build the webhook, poller, import command, or bridge.";
+    ? "Connector files exist. Run sync to refresh."
+    : "Initialize this source to create the connector files.";
 }
 
 const TOOLKIT_PAGE_SIZE = 24;
@@ -782,6 +777,7 @@ function SourceConnectorSettingsPanel() {
   const [data, setData] = useState<SourceConnectorsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
+  const [runResults, setRunResults] = useState<Record<string, { kind: string; message: string }>>({});
   const [composioAccounts, setComposioAccounts] = useState<ComposioConnectedAccount[]>([]);
   const [composioReady, setComposioReady] = useState<boolean>(false);
   const [fbPages, setFbPages] = useState<Array<{
@@ -850,6 +846,13 @@ function SourceConnectorSettingsPanel() {
   );
   const fbSelectedCount = fbPages.filter(p => p.selected).length;
 
+  const promptForConnector = async (connector: SourceConnectorStatus): Promise<string> => {
+    const existing = (connector.prompt || "").trim();
+    if (existing) return existing;
+    const resp = await api.getSourceConnectorPrompt(connector.id);
+    return (resp.prompt || "").trim();
+  };
+
   useEffect(() => {
     void load();
     void loadComposio();
@@ -864,18 +867,46 @@ function SourceConnectorSettingsPanel() {
   }, [hasFacebookAccount, loadFbPages]);
 
   const runPrompt = async (connector: SourceConnectorStatus) => {
+    const opensChat = connector.runMode === "agent_session" || !connector.wired;
     setRunningPromptId(connector.id);
+    setRunResults((prev) => {
+      const next = { ...prev };
+      delete next[connector.id];
+      return next;
+    });
     try {
-      // Always resolve the freshest prompt text (the source_prompt_for output
-      // can drift if config changes). Prompt is already on the connector row,
-      // but a roundtrip guarantees the canonical contract is current.
-      const prompt = (connector.prompt || "").trim();
-      if (!prompt) {
-        setRunningPromptId(null);
+      // Server-inline connectors can safely complete inside the API request.
+      // Browser-driven MLS scrapers need a visible PTY-backed chat session so
+      // the operator can watch MFA, browser steps, and terminal output.
+      if (!opensChat) {
+        try {
+          const resp = await api.runSourceConnectorPrompt(connector.id);
+          const outcome = resp.run?.outcome;
+          setRunResults((prev) => ({
+            ...prev,
+            [connector.id]: {
+              kind: outcome?.kind ?? "ok",
+              message: outcome?.message ?? "Sync finished.",
+            },
+          }));
+        } catch (err) {
+          setRunResults((prev) => ({
+            ...prev,
+            [connector.id]: {
+              kind: "error",
+              message: err instanceof Error ? err.message : "Sync failed.",
+            },
+          }));
+        } finally {
+          void load();
+        }
         return;
       }
+      const prompt = await promptForConnector(connector);
+      if (!prompt) return;
       const ts = String(Date.now());
-      const seedText = `Source connector: ${connector.label} (${connector.id})\n\n${prompt}`;
+      const seedTitle = connector.runMode === "agent_session" ? "Run source connector" : "Source connector";
+      const seedText = `${seedTitle}: ${connector.label} (${connector.id})\n\n${prompt}`;
       try {
         window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, seedText);
       } catch {
@@ -890,7 +921,7 @@ function SourceConnectorSettingsPanel() {
 
   const copyPromptText = async (connector: SourceConnectorStatus) => {
     try {
-      await navigator.clipboard.writeText(connector.prompt);
+      await navigator.clipboard.writeText(await promptForConnector(connector));
     } catch {
       // clipboard not available — silently skip; primary path is run.
     }
@@ -908,7 +939,7 @@ function SourceConnectorSettingsPanel() {
             Source connectors
           </h2>
           <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
-            Setup lives here. Apple Messages can build a real local message index. Social apps use Composio as the account hub. Other sources create an agent setup task until a webhook, poller, import command, or bridge exists.
+            Where Elevate pulls its data from. Grouped by purpose: messages & inbox, CRM, MLS / buyer intelligence, social, and back-office. Each connector self-describes what it does.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -933,9 +964,39 @@ function SourceConnectorSettingsPanel() {
         </code>
       </div>
 
-      <ul className="divide-y divide-border/50 border-y border-border/50">
-        {connectors.map((connector) => (
-          <li key={connector.id} className="py-4">
+      {(() => {
+        const categories = data?.categories ?? [];
+        const fallback = { id: "other", label: "Other", description: "" };
+        const groups = new Map<string, SourceConnectorStatus[]>();
+        for (const c of connectors) {
+          const key = c.category || fallback.id;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key)!.push(c);
+        }
+        const ordered = [
+          ...categories.filter((c) => groups.has(c.id)),
+          ...[...groups.keys()]
+            .filter((id) => !categories.some((c) => c.id === id))
+            .map((id) => ({ ...fallback, id, label: id })),
+        ];
+        return ordered.map((cat) => {
+          const rows = groups.get(cat.id) ?? [];
+          if (!rows.length) return null;
+          const readyInCat = rows.filter((r) => r.state === "connected" || r.state === "import_only").length;
+          return (
+            <section key={cat.id} className="space-y-3">
+              <div className="flex flex-col gap-1 border-t border-border/50 pt-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-semibold text-foreground">{cat.label}</h3>
+                  <Badge variant="outline" className="text-[10px]">{readyInCat}/{rows.length}</Badge>
+                </div>
+                {cat.description && (
+                  <p className="max-w-prose text-xs leading-5 text-muted-foreground">{cat.description}</p>
+                )}
+              </div>
+              <ul className="divide-y divide-border/50">
+                {rows.map((connector) => (
+                  <li key={connector.id} className="py-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1040,20 +1101,46 @@ function SourceConnectorSettingsPanel() {
                 )}
               </div>
             )}
+            {runResults[connector.id] && (
+              <div
+                className={
+                  "mt-3 rounded-md border px-3 py-2 text-xs leading-5 " +
+                  (runResults[connector.id].kind === "error"
+                    ? "border-destructive/40 bg-destructive/5 text-destructive"
+                    : runResults[connector.id].kind === "needs_operator"
+                      ? "border-warning/40 bg-warning/5 text-foreground"
+                      : "border-success/40 bg-success/5 text-foreground")
+                }
+              >
+                {runResults[connector.id].message}
+              </div>
+            )}
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <Badge variant="outline">{connector.ownerAgent}</Badge>
               {connector.connectionType && <Badge variant="outline">{connector.connectionType}</Badge>}
+              {(() => {
+                const opensChat = connector.runMode === "agent_session" || !connector.wired;
+                const busy = runningPromptId === connector.id;
+                const idleLabel = opensChat
+                  ? (connector.runMode === "agent_session" ? "Open run session" : "Open setup chat")
+                  : "Run sync";
+                const busyLabel = opensChat
+                  ? (connector.runMode === "agent_session" ? "Opening session…" : "Opening chat…")
+                  : "Running…";
+                return (
               <Button
                 variant="default"
                 size="sm"
                 className="ml-auto"
                 onClick={() => void runPrompt(connector)}
-                disabled={runningPromptId === connector.id}
-                aria-label={`Run setup prompt for ${connector.label}`}
+                disabled={busy}
+                aria-label={opensChat ? `Open chat session for ${connector.label}` : `Run sync for ${connector.label}`}
               >
                 <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                {runningPromptId === connector.id ? "Opening chat…" : "Run prompt"}
+                {busy ? busyLabel : idleLabel}
               </Button>
+                );
+              })()}
               <Button
                 variant="ghost"
                 size="sm"
@@ -1065,11 +1152,15 @@ function SourceConnectorSettingsPanel() {
               </Button>
             </div>
           </li>
-        ))}
-        {loading && !connectors.length && (
-          <li className="py-6 text-sm text-muted-foreground">Loading connector blueprints...</li>
-        )}
-      </ul>
+                ))}
+              </ul>
+            </section>
+          );
+        });
+      })()}
+      {loading && !connectors.length && (
+        <div className="py-6 text-sm text-muted-foreground">Loading connector blueprints...</div>
+      )}
     </section>
   );
 }
@@ -1496,6 +1587,16 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
     navigate(`/chat?new=${ts}&seed=${ts}`);
   };
 
+  const sourceConnectorPrompt = async (sourceId: string, fallback: string): Promise<string> => {
+    try {
+      const resp = await api.getSourceConnectorPrompt(sourceId);
+      const prompt = (resp.prompt || "").trim();
+      return prompt || fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
   const appleConnector = connectors?.connectors?.find((c) => c.id === "apple-messages");
   const appleConnected = appleConnector?.state === "connected" || appleConnector?.state === "import_only";
 
@@ -1681,13 +1782,16 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
             <Button
               size="sm"
               variant="outline"
-              onClick={() =>
+              onClick={() => void (async () => {
+                const prompt = await sourceConnectorPrompt(
+                  appleConnector?.id || "apple-messages",
+                  "Help me wire iMessage so Elevate can read my Mac Messages history into the local message index. Walk me through Full Disk Access for the Elevate binary and run a first sync.",
+                );
                 startSetupChat(
                   "Channel setup: iMessage receive",
-                  appleConnector?.prompt ||
-                    "Help me wire iMessage so Elevate can read my Mac Messages history into the local message index. Walk me through Full Disk Access for the Elevate binary and run a first sync.",
-                )
-              }
+                  prompt,
+                );
+              })()}
             >
               <Play className="h-3.5 w-3.5" />
               Setup chat

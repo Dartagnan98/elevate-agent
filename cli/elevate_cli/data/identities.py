@@ -40,6 +40,7 @@ def _canonicalize(kind: str, value: str) -> str | None:
     if kind in {
         "instagram_id", "facebook_id", "telegram_id",
         "lofty_id", "fub_id", "sierra_id", "brivity_id", "boldtrail_id",
+        "xposure_pcs_id",
         "apple_handle", "apple_addressbook_id", "apple_chat_id",
         "wa_id",
     }:
@@ -362,10 +363,21 @@ def merge_contacts(
 
     # Reassign all FK rows. Anything not listed here stays untouched —
     # add tables to this list as the schema grows.
+    #
+    # CASCADE-on-delete tables (conversations, events, identities,
+    # pcs_buyers, notes, lead_inquiries, lead_properties, deal_contacts)
+    # would technically cascade, but we re-point them explicitly so the
+    # primary contact ends up owning the rows instead of losing them.
+    #
+    # RESTRICT tables (lead_signals.graduated_to_contact_id,
+    # events_summary, deals, agent_handoffs) MUST be reassigned before
+    # the DELETE or the transaction aborts on FK violation.
     for sql in (
         "UPDATE identities      SET contact_id=? WHERE contact_id=?",
         "UPDATE conversations   SET contact_id=? WHERE contact_id=?",
         "UPDATE events          SET contact_id=? WHERE contact_id=?",
+        "UPDATE lead_signals    SET graduated_to_contact_id=? WHERE graduated_to_contact_id=?",
+        "UPDATE events_summary  SET contact_id=? WHERE contact_id=?",
     ):
         conn.execute(sql, (primary_id, duplicate_id))
     # pcs_buyers' contact_id is a PK — if both have rows, the duplicate

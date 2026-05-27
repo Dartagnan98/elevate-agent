@@ -25,6 +25,25 @@ export function SidebarUserPill() {
     return () => window.removeEventListener("elevate:auth-changed", handler);
   }, [load]);
 
+  // Re-poll license state when the user looks back at the window or the tab
+  // becomes visible again. The CLI gateway can clear ~/.elevate/license.json
+  // out from under us (refresh token rejected, explicit logout from another
+  // surface) and without this listener the pill would keep rendering a stale
+  // "signed in as foo@bar" until the next manual reload.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", load);
+    const tick = window.setInterval(load, 30_000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", load);
+      window.clearInterval(tick);
+    };
+  }, [load]);
+
   useEffect(() => {
     if (!open) return;
     const handleClick = (e: MouseEvent) => {

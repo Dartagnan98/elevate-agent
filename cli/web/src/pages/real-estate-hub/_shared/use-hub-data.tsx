@@ -17,6 +17,8 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn } from "@/lib/utils";
 import type { HubData } from "./types";
 
+const SOURCE_INBOX_REFRESH_LIMIT = 500;
+
 export function useRealEstateHubData(): HubData {
   const { pathname } = useLocation();
   const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
@@ -54,6 +56,9 @@ export function useRealEstateHubData(): HubData {
       statusResult,
       sessionsResult,
       cronResult,
+      sourceInboxResult,
+      dealTasksResult,
+      actionRunsResult,
     ] = await Promise.allSettled([
       includeAgentHub
         ? api.getAgentHub({
@@ -65,6 +70,9 @@ export function useRealEstateHubData(): HubData {
       api.getStatus(),
       api.getSessions(36, 0, { includeTotal: false }),
       api.getCronJobs({ compact: true }),
+      includeSourceInbox ? api.getSourceInbox(SOURCE_INBOX_REFRESH_LIMIT) : Promise.resolve(null),
+      includeAdminTaskData ? api.getAdminDealTasks({ status: "open", limit: 200 }) : Promise.resolve(null),
+      includeAdminTaskData ? api.getAdminActionRuns({ limit: 200 }) : Promise.resolve(null),
     ]);
 
     if (refreshSeq.current !== refreshId) return;
@@ -75,8 +83,23 @@ export function useRealEstateHubData(): HubData {
       setSessions((sessionsResult.value as PaginatedSessions).sessions);
     }
     if (cronResult.status === "fulfilled") setCronJobs(cronResult.value);
+    if (sourceInboxResult.status === "fulfilled" && sourceInboxResult.value) {
+      setSourceInbox(sourceInboxResult.value);
+    } else {
+      setSourceInbox(null);
+    }
+    if (dealTasksResult.status === "fulfilled" && dealTasksResult.value) {
+      setDealTasks(dealTasksResult.value.items);
+    } else {
+      setDealTasks([]);
+    }
+    if (actionRunsResult.status === "fulfilled" && actionRunsResult.value) {
+      setActionRuns(actionRunsResult.value.items);
+    } else {
+      setActionRuns([]);
+    }
 
-    const failed = [hubResult, statusResult, sessionsResult, cronResult].find(
+    const failed = [hubResult, statusResult, sessionsResult, cronResult, sourceInboxResult, dealTasksResult, actionRunsResult].find(
       (result) => result.status === "rejected",
     );
 
@@ -84,28 +107,6 @@ export function useRealEstateHubData(): HubData {
       setError(failed.reason instanceof Error ? failed.reason.message : "Some hub data failed");
     }
 
-    void Promise.allSettled([
-      includeSourceInbox ? api.getSourceInbox(5000) : Promise.resolve(null),
-      includeAdminTaskData ? api.getAdminDealTasks({ status: "open", limit: 200 }) : Promise.resolve(null),
-      includeAdminTaskData ? api.getAdminActionRuns({ limit: 200 }) : Promise.resolve(null),
-    ]).then(([sourceInboxResult, dealTasksResult, actionRunsResult]) => {
-      if (refreshSeq.current !== refreshId) return;
-      if (sourceInboxResult.status === "fulfilled" && sourceInboxResult.value) {
-        setSourceInbox(sourceInboxResult.value);
-      } else {
-        setSourceInbox(null);
-      }
-      if (dealTasksResult.status === "fulfilled" && dealTasksResult.value) {
-        setDealTasks(dealTasksResult.value.items);
-      } else {
-        setDealTasks([]);
-      }
-      if (actionRunsResult.status === "fulfilled" && actionRunsResult.value) {
-        setActionRuns(actionRunsResult.value.items);
-      } else {
-        setActionRuns([]);
-      }
-    });
   }, [includeAdminTaskData, includeMemoryGraph, includeOrchestration, includeSourceInbox, includeAgentHub]);
 
   useEffect(() => {
@@ -145,7 +146,7 @@ export function useRealEstateHubData(): HubData {
     };
   }, [refresh]);
 
-  return { actionRuns, cronJobs, dealTasks, error, loading, refresh, sourceInbox, sessions, snapshot, status };
+  return { actionRuns, cronJobs, dealTasks, error, loading, refresh, setSourceInbox, sourceInbox, sessions, snapshot, status };
 }
 
 export function useHubHeader(title: string, data: HubData) {

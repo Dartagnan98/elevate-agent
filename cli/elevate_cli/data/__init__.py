@@ -132,6 +132,7 @@ from elevate_cli.data.deals import (
     add_deal_attachment,
     add_deal_contact,
     create_deal,
+    deals_overview,
     DealPhaseGateBlocked,
     get_deal,
     get_deal_context,
@@ -227,6 +228,34 @@ from elevate_cli.data.agent_setup import (
     reset_agent_setup,
     update_agent_setup,
 )
+from elevate_cli.data.working_state import (
+    list_active_working_state,
+    list_history_working_state,
+    recall_working_state,
+    resolve_working_state,
+    touch_deal_stage_move,
+    update_working_state,
+    working_state_digest,
+)
+from elevate_cli.data.usage_ledger import (
+    record_turn as record_usage_turn,
+    recent_turns as recent_usage_turns,
+)
+from elevate_cli.data.chat_sessions import (
+    get_meta as chat_get_meta,
+    insert_message as chat_insert_message,
+    insert_messages_batch as chat_insert_messages_batch,
+    message_count as chat_message_count,
+    recent_sessions as chat_recent_sessions,
+    search_messages as chat_search_messages,
+    session_exists as chat_session_exists,
+    set_meta as chat_set_meta,
+    upsert_session as chat_upsert_session,
+)
+from elevate_cli.data.orchestration import (
+    OrchestrationStorePg,
+    get_orchestration_store_pg,
+)
 
 
 __all__ = [
@@ -276,7 +305,7 @@ __all__ = [
     "template_stats_with_ambiguous",
     # deals
     "add_deal_attachment", "add_deal_contact", "create_deal",
-    "DealPhaseGateBlocked",
+    "deals_overview", "DealPhaseGateBlocked",
     "get_deal", "get_deal_context", "list_deal_action_runs",
     "list_deal_attachments", "list_deal_contacts", "list_deal_events",
     "list_deal_tasks", "list_deals", "move_deal_stage", "record_run_result",
@@ -318,4 +347,17 @@ __all__ = [
     # Agent (top-level) setup readiness gate
     "complete_agent_setup", "get_agent_setup",
     "reset_agent_setup", "update_agent_setup",
+    # Per-entity working state (the "where we left off" journal)
+    "list_active_working_state", "list_history_working_state",
+    "recall_working_state", "resolve_working_state",
+    "touch_deal_stage_move", "update_working_state",
+    "working_state_digest",
+    # Per-turn gateway usage ledger (PG-backed)
+    "record_usage_turn", "recent_usage_turns",
+    # Chat sessions / messages (PG-backed, infrastructure layer)
+    "chat_get_meta", "chat_insert_message", "chat_insert_messages_batch",
+    "chat_message_count", "chat_recent_sessions", "chat_search_messages",
+    "chat_session_exists", "chat_set_meta", "chat_upsert_session",
+    # Orchestration store (PG-backed)
+    "OrchestrationStorePg", "get_orchestration_store_pg",
 ]

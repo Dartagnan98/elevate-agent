@@ -33,16 +33,46 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
     # Real-estate source connectors and integration settings
     # ---------------------------------------------------------------------------
 
+    _SOURCE_INBOX_ACTION_LIMIT = 500
+
+    def _source_inbox_response(limit: int = _SOURCE_INBOX_ACTION_LIMIT):
+        from elevate_cli.source_connectors import build_source_inbox_response
+        from elevate_cli.data import db_source_inbox_response
+
+        try:
+            return db_source_inbox_response(limit=limit)
+        except Exception:
+            _log.exception(
+                "db_source_inbox_response failed, falling back to JSONL source inbox"
+            )
+            return build_source_inbox_response(limit=limit)
+
 
     @router.get("/api/source-connectors")
-    async def get_source_connectors():
+    async def get_source_connectors(include_prompts: bool = False):
         try:
             from elevate_cli.source_connectors import build_source_connectors_response
 
-            return build_source_connectors_response()
+            return build_source_connectors_response(include_prompts=include_prompts)
         except Exception as exc:
             _log.exception("GET /api/source-connectors failed")
             raise HTTPException(status_code=500, detail=f"Source connectors failed: {exc}")
+
+
+    @router.get("/api/source-connectors/{source_id}/prompt")
+    async def get_source_connector_prompt(source_id: str):
+        try:
+            from elevate_cli.source_connectors import source_prompt_for
+
+            prompt = source_prompt_for(source_id)
+            if not prompt:
+                raise ValueError(f"Unknown source connector: {source_id}")
+            return {"sourceId": source_id, "prompt": prompt}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            _log.exception("GET /api/source-connectors/%s/prompt failed", source_id)
+            raise HTTPException(status_code=500, detail=f"Source prompt failed: {exc}")
 
 
     @router.get("/api/source-connectors/{source_id}/records")
@@ -61,17 +91,7 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
     @router.get("/api/source-inbox")
     async def get_source_inbox(limit: int = 16):
         try:
-            from elevate_cli.source_connectors import build_source_inbox_response
-            from elevate_cli.data import db_source_inbox_response, shadow_read
-
-            # Sprint 2: db_fn is wired. Production stays on legacy until
-            # ELEVATE_DATA_PRIMARY=db flips after a clean parity window.
-            return shadow_read(
-                endpoint="GET /api/source-inbox",
-                request_args={"limit": limit},
-                jsonl_fn=lambda: build_source_inbox_response(limit=limit),
-                db_fn=lambda: db_source_inbox_response(limit=limit),
-            )
+            return _source_inbox_response(limit=limit)
         except Exception as exc:
             _log.exception("GET /api/source-inbox failed")
             raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")
@@ -119,7 +139,13 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         try:
             from elevate_cli.source_connectors import update_source_thread_state
 
-            return update_source_thread_state(body.sourceId, body.threadId, body.action)
+            update_source_thread_state(
+                body.sourceId,
+                body.threadId,
+                body.action,
+                return_inbox=False,
+            )
+            return _source_inbox_response()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:
@@ -132,7 +158,12 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         try:
             from elevate_cli.source_connectors import update_profile_state
 
-            return update_profile_state(body.profileId, body.status)
+            update_profile_state(
+                body.profileId,
+                body.status,
+                return_inbox=False,
+            )
+            return _source_inbox_response()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:
@@ -145,12 +176,14 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         try:
             from elevate_cli.source_connectors import update_source_task_state
 
-            return update_source_task_state(
+            update_source_task_state(
                 body.sourceId,
                 body.taskId,
                 body.action,
                 draft_text=body.draftText,
+                return_inbox=False,
             )
+            return _source_inbox_response()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:

@@ -74,7 +74,7 @@ _BACKGROUND_AUTOMATIONS: list[dict[str, Any]] = [
         "name": "Seller Update",
         "skill": "seller-update",
         "kind": "cron",
-        "affectsStages": [5],
+        "affectsStages": [6],
         "description": "Pulls ShowingTime feedback and creates Gmail seller-update drafts.",
     },
 ]
@@ -94,12 +94,12 @@ _BC: dict[str, Any] = {
     "listing": {
         "stages": [
             _stage(
-                "CMA / Prospect",
-                "Appointment + valuation",
+                "Pre-CMA",
+                "Google Form + contact verification",
                 [
-                    ("draft-cma-followup", "Draft CMA follow-up message"),
-                    ("pricing-recap", "Send pricing recap to seller"),
-                    ("missing-info-list", "Identify info needed before listing paperwork"),
+                    ("pre_cma_google_form", "Pre-CMA Google Form filled"),
+                    ("lofty_contact_verified", "Lofty contact verified / created"),
+                    ("pre_cma_handoff", "Client/property notes saved for CMA"),
                 ],
                 fields=[
                     _wf("Client 1 name", "Client 1 Name"),
@@ -107,14 +107,36 @@ _BC: dict[str, Any] = {
                     _wf("Lead source", "Lead Source"),
                     _wf("CMA date requested", "CMA Date Requested"),
                 ],
+                triggers=[
+                    ("pre-cma-google-form", "Verify pre-CMA Google Form", "pre-cma-google-form"),
+                    ("lofty-crm-client-contacts", "Verify Lofty contact", "lofty-crm-client-contacts"),
+                ],
+            ),
+            _stage(
+                "CMA / Evaluation",
+                "PDF + pricing story",
+                [
+                    ("cma_pdf_ready", "CMA PDF / evaluation ready"),
+                    ("pricing_story_approved", "Pricing story approved"),
+                    ("client_yes_to_listing", "Client said yes to listing"),
+                ],
+                fields=[
+                    _wf("CMA date requested", "CMA Date Requested"),
+                    ("listPrice", "Recommended list price"),
+                ],
                 docs=[("cma_report", "CMA report")],
-                triggers=[("cma-complete", "Run CMA skill", "cma")],
+                triggers=[
+                    ("cma-complete", "Run CMA skill", "cma"),
+                    ("seller-package", "Prepare seller evaluation package", "seller-package"),
+                ],
             ),
             _stage(
                 "Listing Intake",
-                "Collect info for MLC",
+                "Trigger MLC + missing fields",
                 [
-                    _wf("Stage 1 complete", "Stage 1 Complete ✓"),
+                    ("mlc_intake_started", "MLC intake triggered"),
+                    ("listing_missing_fields", "Missing listing fields surfaced"),
+                    ("listing_docs_approval", "Listing docs/signature placements ready for approval"),
                 ],
                 fields=[
                     ("listingAddress", "Property address"),
@@ -124,37 +146,49 @@ _BC: dict[str, Any] = {
                     ("listingDate", "Planned go-live date"),
                     ("listingType", "Listing type"),
                 ],
-                triggers=[("mlc-intake", "Collect listing info for MLC", "mlc")],
-            ),
-            _stage(
-                "MLC / Documents",
-                "Create docs + signing",
-                [
-                    ("mlc-package-prepared", "MLC package prepared"),
-                    _wf("Title ordered", "Title Ordered?"),
-                    _wf("Sign ordered", "Sign Ordered?"),
-                    _wf("Stage 2 complete", "Stage 2 Complete ✓"),
-                ],
-                fields=[
-                    _wf("Documents sent date", "Documents Sent Date"),
-                    _wf("Documents signed date", "Documents Signed Date"),
-                    _wf("SkySlope transaction URL", "SkySlope Transaction URL"),
-                ],
                 docs=[("title_search", "Title search"), ("signed_envelope", "Signed listing envelope")],
                 forms=[("MLC", "Multiple Listing Contract"), ("FINTRAC", "FINTRAC identity form"), ("PDS", "Property Disclosure Statement")],
                 triggers=[
-                    ("mlc-prepare", "Prepare MLC package", "mlc"),
+                    ("mlc-intake", "Collect listing info for MLC", "mlc"),
+                    ("deal-matcher-intake", "Match inbound docs to the deal", "deal-matcher"),
                     ("signing-package-sync", "Sync signing status", "signing-package"),
-                    ("skyslope-doc-check", "Check SkySlope opening docs", "skyslope-sync"),
                 ],
             ),
             _stage(
-                "Photos Ready",
-                "Photo capture + review",
+                "SkySlope & Matrix Prep",
+                "Compliance file + incomplete MLS draft",
                 [
-                    _wf("Photos in Drive", "Photos in Drive?"),
-                    _wf("Jeff photo review", "Jeff Photo Review ✓"),
-                    _wf("Stage 3 complete", "Stage 3 Complete ✓"),
+                    ("signed_listing_docs_saved", "Signed listing docs saved to Drive"),
+                    ("skyslope_file_created", "SkySlope file created / synced"),
+                    ("matrix_incomplete_listing_prepped", "Matrix/Xposure incomplete listing prepped"),
+                    ("matrix_missing_fields_surfaced", "Matrix missing fields surfaced"),
+                ],
+                fields=[
+                    _wf("SkySlope transaction URL", "SkySlope Transaction URL"),
+                    ("mlsNumber", "MLS number if already assigned"),
+                ],
+                docs=[("signed_envelope", "Signed listing envelope"), ("matrix_incomplete_draft", "Matrix/Xposure incomplete draft")],
+                triggers=[
+                    ("skyslope-doc-check", "Create/sync SkySlope opening docs", "skyslope-sync"),
+                    ("matrix-incomplete", "Prepare Matrix/Xposure incomplete listing", "matrix-incomplete-listing"),
+                ],
+            ),
+            _stage(
+                "Marketing Go",
+                "Coming-soon + launch assets",
+                [
+                    ("marketing_go_started", "Marketing Go started after SkySlope/Matrix prep"),
+                    ("photographer_drive_link_received", "Photographer Google Drive/photo link received or requested"),
+                    ("marketing_go_questions_answered", "Marketing Go questions answered / blockers surfaced"),
+                    ("photo_cleanup_complete", "Photo cleanup complete"),
+                    ("cleaned_photos_saved_to_drive", "Cleaned photos saved to listing Google Drive folder"),
+                    ("best_99_matrix_photos_selected", "Best 99 Matrix photos selected if photographer sent more than 99"),
+                    ("matrix_photos_uploaded", "Photos uploaded to Matrix/Xposure"),
+                    ("matrix_listing_finished_with_photos", "Matrix listing finished with final photos"),
+                    ("coming_soon_assets_ready", "Coming-soon assets ready"),
+                    ("landing_page_ready", "Landing page ready"),
+                    ("launch_copy_social_email_ready", "Launch copy, social posts, and email assets ready"),
+                    ("marketing_package_ready_for_approval", "Marketing package ready for approval"),
                 ],
                 fields=[
                     _wf("Photo shoot date", "Photo Shoot Date"),
@@ -165,7 +199,11 @@ _BC: dict[str, Any] = {
                     _wf("AI: Flooring Types"),
                 ],
                 docs=[("listing_photos", "Listing photos")],
-                triggers=[("photo-cleanup", "Prepare listing-ready photos", "photo-cleanup")],
+                triggers=[
+                    ("photo-cleanup", "Prepare listing-ready photos", "photo-cleanup"),
+                    ("marketing-go-package", "Prepare Marketing Go launch package", "marketing"),
+                    ("matrix-final-photos", "Upload final photos to Matrix/Xposure", "matrix-incomplete-listing"),
+                ],
             ),
             _stage(
                 "MLS Entry",
@@ -227,23 +265,23 @@ _BC: dict[str, Any] = {
                 triggers=[("offer-review", "Review accepted-offer package", "offer-review")],
             ),
             _stage(
-                "Subject Removal",
-                "Subjects + lawyer package",
+                "Condition Removal",
+                "Conditions + lawyer package",
                 [
-                    _wf("Subject removal form sent", "Subject Removal Form Sent"),
+                    _wf("Condition removal / waiver sent", "Subject Removal Form Sent"),
                     _wf("Title charges verified", "Title Charges Verified"),
                     _wf("BIR + PDS received", "BIR + PDS Received"),
                     _wf("Lawyer info requested", "Lawyer Info Requested"),
-                    _wf("Stage 7 complete", "Stage 7 Complete ✓"),
+                    _wf("Conditions removed / waived", "Stage 7 Complete ✓"),
                 ],
                 fields=[
                     ("subjectRemovalDate", "Subject removal date"),
                     _wf("Order sold rider date", "Order Sold Rider Date"),
                 ],
-                docs=[("subject_removal_form", "Subject removal form"), ("deposit_receipt", "Deposit receipt")],
+                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt")],
                 triggers=[
-                    ("subject-removal", "Run subject-removal admin check", "subject-removal"),
-                    ("subject-removal-docs", "Sync subject-removal signing", "signing-package"),
+                    ("subject-removal", "Run condition-removal admin check", "subject-removal"),
+                    ("subject-removal-docs", "Sync condition-removal signing", "signing-package"),
                 ],
             ),
             _stage(
@@ -355,19 +393,19 @@ def _package_for_key(package_key: str) -> dict[str, Any]:
 
 _CONDITION_ADDITIONS: dict[str, list[dict[str, Any]]] = {
     "propertySubtype:strata": [
-        {"stage": 6, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
+        {"stage": 7, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
     ],
     "property_subtype:strata": [
-        {"stage": 6, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
+        {"stage": 7, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
     ],
     "tenanted:true": [
         {"stage": 2, "id": "tenancy-docs", "label": "Tenancy docs / notice requirements checked", "docKind": "tenancy_docs"}
     ],
     "multipleOffers:true": [
-        {"stage": 6, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
+        {"stage": 7, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
     ],
     "multiple_offers:true": [
-        {"stage": 6, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
+        {"stage": 7, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
     ],
     "poaSigning:true": [
         {"stage": 2, "id": "poa-review", "label": "POA authority reviewed", "docKind": "poa_authority"}
@@ -444,14 +482,18 @@ def resolve_admin_deal_flow(
         condition_docs=condition_docs,
     )
     checklist = [*current["checklist"], *additions]
+    next_stage = stage_index + 1 if stage_index < last_stage else None
+    if side_key == "listing" and stage_index == 4 and last_stage >= 6:
+        next_stage = 6
+    next_stage_name = stages[next_stage]["title"] if next_stage is not None else None
     return {
         "packageKey": package["packageKey"],
         "side": side_key,
         "stage": stage_index,
         "stageName": current["title"],
         "stageSubtitle": current["subtitle"],
-        "nextStage": stage_index + 1 if stage_index < last_stage else None,
-        "nextStageName": stages[stage_index + 1]["title"] if stage_index < last_stage else None,
+        "nextStage": next_stage,
+        "nextStageName": next_stage_name,
         "checklistItems": checklist,
         "requiredFields": current["requiredFields"],
         "requiredForms": current["forms"],

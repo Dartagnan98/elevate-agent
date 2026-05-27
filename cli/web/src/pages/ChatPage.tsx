@@ -615,6 +615,10 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
   if (role === "tool") return false;
   if (role !== "user" && isRawToolPayload(clean)) return false;
   if (clean.startsWith("[CONTEXT COMPACTION")) return false;
+  if (role === "system") {
+    if (/^⚡\s*loaded skill:/i.test(clean)) return false;
+    if (/^session busy\b/i.test(clean)) return false;
+  }
   if (role === "user") {
     if (/^\[SYSTEM:/.test(clean)) {
       // Skill invocations pass through — collapseSkillInvocation handles them
@@ -627,6 +631,23 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
     if (clean.startsWith("User follow-up received while you were already working:")) return false;
   }
   return true;
+}
+
+function hasActivitySnapshot(message: Partial<ChatMessage>): boolean {
+  return (
+    message.role === "assistant" &&
+    (message.status === "streaming" ||
+      !!message.tools?.length ||
+      !!message.traces?.length ||
+      typeof message.tokenCount === "number")
+  );
+}
+
+function shouldCacheTranscriptMessage(message: ChatMessage): boolean {
+  return (
+    shouldKeepTranscriptMessage(message.role, message.content) ||
+    hasActivitySnapshot(message)
+  );
 }
 
 // A skill slash command (/cma-audit) injects the entire SKILL.md as the
@@ -669,6 +690,13 @@ function timestampMillis(value: unknown, fallback: number): number {
     return fallback;
   }
   return value < 1_000_000_000_000 ? value * 1000 : value;
+}
+
+function eventMillis(ev: GatewayEvent, fallback = Date.now()): number {
+  if (typeof ev.ts === "number") {
+    return timestampMillis(ev.ts, fallback);
+  }
+  return timestampMillis(compactToolPayload(ev.payload).ts, fallback);
 }
 
 function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
@@ -717,6 +745,14 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     const entry = message as Partial<ChatMessage>;
     const role = entry.role;
     const content = typeof entry.content === "string" ? entry.content : "";
+    const tools = Array.isArray(entry.tools) ? entry.tools : undefined;
+    const traces = Array.isArray(entry.traces) ? entry.traces : undefined;
+    const hasCachedActivity =
+      role === "assistant" &&
+      (entry.status === "streaming" ||
+        !!tools?.length ||
+        !!traces?.length ||
+        typeof entry.tokenCount === "number");
     if (
       role !== "assistant" &&
       role !== "system" &&
@@ -725,7 +761,7 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     ) {
       return;
     }
-    if (!shouldKeepTranscriptMessage(role, content)) return;
+    if (!shouldKeepTranscriptMessage(role, content) && !hasCachedActivity) return;
     normalized.push({
       content: collapseSkillInvocation(role, content),
       createdAt: timestampMillis(entry.createdAt, Date.now() - index),
@@ -739,8 +775,8 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
           : "complete" as const,
       title: typeof entry.title === "string" ? entry.title : undefined,
       warning: typeof entry.warning === "string" ? entry.warning : undefined,
-      tools: Array.isArray(entry.tools) ? entry.tools : undefined,
-      traces: Array.isArray(entry.traces) ? entry.traces : undefined,
+      tools,
+      traces,
       tokenCount:
         typeof entry.tokenCount === "number" ? entry.tokenCount : undefined,
       attachments: Array.isArray(entry.attachments)
@@ -790,7 +826,7 @@ function trimTranscriptForStorage(messages: ChatMessage[]): ChatMessage[] {
   let used = 0;
   const trimmed: ChatMessage[] = [];
   for (const message of messages.slice(-MAX_STORED_TRANSCRIPT_MESSAGES).reverse()) {
-    if (message.status === "streaming") continue;
+    if (!shouldCacheTranscriptMessage(message)) continue;
     const content =
       message.content.length > MAX_STORED_MESSAGE_CHARS
         ? `${message.content.slice(0, MAX_STORED_MESSAGE_CHARS)}\n\n[Cached preview trimmed. Full history reloads from disk.]`
@@ -847,16 +883,58 @@ function restoreTranscript(sessionId: string): ChatMessage[] | null {
 
 function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
   if (!sessionId) return;
-  const stableMessages = messages.filter((message) => message.status !== "streaming");
-  if (!stableMessages.length) return;
+  const cacheableMessages = messages.filter(shouldCacheTranscriptMessage);
+  if (!cacheableMessages.length) return;
   SESSION_MESSAGE_CACHE.delete(sessionId);
-  SESSION_MESSAGE_CACHE.set(sessionId, stableMessages);
+  SESSION_MESSAGE_CACHE.set(sessionId, cacheableMessages);
   while (SESSION_MESSAGE_CACHE.size > MAX_CACHED_TRANSCRIPTS) {
     const oldest = SESSION_MESSAGE_CACHE.keys().next().value;
     if (!oldest) break;
     SESSION_MESSAGE_CACHE.delete(oldest);
   }
-  writeStoredTranscript(sessionId, stableMessages);
+  writeStoredTranscript(sessionId, cacheableMessages);
+}
+
+function attachLiveActivitySnapshots(
+  messages: ChatMessage[],
+  tools: ToolEntry[],
+  traces: ActivityTrace[],
+): ChatMessage[] {
+  if (!messages.length || (!tools.length && !traces.length)) return messages;
+
+  const toolsByMessage = new Map<string, ToolEntry[]>();
+  for (const tool of tools) {
+    if (!tool.messageId) continue;
+    const list = toolsByMessage.get(tool.messageId) ?? [];
+    list.push(tool);
+    toolsByMessage.set(tool.messageId, list);
+  }
+
+  const tracesByMessage = new Map<string, ActivityTrace[]>();
+  for (const trace of traces) {
+    if (!trace.messageId) continue;
+    const list = tracesByMessage.get(trace.messageId) ?? [];
+    list.push(trace);
+    tracesByMessage.set(trace.messageId, list);
+  }
+
+  if (!toolsByMessage.size && !tracesByMessage.size) return messages;
+
+  let changed = false;
+  const next = messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    const messageTools = toolsByMessage.get(message.id);
+    const messageTraces = tracesByMessage.get(message.id);
+    if (!messageTools?.length && !messageTraces?.length) return message;
+    changed = true;
+    return {
+      ...message,
+      tools: messageTools?.length ? messageTools : message.tools,
+      traces: messageTraces?.length ? messageTraces : message.traces,
+    };
+  });
+
+  return changed ? next : messages;
 }
 
 // Merge a fresh server transcript with whatever the client cached locally.
@@ -874,7 +952,16 @@ function mergeServerWithCache(
   cached: ChatMessage[] | null,
 ): ChatMessage[] {
   if (!cached?.length) return serverMessages;
-  const fp = (m: ChatMessage) => `${m.role}:${m.content.slice(0, 200)}`;
+  // Fingerprint is whitespace-normalized: live-cached content vs
+  // server-rehydrated content can diverge by trailing newlines or
+  // doubled whitespace, and a raw slice(0,200) makes those two
+  // versions of the same message hash differently — which then sends
+  // the cached copy down the tail-walk path and renders the Q+A
+  // doubled in the chat panel.
+  const fp = (m: ChatMessage) => {
+    const c = (m.content ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
+    return `${m.role}:${c}`;
+  };
   const serverFingerprints = new Set(serverMessages.map(fp));
 
   // The server transcript doesn't carry tool/trace/token snapshots.
@@ -922,7 +1009,23 @@ function mergeServerWithCache(
     if (serverFingerprints.has(fp(msg))) break;
     tail.unshift(msg);
   }
-  return tail.length ? [...enriched, ...tail] : enriched;
+
+  // Safety net: even with the normalized fingerprint, dedupe the final
+  // array by fingerprint. If two messages still collide (e.g. the same
+  // assistant turn lives in both server and tail because of an
+  // unforeseen format quirk), keep the first (server/enriched) copy and
+  // drop the second so the chat panel never renders a Q+A twice.
+  const merged = tail.length ? [...enriched, ...tail] : enriched;
+  if (merged.length < 2) return merged;
+  const seen = new Set<string>();
+  const out: ChatMessage[] = [];
+  for (const m of merged) {
+    const key = fp(m);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(m);
+  }
+  return out;
 }
 
 // Detect whether the cached transcript ends with a user message that has no
@@ -931,7 +1034,7 @@ function mergeServerWithCache(
 function hasPendingTurn(messages: ChatMessage[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (msg.role === "assistant") return false;
+    if (msg.role === "assistant") return msg.status === "streaming";
     if (msg.role === "user") return true;
   }
   return false;
@@ -1120,21 +1223,50 @@ function detailsFor(tools: ToolEntry[]): string[] {
   return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-4);
 }
 
+// The 15 "thinking verbs" the agent loop emits as transient heartbeats
+// (see ui-tui/src/content/verbs.ts and agent/display.py). They look fine on
+// the live rotating pill but should NEVER stack as permanent rows in the
+// activity panel.
+const ROTATING_VERBS = [
+  "analyzing",
+  "brainstorming",
+  "cogitating",
+  "computing",
+  "contemplating",
+  "deliberating",
+  "formulating",
+  "mulling",
+  "musing",
+  "pondering",
+  "processing",
+  "reasoning",
+  "reflecting",
+  "ruminating",
+  "synthesizing",
+];
+
 function isGenericActivityText(text: string): boolean {
   const clean = displayStatusText(text).trim().toLowerCase();
-  return (
-    clean === "" ||
+  if (clean === "") return true;
+  if (
     clean === "working..." ||
     clean === "thinking..." ||
     clean === "reasoning..." ||
     clean === "running..." ||
     clean === "ready" ||
-    clean === "done" ||
-    // Transient watchdog heartbeats — fine on the live status line, but
-    // they should never pile up as permanent rows in the Activity panel.
-    clean.startsWith("sending request") ||
-    clean.startsWith("still working")
-  );
+    clean === "done"
+  ) {
+    return true;
+  }
+  // Transient watchdog heartbeats — fine on the live status line, but
+  // they should never pile up as permanent rows in the Activity panel.
+  if (clean.startsWith("sending request") || clean.startsWith("still working")) {
+    return true;
+  }
+  // "ruminating", "ruminating...", "ruminating." — same story.
+  const stripped = clean.replace(/[.…!?]+$/, "").trim();
+  if (ROTATING_VERBS.includes(stripped)) return true;
+  return false;
 }
 
 function progressIntentLabel(text: string): string {
@@ -1173,13 +1305,11 @@ function addProgressSummary(
 }
 
 function buildProgressSummaries({
-  activityTrace,
   artifacts,
   busy,
   statusText,
   tools,
 }: {
-  activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
   statusText: string;
@@ -1208,23 +1338,10 @@ function buildProgressSummaries({
     return starts.length ? Math.min(...starts) : 0;
   };
 
-  activityTrace
-    .map((trace) => ({
-      at: trace.createdAt || 0,
-      id: trace.id,
-      label: progressIntentLabel(trace.text),
-    }))
-    .filter((item) => item.label)
-    .slice(-3)
-    .forEach((item) => {
-      addProgressSummary(real, {
-        at: item.at,
-        details: [],
-        id: item.id,
-        label: item.label,
-        status: "done",
-      });
-    });
+  // NOTE: We intentionally do NOT mirror activityTrace items as standalone
+  // rows here. Those traces are heartbeats from the agent loop ("ruminating",
+  // "mulling", etc.) — they belong on the single live rotating pill at the
+  // bottom of the panel, not stacked as a timeline.
 
   const explore = [...groups.read, ...groups.search];
   if (explore.length) {
@@ -1289,18 +1406,23 @@ function buildProgressSummaries({
   // The live "current" line and the pending checklist always sit at the
   // bottom — they are what's happening right now and what's still to come.
   const tail: ProgressSummary[] = [];
-  const current = progressIntentLabel(statusText || "Working...");
-  if (
-    busy &&
-    current &&
-    !real.some((item) => item.label.toLowerCase() === current.toLowerCase())
-  ) {
-    addProgressSummary(tail, {
-      details: [],
-      id: "current",
-      label: current,
-      status: "running",
-    });
+  // Always show exactly ONE live pill while busy. The label here is just a
+  // fallback — the row renderer swaps in <RotatingPhrase /> for id="current",
+  // so this string is never actually displayed.
+  if (busy) {
+    const currentLabel = progressIntentLabel(statusText || "") || "Working";
+    if (
+      !real.some(
+        (item) => item.label.toLowerCase() === currentLabel.toLowerCase(),
+      )
+    ) {
+      addProgressSummary(tail, {
+        details: [],
+        id: "current",
+        label: currentLabel,
+        status: "running",
+      });
+    }
   }
 
   if (busy) {
@@ -1809,6 +1931,7 @@ export default function ChatPage() {
   // can snapshot the finished turn without a stale-closure read.
   const toolsRef = useRef<ToolEntry[]>([]);
   const activityTraceRef = useRef<ActivityTrace[]>([]);
+  const lastToolActivityAtRef = useRef(0);
   // Cumulative session usage mirror + the output-token baseline captured
   // at message.start, so message.complete can diff out this turn's tokens.
   const usageRef = useRef<UsageInfo | null>(null);
@@ -1892,6 +2015,10 @@ export default function ChatPage() {
 
   const appendMessage = useCallback(
     (role: ChatRole, content: string, extras: Partial<ChatMessage> = {}) => {
+      const candidate: Partial<ChatMessage> = { role, content, ...extras };
+      if (!shouldKeepTranscriptMessage(role, content) && !hasActivitySnapshot(candidate)) {
+        return "";
+      }
       const message: ChatMessage = {
         content,
         createdAt: Date.now(),
@@ -1905,15 +2032,32 @@ export default function ChatPage() {
     [],
   );
 
-  const ensureAssistant = useCallback(() => {
-    if (currentAssistantRef.current) return currentAssistantRef.current;
+  const ensureAssistant = useCallback((createdAt?: number) => {
+    const startedAt = timestampMillis(createdAt, Date.now());
+    if (currentAssistantRef.current) {
+      const messageId = currentAssistantRef.current;
+      if (createdAt !== undefined) {
+        setMessages((prev) => {
+          let changed = false;
+          const next = prev.map((message) => {
+            if (message.id !== messageId || startedAt >= message.createdAt) {
+              return message;
+            }
+            changed = true;
+            return { ...message, createdAt: startedAt };
+          });
+          return changed ? next : prev;
+        });
+      }
+      return messageId;
+    }
     const messageId = id("assistant");
     currentAssistantRef.current = messageId;
     setMessages((prev) => [
       ...prev,
       {
         content: "",
-        createdAt: Date.now(),
+        createdAt: startedAt,
         id: messageId,
         role: "assistant",
         status: "streaming",
@@ -2048,7 +2192,7 @@ export default function ChatPage() {
   );
 
   const addActivityTrace = useCallback(
-    (kind: ActivityTrace["kind"], text: string) => {
+    (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
       const clean = displayStatusText(text).trim();
       if (!clean) return;
       if (
@@ -2059,6 +2203,8 @@ export default function ChatPage() {
       }
 
       const messageId = currentAssistantRef.current ?? undefined;
+      const at = timestampMillis(createdAt, Date.now());
+      const toolBoundaryAt = lastToolActivityAtRef.current;
       setActivityTrace((prev) => {
         const last = prev[prev.length - 1];
         if (last?.kind === kind && last.text === clean && last.messageId === messageId) {
@@ -2071,7 +2217,8 @@ export default function ChatPage() {
         if (
           (kind === "thinking" || kind === "reasoning") &&
           last?.kind === kind &&
-          last.messageId === messageId
+          last.messageId === messageId &&
+          last.createdAt >= toolBoundaryAt
         ) {
           const sep = /[.!?…]$/.test(last.text) ? " " : last.text.endsWith(" ") || clean.startsWith(" ") ? "" : " ";
           const merged = (last.text + sep + clean).trim().slice(-2000);
@@ -2082,7 +2229,7 @@ export default function ChatPage() {
         return [
           ...prev,
           {
-            createdAt: Date.now(),
+            createdAt: at,
             id: id(`activity-${kind}`),
             kind,
             text: clean,
@@ -2244,9 +2391,12 @@ export default function ChatPage() {
   useEffect(() => {
     const persisted = persistedSessionIdRef.current;
     if (persisted && messages.length) {
-      rememberTranscript(persisted, messages);
+      rememberTranscript(
+        persisted,
+        attachLiveActivitySnapshots(messages, tools, activityTrace),
+      );
     }
-  }, [messages]);
+  }, [activityTrace, messages, tools]);
 
   useEffect(() => {
     const persisted = persistedSessionIdRef.current ?? sessionId;
@@ -2317,6 +2467,7 @@ export default function ChatPage() {
     setTools([]);
     setSubagents([]);
     setActivityTrace([]);
+    lastToolActivityAtRef.current = 0;
     setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
     setPendingPrompt(null);
     setPromptValue("");
@@ -2350,22 +2501,30 @@ export default function ChatPage() {
         .then((response) => {
           if (cancelled) return;
           const hydrated = normalizeStoredTranscript(response.messages);
-          const merged = mergeServerWithCache(hydrated, cached);
           historyHydratedRef.current = true;
-          rememberTranscript(response.session_id || resumeId, merged);
-          rememberTranscript(resumeId, merged);
-          setMessages(merged);
-          hydrateArtifactsFromMessages(merged);
-          if (!hasPendingTurn(merged)) {
-            // Cache heuristic flagged this as pending (last msg = user
-            // with no assistant follow-up) so busy was set true at
-            // L1899. The server-side transcript confirms no pending
-            // turn — clear busy too, otherwise the composer stays
-            // locked behind a "Resuming work" mirage that the gateway
-            // has no knowledge of.
-            setBusy(false);
-            setStatusText("Ready");
-          }
+          setMessages((prev) => {
+            // Merge against the current UI state, not only the cache captured
+            // before gateway replay. Otherwise a slow DB hydrate can erase the
+            // in-flight assistant turn that session.resume just replayed.
+            const base = prev.length ? prev : cached;
+            const merged = mergeServerWithCache(hydrated, base);
+            rememberTranscript(response.session_id || resumeId, merged);
+            rememberTranscript(resumeId, merged);
+            hydrateArtifactsFromMessages(merged);
+            if (!hasPendingTurn(merged)) {
+              // Cache heuristic flagged this as pending (last msg = user
+              // with no assistant follow-up) so busy was set true above. The
+              // merged transcript confirms no live-looking turn remains —
+              // clear busy unless gateway resume later proves the turn is
+              // still running.
+              setBusy(false);
+              setStatusText("Ready");
+            } else {
+              setBusy(true);
+              setStatusText("Resuming work...");
+            }
+            return merged;
+          });
         })
         .catch((error: Error) => {
           if (cancelled || cached) return;
@@ -2384,12 +2543,15 @@ export default function ChatPage() {
     const trackTool = (ev: GatewayEvent) => {
       if (!accepts(ev)) return;
       const payload = compactToolPayload(ev.payload);
+      const at = eventMillis(ev);
+      lastToolActivityAtRef.current = Math.max(lastToolActivityAtRef.current, at);
 
       if (ev.type === "tool.start") {
         const toolId = String(payload.tool_id ?? "");
         if (!toolId) return;
         const name = String(payload.name ?? "tool");
         const context = typeof payload.context === "string" ? payload.context : "";
+        const startedAt = timestampMillis(payload.started_at, at);
         const turnMessageId = currentAssistantRef.current ?? undefined;
 
         setTools((prev) =>
@@ -2401,6 +2563,7 @@ export default function ChatPage() {
                       context,
                       messageId: tool.messageId ?? turnMessageId,
                       name,
+                      startedAt: Math.min(tool.startedAt || startedAt, startedAt),
                       status: "running" as const,
                     }
                   : tool,
@@ -2420,6 +2583,7 @@ export default function ChatPage() {
                         context,
                         messageId: tool.messageId ?? turnMessageId,
                         name,
+                        startedAt: Math.min(tool.startedAt || startedAt, startedAt),
                         tool_id: toolId,
                       }
                     : tool,
@@ -2432,7 +2596,7 @@ export default function ChatPage() {
                     kind: "tool" as const,
                     messageId: turnMessageId,
                     name,
-                    startedAt: Date.now(),
+                    startedAt,
                     status: "running" as const,
                     tool_id: toolId,
                   },
@@ -2446,19 +2610,25 @@ export default function ChatPage() {
         const name = String(payload.name ?? "");
         const preview = String(payload.preview ?? "");
         if (!name || !preview) return;
+        const startedAt = timestampMillis(payload.started_at, at);
         const turnMessageId = currentAssistantRef.current ?? undefined;
 
         setTools((prev) => {
           const hasRunning = prev.some(
             (tool) => tool.status === "running" && tool.name === name,
-          );
-          if (hasRunning) {
-            return prev.map((tool) =>
-              tool.status === "running" && tool.name === name
-                ? { ...tool, messageId: tool.messageId ?? turnMessageId, preview }
-                : tool,
-            );
-          }
+	          );
+	          if (hasRunning) {
+	            return prev.map((tool) =>
+	              tool.status === "running" && tool.name === name
+	                ? {
+	                    ...tool,
+	                    messageId: tool.messageId ?? turnMessageId,
+	                    preview,
+	                    startedAt: Math.min(tool.startedAt || startedAt, startedAt),
+	                  }
+	                : tool,
+	            );
+	          }
 
           return [
             ...prev,
@@ -2468,7 +2638,7 @@ export default function ChatPage() {
               messageId: turnMessageId,
               name,
               preview,
-              startedAt: Date.now(),
+              startedAt,
               status: "running" as const,
               tool_id: syntheticToolId(name),
             },
@@ -2482,6 +2652,7 @@ export default function ChatPage() {
         const toolId = String(payload.tool_id ?? "");
         const name = String(payload.name ?? "");
         if (!toolId && !name) return;
+        const completedAt = timestampMillis(payload.completed_at, at);
 
         setTools((prev) => {
           const hasToolId = toolId
@@ -2501,7 +2672,7 @@ export default function ChatPage() {
             (toolId && tool.tool_id === toolId) || index === fallbackIndex
               ? {
                   ...tool,
-                  completedAt: Date.now(),
+                  completedAt,
                   error:
                     typeof payload.error === "string"
                       ? payload.error
@@ -2545,7 +2716,7 @@ export default function ChatPage() {
             ? "error"
             : "done"
           : "running";
-      const now = Date.now();
+      const now = eventMillis(ev);
 
       setSubagents((prev) => {
         const existing = prev.find((subagent) => subagent.subagent_id === subagentId);
@@ -2618,15 +2789,17 @@ export default function ChatPage() {
     unsubs.push(
       gw.on("message.start", (ev) => {
         if (!accepts(ev)) return;
+        const at = eventMillis(ev);
         currentAssistantRef.current = null;
+        lastToolActivityAtRef.current = 0;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
-        ensureAssistant();
+        ensureAssistant(at);
         // Snapshot cumulative output tokens so message.complete can diff
         // out exactly this turn's count.
         turnOutputBaselineRef.current = usageRef.current?.output ?? null;
         setBusy(true);
         setStatusText("Working...");
-        addActivityTrace("status", "Working...");
+        addActivityTrace("status", "Working...", at);
       }),
     );
     unsubs.push(
@@ -2634,6 +2807,7 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (!text) return;
+        ensureAssistant(eventMillis(ev));
         updateAssistant((message) => ({
           ...message,
           content: message.content + text,
@@ -2644,11 +2818,12 @@ export default function ChatPage() {
     unsubs.push(
       gw.on("message.complete", (ev) => {
         if (!accepts(ev)) return;
+        const at = eventMillis(ev);
         updateUsageFromPayload(ev);
         const text = eventText(ev);
         const status = eventString(ev, "status") || "complete";
         const warning = eventString(ev, "warning");
-        const messageId = currentAssistantRef.current ?? ensureAssistant();
+        const messageId = currentAssistantRef.current ?? ensureAssistant(at);
 
         // Snapshot the finished turn's tools + reasoning traces onto the
         // message so the activity digest survives a session resume. Any
@@ -2661,7 +2836,7 @@ export default function ChatPage() {
               ? {
                   ...tool,
                   status: "done" as const,
-                  completedAt: tool.completedAt ?? Date.now(),
+                  completedAt: tool.completedAt ?? at,
                 }
               : tool,
           );
@@ -2717,7 +2892,7 @@ export default function ChatPage() {
             subagent.status === "running"
               ? {
                   ...subagent,
-                  completedAt: Date.now(),
+                  completedAt: at,
                   status: status === "interrupted" ? "error" : "done",
                 }
               : subagent,
@@ -2734,8 +2909,9 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventString(ev, "text");
         if (text) {
+          const at = eventMillis(ev);
           setStatusText(displayStatusText(text));
-          addActivityTrace("status", text);
+          addActivityTrace("status", text, at);
         }
       }),
     );
@@ -2744,9 +2920,10 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (text) {
+          const at = eventMillis(ev);
           setStatusText("Thinking...");
-          ensureAssistant();
-          addActivityTrace("thinking", text);
+          ensureAssistant(at);
+          addActivityTrace("thinking", text, at);
         }
       }),
     );
@@ -2755,9 +2932,10 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const text = eventText(ev);
         if (text) {
+          const at = eventMillis(ev);
           setStatusText("Reasoning...");
-          ensureAssistant();
-          addActivityTrace("reasoning", text);
+          ensureAssistant(at);
+          addActivityTrace("reasoning", text, at);
         }
       }),
     );
@@ -2773,6 +2951,8 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const name = eventString(ev, "name");
         if (!name) return;
+        const at = eventMillis(ev);
+        lastToolActivityAtRef.current = Math.max(lastToolActivityAtRef.current, at);
         setStatusText(`Preparing ${name}`);
         setTools((prev) =>
           prev.some(
@@ -2789,7 +2969,7 @@ export default function ChatPage() {
                   kind: "tool" as const,
                   name,
                   preview: `Preparing ${name}`,
-                  startedAt: Date.now(),
+                  startedAt: at,
                   status: "running" as const,
                   tool_id: syntheticToolId(name),
                 },
@@ -2862,18 +3042,19 @@ export default function ChatPage() {
       }),
     );
     unsubs.push(
-      gw.on("error", (ev) => {
-        if (!accepts(ev)) return;
-        const message = eventString(ev, "message") || "Gateway error";
-        setBanner(message);
-        appendMessage("system", message, { status: "error" });
-        setBusy(false);
-        setQueuedInputs([]);
-        setSubagents((prev) =>
-          prev.map((subagent) =>
-            subagent.status === "running"
-              ? { ...subagent, completedAt: Date.now(), status: "error" }
-              : subagent,
+	      gw.on("error", (ev) => {
+	        if (!accepts(ev)) return;
+	        const at = eventMillis(ev);
+	        const message = eventString(ev, "message") || "Gateway error";
+	        setBanner(message);
+	        appendMessage("system", message, { createdAt: at, status: "error" });
+	        setBusy(false);
+	        setQueuedInputs([]);
+	        setSubagents((prev) =>
+	          prev.map((subagent) =>
+	            subagent.status === "running"
+	              ? { ...subagent, completedAt: at, status: "error" }
+	              : subagent,
           ),
         );
         setStatusText("Error");
@@ -3044,10 +3225,12 @@ export default function ChatPage() {
               resumed.running_tools.map((rt) => ({
                 type: "tool.start" as const,
                 session_id: created.session_id,
+                ts: rt.started_at,
                 payload: {
                   tool_id: rt.tool_id,
                   name: rt.name,
                   context: rt.context ?? "",
+                  started_at: rt.started_at,
                 },
               })),
             );
@@ -3370,19 +3553,34 @@ export default function ChatPage() {
     [appendMessage, attachments, gw, sessionId],
   );
 
-  // Skill slash commands (/cma-audit) load the full SKILL.md into the
-  // model's context. The model needs every line; the user does not want to
-  // see it. So we submit the payload as the prompt text (gateway history
-  // keeps it — the model retains the skill across follow-up turns) but
-  // render NO user bubble for it. The only thing visible is the `/command`
-  // bubble the caller already appended, plus the "⚡ loaded skill" line.
-  // On reload, collapseSkillInvocation() keeps the rehydrated turn compact.
+  // Skill slash commands (/cma-audit) load the full SKILL.md into the model's
+  // context. The user already sees the `/command` bubble they typed, so the
+  // payload stays hidden. If a turn is running, deliver it through steer so it
+  // augments the live session instead of bouncing as "session busy".
   const submitSkillInvocation = useCallback(
     async (payload: string, commandName?: string, args?: string) => {
       if (!sessionId || state !== "open") return;
-      setBusy(true);
-      setStatusText("Loading skill...");
+      const visibleCommand = commandName
+        ? `/${commandName}${(args ?? "").trim() ? ` ${(args ?? "").trim()}` : ""}`
+        : undefined;
+      const steerSkillPayload = async () => {
+        const response = await gw.request("session.steer", {
+          session_id: sessionId,
+          text: payload,
+        });
+        const status =
+          response && typeof response === "object" && "status" in response
+            ? String((response as Record<string, unknown>).status)
+            : "queued";
+        setStatusText(status === "rejected" ? "Steer rejected" : "Skill steered");
+      };
+      setStatusText(busy ? "Steering skill..." : "Loading skill...");
       try {
+        if (busy) {
+          await steerSkillPayload();
+          return;
+        }
+        setBusy(true);
         const req: Record<string, unknown> = {
           session_id: sessionId,
           text: payload,
@@ -3391,22 +3589,34 @@ export default function ChatPage() {
         // shows what was actually asked. A bare `/${commandName}` collapses
         // every invocation into an identical chip — distinct runs become
         // indistinguishable duplicates after a refresh or session switch.
-        if (commandName) {
-          const trimmedArgs = (args ?? "").trim();
-          req.persist_user_message = trimmedArgs
-            ? `/${commandName} ${trimmedArgs}`
-            : `/${commandName}`;
-        }
+        if (visibleCommand) req.persist_user_message = visibleCommand;
         if (selectedAgent.id) req.agent_id = selectedAgent.id;
         await gw.request("prompt.submit", req);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        if (!busy && /^session busy\b/i.test(message)) {
+          try {
+            await steerSkillPayload();
+            setBusy(true);
+          } catch (steerError) {
+            const steerMessage =
+              steerError instanceof Error ? steerError.message : String(steerError);
+            setBanner(`Skill steer failed: ${steerMessage}`);
+            setStatusText("Steer failed");
+          }
+          return;
+        }
+        if (busy) {
+          setBanner(`Skill steer failed: ${message}`);
+          setStatusText("Steer failed");
+          return;
+        }
         appendMessage("system", message, { status: "error" });
         setBusy(false);
         setStatusText("Error");
       }
     },
-    [appendMessage, gw, selectedAgent, sessionId, state],
+    [appendMessage, busy, gw, selectedAgent, sessionId, state],
   );
 
   const interruptCurrentTurn = useCallback(() => {
@@ -4006,7 +4216,6 @@ export default function ChatPage() {
     : undefined;
   const activity = (
     <ActivityPanel
-      activityTrace={activityTrace}
       artifacts={artifacts}
       banner={banner}
       busy={busy}
@@ -4243,6 +4452,9 @@ export default function ChatPage() {
                   gw={gw}
                   input={input}
                   onApply={applyComposerCompletion}
+                  onSubmit={(nextInput) => {
+                    void submitPrompt(nextInput);
+                  }}
                 />
 
                 <div className="flex items-center gap-1">
@@ -4315,12 +4527,12 @@ export default function ChatPage() {
                   <button
                     aria-label={busy ? "Interrupt response" : "Send message"}
                     className={cn(
-                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
+                      "flex h-7 shrink-0 items-center justify-center rounded-md transition-colors",
                       busy
-                        ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+                        ? "w-auto gap-1.5 border border-orange-400/45 bg-orange-500/15 px-2 text-orange-200 hover:bg-orange-500/25 hover:text-orange-100"
                         : canSend
-                          ? "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
-                          : "text-[var(--chat-muted)]",
+                          ? "w-7 text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+                          : "w-7 text-[var(--chat-muted)]",
                     )}
                     disabled={busy ? state !== "open" : !canSend}
                     onClick={busy ? interruptCurrentTurn : undefined}
@@ -4328,7 +4540,10 @@ export default function ChatPage() {
                     type={busy ? "button" : "submit"}
                   >
                     {busy ? (
-                      <Square className="h-4 w-4" />
+                      <>
+                        <Square className="h-3.5 w-3.5 fill-current" />
+                        <span className="text-[11px] font-medium leading-none">Stop</span>
+                      </>
                     ) : (
                       <CornerDownLeft className="h-4 w-4 -translate-y-[1.5px]" />
                     )}
@@ -5302,6 +5517,9 @@ function buildBreakdownSteps(
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
     const text = compactLine(trace.text);
     if (!text) continue;
+    // Drop transient heartbeats ("brainstorming", "Working...", etc.) —
+    // they belong on the rotating header pill, not as permanent rows.
+    if (isGenericActivityText(text)) continue;
     raw.push({ type: "trace", id: trace.id, at: trace.createdAt || 0, text });
   }
 
@@ -5384,12 +5602,37 @@ function MemorySaveRow({ tool }: { tool: ToolEntry }) {
   );
 }
 
+// Rotating "thinking verb" for the live digest header. Cycles through the
+// same 15 verbs the agent loop emits as heartbeats, capitalised, every
+// ~2.4s while the turn is busy. Picks a fresh random index each tick so it
+// doesn't feel mechanical.
+function useRotatingVerb(busy: boolean): string {
+  const [verb, setVerb] = useState(
+    () => ROTATING_VERBS[Math.floor(Math.random() * ROTATING_VERBS.length)],
+  );
+  useEffect(() => {
+    if (!busy) return;
+    const timer = window.setInterval(() => {
+      setVerb((prev) => {
+        if (ROTATING_VERBS.length <= 1) return prev;
+        let next = prev;
+        while (next === prev) {
+          next = ROTATING_VERBS[Math.floor(Math.random() * ROTATING_VERBS.length)];
+        }
+        return next;
+      });
+    }, 2400);
+    return () => window.clearInterval(timer);
+  }, [busy]);
+  return verb;
+}
+
 // Working/worked digest. While a turn streams, the header is the live
-// meter: pulsing accent mark + "Working" + elapsed + running token count,
-// and the breakdown is expanded by default so reasoning (grey) and tool
-// calls scroll in chronologically as they happen. Once the turn completes
-// the same header collapses into "Worked for ..." with the real token
-// count, and the breakdown defaults to collapsed.
+// meter: pulsing accent mark + a cycling thinking verb + elapsed + running
+// token count, and the breakdown is expanded by default so reasoning (grey)
+// and tool calls scroll in chronologically as they happen. Once the turn
+// completes the same header collapses into "Worked for ..." with the real
+// token count, and the breakdown defaults to collapsed.
 function ChatActivityDigest({
   activityTrace,
   busy,
@@ -5410,6 +5653,7 @@ function ChatActivityDigest({
   // collapsed when done). A real boolean = the user toggled it explicitly.
   const [open, setOpen] = useState<boolean | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const rotatingVerb = useRotatingVerb(busy);
 
   useEffect(() => {
     if (!busy) return;
@@ -5462,9 +5706,18 @@ function ChatActivityDigest({
           <Sparkle className="h-4 w-4 shrink-0 animate-pulse fill-[var(--chat-accent)] text-[var(--chat-accent)]" />
         )}
         <span>
-          {busy ? "Working" : "Worked for"} {duration}
+          {busy
+            ? `${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)} · ${duration}`
+            : `Worked for ${duration}`}
           {!busy && steps.length > 0 && ` · ${plural(steps.length, "step")}`}
-          {tokens > 0 ? ` · ${tokens.toLocaleString()} tokens` : ""}
+          {/* Always show the live counter while the turn is in flight so
+              the user sees something climbing immediately, even before the
+              first reasoning/output token actually arrives. */}
+          {busy
+            ? ` · ${tokens.toLocaleString()} tokens`
+            : tokens > 0
+              ? ` · ${tokens.toLocaleString()} tokens`
+              : ""}
         </span>
         {(busy || steps.length > 0) && (
           <ChevronDown
@@ -5476,7 +5729,7 @@ function ChatActivityDigest({
         )}
       </button>
 
-      {expanded && (busy || steps.length > 0) && (
+      {expanded && steps.length > 0 && (
         <div className="mt-3 space-y-1.5">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} />
@@ -6067,12 +6320,57 @@ function ProgressSummaryList({ summaries }: { summaries: ProgressSummary[] }) {
   );
 }
 
+// Funny single-word phrases that cycle on the live "current" pill while the
+// agent is busy. Replaces the stack of ruminating/mulling/Sending request
+// status rows. Kept short so the pill width doesn't jump around.
+const ROTATING_PHRASES = [
+  "Ruminating",
+  "Mulling",
+  "Pondering",
+  "Cogitating",
+  "Brewing",
+  "Plotting",
+  "Scheming",
+  "Untangling",
+  "Wrangling",
+  "Tinkering",
+  "Stirring the pot",
+  "Doing the thing",
+  "Thinking thoughts",
+  "Vibing",
+  "Sleuthing",
+  "Conjuring",
+  "Marinating",
+  "Reticulating splines",
+  "Chasing the muse",
+  "Connecting dots",
+];
+
+function RotatingPhrase() {
+  const [index, setIndex] = useState(() =>
+    Math.floor(Math.random() * ROTATING_PHRASES.length),
+  );
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setIndex((prev) => {
+        // Avoid the same phrase twice in a row.
+        let next = Math.floor(Math.random() * ROTATING_PHRASES.length);
+        if (next === prev) next = (next + 1) % ROTATING_PHRASES.length;
+        return next;
+      });
+    }, 2400);
+    return () => clearInterval(timer);
+  }, []);
+  return <span>{ROTATING_PHRASES[index]}…</span>;
+}
+
 function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
   const [open, setOpen] = useState(false);
   const hasDetails = summary.details.length > 0;
   const complete = summary.status === "done";
   const failed = summary.status === "error";
   const running = summary.status === "running";
+  const isLivePill = summary.id === "current" && running;
 
   return (
     <div className="text-[0.8rem] leading-5">
@@ -6117,7 +6415,7 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
                 : "text-[var(--chat-muted-strong)]",
             )}
           >
-            {summary.label}
+            {isLivePill ? <RotatingPhrase /> : summary.label}
           </div>
           {summary.detail && (
             <div className="mt-0.5 truncate text-[0.76rem] text-[var(--chat-muted)]">
@@ -6148,7 +6446,6 @@ function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
 }
 
 function ActivityPanel({
-  activityTrace,
   artifacts,
   banner,
   busy,
@@ -6158,7 +6455,6 @@ function ActivityPanel({
   statusText,
   tools,
 }: {
-  activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   banner: string | null;
   busy: boolean;
@@ -6169,8 +6465,8 @@ function ActivityPanel({
   tools: ToolEntry[];
 }) {
   const progress = useMemo(
-    () => buildProgressSummaries({ activityTrace, artifacts, busy, statusText, tools }),
-    [activityTrace, artifacts, busy, statusText, tools],
+    () => buildProgressSummaries({ artifacts, busy, statusText, tools }),
+    [artifacts, busy, statusText, tools],
   );
 
   const hasProgress = progress.length > 0;

@@ -55,6 +55,8 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
             "last_run_at",
             "last_status",
             "last_error",
+            "last_summary",
+            "last_session_id",
             "deliver",
             "origin",
             "workdir",
@@ -317,6 +319,79 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
             raise HTTPException(status_code=404, detail="Job not found")
         return {"ok": True}
 
+
+    @router.get("/api/cron/attention")
+    async def cron_attention():
+        """Aggregate what's waiting on the operator.
+
+        Returns counts the dashboard can surface as a "needs attention" banner:
+        - ``pending_drafts``: outreach drafts in `drafted` status waiting on review
+        - ``errored_jobs``: cron jobs whose last run failed
+        - ``stale_jobs``: enabled jobs that haven't fired in >36h (likely auth/runtime break)
+        - ``jobs``: light per-job rollup (id, name, last_status, last_error_short, last_run_at)
+        """
+        from cron.jobs import list_jobs
+        import datetime as _dt
+
+        pending_drafts = 0
+        try:
+            from elevate_cli.outreach_db import connect as _outreach_connect
+            with _outreach_connect() as _conn:
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT COUNT(*) FROM outreach_draft_attempts WHERE status = %s",
+                        ("drafted",),
+                    )
+                    row = _cur.fetchone()
+                    pending_drafts = int(row[0]) if row else 0
+        except Exception as exc:
+            _log.debug("attention: outreach draft count failed: %s", exc)
+
+        errored: list[dict] = []
+        stale: list[dict] = []
+        now = _dt.datetime.now(_dt.timezone.utc)
+        try:
+            jobs = list_jobs(include_disabled=True)
+        except Exception as exc:
+            _log.exception("attention: list_jobs failed: %s", exc)
+            jobs = []
+
+        for job in jobs:
+            if not job.get("enabled"):
+                continue
+            last_status = (job.get("last_status") or "").lower()
+            last_error = job.get("last_error") or ""
+            short_err = (last_error[:140] + "...") if len(last_error) > 140 else last_error
+            if last_status == "error":
+                errored.append({
+                    "id": job.get("id"),
+                    "name": job.get("name"),
+                    "last_error": short_err,
+                    "last_run_at": job.get("last_run_at"),
+                })
+            last_run = job.get("last_run_at")
+            if last_run:
+                try:
+                    parsed = _dt.datetime.fromisoformat(str(last_run).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+                    age_h = (now - parsed).total_seconds() / 3600.0
+                    if age_h > 36 and last_status != "error":
+                        stale.append({
+                            "id": job.get("id"),
+                            "name": job.get("name"),
+                            "last_run_at": last_run,
+                            "hours_since": round(age_h, 1),
+                        })
+                except Exception:
+                    pass
+
+        return {
+            "pending_drafts": pending_drafts,
+            "errored_jobs": errored,
+            "stale_jobs": stale,
+            "total": pending_drafts + len(errored) + len(stale),
+        }
 
 
     return router

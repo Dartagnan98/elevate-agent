@@ -116,7 +116,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if _kanban_guidance:
         tool_guidance.append(_kanban_guidance)
     elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
-        # Fallback for code paths that bypass agent_init (rare).
+        # In Elevate this is the primary path — agent_init.py is dead code
+        # and the inline AIAgent.__init__ never resolves _kanban_worker_guidance.
+        # The `if _kanban_guidance` branch above only fires if a future
+        # change ports that initialization into the live constructor.
         tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
@@ -259,6 +262,23 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
                 volatile_parts.append(_ext_mem_block)
         except Exception:
             pass
+
+    # Per-entity "where we left off" journal — short digest of every
+    # non-resolved working-state entry across deals and contacts/leads.
+    # The full row is fetched on demand via the working_state tool.
+    # Best-effort: failures (no DB, missing migration) must not break
+    # the prompt build.
+    try:
+        from elevate_cli.data.connection import connect as _ws_connect
+        from elevate_cli.data.working_state import (
+            working_state_digest as _ws_digest,
+        )
+        with _ws_connect() as _ws_conn:
+            _ws_block = _ws_digest(_ws_conn)
+        if _ws_block:
+            volatile_parts.append(_ws_block)
+    except Exception:
+        pass
 
     from elevate_time import now as _elevate_now
     now = _elevate_now()

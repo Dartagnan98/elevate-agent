@@ -10,19 +10,27 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Activity, CheckSquare, Loader2, Send, X as CloseIcon, StickyNote } from "lucide-react";
+import { Activity, CheckSquare, Loader2, RotateCcw, Send, X as CloseIcon, StickyNote } from "lucide-react";
 import { api } from "@/lib/api";
 import type { ThreadContextMessage, ThreadContextResponse } from "@/lib/api";
+import type { SourceInboxDraft } from "@/lib/api-types";
 import type { HubData } from "../RealEstateHubPages";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { LeadStatusControl } from "./_shared/lead-status-control";
 
-type ThreadDrawerTarget = { sourceId: string; threadId: string } | null;
+type ThreadDrawerExtras = { skippedDraft?: SourceInboxDraft };
+type ThreadDrawerTarget =
+  | { sourceId: string; threadId: string; extras?: ThreadDrawerExtras }
+  | null;
 
 const ThreadDrawerContext = createContext<{
-  openThread: (sourceId: string, threadId: string) => void;
+  openThread: (
+    sourceId: string,
+    threadId: string,
+    extras?: ThreadDrawerExtras,
+  ) => void;
 } | null>(null);
 
 export function useThreadDrawer() {
@@ -37,9 +45,12 @@ export function ThreadDrawerProvider({
   data: HubData;
 }) {
   const [target, setTarget] = useState<ThreadDrawerTarget>(null);
-  const openThread = useCallback((sourceId: string, threadId: string) => {
-    setTarget({ sourceId, threadId });
-  }, []);
+  const openThread = useCallback(
+    (sourceId: string, threadId: string, extras?: ThreadDrawerExtras) => {
+      setTarget({ sourceId, threadId, extras });
+    },
+    [],
+  );
   const close = useCallback(() => setTarget(null), []);
   const ctx = useMemo(() => ({ openThread }), [openThread]);
   return (
@@ -89,14 +100,16 @@ function ThreadDrawer({
   onClose,
 }: {
   data: HubData;
-  target: { sourceId: string; threadId: string };
+  target: { sourceId: string; threadId: string; extras?: ThreadDrawerExtras };
   onClose: () => void;
 }) {
+  const skippedDraft = target.extras?.skippedDraft;
   const [context, setContext] = useState<ThreadContextResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -141,13 +154,13 @@ function ThreadDrawer({
       if (!context?.pendingDraft) return;
       setSubmitting(true);
       try {
-        await api.updateSourceInboxDraft(
+        const nextInbox = await api.updateSourceInboxDraft(
           context.pendingDraft.sourceId,
           context.pendingDraft.taskId,
           action,
           reply,
         );
-        await data.refresh();
+        data.setSourceInbox(nextInbox);
         onClose();
       } catch (err) {
         window.alert(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
@@ -157,6 +170,25 @@ function ThreadDrawer({
     },
     [context?.pendingDraft, data, onClose, reply],
   );
+
+  const restoreSkippedDraft = useCallback(async () => {
+    if (!skippedDraft || restoring) return;
+    setRestoring(true);
+    try {
+      const nextInbox = await api.updateSourceInboxDraft(
+        skippedDraft.sourceId,
+        skippedDraft.taskId,
+        "restore",
+        skippedDraft.draftText,
+      );
+      data.setSourceInbox(nextInbox);
+      onClose();
+    } catch (err) {
+      window.alert(`Failed to restore skipped draft: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setRestoring(false);
+    }
+  }, [data, onClose, restoring, skippedDraft]);
 
   const meta = context?.meta;
   const sends = context?.sends ?? [];
@@ -243,7 +275,9 @@ function ThreadDrawer({
               <LeadStatusControl
                 profileId={profile.id}
                 status={profile.status}
-                onChanged={() => data.refresh()}
+                onChanged={(nextInbox) => {
+                  if (nextInbox) data.setSourceInbox(nextInbox);
+                }}
                 selectClassName="w-36"
                 selectButtonClassName="h-8 px-2 text-xs"
               />
@@ -257,6 +291,46 @@ function ThreadDrawer({
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
           <div className="flex min-h-0 flex-col border-r border-border">
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
+              {skippedDraft && (
+                <div className="mb-4 rounded-md border border-warning/55 bg-warning/10 px-3.5 py-3">
+                  <div
+                    className="mb-1.5 flex items-center justify-between text-[0.68rem] font-semibold uppercase tracking-[0.1em] text-warning"
+                    style={{ fontFamily: "var(--theme-font-mono)" }}
+                  >
+                    <span>Skipped draft{skippedDraft.skippedAt ? ` · ${fmtMessageTimestamp(skippedDraft.skippedAt)}` : ""}</span>
+                    <span className="text-foreground/65">{skippedDraft.channel}</span>
+                  </div>
+                  {skippedDraft.context && (
+                    <p className="mb-2 line-clamp-3 text-[0.78rem] leading-5 text-foreground/70">
+                      <span
+                        className="mr-1.5 uppercase tracking-[0.08em] text-foreground/55"
+                        style={{ fontFamily: "var(--theme-font-mono)", fontSize: "0.65rem" }}
+                      >
+                        Context:
+                      </span>
+                      {skippedDraft.context}
+                    </p>
+                  )}
+                  <p className="whitespace-pre-wrap break-words text-sm leading-5 text-foreground">
+                    {skippedDraft.draftText || <span className="text-foreground/55 italic">(empty draft)</span>}
+                  </p>
+                  <div className="mt-2.5 flex justify-end">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void restoreSkippedDraft()}
+                      disabled={restoring}
+                    >
+                      {restoring ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      )}
+                      Restore
+                    </Button>
+                  </div>
+                </div>
+              )}
               {loading && (
                 <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading thread…</p>
               )}
@@ -265,7 +339,7 @@ function ThreadDrawer({
                   {error}
                 </div>
               )}
-              {!loading && !error && messages.length === 0 && (
+              {!loading && !error && messages.length === 0 && !skippedDraft && (
                 <p className="px-1 py-1 text-xs text-muted-foreground/80">No messages on file yet.</p>
               )}
               {!loading && messages.length > 0 && (

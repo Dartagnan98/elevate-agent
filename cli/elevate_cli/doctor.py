@@ -8,6 +8,7 @@ import os
 import sys
 import subprocess
 import shutil
+import time
 from pathlib import Path
 
 from elevate_cli.config import get_project_root, get_elevate_home, get_env_path
@@ -876,6 +877,34 @@ def run_doctor(args):
                     issues.append("Large WAL file — run 'elevate doctor --fix' to checkpoint")
             elif wal_size > 10 * 1024 * 1024:  # 10 MB
                 check_info(f"WAL file is {wal_size // (1024*1024)} MB (normal for active sessions)")
+        except Exception:
+            pass
+
+    # Check: stale operational.db SQLite file (deprecated — operational data
+    # lives in embedded Postgres since the data/connection.py PG cutover).
+    # If anything wrote to it in the last 24h, some code path bypassed the
+    # PG router and is silently writing to the dead SQLite — flag it loud.
+    op_db = elevate_home / "data" / "operational.db"
+    if op_db.exists():
+        try:
+            mtime = op_db.stat().st_mtime
+            age_h = (time.time() - mtime) / 3600
+            size_mb = op_db.stat().st_size / (1024 * 1024)
+            if age_h < 24:
+                check_warn(
+                    f"{_DHH}/data/operational.db was written {age_h:.1f}h ago",
+                    f"(SQLite is deprecated — operational data lives in Postgres. "
+                    f"Something is still writing to the dead SQLite file. Size: {size_mb:.0f} MB)",
+                )
+                issues.append(
+                    "Stale operational.db SQLite file is still being written to — "
+                    "audit recent commits for raw sqlite3.connect calls on data/operational.db"
+                )
+            else:
+                check_info(
+                    f"{_DHH}/data/operational.db is dormant "
+                    f"(last write {age_h/24:.1f}d ago, {size_mb:.0f} MB — safe to archive)"
+                )
         except Exception:
             pass
 

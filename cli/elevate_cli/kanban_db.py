@@ -572,10 +572,12 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     if get_current_board() == normed:
         clear_current_board()
 
-    # A concurrent connect(board=normed) after the rename/delete recreates
-    # an empty sqlite file via mkdir(exist_ok=True); the cache entry must be
-    # dropped first so the schema init pass re-runs on that fresh file.
-    _INITIALIZED_PATHS.discard(str((d / "kanban.db").resolve()))
+    # On the PG-backed kanban store the per-board directory is metadata
+    # only (board.json + workspaces/ + logs/). The task rows live in PG
+    # under the shared tableset, so removing this directory does NOT
+    # remove the tasks — that has to happen through a separate explicit
+    # purge. Kept this way to preserve back-compat with sqlite-era
+    # workflows that "archived" a board by stashing its directory.
 
     if archive:
         archive_root = boards_root() / "_archived"
@@ -950,253 +952,54 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
+#
+# Storage moved from per-board sqlite files to the central embedded Postgres
+# (DB ``elevate_operational``). ``connect()`` and ``write_txn()`` now delegate
+# to ``elevate_cli.data.connection``; the ``board=`` argument is accepted for
+# call-site compatibility but is a no-op — the PG schema collapses all boards
+# onto one tableset. Path-based helpers
+# (``_validate_sqlite_header``/``_guard_existing_db_is_healthy``/``KanbanDbCorruptError``)
+# and the additive-column migrator (``_migrate_add_optional_columns``) are
+# gone with the SQLite backend. The legacy on-disk ``kanban.db`` is read once
+# by ``_pg_kanban_migrate.py`` (sentinel 9008) and then ignored.
 
-_INITIALIZED_PATHS: set[str] = set()
-_INIT_LOCK = threading.RLock()
-_SQLITE_HEADER = b"SQLite format 3\x00"
+import psycopg
 
-
-def _looks_like_tls_record_at(data: bytes, offset: int) -> bool:
-    """Return True for a TLS record header at ``data[offset:]``."""
-    if len(data) < offset + 5:
-        return False
-    content_type = data[offset]
-    major = data[offset + 1]
-    minor = data[offset + 2]
-    length = int.from_bytes(data[offset + 3:offset + 5], "big")
-    return (
-        content_type in {0x14, 0x15, 0x16, 0x17}
-        and major == 0x03
-        and minor in {0x00, 0x01, 0x02, 0x03, 0x04}
-        and 0 < length <= 18432
-    )
+from elevate_cli.data import connection as _data_connection
 
 
-def _validate_sqlite_header(path: Path) -> None:
-    """Fail early with an actionable error for non-SQLite Kanban DB files.
-
-    ``sqlite3.connect()`` creates missing and zero-byte files, so those are
-    allowed. Existing non-empty files must have the SQLite header before we
-    hand them to SQLite/WAL setup. This keeps corrupted page-0 failures from
-    being collapsed into a generic PRAGMA error and lets the gateway's corrupt
-    board handling identify the board by fingerprint.
-    """
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
-    if stat.st_size == 0:
-        return
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(64)
-    except OSError:
-        return
-    if head.startswith(_SQLITE_HEADER):
-        return
-    signature = ""
-    if head.startswith(b"SQLit") and _looks_like_tls_record_at(head, 5):
-        signature = " (TLS record header detected at byte offset 5)"
-    elif _looks_like_tls_record_at(head, 0):
-        signature = " (TLS record header detected at byte offset 0)"
-    raise sqlite3.DatabaseError(
-        "file is not a database: invalid SQLite header for "
-        f"{path}{signature}; first_32={head[:32].hex(' ')}"
-    )
-
-
+# Back-compat shim. The class used to wrap corrupt-DB recovery on SQLite
+# files; the PG backend has no equivalent failure mode (the embedded server
+# either boots or crashes wholesale, handled by ``pg_server.py``). Kept as
+# an alias so any catch sites that import it keep working.
 class KanbanDbCorruptError(RuntimeError):
-    """Raised when an existing kanban DB file fails integrity checks.
-
-    Fail-closed guard against silent recreation of a corrupt board file,
-    which would otherwise destroy the user's tasks. Carries both the
-    original path and the timestamped backup we made before refusing.
-    """
-
-    def __init__(self, db_path: Path, backup_path: Optional[Path], reason: str):
-        self.db_path = db_path
-        self.backup_path = backup_path
-        self.reason = reason
-        backup_str = str(backup_path) if backup_path is not None else "<backup failed>"
-        super().__init__(
-            f"Refusing to open corrupt kanban DB at {db_path}: {reason}. "
-            f"Original preserved; backup at {backup_str}."
-        )
+    pass
 
 
-def _backup_corrupt_db(path: Path) -> Optional[Path]:
-    """Copy a corrupt DB (and its WAL/SHM sidecars) to a timestamped backup.
-
-    Returns the backup path of the main DB file, or ``None`` if the copy
-    itself failed (the caller still raises loudly in that case).
-
-    Writes are confined to the original DB's parent directory. The
-    backup basename is derived purely from ``path.name``, never from
-    caller-supplied directory segments — no traversal is possible.
-    """
-    # Resolve once and pin the parent so subsequent path operations cannot
-    # escape it. ``Path.resolve()`` collapses any ``..`` segments and
-    # symlinks, and we only ever write inside ``parent``.
-    resolved = path.resolve()
-    parent = resolved.parent
-    base_name = resolved.name  # basename only
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    candidate = parent / f"{base_name}.corrupt.{stamp}.bak"
-    # Defensive: candidate must still be inside parent after construction.
-    # f-string interpolation of ``base_name`` cannot escape ``parent``
-    # because ``base_name`` is itself a resolved basename, but assert it
-    # anyway so static analyzers can see the containment guarantee.
-    if candidate.parent != parent:
-        return None
-    counter = 0
-    while candidate.exists():
-        counter += 1
-        candidate = parent / f"{base_name}.corrupt.{stamp}.{counter}.bak"
-        if candidate.parent != parent:
-            return None
-    try:
-        shutil.copy2(resolved, candidate)
-    except OSError:
-        return None
-    for suffix in ("-wal", "-shm"):
-        sidecar = parent / (base_name + suffix)
-        if sidecar.parent != parent or not sidecar.exists():
-            continue
-        try:
-            sidecar_backup = parent / (candidate.name + suffix)
-            if sidecar_backup.parent != parent:
-                continue
-            shutil.copy2(sidecar, sidecar_backup)
-        except OSError:
-            pass
-    return candidate
-
-
-def _guard_existing_db_is_healthy(path: Path) -> None:
-    """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
-
-    Opens the probe in read/write mode so SQLite can recover or
-    checkpoint a healthy WAL/hot-journal DB before we declare it
-    corrupt. If the file is malformed, copy it (and any WAL/SHM
-    sidecars) to a timestamped backup and raise
-    :class:`KanbanDbCorruptError` so callers cannot silently recreate
-    the schema on top of a damaged DB.
-
-    Transient lock/busy errors (``sqlite3.OperationalError``) are NOT
-    treated as corruption; they propagate raw so the caller sees a
-    normal lock failure and no spurious ``.corrupt`` backup is made.
-
-    No-op for missing files, zero-byte files (treated as fresh), and
-    paths already proven healthy this process (cache hit).
-
-    Path-trust note: ``path`` arrives via :func:`connect`, which itself
-    resolves it from an explicit ``db_path`` argument, the
-    :func:`kanban_db_path` env-var chain, or the kanban-home default —
-    all sources Elevate treats as user-controlled-but-trusted on the
-    user's own machine. We additionally resolve the path here and
-    confine all filesystem writes to its parent directory so any
-    accidental ``..`` segments are collapsed before any I/O happens.
-    """
-    # Resolve before any I/O. ``Path.resolve()`` normalizes ``..`` and
-    # symlinks, giving us a canonical path whose parent dir we can pin.
-    try:
-        resolved = path.resolve()
-    except OSError:
-        return
-    try:
-        if not resolved.exists() or resolved.stat().st_size == 0:
-            return
-    except OSError:
-        return
-    if str(resolved) in _INITIALIZED_PATHS:
-        return
-    reason: Optional[str] = None
-    try:
-        probe = sqlite3.connect(str(resolved), timeout=5, isolation_level=None)
-        try:
-            row = probe.execute("PRAGMA integrity_check").fetchone()
-        finally:
-            probe.close()
-        if not row or (row[0] or "").lower() != "ok":
-            reason = f"integrity_check returned {row[0] if row else '<no row>'!r}"
-    except sqlite3.OperationalError:
-        # Lock contention, busy, transient IO — not corruption. Let it propagate.
-        raise
-    except sqlite3.DatabaseError as exc:
-        reason = f"sqlite refused to open file: {exc}"
-    if reason is None:
-        return
-    backup = _backup_corrupt_db(resolved)
-    raise KanbanDbCorruptError(resolved, backup, reason)
-
-
+@contextlib.contextmanager
 def connect(
     db_path: Optional[Path] = None,
     *,
     board: Optional[str] = None,
-) -> sqlite3.Connection:
-    """Open (and initialize if needed) the kanban DB.
+):
+    """Yield a connection to the central PG-backed kanban store.
 
-    WAL mode is enabled on every connection; it's a no-op after the first
-    time but keeps the code robust if the DB file is ever re-created.
+    Old call shape (`with kb.connect() as conn:` plus a few legacy
+    `conn = kb.connect()` / `conn.close()` pairs) is preserved by making
+    this a context manager that yields the same ``PgConnection`` shim
+    used by every other ``elevate_cli.data`` caller.
 
-    The first connection to a given path auto-runs :func:`init_db` so
-    fresh installs and test harnesses that construct `connect()`
-    directly don't have to remember a separate init step. Subsequent
-    connections skip the schema check via a module-level path cache.
-
-    Path resolution:
-
-    * ``db_path`` explicit → used as-is (legacy callers, tests).
-    * ``board`` explicit → resolves to that board's DB.
-    * Neither → :func:`kanban_db_path` resolves via
-      ``ELEVATE_KANBAN_DB`` env → ``ELEVATE_KANBAN_BOARD`` env →
-      ``<root>/kanban/current`` → ``default``.
+    ``db_path`` and ``board`` are accepted for source-compat with the
+    sqlite-era signature but are no-ops — the PG schema (migration 0010)
+    collapses all boards onto a single tableset, and the legacy on-disk
+    ``kanban.db`` is read once by ``_pg_kanban_migrate.py`` (sentinel
+    9008) on first boot.
     """
-    if db_path is not None:
-        path = db_path
-    else:
-        path = kanban_db_path(board=board)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
-    # and other invalid-header cases without opening a sqlite connection.
-    _validate_sqlite_header(path)
-    # Full integrity probe — catches corruption past the header (malformed
-    # pages, broken internal metadata). Cached per-path after first success
-    # via _INITIALIZED_PATHS so it only runs once per process per path.
-    _guard_existing_db_is_healthy(path)
-    resolved = str(path.resolve())
-    conn = sqlite3.connect(str(path), isolation_level=None, timeout=30)
-    try:
-        conn.row_factory = sqlite3.Row
-        with _INIT_LOCK:
-            # WAL activation can take an exclusive lock while SQLite creates the
-            # sidecar files for a fresh database. Keep it in the same process-local
-            # critical section as schema initialization so concurrent gateway
-            # startup threads do not race before _INITIALIZED_PATHS is populated.
-            # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
-            # falls back to DELETE with one WARNING so kanban stays usable there.
-            # See elevate_state._WAL_INCOMPAT_MARKERS for detection logic.
-            from elevate_state import apply_wal_with_fallback
-            apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            needs_init = resolved not in _INITIALIZED_PATHS
-            if needs_init:
-                # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
-                # migrations. Cached so subsequent connect() calls in the same
-                # process are cheap. The lock prevents same-process dispatcher
-                # threads from racing through the additive ALTER TABLE pass with
-                # stale PRAGMA snapshots during gateway startup.
-                conn.executescript(SCHEMA_SQL)
-                _migrate_add_optional_columns(conn)
-                _INITIALIZED_PATHS.add(resolved)
-    except Exception:
-        conn.close()
-        raise
-    return conn
+    # The PG migrations (incl. 0010_kanban_store.sql) are guaranteed to
+    # have run by the time data.connection.connect() returns, so no
+    # per-call schema check is needed.
+    with _data_connection.connect() as conn:
+        yield conn
 
 
 def init_db(
@@ -1204,284 +1007,50 @@ def init_db(
     *,
     board: Optional[str] = None,
 ) -> Path:
-    """Create the schema if it doesn't exist; return the path used.
+    """No-op on PG. Returns the legacy DB path for back-compat.
 
-    Kept as a public entry point so CLI ``elevate kanban init`` and the
-    daemon have something explicit to call. Unlike :func:`connect`'s
-    first-time auto-init (which caches by path), ``init_db`` always
-    re-runs the migration pass. Callers that know the on-disk schema
-    may have drifted — tests that write legacy event kinds directly,
-    external tools that upgrade an old DB file — can call this to
-    force re-migration.
+    Schema lives in migration ``0010_kanban_store.sql`` and is applied
+    by ``data.connection._ensure_schema`` on the first ``connect()``
+    in the process. Callers that still invoke ``init_db()`` (CLI
+    ``elevate kanban init``, dashboard plugin bootstrap) get a path
+    back so any path-stringifying code keeps working.
     """
-    if db_path is not None:
-        path = db_path
-    else:
-        path = kanban_db_path(board=board)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    resolved = str(path.resolve())
-    # Clear the cache entry so the underlying connect() re-runs the
-    # schema + migration pass unconditionally.
-    with _INIT_LOCK:
-        _INITIALIZED_PATHS.discard(resolved)
-    with contextlib.closing(connect(path)):
+    # Open + close so the migration runner fires even if the caller
+    # never opened a regular connection (matches the old "always init"
+    # contract of init_db).
+    with connect():
         pass
-    return path
+    if db_path is not None:
+        return db_path
+    return kanban_db_path(board=board)
 
 
-def _add_column_if_missing(
-    conn: sqlite3.Connection, table: str, column: str, ddl: str
-) -> bool:
-    """Run ``ALTER TABLE <table> ADD COLUMN <ddl>``, idempotent across races.
+def _migrate_add_optional_columns(conn) -> None:  # pragma: no cover -- legacy
+    """Sqlite-era additive-column migrator. No-op under Postgres.
 
-    Returns ``True`` when the column was actually added by this call.
-    Swallows ``duplicate column name`` errors so a concurrent connection
-    that ran the same migration first does not crash the dispatcher tick
-    (issue #21708).
+    Kept as a callable in case any external caller still imports it.
+    All columns it used to add live in migration ``0010_kanban_store.sql``
+    from the start, and the one-shot ``running``-row backfill that used
+    to live here is run by ``_pg_kanban_migrate.py`` if/when a legacy
+    sqlite ``kanban.db`` is imported.
     """
-    try:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
-        return True
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" in str(exc).lower():
-            return False
-        raise
-
-
-def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
-    """Add columns that were introduced after v1 release to legacy DBs.
-
-    Called by ``init_db`` so opening an old DB is always safe.
-    """
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
-    if "tenant" not in cols:
-        _add_column_if_missing(conn, "tasks", "tenant", "tenant TEXT")
-    if "result" not in cols:
-        _add_column_if_missing(conn, "tasks", "result", "result TEXT")
-    if "branch_name" not in cols:
-        _add_column_if_missing(conn, "tasks", "branch_name", "branch_name TEXT")
-    if "idempotency_key" not in cols:
-        _add_column_if_missing(
-            conn, "tasks", "idempotency_key", "idempotency_key TEXT"
-        )
-    # ``idx_tasks_idempotency`` is created unconditionally below alongside
-    # the other additive-column indexes — see the block after the
-    # legacy-column migration. Creating it here too would be redundant.
-
-    # Refresh after early additive migrations above. Some existing DBs were
-    # partially migrated in older releases and can already contain the later
-    # columns (for example ``consecutive_failures``) even when this function's
-    # initial snapshot did not. Re-snapshot here so the legacy-column migration
-    # below is truly idempotent and never re-adds columns that already exist.
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
-
-    # Legacy column migration: ``spawn_failures`` → ``consecutive_failures``
-    # and ``last_spawn_error`` → ``last_failure_error``.
-    #
-    # Avoid ``ALTER TABLE ... RENAME COLUMN`` for two reasons:
-    #   1. Primary: very old DBs may never have had ``spawn_failures`` at
-    #      all, so RENAME raises OperationalError: no such column (the crash
-    #      reported in issue #20842 after the #20410 update).
-    #   2. Secondary: SQLite reparses the whole schema on any RENAME, which
-    #      fails if related objects (views, triggers) reference the old name.
-    #
-    # ADD-first-then-copy is tolerant of both shapes and preserves
-    # historical counter values when the legacy columns do exist.
-    if "consecutive_failures" not in cols:
-        added = _add_column_if_missing(
-            conn,
-            "tasks",
-            "consecutive_failures",
-            "consecutive_failures INTEGER NOT NULL DEFAULT 0",
-        )
-        if added and "spawn_failures" in cols:
-            conn.execute(
-                "UPDATE tasks SET consecutive_failures = COALESCE(spawn_failures, 0)"
-            )
-    if "worker_pid" not in cols:
-        _add_column_if_missing(conn, "tasks", "worker_pid", "worker_pid INTEGER")
-    if "last_failure_error" not in cols:
-        added = _add_column_if_missing(
-            conn, "tasks", "last_failure_error", "last_failure_error TEXT"
-        )
-        if added and "last_spawn_error" in cols:
-            conn.execute(
-                "UPDATE tasks SET last_failure_error = last_spawn_error"
-            )
-    if "max_runtime_seconds" not in cols:
-        _add_column_if_missing(
-            conn, "tasks", "max_runtime_seconds", "max_runtime_seconds INTEGER"
-        )
-    if "last_heartbeat_at" not in cols:
-        _add_column_if_missing(
-            conn, "tasks", "last_heartbeat_at", "last_heartbeat_at INTEGER"
-        )
-    if "current_run_id" not in cols:
-        _add_column_if_missing(
-            conn, "tasks", "current_run_id", "current_run_id INTEGER"
-        )
-    if "workflow_template_id" not in cols:
-        _add_column_if_missing(
-            conn, "tasks", "workflow_template_id", "workflow_template_id TEXT"
-        )
-    if "current_step_key" not in cols:
-        _add_column_if_missing(
-            conn, "tasks", "current_step_key", "current_step_key TEXT"
-        )
-    if "skills" not in cols:
-        # JSON array of skill names the dispatcher force-loads into the
-        # worker (additive to the built-in `kanban-worker`). NULL is fine
-        # for existing rows.
-        _add_column_if_missing(conn, "tasks", "skills", "skills TEXT")
-
-    if "max_retries" not in cols:
-        # Per-task override for the consecutive-failure circuit breaker.
-        # NULL = fall through to the dispatcher-level ``kanban.failure_limit``
-        # config, then ``DEFAULT_FAILURE_LIMIT``. Existing rows get NULL,
-        # which is the correct default (they keep the global behaviour
-        # they were getting before the column existed).
-        _add_column_if_missing(conn, "tasks", "max_retries", "max_retries INTEGER")
-
-    if "model_override" not in cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
-
-    if "session_id" not in cols:
-        # Originating agent/chat session id, populated when the task is
-        # created from within an agent loop that propagated
-        # ``ELEVATE_SESSION_ID`` (e.g. ACP). NULL on legacy rows and on any
-        # creation path that doesn't set the env var (CLI, dashboard).
-        _add_column_if_missing(
-            conn, "tasks", "session_id", "session_id TEXT"
-        )
-
-    # Indexes over additive ``tasks`` columns must be created after the
-    # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
-    # parses each statement in ``executescript`` against the live schema, so a
-    # ``CREATE INDEX`` over a missing column aborts initialization before the
-    # additive ``ALTER TABLE`` migrations below can run. Re-running them here
-    # is cheap thanks to ``IF NOT EXISTS`` and stays correct on fresh DBs
-    # (where the columns already exist from SCHEMA_SQL).
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
-    )
-
-    # task_events gained a run_id column; back-fill it as NULL for
-    # historical events (they predate runs and can't be attributed).
-    ev_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_events)")}
-    if "run_id" not in ev_cols:
-        _add_column_if_missing(conn, "task_events", "run_id", "run_id INTEGER")
-
-    # Same ordering rule as the additive ``tasks`` indexes above: create the
-    # index after the additive column migration so legacy ``task_events``
-    # tables don't fail during SCHEMA_SQL execution before ``run_id`` exists.
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_events_run "
-        "ON task_events(run_id, id)"
-    )
-
-    notify_table_exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
-    ).fetchone() is not None
-    if notify_table_exists:
-        notify_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(kanban_notify_subs)")
-        }
-        if "notifier_profile" not in notify_cols:
-            _add_column_if_missing(
-                conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
-            )
-
-    # One-shot backfill: any task that is 'running' before runs existed
-    # had its claim_lock / claim_expires / worker_pid on the task row.
-    # Synthesize a matching task_runs row so subsequent end-run / heartbeat
-    # calls have something to write to. Wrapped in write_txn to serialize
-    # against any concurrent dispatcher, and the per-row UPDATE uses
-    # ``current_run_id IS NULL`` as a CAS guard so a racing claim can't
-    # produce an orphaned row if it interleaves with the backfill pass.
-    runs_exist = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
-    ).fetchone() is not None
-    if runs_exist:
-        with write_txn(conn):
-            inflight = conn.execute(
-                "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
-                "       max_runtime_seconds, last_heartbeat_at, started_at "
-                "FROM tasks "
-                "WHERE status = 'running' AND current_run_id IS NULL"
-            ).fetchall()
-            for row in inflight:
-                started = row["started_at"] or int(time.time())
-                cur = conn.execute(
-                    """
-                    INSERT INTO task_runs (
-                        task_id, profile, status,
-                        claim_lock, claim_expires, worker_pid,
-                        max_runtime_seconds, last_heartbeat_at,
-                        started_at
-                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row["id"], row["assignee"], row["claim_lock"],
-                        row["claim_expires"], row["worker_pid"],
-                        row["max_runtime_seconds"], row["last_heartbeat_at"],
-                        started,
-                    ),
-                )
-                # CAS: only install the pointer if nothing else claimed
-                # the task between our SELECT and here (shouldn't happen
-                # under the write_txn, but belt-and-suspenders). If the
-                # CAS fails we've got an orphan run_row — mark it
-                # reclaimed so it doesn't look in-flight.
-                upd = conn.execute(
-                    "UPDATE tasks SET current_run_id = ? "
-                    "WHERE id = ? AND current_run_id IS NULL",
-                    (cur.lastrowid, row["id"]),
-                )
-                if upd.rowcount != 1:
-                    conn.execute(
-                        "UPDATE task_runs SET status = 'reclaimed', "
-                        "    outcome = 'reclaimed', ended_at = ? "
-                        "WHERE id = ?",
-                        (int(time.time()), cur.lastrowid),
-                    )
-
-    # One-shot event-kind rename pass. The old names ("ready", "priority",
-    # "spawn_auto_blocked") still worked but were awkward on the wire;
-    # rename them in-place so existing DBs migrate cleanly. Fires once
-    # per DB because after the UPDATE no rows match the old kinds.
-    _EVENT_RENAMES = (
-        # (old, new)
-        ("ready",              "promoted"),
-        ("priority",           "reprioritized"),
-        ("spawn_auto_blocked", "gave_up"),
-    )
-    for old, new in _EVENT_RENAMES:
-        conn.execute(
-            "UPDATE task_events SET kind = ? WHERE kind = ?",
-            (new, old),
-        )
+    return None
 
 
 @contextlib.contextmanager
-def write_txn(conn: sqlite3.Connection):
-    """Context manager for an IMMEDIATE write transaction.
+def write_txn(conn):
+    """Open an explicit write transaction on the PG-backed kanban store.
 
-    Use for any multi-statement write (creating a task + link, claiming a
-    task + recording an event, etc.).  A claim CAS inside this context is
-    atomic -- at most one concurrent writer can succeed.
+    Sqlite-era contract was ``BEGIN IMMEDIATE`` so the first writer wins
+    and concurrent writers block on the page lock. PG gives us the same
+    atomicity through its normal MVCC semantics — the outer
+    ``data.connection.transaction()`` flushes any pre-existing tx and
+    rolls back on exception, which matches the old `with write_txn(conn)`
+    callsite contract used throughout this module (claim CAS, create-task
+    + parent-link, end-run + status flip, etc.).
     """
-    conn.execute("BEGIN IMMEDIATE")
-    try:
+    with _data_connection.transaction(conn):
         yield conn
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
 
 
 # ---------------------------------------------------------------------------
@@ -1744,7 +1313,13 @@ def create_task(
                     },
                 )
             return task_id
-        except sqlite3.IntegrityError:
+        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation):
+            # Roll back the failed insert so the outer write_txn isn't
+            # poisoned for the retry attempt.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             if attempt == 1:
                 raise
             # Retry with a fresh id.
@@ -1997,11 +1572,12 @@ def add_comment(
             raise ValueError(f"unknown task {task_id}")
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?) RETURNING id",
             (task_id, author.strip(), body.strip(), now),
         )
+        new_id = int(cur.fetchone()["id"])
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        return new_id
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -2171,7 +1747,7 @@ def _synthesize_ended_run(
             status, outcome,
             summary, error, metadata,
             started_at, ended_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
         """,
         (
             task_id, profile, step_key,
@@ -2181,7 +1757,7 @@ def _synthesize_ended_run(
             now, now,
         ),
     )
-    return int(cur.lastrowid or 0)
+    return int(cur.fetchone()["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -2375,7 +1951,7 @@ def claim_task(
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
                 started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?) RETURNING id
             """,
             (
                 task_id,
@@ -2387,7 +1963,7 @@ def claim_task(
                 now,
             ),
         )
-        run_id = run_cur.lastrowid
+        run_id = int(run_cur.fetchone()["id"])
         conn.execute(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),
@@ -2449,7 +2025,7 @@ def claim_review_task(
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
                 started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?) RETURNING id
             """,
             (
                 task_id,
@@ -2461,7 +2037,7 @@ def claim_review_task(
                 now,
             ),
         )
-        run_id = run_cur.lastrowid
+        run_id = int(run_cur.fetchone()["id"])
         conn.execute(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),

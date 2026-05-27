@@ -650,6 +650,24 @@ def _sqlite_connect_readonly(path: Path) -> sqlite3.Connection:
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = ?
+            LIMIT 1
+            """,
+            (table,),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? LIMIT 1",
         (table,),
@@ -747,6 +765,73 @@ def _memory_summary(config: dict[str, Any], *, include_graph: bool = True) -> di
         summary["activity"] = activity_snapshot()
     except Exception:
         summary["activity"] = {}
+
+    try:
+        from elevate_cli.data import connect
+
+        with connect() as conn:
+            summary["db_path"] = "embedded-postgres:elevate_operational"
+            summary["db_exists"] = True
+            summary["facts"] = _safe_count_table(conn, "memory_facts")
+            summary["entities"] = _safe_count_table(conn, "memory_entities")
+            summary["embeddings"] = _safe_count_table(conn, "memory_embeddings")
+            summary["indexed_facts"] = _safe_count_table(conn, "memory_embeddings", "target_type = 'fact'")
+            summary["documents"] = _safe_count_table(conn, "memory_documents")
+            summary["chunks"] = _safe_count_table(conn, "memory_chunks")
+            summary["indexed_chunks"] = _safe_count_table(conn, "memory_embeddings", "target_type = 'chunk'")
+            summary["community_reports"] = _safe_count_table(conn, "memory_community_reports")
+            summary["relations"] = _safe_count_table(conn, "memory_relations")
+            summary["modal_assets"] = _safe_count_table(conn, "memory_modal_assets")
+            journal_rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM memory_turn_journal
+                GROUP BY status
+                """
+            ).fetchall()
+            counts = {str(row["status"]): int(row["count"] or 0) for row in journal_rows}
+            session_rows = conn.execute(
+                """
+                SELECT session_id,
+                       session_day,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END) AS processed,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                       MAX(created_at) AS latest_created_at
+                FROM memory_turn_journal
+                GROUP BY session_id, session_day
+                ORDER BY latest_created_at DESC, session_id ASC, session_day DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            sessions = [
+                {
+                    "session_id": row["session_id"],
+                    "session_day": row["session_day"],
+                    "total": int(row["total"] or 0),
+                    "pending": int(row["pending"] or 0),
+                    "processed": int(row["processed"] or 0),
+                    "failed": int(row["failed"] or 0),
+                    "latest_created_at": str(row["latest_created_at"]) if row["latest_created_at"] is not None else None,
+                }
+                for row in session_rows
+            ]
+            summary["journal"] = {
+                "total": sum(counts.values()),
+                "pending": counts.get("pending", 0),
+                "processed": counts.get("processed", 0),
+                "failed": counts.get("failed", 0),
+                "active_session_count": len({row["session_id"] for row in sessions}),
+                "session_segment_count": len(sessions),
+                "sessions": sessions,
+            }
+            if include_graph:
+                summary["graph"] = _memory_graph(conn)
+        return summary
+    except Exception as exc:
+        summary["error"] = str(exc)
+
     if not db_path.exists():
         return summary
 
@@ -838,8 +923,8 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
                e.name,
                COUNT(DISTINCT fe.fact_id) AS fact_count,
                COUNT(DISTINCT ce.chunk_id) AS chunk_count
-        FROM entities e
-        LEFT JOIN fact_entities fe ON fe.entity_id = e.entity_id
+        FROM memory_entities e
+        LEFT JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
         LEFT JOIN memory_chunk_entities ce ON ce.entity_id = e.entity_id
         GROUP BY e.entity_id, e.name
         ORDER BY (COUNT(DISTINCT fe.fact_id) + COUNT(DISTINCT ce.chunk_id)) DESC, e.name ASC
@@ -849,7 +934,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
     fact_rows = conn.execute(
         """
         SELECT fact_id, content, category, trust_score
-        FROM facts
+        FROM memory_facts
         WHERE COALESCE(status, 'active') = 'active'
         ORDER BY updated_at DESC, fact_id DESC
         LIMIT 18
@@ -983,7 +1068,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         rows = conn.execute(
             f"""
             SELECT entity_id, fact_id
-            FROM fact_entities
+            FROM memory_fact_entities
             WHERE entity_id IN ({placeholders_entities})
               AND fact_id IN ({placeholders_facts})
             LIMIT 80
@@ -1042,7 +1127,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         if entity_names:
             placeholders = ",".join("?" for _ in entity_names[:8])
             entity_matches = conn.execute(
-                f"SELECT entity_id FROM entities WHERE name IN ({placeholders}) LIMIT 8",
+                f"SELECT entity_id FROM memory_entities WHERE name IN ({placeholders}) LIMIT 8",
                 entity_names[:8],
             ).fetchall()
             for entity in entity_matches:

@@ -70,7 +70,7 @@ ADMIN_PROFILE_SCHEMA = {
                 "province": {"type": "string"},
                 "board": {"type": "string"},
                 "market": {"type": "string"},
-                "current_stage": {"type": "integer", "minimum": 0, "maximum": 9},
+                "current_stage": {"type": "integer", "minimum": 0, "maximum": 10},
                 "display_name": {"type": "string"},
                 "primary_contact_id": {"type": "string"},
                 "listing_address": {"type": "string"},

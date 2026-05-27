@@ -56,6 +56,18 @@ const SOURCE_CONFIG: Record<string, { icon: typeof Terminal; color: string }> =
     cron: { icon: Clock, color: "text-warning" },
   };
 
+/** Compact human format for token counts: 1234 -> "1.2K", 1_500_000 -> "1.5M". */
+function formatTokenCount(n: number): string {
+  if (!n || n < 0) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k >= 10 ? Math.round(k) : k.toFixed(1)}K`;
+  }
+  const m = n / 1_000_000;
+  return `${m >= 10 ? Math.round(m) : m.toFixed(1)}M`;
+}
+
 /** Render an FTS5 snippet with highlighted matches.
  *  The backend wraps matches in >>> and <<< delimiters. */
 function SnippetHighlight({ snippet }: { snippet: string }) {
@@ -341,6 +353,14 @@ function SessionRow({
                   <span className="text-border">&#183;</span>
                   <span>
                     {session.tool_call_count} {t.common.tools}
+                  </span>
+                </>
+              )}
+              {(session.input_tokens > 0 || session.output_tokens > 0) && (
+                <>
+                  <span className="text-border">&#183;</span>
+                  <span title={`${session.input_tokens.toLocaleString()} in / ${session.output_tokens.toLocaleString()} out`}>
+                    {formatTokenCount(session.input_tokens)} in &middot; {formatTokenCount(session.output_tokens)} out
                   </span>
                 </>
               )}

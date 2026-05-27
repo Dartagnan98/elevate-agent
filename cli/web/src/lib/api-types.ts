@@ -82,10 +82,18 @@ export interface SourceConnectionBlueprint {
   prompt: string;
 }
 
+export interface SourceCategoryMeta {
+  id: string;
+  label: string;
+  description: string;
+}
+
 export interface SourceConnectorStatus {
   id: string;
   label: string;
   category: string;
+  description: string;
+  wired: boolean;
   state: SourceConnectorState;
   sourceExists: boolean;
   sourceDir: string;
@@ -96,6 +104,7 @@ export interface SourceConnectorStatus {
   syncMode: string | null;
   authStatus: string | null;
   initializeBehavior: "local_messages_import" | "composio_social_setup" | "agent_setup_task" | string;
+  runMode: "server_inline" | "agent_session" | "agent_setup_task" | string;
   ownerAgent: string;
   enabledUiSurfaces: string[];
   connected: boolean;
@@ -115,6 +124,7 @@ export interface SourceConnectorsResponse {
   sourceRoot: string;
   blueprints: SourceConnectionBlueprint[];
   promptCategories: Array<{ id: string; label: string }>;
+  categories: SourceCategoryMeta[];
   connectors: SourceConnectorStatus[];
 }
 
@@ -183,6 +193,7 @@ export interface SourceInboxThread {
   heatScore: number;
   heatLabel: "hot" | "warm" | "watch" | "normal" | string;
   status: "open" | "done" | "archived" | string;
+  leadSectionIds?: string[];
   record: SourceRecord;
 }
 
@@ -225,6 +236,7 @@ export interface SourceInboxProfile {
   tags: string[];
   status: SourceInboxProfileStatus | null;
   statusUpdatedAt: string | null;
+  leadSectionIds?: string[];
 }
 
 export interface SourceInboxDraft {
@@ -245,11 +257,15 @@ export interface SourceInboxDraft {
   approvalRequired: boolean;
   generated: boolean;
   fallback?: boolean;
+  templateId?: string | null;
+  templateName?: string | null;
+  outreachLane?: OutreachLane | string | null;
   record: SourceRecord;
   skippedAt?: string | null;
   score?: number | null;
   leadLabel?: string | null;
   scoreReason?: string | null;
+  leadSectionIds?: string[];
 }
 
 export type OutreachLane = "new-outreach" | "hot-leads-watcher" | "follow-ups";
@@ -1299,6 +1315,7 @@ export interface ThreadContextResponse {
 
 export interface BuyerWatchlistEntry {
   id: string;
+  contactId?: string | null;
   name: string;
   email?: string;
   phone?: string;
@@ -1314,6 +1331,19 @@ export interface BuyerWatchlistEntry {
   sourceLabel?: string;
   tags?: string[];
   scrapedAt?: string | null;
+  leadSectionIds?: string[];
+}
+
+export interface LeadSectionSummary {
+  id: string;
+  label: string;
+  source: string;
+  count: number;
+  contactIds: string[];
+  threadIds: string[];
+  profileIds: string[];
+  draftIds: string[];
+  buyerIds: string[];
 }
 
 export interface SourceInboxResponse {
@@ -1330,6 +1360,7 @@ export interface SourceInboxResponse {
   drafts: SourceInboxDraft[];
   skippedDrafts?: SourceInboxDraft[];
   privateSearchBuyers?: BuyerWatchlistEntry[];
+  leadSections?: Record<string, LeadSectionSummary>;
 }
 
 export interface SourceInboxSentItem {
@@ -2042,6 +2073,26 @@ export interface CronJob {
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_error?: string | null;
+  last_status?: string | null;
+  last_summary?: string | null;
+  last_session_id?: string | null;
+}
+
+export interface CronAttention {
+  pending_drafts: number;
+  errored_jobs: Array<{
+    id: string;
+    name?: string;
+    last_error?: string;
+    last_run_at?: string;
+  }>;
+  stale_jobs: Array<{
+    id: string;
+    name?: string;
+    last_run_at?: string;
+    hours_since?: number;
+  }>;
+  total: number;
 }
 
 export interface CronJobCreateRequest {

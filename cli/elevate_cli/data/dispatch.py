@@ -260,10 +260,10 @@ def _validate_stage(stage: int | None) -> int | None:
     if stage is None:
         return None
     if isinstance(stage, bool):
-        raise ValueError("stage must be an integer between 0 and 9")
+        raise ValueError("stage must be an integer between 0 and 10")
     stage_int = int(stage)
-    if stage_int < 0 or stage_int > 9:
-        raise ValueError("stage must be an integer between 0 and 9")
+    if stage_int < 0 or stage_int > 10:
+        raise ValueError("stage must be an integer between 0 and 10")
     return stage_int
 
 

@@ -41,6 +41,7 @@ interface PickerItem extends CompletionItem {
   display: string;
   group: string;
   icon: LucideIcon;
+  insertText?: string;
   kind: "agent" | "context" | "file" | "plugin" | "skill" | "slash" | "toolset";
 }
 
@@ -64,6 +65,7 @@ interface Props {
   gw: GatewayClient | null;
   input: string;
   onApply(nextInput: string, nextCaret: number): void;
+  onSubmit?(nextInput: string): void;
 }
 
 interface CompletionResponse {
@@ -387,16 +389,44 @@ function normalizeSlashItem(
   item: CompletionItem,
   skillsByCommand: Map<string, SkillInfo>,
 ): PickerItem {
-  const commandText = item.text.startsWith("/") ? item.text : `/${item.text}`;
+  const rawText = item.text || asPlainText(item.display);
+  const insertText = rawText.startsWith("/") ? rawText : `/${rawText}`;
+  const commandText = insertText.trimEnd();
   const skill = skillsByCommand.get(commandText.toLowerCase());
   return {
     display: skill ? displaySkillName(skill.name) : displayCommandLabel(item.display, commandText),
     group: skill ? "Skills" : "Commands",
     icon: skill ? Sparkles : commandIcon(commandText),
+    insertText: skill ? commandText : insertText,
     kind: skill ? "skill" : "slash",
     meta: skill ? [skill.description, skill.category].filter(Boolean).join(" · ") : item.meta,
     text: commandText,
   };
+}
+
+function shouldShowSlashCommandItem(item: PickerItem, query: string | null, hasSkillMatches: boolean): boolean {
+  if (!hasSkillMatches || query === null) return true;
+  if (query === "skills") return true;
+  return item.text.toLowerCase() !== "/skills";
+}
+
+function slashGroupOrder(
+  query: string | null,
+  slashText: string,
+  hasSkillMatches: boolean,
+): string[] {
+  const normalized =
+    query ??
+    slashText
+      .replace(/^\/+/, "")
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)[0] ??
+    "";
+  if (hasSkillMatches && normalized && normalized !== "skills") {
+    return ["Skills", "Commands"];
+  }
+  return ["Commands", "Skills"];
 }
 
 function orderGroupedItems(
@@ -421,14 +451,14 @@ function orderGroupedItems(
 }
 
 function shouldAppendSpace(item: PickerItem): boolean {
-  if (item.kind === "slash") {
-    return !item.text.endsWith(" ") && !item.text.endsWith(":");
+  if (item.kind === "slash" || item.text.startsWith("/")) {
+    return false;
   }
   return !item.text.endsWith(":") && !item.text.endsWith("/");
 }
 
 export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
-  function SlashPopover({ agents, caretIndex, input, gw, onApply }, ref) {
+  function SlashPopover({ agents, caretIndex, input, gw, onApply, onSubmit }, ref) {
     const trigger = useMemo(
       () => detectTrigger(input, caretIndex),
       [caretIndex, input],
@@ -482,10 +512,17 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
               .map((item) => normalizeSlashItem(item, skillsByCommand))
               .filter((item) => query === null || matchesSlash(item, query));
             const skillItems = slashSkillItems(catalog, query);
+            const hasSkillMatches =
+              skillItems.length > 0 || commandItems.some((item) => item.kind === "skill");
             setItems(
               orderGroupedItems(
-                [...commandItems, ...skillItems],
-                ["Commands", "Skills"],
+                [
+                  ...skillItems,
+                  ...commandItems.filter((item) =>
+                    shouldShowSlashCommandItem(item, query, hasSkillMatches),
+                  ),
+                ],
+                slashGroupOrder(query, trigger.text, hasSkillMatches),
                 MAX_SLASH_GROUP_ITEMS,
               ),
             );
@@ -518,16 +555,16 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
 
     const visible = Boolean(trigger && items.length > 0);
 
-    const apply = useCallback(
-      (item: PickerItem) => {
-        if (!trigger) return;
+    const inputForItem = useCallback(
+      (item: PickerItem): { nextCaret: number; nextInput: string } | null => {
+        if (!trigger) return null;
 
         let replaceStart = trigger.start;
-        let replacement = item.text;
+        let replacement = item.insertText ?? item.text;
 
         if (trigger.mode === "slash") {
           replaceStart = trigger.start + slashReplaceFrom;
-          replacement = item.text.replace(/^\//, "");
+          replacement = replacement.replace(/^\//, "");
         }
 
         if (shouldAppendSpace(item)) {
@@ -535,9 +572,26 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
         }
 
         const nextInput = `${input.slice(0, replaceStart)}${replacement}${input.slice(trigger.end)}`;
-        onApply(nextInput, replaceStart + replacement.length);
+        return {
+          nextCaret: replaceStart + replacement.length,
+          nextInput,
+        };
       },
-      [input, onApply, slashReplaceFrom, trigger],
+      [input, slashReplaceFrom, trigger],
+    );
+
+    const apply = useCallback(
+      (item: PickerItem, options?: { submit?: boolean }) => {
+        const next = inputForItem(item);
+        if (!next) return;
+        setItems([]);
+        if (options?.submit && onSubmit) {
+          onSubmit(next.nextInput);
+          return;
+        }
+        onApply(next.nextInput, next.nextCaret);
+      },
+      [inputForItem, onApply, onSubmit],
     );
 
     useImperativeHandle(
@@ -559,7 +613,15 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
             case "Tab": {
               event.preventDefault();
               const item = items[selected];
-              if (item) apply(item);
+              if (item) {
+                const next = inputForItem(item);
+                const shouldSubmit =
+                  event.key === "Enter" &&
+                  trigger?.mode === "slash" &&
+                  Boolean(onSubmit) &&
+                  (item.kind === "skill" || next?.nextInput.trim() === input.trim());
+                apply(item, { submit: shouldSubmit });
+              }
               return true;
             }
             case "Escape":
@@ -571,7 +633,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           }
         },
       }),
-      [apply, items, selected, visible],
+      [apply, input, inputForItem, items, onSubmit, selected, trigger?.mode, visible],
     );
 
     // Keep the keyboard-selected row inside the scrollable popover viewport.
@@ -620,7 +682,11 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
                     : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
                 )}
                 id={`slash-item-${index}`}
-                onClick={() => apply(item)}
+                onClick={() =>
+                  apply(item, {
+                    submit: trigger?.mode === "slash" && item.kind === "skill",
+                  })
+                }
                 onMouseEnter={() => setSelected(index)}
                 role="option"
                 type="button"

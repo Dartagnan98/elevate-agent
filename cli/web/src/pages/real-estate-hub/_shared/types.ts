@@ -16,6 +16,7 @@ export type HubData = {
   error: string | null;
   loading: boolean;
   refresh: () => Promise<void>;
+  setSourceInbox: (sourceInbox: SourceInboxResponse | null) => void;
   sourceInbox: SourceInboxResponse | null;
   sessions: SessionInfo[];
   snapshot: AgentHubSnapshot | null;

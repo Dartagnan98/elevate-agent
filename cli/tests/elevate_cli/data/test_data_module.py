@@ -143,6 +143,45 @@ def test_merge_rejects_agent_actor():
             )
 
 
+def test_merge_reassigns_lead_signal_graduation():
+    """Regression: lead_signals.graduated_to_contact_id is a RESTRICT FK
+    on contacts.id, so merging a contact that has a graduated lead_signal
+    used to abort the transaction on the final DELETE. merge_contacts
+    must move the graduation pointer to the primary first."""
+    with data.connect() as conn:
+        primary = data.upsert_contact(conn, display_name="Primary")
+        duplicate = data.upsert_contact(conn, display_name="Duplicate")
+        signal = data.upsert_lead_signal(
+            conn,
+            source_id="xposure-pcs",
+            source_native_id="xposure-fixture",
+            payload={"score": 80, "tier": "warm"},
+            email="dup@example.com",
+        )
+        data.graduate_lead_signal(
+            conn, signal["id"], contact_id=duplicate["id"], actor="human:test",
+        )
+        # Sanity: the signal points at the duplicate before merge.
+        assert (
+            data.get_lead_signal(conn, signal["id"])["graduatedToContactId"]
+            == duplicate["id"]
+        )
+
+        data.merge_contacts(
+            conn,
+            primary_id=primary["id"],
+            duplicate_id=duplicate["id"],
+            actor="human:test",
+        )
+
+        # Duplicate is gone, signal now points at the primary.
+        assert data.get_contact(conn, duplicate["id"]) is None
+        assert (
+            data.get_lead_signal(conn, signal["id"])["graduatedToContactId"]
+            == primary["id"]
+        )
+
+
 def test_conversation_get_or_create_is_idempotent():
     with data.connect() as conn:
         c = data.upsert_contact(conn, display_name="C")

@@ -27,6 +27,11 @@ const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
 const HOST = "127.0.0.1";
 const HOME = os.homedir();
 const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/hub";
+const HQ_BASE_URL = (process.env.ELEVATE_BACKEND_URL || "https://api.elevationrealestatehq.com").replace(/\/+$/, "");
+const LICENSE_PATH = path.join(HOME, ".elevate", "license.json");
+// Refresh access tokens with this much headroom before expiry. Mirrors
+// REFRESH_MARGIN_SECONDS in elevate_cli/license.py so the two stay in sync.
+const ACCESS_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const EMBEDDED_CHAT =
   process.env.ELEVATE_DESKTOP_EMBEDDED_CHAT !== "0" &&
   process.env.ELEVATE_DASHBOARD_TUI !== "0";
@@ -46,6 +51,7 @@ let overlayWindow = null;
 let overlayWatcher = null;
 let backendProcess = null;
 let updateToastWindow = null;
+let loginWindow = null;
 
 // The computer-use tool touches this file on every action. The desktop app
 // polls its mtime and shows the screen-edge glow while it is fresh, so the
@@ -62,6 +68,186 @@ app.setName("Elevate");
 
 function repoRoot() {
   return path.resolve(__dirname, "..", "..");
+}
+
+// ---- Auth gate ---------------------------------------------------------
+//
+// The desktop app requires an Elevation Real Estate HQ login before it will
+// load the local dashboard. Tokens live in ~/.elevate/license.json — the
+// same file the CLI reads/writes via elevate_cli/license.py. Writing in the
+// same shape means `elevate license status` (and any future shared tooling)
+// sees the desktop session.
+
+function readLicense() {
+  try {
+    const raw = fs.readFileSync(LICENSE_PATH, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeLicense(license) {
+  fs.mkdirSync(path.dirname(LICENSE_PATH), { recursive: true });
+  fs.writeFileSync(LICENSE_PATH, JSON.stringify(license, null, 2), { mode: 0o600 });
+}
+
+function clearLicense() {
+  try {
+    fs.unlinkSync(LICENSE_PATH);
+  } catch {
+    // already gone is fine
+  }
+}
+
+function decodeJwtExp(token) {
+  try {
+    const payload = token.split(".")[1];
+    const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    const claims = JSON.parse(json);
+    return Number(claims.exp || 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function refreshLicense(license) {
+  if (!license || !license.refresh_token) return null;
+  try {
+    // Same endpoint the CLI's elevate_cli/license.py refresh() uses, so a
+     // session refreshed here is interchangeable with one refreshed by the CLI.
+    const res = await fetch(`${HQ_BASE_URL}/api/license/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: license.refresh_token }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(`[license] refresh failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json();
+    if (!data || !data.access_token || !data.refresh_token) {
+      console.warn("[license] refresh response missing tokens");
+      return null;
+    }
+    const next = {
+      ...license,
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      license_id: data.license_id || license.license_id,
+      tier: data.tier || license.tier,
+      entitlements: data.entitlements || license.entitlements,
+      expires_at: decodeJwtExp(data.access_token),
+    };
+    writeLicense(next);
+    return next;
+  } catch (err) {
+    console.warn(`[license] refresh threw: ${err && err.message ? err.message : err}`);
+    return null;
+  }
+}
+
+// Retry wrapper for startup. Transient network failures during app launch
+// (DNS not yet warm, VPN reconnecting, HQ briefly slow) used to trigger the
+// login popup even though the user had a valid refresh_token on disk. We try
+// up to 3 times with short backoff before giving up.
+async function refreshLicenseWithRetry(license, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    const next = await refreshLicense(license);
+    if (next) return next;
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  return null;
+}
+
+// Returns a valid license, refreshing if needed. Returns null if there's no
+// usable session. On startup the network may not be fully ready, so refresh
+// is retried before we give up and pop the login window.
+async function ensureValidLicense({ retry = false } = {}) {
+  let license = readLicense();
+  if (!license || !license.access_token) return null;
+
+  const expMs = (Number(license.expires_at) || 0) * 1000;
+  if (!Number.isFinite(expMs) || Date.now() > expMs - ACCESS_REFRESH_MARGIN_MS) {
+    license = retry
+      ? await refreshLicenseWithRetry(license)
+      : await refreshLicense(license);
+  }
+  return license;
+}
+
+// Forces a token refresh regardless of expiry — used on window focus and a
+// background interval so an admin revoking a skill pack on HQ propagates to
+// the local ~/.elevate/license.json within seconds. The React dashboard
+// already polls /api/license/status on focus, so once this writes the new
+// entitlements the locked/unlocked tabs flip without a reload.
+async function forceRefreshLicense() {
+  const current = readLicense();
+  if (!current || !current.refresh_token) return null;
+  const next = await refreshLicense(current);
+  if (next && mainWindow && !mainWindow.isDestroyed()) {
+    // Nudge the React side to re-check immediately rather than wait for its
+    // own 30s tick.
+    mainWindow.webContents
+      .executeJavaScript(
+        "window.dispatchEvent(new Event('elevate:auth-changed'));",
+        true,
+      )
+      .catch(() => {});
+  }
+  return next;
+}
+
+async function performLogin({ email, password }) {
+  if (!email || !password) {
+    return { ok: false, error: "Email and password are required." };
+  }
+  try {
+    const res = await fetch(`${HQ_BASE_URL}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: String(email).trim().toLowerCase(),
+        password,
+        device_label: `Elevate Desktop (${os.hostname()})`,
+      }),
+    });
+
+    if (res.status === 401) {
+      return { ok: false, error: "Email or password is wrong." };
+    }
+    if (res.status === 402) {
+      return {
+        ok: false,
+        error: "Your account has no active subscription. Upgrade in your browser, then sign in.",
+      };
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      return { ok: false, error: `Sign-in failed (${res.status}): ${text.slice(0, 160)}` };
+    }
+
+    const data = await res.json();
+    const license = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      license_id: data.license_id,
+      tier: data.tier,
+      email: String(email).trim().toLowerCase(),
+      expires_at: decodeJwtExp(data.access_token),
+      entitlements: data.entitlements || [],
+    };
+    writeLicense(license);
+    return { ok: true, license };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Could not reach ${HQ_BASE_URL}. Check your connection and try again.`,
+    };
+  }
 }
 
 function envWithPath(extra = {}) {
@@ -111,6 +297,31 @@ function resolveElevateLauncher() {
       args: dashboardArgs,
       cwd: os.homedir(),
     };
+  }
+
+  // Bundled runtime (the .app ships its own Python + CLI source under
+  // Contents/Resources so a fresh install doesn't need a separate
+  // `elevate` CLI on the user's PATH). Highest priority when packaged.
+  if (app.isPackaged) {
+    const bundledPython = path.join(
+      process.resourcesPath,
+      "runtime",
+      "python",
+      "bin",
+      "python3.12",
+    );
+    const bundledCli = path.join(process.resourcesPath, "cli");
+    if (fileExists(bundledPython) && fileExists(bundledCli)) {
+      return {
+        command: bundledPython,
+        args: ["-m", "elevate_cli.main", ...dashboardArgs],
+        cwd: bundledCli,
+        extraEnv: {
+          PYTHONPATH: bundledCli,
+          PYTHONNOUSERSITE: "1",
+        },
+      };
+    }
   }
 
   const root = repoRoot();
@@ -204,7 +415,7 @@ async function backendMatchesDesktopMode(port = backendPort) {
   return dashboardChatEnabled(port);
 }
 
-async function waitForBackend(timeoutMs = 45000) {
+async function waitForBackend(timeoutMs = 180000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (await backendMatchesDesktopMode()) {
@@ -258,9 +469,10 @@ async function ensureBackend() {
     return false;
   }
 
+  const baseEnv = EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {};
   backendProcess = spawn(launcher.command, launcher.args, {
     cwd: launcher.cwd,
-    env: envWithPath(EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
+    env: envWithPath({ ...baseEnv, ...(launcher.extraEnv || {}) }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   ownsBackend = true;
@@ -282,6 +494,27 @@ function createMenu() {
       label: "Elevate",
       submenu: [
         { role: "about" },
+        { type: "separator" },
+        {
+          label: "Sign In...",
+          accelerator: "CmdOrCtrl+L",
+          click: () => openLoginWindow(),
+        },
+        {
+          label: "Account...",
+          click: () => shell.openExternal(`${HQ_BASE_URL}/account`),
+        },
+        {
+          label: "Sign Out",
+          click: () => {
+            clearLicense();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              // Reload so the chat WebSocket reconnects and now sees no
+              // license — the sign-in banner will render in the chat pane.
+              loadAppPath(START_PATH);
+            }
+          },
+        },
         { type: "separator" },
         {
           label: "Quit Elevate",
@@ -472,6 +705,54 @@ function loadLocalPage(fileName) {
   mainWindow.loadFile(path.join(__dirname, fileName));
 }
 
+// Pops the login form in a small floating window (instead of swapping the
+// main window) so the dashboard stays put underneath. The auth:login IPC
+// handler closes this window and reloads the dashboard on success.
+function openLoginWindow() {
+  // Nudge the dashboard renderer to re-check /api/license/status. Without
+  // this the SidebarUserPill can sit with stale "signed in as foo" state
+  // (loaded earlier in the session) while we pop the modal because the
+  // license file was cleared out from under it. The pill seeing the same
+  // 401 and rendering "Not signed in" makes the modal experience make sense.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents
+      .executeJavaScript(
+        "window.dispatchEvent(new Event('elevate:auth-changed'));",
+        true,
+      )
+      .catch(() => {});
+  }
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.focus();
+    return;
+  }
+  loginWindow = new BrowserWindow({
+    width: 460,
+    height: 560,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    title: "Sign in to Elevate",
+    backgroundColor: "#1a1b1a",
+    parent: mainWindow || undefined,
+    modal: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  loginWindow.once("ready-to-show", () => {
+    loginWindow.show();
+  });
+  loginWindow.on("closed", () => {
+    loginWindow = null;
+  });
+  loginWindow.loadFile(path.join(__dirname, "login.html"));
+}
+
 function loadAppPath(pathname = START_PATH) {
   if (!mainWindow) return;
   mainWindow.loadURL(`${backendUrl}${pathname}`);
@@ -505,7 +786,55 @@ async function startDesktop() {
   const ready = await ensureBackend();
   backendReady = ready;
   if (ready) {
+    // The auth gate is enforced inside the chat endpoint, not at window load,
+    // so the user can browse the dashboard while signed out. The chat will
+    // reply with a "sign in required" message until ~/.elevate/license.json
+    // contains a valid token.
     loadAppPath(START_PATH);
+    // If no valid license is on disk, pop the in-app login window on top of
+    // the dashboard so the user signs in without ever leaving the app.
+    // Same window the "Sign In..." menu opens — small floating modal, not
+    // a full-screen takeover.
+    // On launch only: if a license file exists, give the refresh up to 3
+    // attempts before popping the login window. Without retry, a transient
+    // network blip at startup throws the user into a sign-in modal even
+    // though their session is still valid on HQ.
+    ensureValidLicense({ retry: true })
+      .then((license) => {
+        if (!license) {
+          const onDisk = readLicense();
+          if (onDisk && onDisk.refresh_token) {
+            // We have a refresh_token but every retry failed. Don't pop the
+            // login window — the background interval will keep trying every
+            // 60s and the dashboard's gateway has its own session. If HQ is
+            // truly down, the user sees a "sign in required" message inside
+            // the chat panel rather than a confusing login modal.
+            console.warn(
+              "[license] startup refresh failed after retries — leaving session in place",
+            );
+            return;
+          }
+          openLoginWindow();
+        }
+      })
+      .catch((err) => {
+        console.warn(`[license] ensureValidLicense threw: ${err && err.message ? err.message : err}`);
+        const onDisk = readLicense();
+        if (!onDisk || !onDisk.refresh_token) openLoginWindow();
+      });
+
+    // Keep the local license in sync with HQ. If an admin revokes a skill
+    // pack the user has, the next focus or 60s tick fetches fresh
+    // entitlements via /api/license/refresh, rewrites license.json, and
+    // notifies the React dashboard to re-render the sidebar/tabs.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.on("focus", () => {
+        forceRefreshLicense().catch(() => {});
+      });
+    }
+    setInterval(() => {
+      forceRefreshLicense().catch(() => {});
+    }, 60_000);
   } else {
     loadLocalPage("install.html");
   }
@@ -558,6 +887,63 @@ ipcMain.handle("desktop:retry", async () => {
 });
 
 ipcMain.handle("desktop:install", async () => runInstaller());
+
+// ---- Auth IPC ---------------------------------------------------------
+// Login form on login.html calls these. After a successful login we route
+// the window straight into the dashboard so the user doesn't have to click
+// anything else.
+
+ipcMain.handle("auth:login", async (_event, payload) => {
+  const result = await performLogin(payload || {});
+  if (result.ok) {
+    // Close the floating login window (if this came from one) and reload the
+    // dashboard so the chat WebSocket reopens and picks up the new license.
+    setTimeout(() => {
+      if (loginWindow && !loginWindow.isDestroyed()) {
+        loginWindow.close();
+        loginWindow = null;
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        loadAppPath(START_PATH);
+      }
+    }, 250);
+  }
+  return result;
+});
+
+ipcMain.handle("auth:status", async () => {
+  const license = await ensureValidLicense();
+  if (!license) return { signedIn: false };
+  return {
+    signedIn: true,
+    email: license.email,
+    tier: license.tier,
+    license_id: license.license_id,
+    expires_at: license.expires_at,
+  };
+});
+
+ipcMain.handle("auth:logout", async () => {
+  clearLicense();
+  loadLocalPage("login.html");
+  return { ok: true };
+});
+
+// Routes the login page's "Forgot?" / "Create account" / "Use a code" links
+// out to the user's default browser. Hard-coded to the HQ origin so a
+// compromised renderer can't open arbitrary URLs.
+ipcMain.handle("auth:open-external", async (_event, target) => {
+  const paths = {
+    forgot: "/forgot",
+    signup: "/signup",
+    link: "/link",
+    account: "/account",
+  };
+  const safePath = paths[target];
+  if (!safePath) return { ok: false };
+  await shell.openExternal(`${HQ_BASE_URL}${safePath}`);
+  return { ok: true };
+});
 
 // ---------------------------------------------------------------------------
 // Auto-update
@@ -682,22 +1068,11 @@ autoUpdater.on("error", (err) => {
 });
 
 function kickoffUpdates() {
-  if (!app.isPackaged) {
-    log.info("[updater] skipped — running in dev mode");
-    return;
-  }
-  // First check after a short delay so the main window has time to load and
-  // wire its IPC listener.
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err) => log.warn("[updater] check failed", err));
-  }, 5_000);
-  // Re-check every 2 hours while the app stays open.
-  setInterval(
-    () => {
-      autoUpdater.checkForUpdates().catch((err) => log.warn("[updater] check failed", err));
-    },
-    2 * 60 * 60 * 1000,
-  );
+  // Auto-update disabled until the Mac build is signed with a Developer ID +
+  // shipped through a real publish channel. Without signing, electron-updater
+  // downloads the new bundle but macOS refuses the cert-mismatched swap, so
+  // the popup just confuses users. Clients install updates manually for now.
+  log.info("[updater] disabled — manual updates only (no Developer ID signing yet)");
 }
 
 // Renderer can ask "what's the latest status?" on mount so it doesn't miss

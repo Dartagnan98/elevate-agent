@@ -42,8 +42,42 @@ BACKEND_URL = os.environ.get("ELEVATE_BACKEND_URL", DEFAULT_BACKEND).rstrip("/")
 
 LICENSE_PATH = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate") / "license.json"
 
+# Sibling marker — counts consecutive 401s from /api/license/refresh so a
+# transient HQ blip (network flap, deploy, brief auth race) doesn't nuke the
+# user's session on the first failure. Wiping license.json on every 401 was
+# the root cause of "I'm signed in but the modal pops on startup" — by the
+# time the user opened the desktop, the gateway had already cleared the file
+# in the background.
+LICENSE_FAIL_PATH = LICENSE_PATH.parent / ".license_refresh_failures"
+LICENSE_FAIL_THRESHOLD = 3
+
 # Refresh when <5 minutes of access-token life remain.
 REFRESH_MARGIN_SECONDS = 300
+
+
+def _read_fail_count() -> int:
+    try:
+        return int(LICENSE_FAIL_PATH.read_text().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def _bump_fail_count() -> int:
+    n = _read_fail_count() + 1
+    try:
+        LICENSE_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LICENSE_FAIL_PATH.write_text(str(n))
+    except OSError:
+        pass
+    return n
+
+
+def _reset_fail_count() -> None:
+    try:
+        if LICENSE_FAIL_PATH.exists():
+            LICENSE_FAIL_PATH.unlink()
+    except OSError:
+        pass
 
 
 @dataclass
@@ -238,13 +272,33 @@ def refresh(lic: License) -> License:
             json={"refresh_token": lic.refresh_token},
         )
     if resp.status_code == 402:
+        # Subscription explicitly inactive — definitive answer from HQ, clear
+        # immediately so the user is forced through `activate` after they
+        # re-subscribe.
+        _reset_fail_count()
         clear()
         raise LicenseError("Subscription inactive — license revoked. Contact Elevation Real Estate HQ.")
     if resp.status_code == 401:
-        clear()
-        raise LicenseError("Refresh token rejected. Run `elevate activate` to log in again.")
+        # Refresh token *might* be invalid, but a single 401 also happens on
+        # transient HQ blips (deploy mid-request, brief auth race after token
+        # rotation). Require LICENSE_FAIL_THRESHOLD consecutive 401s before
+        # nuking the file. Until then, raise the error so the caller can fall
+        # back gracefully (CLI shows status, desktop keeps showing chat) but
+        # leave license.json intact so the next attempt can recover.
+        count = _bump_fail_count()
+        if count >= LICENSE_FAIL_THRESHOLD:
+            _reset_fail_count()
+            clear()
+            raise LicenseError(
+                f"Refresh token rejected ({count} consecutive 401s). Run `elevate activate` to log in again.",
+            )
+        raise LicenseError(
+            f"Refresh failed (HTTP 401, attempt {count}/{LICENSE_FAIL_THRESHOLD}). Will retry — session preserved.",
+        )
     if not resp.is_success:
         raise LicenseError(f"Refresh failed ({resp.status_code}): {resp.text[:200]}")
+
+    _reset_fail_count()
 
     data = resp.json()
     new_lic = License(

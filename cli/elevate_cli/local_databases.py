@@ -174,8 +174,95 @@ def print_database_init_results(
     return 1 if failures else 0
 
 
+def find_sqlite_backups(root: Path | None = None) -> list[Path]:
+    """Locate the SQLite snapshot files left behind by the PG migration.
+
+    Two patterns are produced by the migration scripts:
+
+    * ``<name>.pre-pg-migration`` / ``<name>.pre-pg-aux-migration`` —
+      snapshots taken immediately before the legacy SQLite → PG copy.
+    * ``state.db.bak-pre-ghost-cleanup-<ts>`` — a dated snapshot of
+      ``state.db`` taken before the SessionDB ghost-row cleanup.
+
+    We never touch live ``.db`` / ``.sqlite`` files or their WAL/SHM
+    siblings — only the explicitly named backup variants.
+    """
+    if root is None:
+        root = Path.home() / ".elevate"
+    if not root.exists():
+        return []
+
+    patterns = (
+        "*.pre-pg-migration",
+        "*.pre-pg-aux-migration",
+        "state.db.bak-*",
+    )
+    found: list[Path] = []
+    for pat in patterns:
+        # ~/.elevate top-level
+        found.extend(sorted(root.glob(pat)))
+        # ~/.elevate/data subdir (operational store lives here)
+        data_dir = root / "data"
+        if data_dir.exists():
+            found.extend(sorted(data_dir.glob(pat)))
+    # Dedupe while preserving order
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for p in found:
+        if p in seen:
+            continue
+        seen.add(p)
+        unique.append(p)
+    return unique
+
+
+def purge_sqlite_backups(
+    root: Path | None = None, *, dry_run: bool = True, quiet: bool = False
+) -> int:
+    """Delete the SQLite snapshots left by the PG migration.
+
+    Defaults to dry-run to make this safe to wire into doctors and
+    runbooks; the caller must pass ``dry_run=False`` to actually remove
+    files. Returns 0 on success (or no-op), 1 if any deletion failed.
+    """
+    backups = find_sqlite_backups(root)
+    if not backups:
+        if not quiet:
+            print("No SQLite migration backup files found.")
+        return 0
+
+    total_bytes = 0
+    failures: list[tuple[Path, Exception]] = []
+    for p in backups:
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        total_bytes += size
+        if not quiet:
+            print(f"  {'would remove' if dry_run else 'removing'}: {p} ({size:,} bytes)")
+        if dry_run:
+            continue
+        try:
+            p.unlink()
+        except OSError as exc:
+            failures.append((p, exc))
+
+    if not quiet:
+        verb = "would free" if dry_run else "freed"
+        print(f"{verb} ~{total_bytes / 1_000_000:.1f} MB across {len(backups)} file(s).")
+        if dry_run:
+            print("Pass --confirm to actually delete.")
+    return 1 if failures else 0
+
+
 def cmd_db(args) -> int:
     action = getattr(args, "db_action", "init")
+    if action == "purge-sqlite-backup":
+        return purge_sqlite_backups(
+            dry_run=not getattr(args, "confirm", False),
+            quiet=getattr(args, "quiet", False),
+        )
     if action != "init":
         raise SystemExit(f"Unknown db action: {action}")
     results = initialize_local_databases(include_memory=not getattr(args, "no_memory", False))

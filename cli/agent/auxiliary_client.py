@@ -811,21 +811,42 @@ class _CodexCompletionsAdapter:
                 timeout_timer.start()
             _check_cancelled()
             with self._client.responses.stream(**resp_kwargs) as stream:
-                for _event in stream:
+                try:
+                    for _event in stream:
+                        _check_cancelled()
+                        _etype = getattr(_event, "type", "")
+                        if _etype == "response.output_item.done":
+                            _done = getattr(_event, "item", None)
+                            if _done is not None:
+                                collected_output_items.append(_done)
+                        elif "output_text.delta" in _etype:
+                            _delta = getattr(_event, "delta", "")
+                            if _delta:
+                                collected_text_deltas.append(_delta)
+                        elif "function_call" in _etype:
+                            has_function_calls = True
                     _check_cancelled()
-                    _etype = getattr(_event, "type", "")
-                    if _etype == "response.output_item.done":
-                        _done = getattr(_event, "item", None)
-                        if _done is not None:
-                            collected_output_items.append(_done)
-                    elif "output_text.delta" in _etype:
-                        _delta = getattr(_event, "delta", "")
-                        if _delta:
-                            collected_text_deltas.append(_delta)
-                    elif "function_call" in _etype:
-                        has_function_calls = True
-                _check_cancelled()
-                final = stream.get_final_response()
+                    final = stream.get_final_response()
+                except TypeError as stream_exc:
+                    # Some Codex Responses streams finish with response.output
+                    # set to None, which the SDK parser cannot iterate. If we
+                    # already collected the streamed content, keep the auxiliary
+                    # call alive and let the backfill block below synthesize the
+                    # chat-completions-shaped response.
+                    if (
+                        "'NoneType' object is not iterable" in str(stream_exc)
+                        and (
+                            collected_output_items
+                            or (collected_text_deltas and not has_function_calls)
+                        )
+                    ):
+                        logger.debug(
+                            "Codex auxiliary: recovering from empty final response.output "
+                            "using streamed events",
+                        )
+                        final = SimpleNamespace(output=[], usage=None)
+                    else:
+                        raise
 
             # Backfill empty output from collected stream events
             _output = getattr(final, "output", None)

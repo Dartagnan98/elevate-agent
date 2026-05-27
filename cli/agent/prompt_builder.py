@@ -743,40 +743,51 @@ def build_environment_hints() -> str:
 
 
 def build_app_layout_hint() -> str:
-    """Return a static map of the Elevate app's on-disk data layout.
+    """Return a static map of the Elevate app's data layout.
 
-    The layout is identical across every install — only the ELEVATE_HOME
-    root varies, so it is resolved at call time. Injecting this into every
-    system prompt keeps the agent from grepping the filesystem to locate
-    its own databases on each run.
+    Operational data lives in embedded Postgres (boots automatically with
+    the gateway). Agents reach it through the structured ``elevate_db`` tool
+    and the curated overview tools — never via raw ``sqlite3``, ``psql``,
+    or filesystem grepping. This hint is injected into every system prompt
+    so the model stops trying to discover its own database on each run.
     """
-    home = get_elevate_home()
-    db = home / "data" / "operational.db"
     return (
         "# Elevate data layout\n\n"
-        f"Your app keeps its data under `{home}`. These locations are fixed. "
-        "Never use search_files or terminal discovery to find them — go "
-        "straight to the path.\n\n"
-        f"Primary database — all CRM, deal and lead data: `{db}`\n"
-        "Query it with the `sqlite3` CLI. Key tables:\n"
-        "- `deals` — admin deals/transactions, listing or buyer side "
-        "(columns: id, title, side, current_stage, status).\n"
-        "- `deal_contacts`, `deal_attachments`, `deal_events` — records tied to a deal.\n"
-        "- `contacts` — people (id, display_name, primary_email, primary_phone, type, stage).\n"
-        "- `conversations` — per-contact message threads across email, sms, "
+        "All operational data — contacts, deals, conversations, leads, "
+        "templates, send queue, agent/session state, long-term memory — "
+        "lives in the embedded Postgres database that boots with the "
+        "gateway. There is NO sqlite, NO operational.db, NO state.db on "
+        "disk. Never call `sqlite3`, never call `psql`, never search the "
+        "filesystem for `.db` files.\n\n"
+        "Access path (use these tools, in this order):\n"
+        "- `deals_overview` — one-call snapshot of every deal with stage, "
+        "side, contacts, last activity. Use this FIRST for any 'what deals "
+        "do we have' / 'current pipeline' / 'listings vs buyers' question. "
+        "Do not assemble it from individual queries.\n"
+        "- `elevate_db` — gated SELECT / describe / curated-write access "
+        "for anything `deals_overview` doesn't cover. Actions: `query` "
+        "(read-only SELECT), `describe` (list tables or one table's "
+        "schema), `call` (named write function from elevate_cli.data). "
+        "Run `elevate_db {action: 'describe'}` once if you're unsure what "
+        "tables exist for the current entitlement pack.\n\n"
+        "Key tables (all in Postgres, all reachable via `elevate_db`):\n"
+        "- `deals`, `deal_contacts`, `deal_attachments`, `deal_events` — "
+        "admin deals/transactions (listing or buyer side).\n"
+        "- `contacts` — people (id, display_name, primary_email, "
+        "primary_phone, type, stage).\n"
+        "- `conversations` — per-contact threads across email, sms, "
         "imessage, messenger, instagram, whatsapp, telegram, voice, crm.\n"
-        "- `lead_inquiries`, `lead_signals`, `lead_properties` — inbound buyer-lead "
-        "criteria and activity.\n"
-        "- `send_queue`, `draft_attempts` — outbound messaging pipeline.\n"
-        "- `templates`, `notes`, `events` — supporting records.\n\n"
-        "Side databases under the same root: "
-        f"`{home / 'state.db'}` (agent/session state), "
-        f"`{home / 'memory_store.db'}` (long-term memory), "
-        f"`{home / 'orchestration.db'}` (multi-agent orchestration).\n\n"
-        "To list deals, run one query — do not explore:\n"
-        f'  sqlite3 "{db}" "SELECT id, title, side, status FROM deals '
-        'ORDER BY rowid DESC LIMIT 20;"\n'
-        "Run `.schema <table>` for exact columns before a complex query."
+        "- `lead_inquiries`, `lead_signals`, `lead_properties` — inbound "
+        "buyer-lead criteria and activity.\n"
+        "- `send_queue`, `outreach_draft_attempts`, `outreach_templates`, "
+        "`outreach_thread_meta` — outbound messaging pipeline.\n"
+        "- `kanban_tasks`, `kanban_task_runs`, `kanban_task_events` — task "
+        "board.\n"
+        "- `memory_facts`, `memory_entities`, `memory_relations` — "
+        "long-term memory store (pgvector for embeddings).\n\n"
+        "If a table you need is not visible to `elevate_db.describe`, "
+        "the current pack does not grant access — surface that as an "
+        "upgrade prompt, do not try to bypass it."
     )
 
 

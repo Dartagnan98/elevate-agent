@@ -1,6 +1,6 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "0.12.0",
+  "version": "0.15.0",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
@@ -8,8 +8,8 @@
   "scripts": {
     "start": "electron .",
     "pack:mac": "electron-builder --mac dir",
-    "build:mac": "electron-builder --mac dmg zip",
-    "release:mac": "electron-builder --mac dmg zip --publish never && node scripts/ship-to-hetzner.js"
+    "build:mac": "electron-builder --mac dmg zip --x64 --arm64",
+    "release:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never && node scripts/ship-to-hetzner.js"
   },
   "build": {
     "appId": "com.elevationrealestate.elevate",
@@ -18,6 +18,42 @@
     "files": [
       "src/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime/${arch}/python",
+        "to": "runtime/python",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../cli",
+        "to": "cli",
+        "filter": [
+          "**/*",
+          "!web/**",
+          "!ui-tui/**",
+          "!venv/**",
+          "!.venv/**",
+          "!tests/**",
+          "!docs/**",
+          "!docker/**",
+          "!nix/**",
+          "!plans/**",
+          "!website/**",
+          "!packaging/**",
+          "!datagen-config-examples/**",
+          "!temp_vision_images/**",
+          "!scripts/**",
+          "!assets/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!.git/**",
+          "!.pytest_cache/**",
+          "!**/.DS_Store",
+          "!*.egg-info/**"
+        ]
+      }
     ],
     "publish": [
       {

@@ -87,6 +87,39 @@ _RUN_RESULT_PATH_RE = re.compile(r"^/api/deals/([^/]+)/runs/([^/]+)/result$")
 # or ELEVATE_DASHBOARD_TUI=1.  Set from :func:`start_server`.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
 
+
+# ---------------------------------------------------------------------------
+# Elevation Real Estate HQ sign-in gate.
+#
+# The chat refuses to start until ``~/.elevate/license.json`` exists with a
+# non-expired access token. This is the same file ``elevate_cli/license.py``
+# writes after ``elevate activate`` or the desktop app's IPC login. We do the
+# check inline (no import of license.py) so we avoid a circular import.
+# ---------------------------------------------------------------------------
+
+_LICENSE_PATH = Path(os.environ.get("ELEVATE_HOME") or Path.home() / ".elevate") / "license.json"
+_SIGN_IN_URL = (
+    os.environ.get("ELEVATE_BACKEND_URL", "https://api.elevationrealestatehq.com").rstrip("/")
+    + "/login"
+)
+
+
+def _license_signed_in() -> bool:
+    """Return True iff a license.json with an unexpired access token exists."""
+    try:
+        with _LICENSE_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    token = data.get("access_token")
+    expires_at = data.get("expires_at")
+    if not token or not isinstance(expires_at, (int, float)):
+        return False
+    # 30s of slack so we don't flap right at the boundary; the desktop and CLI
+    # both refresh well before this triggers in practice.
+    return float(expires_at) > (time.time() + 30)
+
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
 _REVEAL_MAX_PER_WINDOW = 5
@@ -4485,7 +4518,7 @@ async def post_admin_setup_verify_endpoint():
         try:
             from elevate_cli.source_connectors import build_source_connectors_response
 
-            source_connectors = build_source_connectors_response(config)
+            source_connectors = build_source_connectors_response(config, include_prompts=False)
         except Exception as exc:
             warnings.append(f"Source connector check skipped: {exc}")
         try:
@@ -6081,7 +6114,7 @@ def _build_available_channels() -> dict[str, Any]:
     from elevate_cli.source_connectors import build_source_connectors_response
     from elevate_cli import composio_client
 
-    src_resp = build_source_connectors_response()
+    src_resp = build_source_connectors_response(include_prompts=False)
     source_channels: list[dict[str, Any]] = []
     for c in src_resp.get("connectors", []):
         sid = str(c.get("id") or "")
@@ -6275,7 +6308,10 @@ async def put_lane_channels_endpoint(lane: str, body: _LaneChannelsBody):
         raise HTTPException(status_code=500, detail=f"Set lane channels failed: {exc}")
 
 
-_WIRED_SOURCE_IDS = frozenset({"apple-messages", "crm", "social"})
+from elevate_cli.source_connectors import (  # noqa: E402
+    AGENT_SESSION_SOURCE_IDS as _AGENT_SESSION_SOURCE_IDS,
+    WIRED_SOURCE_IDS as _WIRED_SOURCE_IDS,
+)
 
 
 @app.post("/api/source-connectors")
@@ -6319,11 +6355,13 @@ async def update_source_connector(body: SourceConnectorAction):
         elif body.action == "run-prompt":
             prompt_text = source_prompt_for(body.sourceId)
             wired = body.sourceId in _WIRED_SOURCE_IDS
-            try:
-                composio_summary = _run_canonical(body.sourceId)
-            except Exception as exc:
-                _log.exception("run-prompt for %s failed", body.sourceId)
-                run_error = f"{type(exc).__name__}: {exc}"
+            agent_session = body.sourceId in _AGENT_SESSION_SOURCE_IDS
+            if not agent_session:
+                try:
+                    composio_summary = _run_canonical(body.sourceId)
+                except Exception as exc:
+                    _log.exception("run-prompt for %s failed", body.sourceId)
+                    run_error = f"{type(exc).__name__}: {exc}"
 
             # Read post-run connector state so the UI can show real outcome.
             info = get_source_root_info()
@@ -6347,11 +6385,17 @@ async def update_source_connector(body: SourceConnectorAction):
             if run_error:
                 outcome_kind = "error"
                 outcome_message = f"Run failed: {run_error}"
+            elif agent_session:
+                outcome_kind = "dispatched"
+                outcome_message = (
+                    "Opening a visible agent session for this connector. "
+                    "Watch the Chat tab for commands, browser steps when needed, verification, and output."
+                )
             elif body.sourceId == "social" and isinstance(composio_summary, dict):
                 total_new = composio_summary.get("total_new") or 0
                 total_fetched = composio_summary.get("total_fetched") or 0
                 outcome_kind = "ok"
-                outcome_message = f"Composio pulled {total_new} new / {total_fetched} fetched into operational.db."
+                outcome_message = f"Composio pulled {total_new} new / {total_fetched} fetched into Postgres."
             elif body.sourceId == "crm" and auth_status == "missing_secret":
                 outcome_kind = "needs_operator"
                 outcome_message = (
@@ -6361,7 +6405,7 @@ async def update_source_connector(body: SourceConnectorAction):
             elif body.sourceId == "crm":
                 outcome_kind = "ok" if connected else ("error" if last_error else "ok")
                 outcome_message = (
-                    f"Pulled {contact_count} CRM contacts / {message_count} activities into operational.db."
+                    f"Pulled {contact_count} CRM contacts / {message_count} activities into Postgres."
                     if connected
                     else (last_error or "CRM sync ran — see Sources page for details.")
                 )
@@ -6370,9 +6414,16 @@ async def update_source_connector(body: SourceConnectorAction):
                 outcome_message = (
                     f"Apple Messages: {contact_count} contacts, {conversation_count} chats, {message_count} messages indexed."
                 )
+            elif body.sourceId == "xposure-pcs":
+                outcome_kind = "ok" if connected else ("error" if last_error else "needs_operator")
+                outcome_message = (
+                    f"MLS Buyer Searches: {contact_count} buyer contacts pulled into Postgres."
+                    if connected
+                    else (last_error or next_step or "Xposure PCS sync ran — see Sources page for details.")
+                )
             elif wired:
                 outcome_kind = "ok"
-                outcome_message = "Pulled inline — operational.db updated."
+                outcome_message = "Pulled inline — Postgres updated."
             else:
                 outcome_kind = "dispatched"
                 source_dir = view.get("sourceDir") if isinstance(view, dict) else None
@@ -6384,7 +6435,11 @@ async def update_source_connector(body: SourceConnectorAction):
             run_result = {
                 "sourceId": body.sourceId,
                 "wired": wired,
-                "execution": "server_inline" if wired else "agent_task_dispatched",
+                "execution": (
+                    "agent_session_seed"
+                    if agent_session
+                    else ("server_inline" if wired else "agent_task_dispatched")
+                ),
                 "prompt": prompt_text,
                 "outcome": {
                     "kind": outcome_kind,
@@ -6399,9 +6454,13 @@ async def update_source_connector(body: SourceConnectorAction):
                     "nextOperatorStep": next_step,
                     "sourceDir": view.get("sourceDir") if isinstance(view, dict) else None,
                 },
-                "next_action_for_operator": None if wired else (
-                    f"Open {view.get('sourceDir') if isinstance(view, dict) else 'data/sources/<source-id>'}/tasks.jsonl, "
-                    "or dispatch to Jimmy via the dispatch-bridge."
+                "next_action_for_operator": (
+                    "The dashboard should navigate to /chat with this prompt seeded."
+                    if agent_session
+                    else None if wired else (
+                        f"Open {view.get('sourceDir') if isinstance(view, dict) else 'data/sources/<source-id>'}/tasks.jsonl, "
+                        "or dispatch to Jimmy via the dispatch-bridge."
+                    )
                 ),
             }
             if isinstance(composio_summary, dict):
@@ -6409,7 +6468,10 @@ async def update_source_connector(body: SourceConnectorAction):
         else:
             scaffold_source(body.sourceId)
 
-        payload: dict[str, Any] = {"ok": True, **build_source_connectors_response()}
+        payload: dict[str, Any] = {
+            "ok": True,
+            **build_source_connectors_response(include_prompts=False),
+        }
         if refresh_summary is not None:
             payload["refresh"] = refresh_summary
         if run_result is not None:
@@ -7802,6 +7864,28 @@ async def pty_ws(ws: WebSocket) -> None:
 
     await ws.accept()
 
+    # --- license gate ---------------------------------------------------
+    # The chat refuses to start until the user has signed in. We render a
+    # short, themed banner in the terminal pane and close cleanly so the
+    # user sees the message in their chat panel and clicks the link to
+    # sign in. Re-opening the chat after signing in works without an
+    # app restart because this check happens per-connection.
+    if not _license_signed_in():
+        banner = (
+            "\r\n"
+            "\x1b[38;5;215m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\r\n"
+            "\x1b[1m  Sign in to start chatting\x1b[0m\r\n"
+            "\r\n"
+            "  Open the Sign In window from the Elevate menu\r\n"
+            "  (or press \x1b[1m\xe2\x8c\x98L\x1b[0m) and use your Elevation Real\r\n"
+            "  Estate HQ account. Reopen this chat when done.\r\n"
+            "\x1b[38;5;215m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\r\n"
+            "\r\n"
+        )
+        await ws.send_text(banner)
+        await ws.close(code=1000)
+        return
+
     # --- spawn PTY ------------------------------------------------------
     resume = ws.query_params.get("resume") or None
     channel = _channel_or_close_code(ws)
@@ -8533,6 +8617,84 @@ def _mount_plugin_api_routes():
 _mount_plugin_api_routes()
 
 mount_spa(app)
+
+
+# ---------------------------------------------------------------------------
+# Cloud-skill sync — startup + hourly heartbeat.
+#
+# Skills live server-side, gated by tier + entitlements. The CLI keeps a local
+# mirror at ~/.elevate/cloud-skills/. We sync:
+#   - on every gateway boot (so server-side version bumps land after restart)
+#   - every hour while running (so entitlement flips on HQ propagate without
+#     forcing the user to re-activate or restart the app)
+# Both paths swallow errors so a flaky network never blocks the gateway.
+# ---------------------------------------------------------------------------
+
+_CLOUD_SKILL_SYNC_INTERVAL_S = int(os.environ.get("ELEVATE_CLOUD_SKILL_SYNC_INTERVAL_S", "3600"))
+
+
+def _cloud_skill_sync_once(reason: str) -> None:
+    try:
+        from elevate_cli import license as lic_mod
+        from elevate_cli import cloud_skills
+    except Exception as exc:
+        _log.debug("cloud-skill sync (%s): import failed: %s", reason, exc)
+        return
+
+    lic = lic_mod.load()
+    if not lic:
+        _log.debug("cloud-skill sync (%s): no license, skipping", reason)
+        return
+
+    try:
+        if lic.is_expired():
+            lic = lic_mod.refresh(lic)
+    except Exception as exc:
+        _log.info("cloud-skill sync (%s): license refresh failed: %s", reason, exc)
+        return
+
+    try:
+        result = cloud_skills.sync_all()
+    except Exception as exc:
+        _log.info("cloud-skill sync (%s): sync failed: %s", reason, exc)
+        return
+
+    _log.info(
+        "cloud-skill sync (%s): %d skills, %d removed, %d errors",
+        reason,
+        result.get("skill_count", 0),
+        len(result.get("removed", []) or []),
+        len(result.get("errors", []) or []),
+    )
+
+
+async def _cloud_skill_heartbeat() -> None:
+    while True:
+        try:
+            await asyncio.sleep(_CLOUD_SKILL_SYNC_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+        await asyncio.get_running_loop().run_in_executor(None, _cloud_skill_sync_once, "heartbeat")
+
+
+@app.on_event("startup")
+async def _kickoff_cloud_skill_sync() -> None:
+    loop = asyncio.get_running_loop()
+    # Run the first sync off the event loop so a slow network doesn't delay
+    # the gateway accepting connections.
+    loop.run_in_executor(None, _cloud_skill_sync_once, "startup")
+    app.state.cloud_skill_heartbeat_task = loop.create_task(_cloud_skill_heartbeat())
+
+
+@app.on_event("shutdown")
+async def _stop_cloud_skill_heartbeat() -> None:
+    task = getattr(app.state, "cloud_skill_heartbeat_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def start_server(

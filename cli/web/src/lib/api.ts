@@ -455,6 +455,8 @@ export const api = {
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}/trigger`, { method: "POST" }),
   deleteCronJob: (id: string) =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}`, { method: "DELETE" }),
+  getCronAttention: () =>
+    fetchJSON<import("./api-types").CronAttention>(`/api/cron/attention`),
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {
@@ -1131,11 +1133,17 @@ export const api = {
   },
 
   // Real-estate source connectors and integrations
-  getSourceConnectors: () =>
-    fetchJSON<SourceConnectorsResponse>("/api/source-connectors"),
+  getSourceConnectors: (options?: { includePrompts?: boolean }) =>
+    fetchJSON<SourceConnectorsResponse>(
+      `/api/source-connectors${options?.includePrompts ? "?include_prompts=true" : ""}`,
+    ),
   getSourceRecords: (sourceId: string, limit = 12) =>
     fetchJSON<SourceRecordsResponse>(
       `/api/source-connectors/${encodeURIComponent(sourceId)}/records?limit=${limit}`,
+    ),
+  getSourceConnectorPrompt: (sourceId: string) =>
+    fetchJSON<{ sourceId: string; prompt: string }>(
+      `/api/source-connectors/${encodeURIComponent(sourceId)}/prompt`,
     ),
   getSourceInbox: (limit = 16) =>
     fetchJSON<SourceInboxResponse>(`/api/source-inbox?limit=${limit}`),
@@ -1205,7 +1213,7 @@ export const api = {
       run?: {
         sourceId: string;
         wired: boolean;
-        execution: "server_inline" | "agent_task_dispatched";
+        execution: "server_inline" | "agent_session_seed" | "agent_task_dispatched";
         prompt: string;
         next_action_for_operator: string | null;
         outcome: {

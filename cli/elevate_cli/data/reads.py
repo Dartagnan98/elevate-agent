@@ -84,6 +84,153 @@ def _heat_label_for(score: int) -> str:
     return "normal"
 
 
+_FOLLOWUP_CHANNELS = {
+    "email",
+    "gmail",
+    "sms",
+    "imessage",
+    "messenger",
+    "facebook",
+    "instagram",
+    "instagram_dm",
+    "whatsapp",
+    "telegram",
+}
+
+_LEAD_SECTION_DEFS = {
+    "hot": ("Hot leads", "contacts.heat_label or conversations.heat_label"),
+    "warm": ("Warm leads", "contacts.heat_label"),
+    "follow_up": (
+        "Follow-ups",
+        "contacts.needs_follow_up or open inbound conversation after outreach",
+    ),
+    "buyer_search": (
+        "Buyer searches",
+        "contacts.buyer_search_active or pcs_buyers.contact_id",
+    ),
+    "listing_active": ("Listing activity", "contacts.listing_active"),
+    "messages": ("Messages", "open conversations"),
+    "drafts": ("Drafts", "approval queue"),
+    "skipped": ("Skipped", "recently skipped approval queue"),
+}
+
+_SUPPRESSED_PIPELINE_STATUSES = {"dead", "closed_seller", "closed_buyer"}
+
+
+def _new_lead_sections() -> dict[str, dict[str, Any]]:
+    return {
+        section_id: {
+            "id": section_id,
+            "label": label,
+            "source": source,
+            "count": 0,
+            "contactIds": [],
+            "threadIds": [],
+            "profileIds": [],
+            "draftIds": [],
+            "buyerIds": [],
+        }
+        for section_id, (label, source) in _LEAD_SECTION_DEFS.items()
+    }
+
+
+def _append_unique(items: list[str], value: Any) -> None:
+    if value is None:
+        return
+    text = str(value).strip()
+    if text and text not in items:
+        items.append(text)
+
+
+def _add_section_item(
+    sections: dict[str, dict[str, Any]],
+    section_id: str,
+    *,
+    contact_id: Any = None,
+    thread_id: Any = None,
+    profile_id: Any = None,
+    draft_id: Any = None,
+    buyer_id: Any = None,
+) -> None:
+    section = sections.get(section_id)
+    if section is None:
+        return
+    _append_unique(section["contactIds"], contact_id)
+    _append_unique(section["threadIds"], thread_id)
+    _append_unique(section["profileIds"], profile_id)
+    _append_unique(section["draftIds"], draft_id)
+    _append_unique(section["buyerIds"], buyer_id)
+
+
+def _contact_section_ids(row: Any) -> set[str]:
+    sections: set[str] = set()
+    if row["heat_label"] == "hot":
+        sections.add("hot")
+    elif row["heat_label"] == "warm":
+        sections.add("warm")
+    if _safe_int(row["needs_follow_up"]) or row["pipeline_status"] == "follow_up":
+        sections.add("follow_up")
+    if _safe_int(row["buyer_search_active"]):
+        sections.add("buyer_search")
+    if _safe_int(row["listing_active"]):
+        sections.add("listing_active")
+    return sections
+
+
+def _is_follow_up_thread(
+    *,
+    channel: Any,
+    outbound_count: int,
+    direction: str | None,
+) -> bool:
+    if str(channel or "").lower() not in _FOLLOWUP_CHANNELS:
+        return False
+    if outbound_count < 1:
+        return False
+    return direction == "inbound"
+
+
+def _finalize_lead_sections(
+    sections: dict[str, dict[str, Any]],
+    *,
+    totals: dict[str, int],
+    buyer_search_count: int,
+    drafts_count: int,
+    skipped_count: int,
+) -> dict[str, dict[str, Any]]:
+    explicit_counts = {
+        "hot": max(
+            totals.get("hotContacts", 0),
+            len(sections["hot"]["contactIds"]),
+            len(sections["hot"]["threadIds"]),
+        ),
+        "warm": max(totals.get("warmContacts", 0), len(sections["warm"]["contactIds"])),
+        "follow_up": max(
+            totals.get("needsFollowUpContacts", 0),
+            len(sections["follow_up"]["contactIds"]),
+            len(sections["follow_up"]["threadIds"]),
+        ),
+        "buyer_search": max(
+            buyer_search_count,
+            len(sections["buyer_search"]["contactIds"]),
+            len(sections["buyer_search"]["buyerIds"]),
+        ),
+        "listing_active": max(
+            totals.get("listingActiveContacts", 0),
+            len(sections["listing_active"]["contactIds"]),
+        ),
+        "messages": max(
+            totals.get("threads", 0),
+            len(sections["messages"]["threadIds"]),
+        ),
+        "drafts": drafts_count,
+        "skipped": skipped_count,
+    }
+    for section_id, section in sections.items():
+        section["count"] = int(explicit_counts.get(section_id, 0))
+    return sections
+
+
 def _read_private_search_buyers_jsonl(
     source_root: Path,
 ) -> list[dict[str, Any]]:
@@ -156,8 +303,11 @@ def db_private_search_buyers(
           pb.matching_listings_json
         FROM contacts c
         LEFT JOIN pcs_buyers pb ON pb.contact_id = c.id
-        WHERE c.buyer_search_active = 1
-           OR pb.contact_id IS NOT NULL
+        WHERE (c.buyer_search_active = 1 OR pb.contact_id IS NOT NULL)
+          AND c.stage != 'closed'
+          AND COALESCE(c.pipeline_status, '') NOT IN (
+            'dead', 'closed_seller', 'closed_buyer'
+          )
         ORDER BY COALESCE(pb.score, c.heat_score, 0) DESC,
                  COALESCE(pb.last_activity_at, c.updated_at) DESC
         LIMIT ?
@@ -186,6 +336,7 @@ def db_private_search_buyers(
 
         entries.append({
             "id": row["id"],
+            "contactId": row["id"],
             "name": row["display_name"] or "Unnamed buyer",
             "email": row["primary_email"],
             "phone": row["primary_phone"],
@@ -201,7 +352,29 @@ def db_private_search_buyers(
             "sourceLabel": "MLS private search",
             "tags": [],
             "scrapedAt": row["pcs_last_scraped"],
+            "leadSectionIds": ["buyer_search"],
         })
+
+    suppressed_identity_rows = conn.execute(
+        """
+        SELECT primary_email, primary_phone
+        FROM contacts
+        WHERE stage = 'closed'
+           OR COALESCE(pipeline_status, '') IN (
+             'dead', 'closed_seller', 'closed_buyer'
+           )
+        """
+    ).fetchall()
+    suppressed_emails = {
+        (row["primary_email"] or "").strip().lower()
+        for row in suppressed_identity_rows
+        if row["primary_email"]
+    }
+    suppressed_phones = {
+        "".join(ch for ch in (row["primary_phone"] or "") if ch.isdigit())
+        for row in suppressed_identity_rows
+        if row["primary_phone"]
+    }
 
     # Overlay pipeline entries that don't already correspond to a
     # CRM contact in the DB walk. Matches the legacy JSONL reader: a
@@ -232,11 +405,20 @@ def db_private_search_buyers(
                 phone_digits = "".join(
                     ch for ch in str(raw.get("phone") or "") if ch.isdigit()
                 )
+                if email and email in suppressed_emails:
+                    continue
+                if phone_digits and phone_digits in suppressed_phones:
+                    continue
                 if email and email in covered_emails:
                     continue
                 if phone_digits and phone_digits in covered_phones:
                     continue
-                entries.append(dict(raw))
+                entry = dict(raw)
+                entry["leadSectionIds"] = sorted({
+                    *[str(x) for x in entry.get("leadSectionIds", []) if x],
+                    "buyer_search",
+                })
+                entries.append(entry)
 
     def _sort_key(entry: dict[str, Any]) -> tuple[int, int, int]:
         score = entry.get("score")
@@ -260,8 +442,10 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
     Returns the same top-level keys (``toolsRoot``, ``sourceRoot``,
     ``limit``, ``recordCounts``, ``hiddenCounts``, ``sources``,
     ``profiles``, ``threads``, ``drafts``, ``skippedDrafts``,
-    ``privateSearchBuyers``) so the shadow-read diff is field-by-field
-    rather than reshape-vs-reshape.
+    ``privateSearchBuyers``) plus ``leadSections``. ``leadSections`` is
+    the operational-db lane contract for /leads: every lead card gets
+    section ids from stored contact/conversation cells instead of each
+    UI lane re-deriving its own membership.
     """
     # Reuse the connector blueprint walker — connector metadata lives
     # outside operational.db (status files, blueprint definitions) and
@@ -281,7 +465,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
-        if (view := connector_view(source_root, str(item["id"]))) is not None
+        if (view := connector_view(source_root, str(item["id"]), include_prompt=False)) is not None
     ]
     existing_ids = {str(view.get("id") or "") for view in connectors}
     for extra in _discover_composio_views(source_root):
@@ -290,6 +474,12 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
     source_by_id = {str(source.get("id") or ""): source for source in connectors}
 
     threads: list[dict[str, Any]] = []
+    lead_sections = _new_lead_sections()
+    contact_sections: dict[str, set[str]] = {}
+    thread_sections_by_id: dict[str, set[str]] = {}
+    buyer_search_count = 0
+    suppressed_contact_ids: set[str] = set()
+    profile_status_by_contact: dict[str, dict[str, Any]] = {}
     totals = {
         "sources": 0,
         "threads": 0,
@@ -340,11 +530,16 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             SELECT
               SUM(CASE WHEN heat_label='hot'            THEN 1 ELSE 0 END) AS hot,
               SUM(CASE WHEN heat_label='warm'           THEN 1 ELSE 0 END) AS warm,
-              SUM(CASE WHEN needs_follow_up = 1         THEN 1 ELSE 0 END) AS nfu,
+              SUM(CASE WHEN needs_follow_up = 1
+                          OR pipeline_status = 'follow_up'
+                                                        THEN 1 ELSE 0 END) AS nfu,
               SUM(CASE WHEN buyer_search_active = 1     THEN 1 ELSE 0 END) AS bsa,
               SUM(CASE WHEN listing_active = 1          THEN 1 ELSE 0 END) AS la
             FROM contacts
             WHERE stage != 'closed'
+              AND COALESCE(pipeline_status, '') NOT IN (
+                'dead', 'closed_seller', 'closed_buyer'
+              )
             """,
         ).fetchone()
         totals["hotContacts"] = _safe_int(flag_row["hot"])
@@ -352,6 +547,97 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         totals["needsFollowUpContacts"] = _safe_int(flag_row["nfu"])
         totals["buyerSearchContacts"] = _safe_int(flag_row["bsa"])
         totals["listingActiveContacts"] = _safe_int(flag_row["la"])
+        buyer_search_count = _safe_int(
+            conn.execute(
+                """
+                SELECT COUNT(DISTINCT c.id) AS c
+                FROM contacts c
+                LEFT JOIN pcs_buyers pb ON pb.contact_id = c.id
+                WHERE c.stage != 'closed'
+                  AND COALESCE(c.pipeline_status, '') NOT IN (
+                    'dead', 'closed_seller', 'closed_buyer'
+                  )
+                  AND (c.buyer_search_active = 1 OR pb.contact_id IS NOT NULL)
+                """,
+            ).fetchone()["c"]
+        )
+        totals["buyerSearchContacts"] = buyer_search_count
+
+        suppressed_contact_ids = {
+            str(row["id"])
+            for row in conn.execute(
+                """
+                SELECT id
+                FROM contacts
+                WHERE stage = 'closed'
+                   OR COALESCE(pipeline_status, '') IN (
+                     'dead', 'closed_seller', 'closed_buyer'
+                   )
+                """
+            ).fetchall()
+            if row["id"]
+        }
+
+        contact_rows = conn.execute(
+            """
+            SELECT
+              id,
+              heat_label,
+              needs_follow_up,
+              buyer_search_active,
+              listing_active,
+              pipeline_status
+            FROM contacts
+            WHERE stage != 'closed'
+              AND COALESCE(pipeline_status, '') NOT IN (
+                'dead', 'closed_seller', 'closed_buyer'
+              )
+              AND (
+                heat_label IN ('hot', 'warm')
+                OR needs_follow_up = 1
+                OR buyer_search_active = 1
+                OR listing_active = 1
+                OR pipeline_status = 'follow_up'
+              )
+            ORDER BY COALESCE(last_activity_at, updated_at) DESC
+            LIMIT ?
+            """,
+            (max(safe_limit * 8, 500),),
+        ).fetchall()
+        for contact_row in contact_rows:
+            contact_id = str(contact_row["id"] or "")
+            contact_sections[contact_id] = _contact_section_ids(contact_row)
+            for section_id in contact_sections[contact_id]:
+                _add_section_item(
+                    lead_sections,
+                    section_id,
+                    contact_id=contact_id,
+                )
+
+        pcs_contact_rows = conn.execute(
+            """
+            SELECT DISTINCT pb.contact_id
+            FROM pcs_buyers pb
+            JOIN contacts c ON c.id = pb.contact_id
+            WHERE pb.contact_id IS NOT NULL
+              AND c.stage != 'closed'
+              AND COALESCE(c.pipeline_status, '') NOT IN (
+                'dead', 'closed_seller', 'closed_buyer'
+              )
+            LIMIT ?
+            """,
+            (max(safe_limit * 8, 500),),
+        ).fetchall()
+        for pcs_row in pcs_contact_rows:
+            contact_id = str(pcs_row["contact_id"] or "")
+            if not contact_id:
+                continue
+            contact_sections.setdefault(contact_id, set()).add("buyer_search")
+            _add_section_item(
+                lead_sections,
+                "buyer_search",
+                contact_id=contact_id,
+            )
 
         # Fetch a slice of conversations large enough to mirror the
         # legacy "candidate_records_for_source" walk. Order by
@@ -359,10 +645,41 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         # sort the legacy code does.
         rows = conn.execute(
             """
-            SELECT c.*, ct.display_name, ct.primary_email, ct.primary_phone
+            SELECT
+              c.*,
+              ct.display_name,
+              ct.primary_email,
+              ct.primary_phone,
+              ct.stage AS contact_stage,
+              ct.heat_label AS contact_heat_label,
+              ct.needs_follow_up AS contact_needs_follow_up,
+              ct.buyer_search_active AS contact_buyer_search_active,
+              ct.listing_active AS contact_listing_active,
+              ct.pipeline_status AS contact_pipeline_status,
+              ct.pipeline_status_set_at AS contact_pipeline_status_set_at,
+              latest_event.kind AS latest_event_kind,
+              latest_event.payload_json AS latest_event_payload_json,
+              latest_event.ts AS latest_event_ts
             FROM conversations c
             LEFT JOIN contacts ct ON ct.id = c.contact_id
+            LEFT JOIN LATERAL (
+              SELECT e.kind, e.payload_json, e.ts
+              FROM events e
+              WHERE e.conversation_id = c.id
+                AND e.kind IN ('inbound','outbound')
+              ORDER BY e.ts DESC
+              LIMIT 1
+            ) latest_event ON TRUE
             WHERE c.status = 'open'
+              AND (
+                ct.id IS NULL
+                OR (
+                  ct.stage != 'closed'
+                  AND COALESCE(ct.pipeline_status, '') NOT IN (
+                    'dead', 'closed_seller', 'closed_buyer'
+                  )
+                )
+              )
             ORDER BY c.heat_score DESC,
                      COALESCE(c.last_inbound_at, c.last_outbound_at) DESC
             LIMIT ?
@@ -379,23 +696,14 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             inbound = _safe_int(row["inbound_count"])
             outbound = _safe_int(row["outbound_count"])
 
-            latest_event = conn.execute(
-                """
-                SELECT kind, payload_json, ts
-                FROM events
-                WHERE conversation_id = ?
-                  AND kind IN ('inbound','outbound')
-                ORDER BY ts DESC LIMIT 1
-                """,
-                (conv_id,),
-            ).fetchone()
-            latest_text = _payload_body(latest_event["payload_json"]) if latest_event else ""
-            latest_at = latest_event["ts"] if latest_event else (
+            latest_kind = row["latest_event_kind"]
+            latest_text = _payload_body(row["latest_event_payload_json"]) if latest_kind else ""
+            latest_at = row["latest_event_ts"] if latest_kind else (
                 row["last_inbound_at"] or row["last_outbound_at"]
             )
             direction = (
-                "inbound" if latest_event and latest_event["kind"] == "inbound"
-                else ("outbound" if latest_event else None)
+                "inbound" if latest_kind == "inbound"
+                else ("outbound" if latest_kind else None)
             )
 
             person_name = row["display_name"] or ""
@@ -410,6 +718,26 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                 "conversation_id": thread_key,
                 "contact_id": row["contact_id"],
             }
+
+            contact_id = str(row["contact_id"] or "")
+            lead_section_ids = set(contact_sections.get(contact_id, set()))
+            lead_section_ids.add("messages")
+            if heat_label == "hot" or row["contact_heat_label"] == "hot":
+                lead_section_ids.add("hot")
+            elif row["contact_heat_label"] == "warm":
+                lead_section_ids.add("warm")
+            if _safe_int(row["contact_needs_follow_up"]) or _is_follow_up_thread(
+                channel=row["channel"],
+                outbound_count=outbound,
+                direction=direction,
+            ):
+                lead_section_ids.add("follow_up")
+            if row["contact_pipeline_status"] == "follow_up":
+                lead_section_ids.add("follow_up")
+            if _safe_int(row["contact_buyer_search_active"]):
+                lead_section_ids.add("buyer_search")
+            if _safe_int(row["contact_listing_active"]):
+                lead_section_ids.add("listing_active")
 
             # Match the legacy id format so existing UI keys stay valid.
             thread = {
@@ -437,11 +765,20 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                 "leadLabel": None,
                 "scoreReason": None,
                 "scoredAt": None,
+                "leadSectionIds": sorted(lead_section_ids),
                 "record": record,
             }
             if heat_label == "hot":
                 totals["hotThreads"] += 1
             threads.append(thread)
+            thread_sections_by_id[thread["id"]] = lead_section_ids
+            for section_id in lead_section_ids:
+                _add_section_item(
+                    lead_sections,
+                    section_id,
+                    contact_id=contact_id,
+                    thread_id=thread["id"],
+                )
 
     visible_threads = threads[:safe_limit]
     totals["threads"] = len(threads)
@@ -463,7 +800,71 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         skipped_cutoff=skipped_cutoff,
         max_drafts=24,
     )
+    if suppressed_contact_ids:
+        drafts = [
+            draft for draft in drafts
+            if str(draft.get("contactId") or "") not in suppressed_contact_ids
+        ]
+        skipped_drafts = [
+            draft for draft in skipped_drafts
+            if str(draft.get("contactId") or "") not in suppressed_contact_ids
+        ]
+    for draft in drafts:
+        section_ids = sorted({
+            *[str(x) for x in draft.get("leadSectionIds", []) if x],
+            "drafts",
+        })
+        draft["leadSectionIds"] = section_ids
+        thread_id = (
+            f"{draft.get('sourceId')}:{draft.get('threadId')}"
+            if draft.get("sourceId") and draft.get("threadId")
+            else draft.get("threadId")
+        )
+        _add_section_item(
+            lead_sections,
+            "drafts",
+            contact_id=draft.get("contactId"),
+            thread_id=thread_id,
+            draft_id=draft.get("id") or draft.get("taskId"),
+        )
+    for draft in skipped_drafts:
+        section_ids = sorted({
+            *[str(x) for x in draft.get("leadSectionIds", []) if x],
+            "skipped",
+        })
+        draft["leadSectionIds"] = section_ids
+        thread_id = (
+            f"{draft.get('sourceId')}:{draft.get('threadId')}"
+            if draft.get("sourceId") and draft.get("threadId")
+            else draft.get("threadId")
+        )
+        _add_section_item(
+            lead_sections,
+            "skipped",
+            contact_id=draft.get("contactId"),
+            thread_id=thread_id,
+            draft_id=draft.get("id") or draft.get("taskId"),
+        )
     profiles = _profiles_from_threads(threads, source_by_id)
+    profile_contact_ids = sorted({
+        str(contact_id)
+        for profile in profiles
+        for contact_id in profile.get("contactIds", [])
+        if str(contact_id or "").strip()
+    })
+    for profile in profiles:
+        profile_section_ids: set[str] = set()
+        for contact_id in profile.get("contactIds", []):
+            profile_section_ids.update(contact_sections.get(str(contact_id), set()))
+        for thread_id in profile.get("threadIds", []):
+            profile_section_ids.update(thread_sections_by_id.get(str(thread_id), set()))
+        profile["leadSectionIds"] = sorted(profile_section_ids)
+        for section_id in profile_section_ids:
+            _add_section_item(
+                lead_sections,
+                section_id,
+                profile_id=profile.get("id"),
+            )
     totals["drafts"] = len(drafts)
     totals["people"] = len(profiles)
     totals["crmPeople"] = sum(1 for profile in profiles if profile.get("hasCrm"))
@@ -482,16 +883,60 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                     (status,),
                 ).fetchone()["c"]
             )
+        if profile_contact_ids:
+            placeholders = ",".join("?" for _ in profile_contact_ids)
+            for row in conn.execute(
+                f"""
+                SELECT id, pipeline_status, pipeline_status_set_at
+                FROM contacts
+                WHERE id IN ({placeholders})
+                """,
+                profile_contact_ids,
+            ).fetchall():
+                profile_status_by_contact[str(row["id"])] = {
+                    "status": row["pipeline_status"],
+                    "updated_at": row["pipeline_status_set_at"],
+                }
         private_search_buyers = db_private_search_buyers(
             conn,
             limit=max(safe_limit, 50),
+            source_root=source_root,
         )
+    for profile in profiles:
+        db_status = None
+        for contact_id in profile.get("contactIds", []):
+            candidate = profile_status_by_contact.get(str(contact_id))
+            if candidate and candidate.get("status"):
+                db_status = candidate
+                break
+        profile["status"] = db_status.get("status") if db_status else None
+        profile["statusUpdatedAt"] = db_status.get("updated_at") if db_status else None
+    for buyer in private_search_buyers:
+        section_ids = sorted({
+            *[str(x) for x in buyer.get("leadSectionIds", []) if x],
+            "buyer_search",
+        })
+        buyer["leadSectionIds"] = section_ids
+        _add_section_item(
+            lead_sections,
+            "buyer_search",
+            contact_id=buyer.get("contactId"),
+            buyer_id=buyer.get("id"),
+        )
+    lead_sections = _finalize_lead_sections(
+        lead_sections,
+        totals=totals,
+        buyer_search_count=buyer_search_count,
+        drafts_count=len(drafts),
+        skipped_count=len(skipped_drafts),
+    )
 
     return {
         **info,
         "limit": safe_limit,
         "recordCounts": totals,
         "hiddenCounts": hidden_counts,
+        "leadSections": lead_sections,
         "sources": connectors,
         "profiles": profiles[:safe_limit],
         "threads": visible_threads,

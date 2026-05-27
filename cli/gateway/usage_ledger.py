@@ -74,6 +74,10 @@ def _safe_tool_schema_tokens_for_toolsets(toolsets: Iterable[str] | None) -> int
 
 
 def _session_db_from_path(db_path: Path | None):
+    """Legacy SessionDB factory — kept for the rare caller that still
+    wants the SQLite path (e.g. unit tests). New writes go through
+    ``elevate_cli.data.usage_ledger`` which is Postgres-backed.
+    """
     from elevate_state import SessionDB
 
     return SessionDB(db_path=db_path) if db_path is not None else SessionDB()
@@ -160,7 +164,13 @@ def record_gateway_turn(
     session_db: Any | None = None,
     db_path: Path | None = None,
 ) -> int | None:
-    """Persist one Elevate gateway turn into the existing state DB."""
+    """Persist one Elevate gateway turn into the Postgres usage ledger.
+
+    ``session_db`` and ``db_path`` are kept for backwards compatibility
+    with the SQLite-era SessionDB injection; both are ignored when the
+    Postgres helper is reachable. If PG init fails for any reason we
+    fall back to the SQLite SessionDB path so callers never break.
+    """
     row = build_turn_usage_row(
         agent_result=agent_result,
         session_id=session_id,
@@ -172,6 +182,18 @@ def record_gateway_turn(
     if row is None:
         return None
 
+    # Primary path: Postgres-backed ledger.
+    try:
+        from elevate_cli.data.usage_ledger import record_turn as _pg_record_turn
+
+        return _pg_record_turn(row)
+    except Exception as exc:
+        logger.debug(
+            "PG usage ledger write failed, falling back to SQLite SessionDB: %s",
+            exc,
+        )
+
+    # Fallback: legacy SQLite path (only fires if PG is unreachable).
     owns_db = False
     db = session_db
     try:
@@ -190,7 +212,22 @@ def record_gateway_turn(
                 pass
 
 
-def recent_turns(limit: int = 20, session_db: Any | None = None, db_path: Path | None = None) -> list[dict[str, Any]]:
+def recent_turns(
+    limit: int = 20,
+    session_db: Any | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return the most recent ledger rows, newest first."""
+    try:
+        from elevate_cli.data.usage_ledger import recent_turns as _pg_recent
+
+        return _pg_recent(limit=limit)
+    except Exception as exc:
+        logger.debug(
+            "PG usage ledger read failed, falling back to SQLite SessionDB: %s",
+            exc,
+        )
+
     owns_db = False
     db = session_db
     try:

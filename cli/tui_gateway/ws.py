@@ -119,6 +119,11 @@ async def handle_ws(ws: Any) -> None:
 
     transport = WSTransport(ws, asyncio.get_running_loop())
 
+    # Register this WS so cron/daemon emits (which have no incoming RPC
+    # context to bind a transport to) can fan out events to every open
+    # dashboard. ChatPage filters by session_id, so cross-talk is safe.
+    server.register_live_transport(transport)
+
     ready_sent = await transport.write_async(
         {
             "jsonrpc": "2.0",
@@ -174,6 +179,7 @@ async def handle_ws(ws: Any) -> None:
                 break
     finally:
         transport.close()
+        server.unregister_live_transport(transport)
 
         # Detach the transport from any sessions it owned so later emits
         # fall back to stdio instead of crashing into a closed socket.

@@ -41,6 +41,8 @@ export interface GatewayEvent<P = unknown> {
   type: GatewayEventName;
   session_id?: string;
   payload?: P;
+  seq?: number;
+  ts?: number;
 }
 
 export type ConnectionState =

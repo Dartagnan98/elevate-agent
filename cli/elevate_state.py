@@ -16,6 +16,7 @@ Key design decisions:
 
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -347,6 +348,133 @@ END;
 """
 
 
+# ---------------------------------------------------------------------------
+# SessionDB → Postgres cutover plumbing (2026-05-24)
+# ---------------------------------------------------------------------------
+# These two env-var flags are the staged hand-over from SQLite to the
+# embedded Postgres `chat_sessions` / `chat_messages` / `chat_state_meta`
+# tables. Both default ON now (2026-05-24 cutover) — PG is the
+# source of truth. The env vars below are kept as kill-switches so the
+# gateway can be reverted to SQLite-primary instantly without a code
+# change if PG hits a regression:
+#
+#   ELEVATE_SESSIONDB_READ_FROM_PG=0  → revert to SQLite-first reads
+#   ELEVATE_DISABLE_SQLITE_WRITE=0    → re-enable the SQLite write half
+#
+# When both flags resolve to True (the default), the SQLite half of
+# `_execute_write` is a no-op, all reads come from PG, and the shadow
+# writer in ``elevate_cli.data.sessiondb_shadow`` is the primary writer.
+# The on-disk ``state.db`` is kept only for emergency rollback and is
+# scheduled for archival in the post-cutover cleanup.
+
+_SESSIONDB_READ_FROM_PG_ENV = "ELEVATE_SESSIONDB_READ_FROM_PG"
+_SESSIONDB_DISABLE_SQLITE_WRITE_ENV = "ELEVATE_DISABLE_SQLITE_WRITE"
+
+
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_from_pg() -> bool:
+    """Is the PG-first read cutover enabled for this process? (default: True)"""
+    return _env_truthy(_SESSIONDB_READ_FROM_PG_ENV, default=True)
+
+
+def _sqlite_writes_disabled() -> bool:
+    """Should `_execute_write` skip the SQLite half? (default: True)"""
+    return _env_truthy(_SESSIONDB_DISABLE_SQLITE_WRITE_ENV, default=True)
+
+
+def _list_sessions_rich_pg(
+    *,
+    source: str | None,
+    exclude_sources: List[str] | None,
+    limit: int,
+    offset: int,
+    include_children: bool,
+    order_by_last_active: bool,
+) -> Optional[List[Dict[str, Any]]]:
+    """PG-backed reader for SessionDB.list_sessions_rich.
+
+    Returns dicts with the same surfaced shape (id, source, model, title,
+    started_at, ended_at, message_count, preview, last_active, ...). Compression
+    chain projection is NOT applied here — cron sessions don't have those
+    chains, and the sidebar is the only consumer that matters for the cutover.
+    Returns None if the PG layer is unavailable so the caller can fall back.
+    """
+    try:
+        from elevate_cli.data.connection import connect
+    except Exception:
+        return None
+
+    where_clauses: List[str] = []
+    params: List[Any] = []
+
+    if not include_children:
+        where_clauses.append(
+            "(s.parent_session_id IS NULL"
+            " OR EXISTS (SELECT 1 FROM chat_sessions p"
+            "            WHERE p.id = s.parent_session_id"
+            "            AND p.end_reason = 'branched'"
+            "            AND s.started_at >= p.ended_at))"
+        )
+    if source:
+        where_clauses.append("s.source = %s")
+        params.append(source)
+    if exclude_sources:
+        placeholders = ",".join("%s" for _ in exclude_sources)
+        where_clauses.append(f"s.source NOT IN ({placeholders})")
+        params.extend(exclude_sources)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    order_sql = (
+        "ORDER BY last_active DESC NULLS LAST, s.started_at DESC, s.id DESC"
+        if order_by_last_active
+        else "ORDER BY s.started_at DESC"
+    )
+
+    query = f"""
+        SELECT s.*,
+            COALESCE(
+                (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
+                 FROM chat_messages m
+                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                 ORDER BY m.timestamp, m.id LIMIT 1),
+                ''
+            ) AS _preview_raw,
+            COALESCE(
+                (SELECT MAX(m2.timestamp) FROM chat_messages m2 WHERE m2.session_id = s.id),
+                s.started_at
+            ) AS last_active
+        FROM chat_sessions s
+        {where_sql}
+        {order_sql}
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+
+    sessions: List[Dict[str, Any]] = []
+    for row in rows:
+        s = dict(row)
+        raw = s.pop("_preview_raw", "") or ""
+        raw = raw.strip() if isinstance(raw, str) else ""
+        if raw:
+            text = raw[:60]
+            s["preview"] = text + ("..." if len(raw) > 60 else "")
+        else:
+            s["preview"] = ""
+        sessions.append(s)
+    return sessions
+
+
 class SessionDB:
     """
     SQLite-backed session storage with FTS5 search.
@@ -427,7 +555,24 @@ class SessionDB:
         SQLite's built-in deterministic backoff creates.
 
         Returns whatever *fn* returns.
+
+        Kill switch: when ``ELEVATE_DISABLE_SQLITE_WRITE=1`` the SQLite
+        half is skipped entirely (returns ``None``) — the shadow-write
+        helpers that callers invoke after this method become the primary
+        writers. Used during the SessionDB → PG cutover so we can flip
+        a single env var to retire SQLite without surgery on every
+        write method. The flag is OFF by default; the helper that reads
+        it lives at module scope so it's testable without a SessionDB.
         """
+        if _sqlite_writes_disabled():
+            # No-op: caller's shadow-write call (which always follows
+            # _execute_write today) is the actual write under this flag.
+            # We return None because every existing caller either ignores
+            # the return value or computes it from PG state in a follow
+            # up read. If a write path relies on the SQLite rowcount,
+            # this flag must stay off for that path until the PG twin
+            # returns the equivalent value.
+            return None  # type: ignore[return-value]
         last_err: Optional[Exception] = None
         for attempt in range(self._WRITE_MAX_RETRIES):
             try:
@@ -746,6 +891,8 @@ class SessionDB:
         parent_session_id: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
+        started_at = time.time()
+        model_config_json = json.dumps(model_config) if model_config else None
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
@@ -756,13 +903,27 @@ class SessionDB:
                     source,
                     user_id,
                     model,
-                    json.dumps(model_config) if model_config else None,
+                    model_config_json,
                     system_prompt,
                     parent_session_id,
-                    time.time(),
+                    started_at,
                 ),
             )
         self._execute_write(_do)
+        # PG shadow write — best-effort, swallows all errors.
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_insert_session
+            shadow_insert_session(
+                session_id, source,
+                model=model,
+                model_config_json=model_config_json,
+                system_prompt=system_prompt,
+                user_id=user_id,
+                parent_session_id=parent_session_id,
+                started_at=started_at,
+            )
+        except Exception:
+            pass
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
         """Create a new session record. Returns the session_id."""
@@ -778,13 +939,19 @@ class SessionDB:
         with a different reason. Use ``reopen_session()`` first if you
         intentionally need to re-end a closed session with a new reason.
         """
+        ended_at = time.time()
         def _do(conn):
             conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = ? "
                 "WHERE id = ? AND ended_at IS NULL",
-                (time.time(), end_reason, session_id),
+                (ended_at, end_reason, session_id),
             )
         self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_end_session
+            shadow_end_session(session_id, ended_at, end_reason)
+        except Exception:
+            pass
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
@@ -794,6 +961,11 @@ class SessionDB:
                 (session_id,),
             )
         self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_reopen_session
+            shadow_reopen_session(session_id)
+        except Exception:
+            pass
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
@@ -803,6 +975,11 @@ class SessionDB:
                 (system_prompt, session_id),
             )
         self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_update_system_prompt
+            shadow_update_system_prompt(session_id, system_prompt)
+        except Exception:
+            pass
 
     def update_token_counts(
         self,
@@ -902,6 +1079,29 @@ class SessionDB:
         def _do(conn):
             conn.execute(sql, params)
         self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_update_token_counts
+            shadow_update_token_counts(
+                session_id,
+                absolute=absolute,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                reasoning_tokens=reasoning_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                actual_cost_usd=actual_cost_usd,
+                cost_status=cost_status,
+                cost_source=cost_source,
+                pricing_version=pricing_version,
+                billing_provider=billing_provider,
+                billing_base_url=billing_base_url,
+                billing_mode=billing_mode,
+                model=model,
+                api_call_count=api_call_count,
+            )
+        except Exception:
+            pass
 
     def ensure_session(
         self,
@@ -984,7 +1184,19 @@ class SessionDB:
         return self._execute_write(_do) or 0
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get a session by ID."""
+        """Get a session by ID. PG-first when the cutover flag is on."""
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import get_session as _pg_get_session
+                row = _pg_get_session(session_id)
+                if row is not None:
+                    return row
+                # PG miss: fall through to SQLite. Either the row hasn't
+                # been shadow-mirrored yet, or this is a session that
+                # predates the shadow soak; SQLite is still the
+                # source-of-truth fallback while the cutover is staged.
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_session PG read failed, falling back: %s", exc)
         with self._lock:
             cursor = self._conn.execute(
                 "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -1250,6 +1462,30 @@ class SessionDB:
         a recursive CTE that walks compression-continuation edges, so LIMIT
         and OFFSET still apply efficiently.
         """
+        # PG-first read (cutover 2026-05-24). SQLite writes are off by default,
+        # so SQLite reads here would return stale data. Fall back to SQLite
+        # on PG error to preserve the legacy code path during the soak window.
+        # 2026-05-25: this method was missed in the original cutover; the
+        # sidebar was showing cron sessions only through 2026-05-23 because
+        # of it. Restored real-time cron sessions in the sidebar.
+        if _read_from_pg():
+            try:
+                pg_sessions = _list_sessions_rich_pg(
+                    source=source,
+                    exclude_sources=exclude_sources,
+                    limit=limit,
+                    offset=offset,
+                    include_children=include_children,
+                    order_by_last_active=order_by_last_active,
+                )
+                if pg_sessions is not None:
+                    return pg_sessions
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "list_sessions_rich PG read failed, falling back to SQLite: %s",
+                    exc,
+                )
+
         where_clauses = []
         params = []
 
@@ -1536,6 +1772,8 @@ class SessionDB:
         if tool_calls is not None:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
+        msg_timestamp = time.time()
+
         def _do(conn):
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
@@ -1550,7 +1788,7 @@ class SessionDB:
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
-                    time.time(),
+                    msg_timestamp,
                     token_count,
                     finish_reason,
                     reasoning,
@@ -1577,7 +1815,31 @@ class SessionDB:
                 )
             return msg_id
 
-        return self._execute_write(_do)
+        result = self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_append_message
+            # content may be a list (multimodal) — encode for PG TEXT column.
+            pg_content = stored_content if isinstance(stored_content, str) else None
+            shadow_append_message(
+                session_id, role,
+                content=pg_content,
+                tool_name=tool_name,
+                tool_calls_json=tool_calls_json,
+                tool_call_id=tool_call_id,
+                token_count=token_count,
+                finish_reason=finish_reason,
+                reasoning=reasoning,
+                reasoning_content=reasoning_content,
+                reasoning_details_json=reasoning_details_json,
+                codex_reasoning_items_json=codex_items_json,
+                codex_message_items_json=codex_message_items_json,
+                platform_message_id=platform_message_id,
+                timestamp=msg_timestamp,
+                num_tool_calls=num_tool_calls,
+            )
+        except Exception:
+            pass
+        return result
 
     # ------------------------------------------------------------------
     # Per-turn usage ledger (gateway/usage_ledger.py + agent/insights.py)
@@ -1654,6 +1916,40 @@ class SessionDB:
         The delete + reinsert sequence must commit as one transaction so a
         mid-rewrite failure does not leave SQLite with a partial transcript.
         """
+        # Pre-serialise rows for the PG shadow path so it runs in lock-step
+        # with the SQLite txn. Mirrors the encoding logic in the _do
+        # closure below.
+        _shadow_rows: List[Dict[str, Any]] = []
+        _shadow_base_ts = time.time()
+        for _idx, _msg in enumerate(messages):
+            _role = _msg.get("role", "unknown")
+            _tc = _msg.get("tool_calls")
+            _rd = _msg.get("reasoning_details") if _role == "assistant" else None
+            _cri = _msg.get("codex_reasoning_items") if _role == "assistant" else None
+            _cmi = _msg.get("codex_message_items") if _role == "assistant" else None
+            _num_tc = (
+                len(_tc) if isinstance(_tc, list) else 1
+            ) if _tc is not None else 0
+            _content_raw = self._encode_content(_msg.get("content"))
+            _shadow_rows.append({
+                "role": _role,
+                "content": _content_raw if isinstance(_content_raw, str) else None,
+                "tool_call_id": _msg.get("tool_call_id"),
+                "tool_calls_json": json.dumps(_tc) if _tc else None,
+                "tool_name": _msg.get("tool_name"),
+                "timestamp": _shadow_base_ts + _idx * 1e-6,
+                "token_count": _msg.get("token_count"),
+                "finish_reason": _msg.get("finish_reason"),
+                "reasoning": _msg.get("reasoning") if _role == "assistant" else None,
+                "reasoning_content": _msg.get("reasoning_content") if _role == "assistant" else None,
+                "reasoning_details_json": json.dumps(_rd) if _rd else None,
+                "codex_reasoning_items_json": json.dumps(_cri) if _cri else None,
+                "codex_message_items_json": json.dumps(_cmi) if _cmi else None,
+                "platform_message_id": (
+                    _msg.get("platform_message_id") or _msg.get("message_id")
+                ),
+                "num_tool_calls": _num_tc,
+            })
 
         def _do(conn):
             conn.execute(
@@ -1731,9 +2027,39 @@ class SessionDB:
             )
 
         self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_replace_messages
+            shadow_replace_messages(session_id, _shadow_rows)
+        except Exception:
+            pass
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load all messages for a session, ordered by insertion order."""
+        """Load all messages for a session, ordered by insertion order.
+
+        PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1; SQLite fallback on
+        empty/error so production stays safe during cutover soak.
+        """
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import get_messages as _pg_get_messages
+                rows = _pg_get_messages(session_id)
+                if rows:
+                    result = []
+                    for msg in rows:
+                        if "content" in msg:
+                            msg["content"] = self._decode_content(msg["content"])
+                        if msg.get("tool_calls"):
+                            try:
+                                msg["tool_calls"] = json.loads(msg["tool_calls"])
+                            except (json.JSONDecodeError, TypeError):
+                                logger.warning(
+                                    "Failed to deserialize tool_calls in get_messages (PG), falling back to []"
+                                )
+                                msg["tool_calls"] = []
+                        result.append(msg)
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_messages PG read failed, falling back: %s", exc)
         with self._lock:
             cursor = self._conn.execute(
                 "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
@@ -2559,7 +2885,16 @@ class SessionDB:
     # =========================================================================
 
     def session_count(self, source: str = None) -> int:
-        """Count sessions, optionally filtered by source."""
+        """Count sessions, optionally filtered by source.
+
+        PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1.
+        """
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import session_count as _pg_session_count
+                return _pg_session_count(source)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("session_count PG read failed, falling back: %s", exc)
         with self._lock:
             if source:
                 cursor = self._conn.execute(
@@ -2570,7 +2905,16 @@ class SessionDB:
             return cursor.fetchone()[0]
 
     def message_count(self, session_id: str = None) -> int:
-        """Count messages, optionally for a specific session."""
+        """Count messages, optionally for a specific session.
+
+        PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1.
+        """
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import message_count as _pg_message_count
+                return _pg_message_count(session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("message_count PG read failed, falling back: %s", exc)
         with self._lock:
             if session_id:
                 cursor = self._conn.execute(
@@ -2735,7 +3079,20 @@ class SessionDB:
     # ── Meta key/value (for scheduler bookkeeping) ──
 
     def get_meta(self, key: str) -> Optional[str]:
-        """Read a value from the state_meta key/value store."""
+        """Read a value from the state_meta key/value store.
+
+        PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1. Distinguishes
+        "PG returned no row" from "PG read errored" so a true miss falls
+        through to SQLite rather than masking the absence.
+        """
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import get_meta as _pg_get_meta
+                pg_val = _pg_get_meta(key)
+                if pg_val is not None:
+                    return pg_val
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_meta PG read failed, falling back: %s", exc)
         with self._lock:
             row = self._conn.execute(
                 "SELECT value FROM state_meta WHERE key = ?", (key,)
@@ -2745,7 +3102,12 @@ class SessionDB:
         return row["value"] if isinstance(row, sqlite3.Row) else row[0]
 
     def set_meta(self, key: str, value: str) -> None:
-        """Write a value to the state_meta key/value store."""
+        """Write a value to the state_meta key/value store.
+
+        SQLite write is no-op'd when ELEVATE_DISABLE_SQLITE_WRITE=1; in
+        that mode the shadow PG write becomes the primary write and must
+        not be silently swallowed.
+        """
         def _do(conn):
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
@@ -2753,6 +3115,15 @@ class SessionDB:
                 (key, value),
             )
         self._execute_write(_do)
+        if _sqlite_writes_disabled():
+            from elevate_cli.data.sessiondb_shadow import shadow_set_meta
+            shadow_set_meta(key, value)
+        else:
+            try:
+                from elevate_cli.data.sessiondb_shadow import shadow_set_meta
+                shadow_set_meta(key, value)
+            except Exception:
+                pass
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.

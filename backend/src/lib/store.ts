@@ -13,6 +13,7 @@ export type StoreUser = {
   status: "active" | "trialing" | "inactive" | "canceled" | "past_due";
   current_period_end: string | null;
   entitlements: string[];
+  blocked_entitlements: string[];
   role: "owner" | "admin" | "user";
   is_developer: boolean;
   created_at: string;
@@ -261,6 +262,17 @@ export async function updateUserEntitlements(
   const { error } = await supabase()
     .from("users")
     .update({ entitlements })
+    .eq("id", userId);
+  if (error) throw error;
+}
+
+export async function updateUserBlockedEntitlements(
+  userId: string,
+  blocked_entitlements: string[],
+): Promise<void> {
+  const { error } = await supabase()
+    .from("users")
+    .update({ blocked_entitlements })
     .eq("id", userId);
   if (error) throw error;
 }
@@ -720,6 +732,13 @@ export async function effectiveAccess(userId: string): Promise<{
       tierRank = orgRank;
     }
     for (const e of m.organization.entitlements || []) entitlements.add(e);
+  }
+
+  // Subtract per-user blocks. Lets an admin revoke a pack from a single user
+  // even when their org grants it. Block list does NOT apply to is_developer
+  // accounts above (those bypass everything).
+  for (const blocked of user.blocked_entitlements || []) {
+    entitlements.delete(blocked);
   }
 
   return {

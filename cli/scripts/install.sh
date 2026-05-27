@@ -3,7 +3,7 @@
 # Elevate Installer
 # ============================================================================
 # Installation script for Linux, macOS, and Android/Termux.
-# Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
+# Uses uv for desktop/server installs and Python's stdlib .venv + pip on Termux.
 #
 # Public release usage:
 #   curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/scripts/install.sh | bash
@@ -261,7 +261,7 @@ detect_os() {
 
 install_uv() {
     if [ "$DISTRO" = "termux" ]; then
-        log_info "Termux detected — using Python's stdlib venv + pip instead of uv"
+        log_info "Termux detected — using Python's stdlib .venv + pip instead of uv"
         UV_CMD=""
         return 0
     fi
@@ -904,25 +904,25 @@ setup_venv() {
     if [ "$DISTRO" = "termux" ]; then
         log_info "Creating virtual environment with Termux Python..."
 
-        if [ -d "venv" ]; then
+        if [ -d ".venv" ]; then
             log_info "Virtual environment already exists, recreating..."
-            rm -rf venv
+            rm -rf .venv
         fi
 
-        "$PYTHON_PATH" -m venv venv
-        log_success "Virtual environment ready ($(./venv/bin/python --version 2>/dev/null))"
+        "$PYTHON_PATH" -m venv .venv
+        log_success "Virtual environment ready ($(./.venv/bin/python --version 2>/dev/null))"
         return 0
     fi
 
     log_info "Creating virtual environment with Python $PYTHON_VERSION..."
 
-    if [ -d "venv" ]; then
+    if [ -d ".venv" ]; then
         log_info "Virtual environment already exists, recreating..."
-        rm -rf venv
+        rm -rf .venv
     fi
 
-    # uv creates the venv and pins the Python version in one step
-    $UV_CMD venv venv --python "$PYTHON_VERSION"
+    # uv creates the .venv and pins the Python version in one step
+    $UV_CMD venv .venv --python "$PYTHON_VERSION"
 
     log_success "Virtual environment ready (Python $PYTHON_VERSION)"
 }
@@ -932,8 +932,8 @@ install_deps() {
 
     if [ "$DISTRO" = "termux" ]; then
         if [ "$USE_VENV" = true ]; then
-            export VIRTUAL_ENV="$INSTALL_DIR/venv"
-            PIP_PYTHON="$INSTALL_DIR/venv/bin/python"
+            export VIRTUAL_ENV="$INSTALL_DIR/.venv"
+            PIP_PYTHON="$INSTALL_DIR/.venv/bin/python"
         else
             PIP_PYTHON="$PYTHON_PATH"
         fi
@@ -971,8 +971,8 @@ install_deps() {
     fi
 
     if [ "$USE_VENV" = true ]; then
-        # Tell uv to install into our venv (no need to activate)
-        export VIRTUAL_ENV="$INSTALL_DIR/venv"
+        # Tell uv to install into our .venv (no need to activate)
+        export VIRTUAL_ENV="$INSTALL_DIR/.venv"
     fi
 
     # On Debian/Ubuntu (including WSL), some Python packages need build tools.
@@ -1036,7 +1036,7 @@ setup_path() {
     log_info "Setting up elevate command..."
 
     if [ "$USE_VENV" = true ]; then
-        ELEVATE_BIN="$INSTALL_DIR/venv/bin/elevate"
+        ELEVATE_BIN="$INSTALL_DIR/.venv/bin/elevate"
     else
         ELEVATE_BIN="$(which elevate 2>/dev/null || echo "")"
         if [ -z "$ELEVATE_BIN" ]; then
@@ -1202,7 +1202,7 @@ SOUL_EOF
     # Seed base bundled skills into ~/.elevate/skills/. Paid real estate/admin,
     # sales, and marketing packs are synced during `elevate activate`.
     log_info "Syncing bundled skills to ~/.elevate/skills/ ..."
-    if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" 2>/dev/null; then
+    if "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" 2>/dev/null; then
         log_success "Skills synced to ~/.elevate/skills/"
     else
         log_warn "Base skill sync failed. Run later with: elevate update"
@@ -1214,8 +1214,8 @@ initialize_local_databases() {
 
     cd "$INSTALL_DIR"
     if [ "$USE_VENV" = true ]; then
-        DB_INIT_CMD=("$INSTALL_DIR/venv/bin/python" -m elevate_cli.main db init --quiet)
-        DB_DETAIL_CMD=("$INSTALL_DIR/venv/bin/python" -m elevate_cli.main db init)
+        DB_INIT_CMD=("$INSTALL_DIR/.venv/bin/python" -m elevate_cli.main db init --quiet)
+        DB_DETAIL_CMD=("$INSTALL_DIR/.venv/bin/python" -m elevate_cli.main db init)
     else
         DB_INIT_CMD=(python -m elevate_cli.main db init --quiet)
         DB_DETAIL_CMD=(python -m elevate_cli.main db init)
@@ -1300,10 +1300,10 @@ run_setup_wizard() {
 
     cd "$INSTALL_DIR"
 
-    # Run elevate setup using the venv Python directly (no activation needed).
+    # Run elevate setup using the .venv Python directly (no activation needed).
     # Redirect stdin from /dev/tty so interactive prompts work when piped from curl.
     if [ "$USE_VENV" = true ]; then
-        "$INSTALL_DIR/venv/bin/python" -m elevate_cli.main setup < /dev/tty
+        "$INSTALL_DIR/.venv/bin/python" -m elevate_cli.main setup < /dev/tty
     else
         python -m elevate_cli.main setup < /dev/tty
     fi

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import hashlib
+import shlex
 import sqlite3
 import sys
 import urllib.error
@@ -25,7 +26,7 @@ from collections import deque
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from elevate_cli.config import (
     get_config_path,
@@ -48,6 +49,8 @@ JSONL_FILES = (
     "lead-events.jsonl",
     "tasks.jsonl",
 )
+_JSONL_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}
+_JSONL_RECORD_CACHE: dict[tuple[str, int, bool], tuple[int, int, list[JsonRecord]]] = {}
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 
@@ -56,6 +59,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "id": "apple-messages",
         "source": "Apple Messages",
         "category": "messages",
+        "description": "Reads the local Mac Messages database (chat.db + AddressBook) and indexes people, conversations, and messages for lead context.",
         "informationNeeded": "Mac user, included handles, conversation scope, read permission, and reply policy.",
         "connectionLayer": "Local bridge or export writes normalized conversations, messages, lead events, and approval tasks.",
         "uiDestination": "Outreach threads, Leads, Today follow-ups, and approval queues for draft replies.",
@@ -65,6 +69,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "id": "sms-provider",
         "source": "SMS Provider",
         "category": "messages",
+        "description": "Webhook/poller adapter for an SMS provider (Twilio, Bandwidth, etc.) — pulls inbound texts into the unified inbox.",
         "informationNeeded": "Provider name, numbers, webhook/API/export access, contact matching, and send approval policy.",
         "connectionLayer": "Webhook, poller, or import adapter maps provider records into Elevate message and lead files.",
         "uiDestination": "Live lead inbox, Outreach, Today hot replies, and source health in Settings.",
@@ -74,6 +79,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "id": "android-device",
         "source": "Android Device SMS",
         "category": "messages",
+        "description": "Imports Android SMS via device export or a mobile helper, into the same inbox as Apple Messages.",
         "informationNeeded": "Export method, device owner approval, included numbers, backup format, and sync cadence.",
         "connectionLayer": "Optional mobile helper, backup export, or manual import turns device messages into normalized source records.",
         "uiDestination": "Same SMS UI path as provider texts: Outreach, Leads, Today, and approval tasks.",
@@ -83,60 +89,97 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "id": "rcs",
         "source": "RCS",
         "category": "messages",
+        "description": "Business or device RCS (Rich Communication Services) capture. Provider connector when available, blocker otherwise.",
         "informationNeeded": "Whether this is business RCS/provider messaging or personal device RCS, plus webhook/export access.",
         "connectionLayer": "Business/provider RCS uses a connector; personal RCS becomes a setup blocker unless export access exists.",
         "uiDestination": "Provider-style message threads and lead events when connected; setup blockers in Settings when not connectable.",
         "successSignal": "RCS is labeled connected, import-only, or blocked instead of being folded into generic SMS.",
     },
     {
-        "id": "crm",
-        "source": "CRM",
-        "category": "leads",
-        "informationNeeded": "CRM name, auth method, stage meanings, reliable fields, activity types, and owner mapping.",
-        "connectionLayer": "CRM adapter maps contacts, stages, notes, activities, and exposed messages into Elevate records.",
-        "uiDestination": "Leads, Admin, Outreach context, Today pipeline, and stale-follow-up queues.",
-        "successSignal": "A CRM stage or activity change updates the lead/admin view and creates the right next action.",
-    },
-    {
-        "id": "social",
-        "source": "Composio Social Accounts",
-        "category": "messages",
-        "informationNeeded": "Composio account/MCP URL, connected social apps, metrics scope, DM/comment scope, lead definition, and reply workflow.",
-        "connectionLayer": "Composio is the account hub. Elevate uses the local MCP/tool connection to read social posts, metrics, DMs, comments, and lead moments into normalized local records.",
-        "uiDestination": "Social Media pulse, Leads from DMs/comments, content tasks, and approvals for drafted replies.",
-        "successSignal": "A connected Composio social app can produce a local social metric, content task, lead event, or reply approval record.",
-    },
-    {
         "id": "email",
         "source": "Email",
         "category": "messages",
+        "description": "Read-only mailbox connector (IMAP, Gmail, or one-time export) for inbound leads, referrals, and document intake.",
         "informationNeeded": "Mailbox, folders/labels, search terms, attachment policy, and storage destination.",
         "connectionLayer": "Read-only mailbox adapter or export importer creates conversations, lead events, and document tasks.",
         "uiDestination": "Leads, Outreach, document intake, admin tasks, and Today reply-needed rows.",
         "successSignal": "A website lead or referral email appears with source thread, summary, and next-step task.",
     },
     {
-        "id": "skills",
-        "source": "Skill Outputs",
-        "category": "operations",
-        "informationNeeded": "Skill name, artifact folders, refresh cadence, record shape, and which UI lane should consume it.",
-        "connectionLayer": "Artifact reader ingests JSON, JSONL, markdown, PDFs, screenshots, and exports from the tools/data root.",
-        "uiDestination": "Admin, seller updates, market stats, document routing, admin queues, and source activity.",
-        "successSignal": "A fresh skill artifact shows in the correct dashboard lane with timestamp, source, and actionability.",
+        "id": "crm",
+        "source": "CRM",
+        "category": "crm",
+        "description": "Pulls contacts, deals, stages, notes, and activity from the agent's CRM of record (Lofty, FUB, Sierra, Brivity, BoldTrail).",
+        "informationNeeded": "CRM name, auth method, stage meanings, reliable fields, activity types, and owner mapping.",
+        "connectionLayer": "CRM adapter maps contacts, stages, notes, activities, and exposed messages into Elevate records.",
+        "uiDestination": "Leads, Admin, Outreach context, Today pipeline, and stale-follow-up queues.",
+        "successSignal": "A CRM stage or activity change updates the lead/admin view and creates the right next action.",
+    },
+    {
+        "id": "xposure-pcs",
+        "source": "MLS Buyer Searches",
+        "category": "mls",
+        "description": "Scrapes Lofty/Xposure private-search (PCS) buyer criteria, writes pcs_buyers detail keyed to the canonical contact.",
+        "informationNeeded": "Lofty member-area credentials, scrape cadence, allowed property-search domains, and CRM sync target.",
+        "connectionLayer": "Headless browser run pulls private-search (PCS) buyer criteria, normalizes phones/emails, writes canonical contacts/conversations/messages JSONL plus the source-specific pcs_buyers rows. The walker hydrates identities + contacts + events through the same identity-first writethrough Apple Messages and CRM already use, so the same buyer collapses to one contact across sources.",
+        "uiDestination": "Leads, Today buyer-search lane, and the outreach approval queue when high-intent triggers fire.",
+        "successSignal": "A scraped MLS buyer search appears as an identity-resolved contact with pcs_buyers detail and (when matched) merges into the existing CRM contact instead of creating a duplicate row.",
+    },
+    {
+        "id": "buyer-brief",
+        "source": "Buyer Brief Enrichment",
+        "category": "mls",
+        "description": "Reads pcs_buyers rows already in Postgres and synthesizes a human-readable buyer brief on each contact. No external calls.",
+        "informationNeeded": "Already-synced xposure-pcs rows. No external credentials — this connector only reads local PG.",
+        "connectionLayer": "Reads pcs_buyers.searches_json for every contact, synthesizes a human-readable brief (price range, beds, neighborhoods, last-search recency, 90-day search volume) and writes it to contacts.enrichment_brief. Sets activity_tier + last_search_at + search_count_90d on the same upsert. Idempotent: keyed on contact_id, re-running refreshes the brief in place without touching display_name/notes/tags.",
+        "uiDestination": "Leads drawer (buyer brief panel), activity-tier filter chips, and the outreach flagger which uses the same denormalized fields.",
+        "successSignal": "Every xposure-pcs contact has a non-null enrichment_brief and activity_tier; the /leads drawer shows the brief instead of the generic 'buyer interested' line.",
+    },
+    {
+        "id": "xposure-pcs-views",
+        "source": "MLS Per-Listing Engagement",
+        "category": "mls",
+        "description": "Scrapes the Client View one-way mirror per saved search for per-listing view counts, favorites, removed, and last access. Feeds the activity flagger.",
+        "informationNeeded": "Same Lofty/Xposure credentials as xposure-pcs (no new auth). Requires existing pcs_buyers rows so we know which buyers to scrape and which xposure search IDs to open.",
+        "connectionLayer": "Headless browser walks the Client View one-way mirror per saved search (manageClients.manageResults). For each engaged buyer it captures per-listing view_count, last_viewed_at, view_state (new / pc / older / viewed / favorite / removed), plus parent-buyer summary counts (results/favorites/removed/queue + last_client_access). Snapshot semantics: upsert keyed on (contact_id, search_id, mls_id); listings that drop off get view_state='stale' rather than being deleted so the activity flagger can diff against the previous run.",
+        "uiDestination": "Leads drawer engagement panel (top viewed listings, repeat-view spikes), Today outreach-trigger lane, and the activity flagger queue.",
+        "successSignal": "pcs_listing_views has rows for every active/warm buyer with at least one saved search; pcs_buyers.{results_count,favorites_count,removed_count,queue_count,last_client_access,views_scraped_at} are populated and the /leads buyer drawer shows 'top views' instead of just the search criteria.",
+    },
+    {
+        "id": "social",
+        "source": "Composio Social Accounts",
+        "category": "social",
+        "description": "Composio is the account hub for IG, Facebook, LinkedIn, TikTok. Once connected, pulls posts, metrics, DMs, comments, and lead moments.",
+        "informationNeeded": "Composio account/MCP URL, connected social apps, metrics scope, DM/comment scope, lead definition, and reply workflow.",
+        "connectionLayer": "Composio is the account hub. Elevate uses the local MCP/tool connection to read social posts, metrics, DMs, comments, and lead moments into normalized local records.",
+        "uiDestination": "Social Media pulse, Leads from DMs/comments, content tasks, and approvals for drafted replies.",
+        "successSignal": "A connected Composio social app can produce a local social metric, content task, lead event, or reply approval record.",
     },
     {
         "id": "market-stats",
         "source": "Market Stats",
-        "category": "operations",
+        "category": "social",
+        "description": "Imports market stats (board exports, MLS reports, CSVs) for use in social content and seller/buyer reports.",
         "informationNeeded": "Market regions, property types, stats source, refresh cadence, and client-facing summary needs.",
         "connectionLayer": "Board, MLS, report, CSV, spreadsheet, or manual import writes dashboard-ready stats and artifacts.",
         "uiDestination": "Admin, Today prep, Social content, later Ads work, and market-report tasks.",
         "successSignal": "A fresh market artifact appears with period, region, metrics, source files, and next operator step.",
     },
     {
+        "id": "skills",
+        "source": "Skill Outputs",
+        "category": "admin",
+        "description": "Ingests structured outputs from skills (JSON, JSONL, markdown, PDFs, screenshots) into the operational store for downstream UI lanes.",
+        "informationNeeded": "Skill name, artifact folders, refresh cadence, record shape, and which UI lane should consume it.",
+        "connectionLayer": "Artifact reader ingests JSON, JSONL, markdown, PDFs, screenshots, and exports from the tools/data root.",
+        "uiDestination": "Admin, seller updates, market stats, document routing, admin queues, and source activity.",
+        "successSignal": "A fresh skill artifact shows in the correct dashboard lane with timestamp, source, and actionability.",
+    },
+    {
         "id": "admin-requirements",
         "source": "Admin Requirements",
         "category": "admin",
+        "description": "Models brokerage/jurisdiction requirements per deal stage (required forms, deadlines, human-only checks).",
         "informationNeeded": "Jurisdiction, brokerage rules, transaction stages, required forms, deadlines, and human-only checks.",
         "connectionLayer": "Checklist or source import writes required items and generated admin tasks.",
         "uiDestination": "Admin, Today admin queue, Tasks, documents, and approvals.",
@@ -146,6 +189,7 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
         "id": "document-storage",
         "source": "Document Storage",
         "category": "admin",
+        "description": "Indexes deal-file documents from cloud storage (Drive, Dropbox, S3) or a local root, routes them by category and deal/listing match.",
         "informationNeeded": "Storage provider/root, folder naming, document categories, permissions, and dry-run routing policy.",
         "connectionLayer": "Local or cloud indexer writes document-index records and routing tasks.",
         "uiDestination": "Admin, Today admin queue, document intake, and source activity.",
@@ -154,11 +198,58 @@ SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
     {
         "id": "forms-signing",
         "source": "Forms & Signing",
-        "category": "forms",
+        "category": "admin",
+        "description": "Form templates + signing packet routing (Authentisign, DocuSign, SkySlope). Drafts dry-run packets; every send is approval-gated.",
         "informationNeeded": "Form provider, blank forms/templates, recipient roles, field map, and approval policy.",
         "connectionLayer": "Provider-neutral form map and packet index writes dry-run packet records and approval tasks.",
         "uiDestination": "Admin, Today admin queue, approvals, and document routing.",
         "successSignal": "A packet draft appears as a dry-run artifact and every send/signing action is gated behind approval.",
+    },
+)
+
+
+# Connectors with a live implementation. Settings "Run" opens a visible chat
+# session for every wired connector so the operator can watch the command,
+# browser work, verification steps, and failure messages in one transcript.
+WIRED_SOURCE_IDS = frozenset({
+    "apple-messages",
+    "crm",
+    "social",
+    "xposure-pcs",
+    "xposure-pcs-views",
+    "buyer-brief",
+})
+
+AGENT_SESSION_SOURCE_IDS = WIRED_SOURCE_IDS
+
+SERVER_INLINE_SOURCE_IDS = WIRED_SOURCE_IDS - AGENT_SESSION_SOURCE_IDS
+
+
+SOURCE_CATEGORIES: tuple[JsonRecord, ...] = (
+    {
+        "id": "messages",
+        "label": "Messages & inbox",
+        "description": "Inbound conversations from phone, laptop, and email — Apple Messages, SMS providers, Android, RCS, mailbox.",
+    },
+    {
+        "id": "crm",
+        "label": "CRM",
+        "description": "The agent's CRM of record. One per workspace. Contacts + deals + activity collapse here.",
+    },
+    {
+        "id": "mls",
+        "label": "MLS / Buyer intelligence",
+        "description": "Lofty/Xposure private-search data, per-buyer briefs, per-listing engagement. Feeds the activity flagger.",
+    },
+    {
+        "id": "social",
+        "label": "Social",
+        "description": "Composio social-account hub (IG, FB, LinkedIn, TikTok) plus market-stats imports for content + reporting.",
+    },
+    {
+        "id": "admin",
+        "label": "Operations & admin",
+        "description": "Skill outputs, brokerage requirements, document storage, forms & signing — the back-office plumbing.",
     },
 )
 
@@ -168,6 +259,9 @@ OWNER_BY_SOURCE = {
     "android-device": "Outreach",
     "rcs": "Outreach",
     "crm": "Outreach",
+    "xposure-pcs": "Outreach",
+    "buyer-brief": "Outreach",
+    "xposure-pcs-views": "Outreach",
     "social": "Social Media",
     "email": "Outreach",
     "skills": "Executive Assistant",
@@ -183,6 +277,9 @@ UI_BY_SOURCE = {
     "android-device": ["Outreach", "Leads", "Today", "Approvals"],
     "rcs": ["Outreach", "Leads", "Today", "Settings"],
     "crm": ["Leads", "Admin", "Outreach", "Today"],
+    "xposure-pcs": ["Leads", "Today", "Outreach", "Approvals"],
+    "buyer-brief": ["Leads", "Today", "Outreach"],
+    "xposure-pcs-views": ["Leads", "Today", "Outreach", "Approvals"],
     "social": ["Leads", "Outreach", "Social Media", "Approvals"],
     "email": ["Leads", "Outreach", "Admin", "Today"],
     "skills": ["Admin", "Social Media", "Settings"],
@@ -204,7 +301,7 @@ SOURCE_PROMPT_CATEGORIES = (
 CONNECTION_CONTRACT = """Canonical Elevate connector contract (every source MUST follow this — already enforced for apple-messages, crm, social):
 
 Storage layout (all paths portable, work on any user's install):
-- `$ELEVATE_HOME/data/operational.db` — the unified SQLite store. Same path on every install (default `~/.elevate/data/operational.db`). Migrations auto-apply on first `data.connect()`.
+- Operational DB — the embedded Postgres store managed by `elevate_cli.data.connect()`. Migrations auto-apply on first `data.connect()`; do not read or write deprecated local DB files.
 - `<tools_root>/data/sources/<source-id>/` — per-source workspace. Holds `source.json`, `status.json`, `contacts.jsonl`, `conversations.jsonl`, `messages.jsonl`, `lead-events.jsonl`, `tasks.jsonl`, `artifacts/`.
 
 Canonical 3-file write shape (REQUIRED — the walker depends on it):
@@ -310,11 +407,23 @@ def _write_json(path: Path, value: JsonRecord) -> None:
 
 def _count_jsonl(path: Path) -> int:
     try:
-        if not path.exists():
-            return 0
+        stat = path.stat()
+        cache_key = str(path)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _JSONL_COUNT_CACHE.get(cache_key)
+        if cached and cached[:2] == signature:
+            return cached[2]
         with path.open("r", encoding="utf-8") as fh:
-            return sum(1 for line in fh if line.strip())
+            count = sum(1 for line in fh if line.strip())
+        _JSONL_COUNT_CACHE[cache_key] = (signature[0], signature[1], count)
+        return count
+    except FileNotFoundError:
+        return 0
     except Exception:
+        try:
+            _JSONL_COUNT_CACHE.pop(str(path), None)
+        except Exception:
+            pass
         return 0
 
 
@@ -331,8 +440,16 @@ def _read_jsonl_records(path: Path, *, limit: int = 12, tail: bool = False) -> l
     # or large limits (rewrite-preserve operations need 5000+). Earlier 100-row ceiling
     # silently dropped preserved tasks/drafts past row 100 on every CRM sync.
     safe_limit = max(1, int(limit or 12))
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
         return []
+    except Exception:
+        return []
+    cache_key = (str(path), safe_limit, bool(tail))
+    cached = _JSONL_RECORD_CACHE.get(cache_key)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return [dict(record) for record in cached[2]]
 
     raw_lines: list[str]
     try:
@@ -363,7 +480,13 @@ def _read_jsonl_records(path: Path, *, limit: int = 12, tail: bool = False) -> l
             continue
         if isinstance(value, dict):
             records.append(value)
-    return sorted(records, key=_record_timestamp, reverse=True)
+    records = sorted(records, key=_record_timestamp, reverse=True)
+    _JSONL_RECORD_CACHE[cache_key] = (
+        stat.st_mtime_ns,
+        stat.st_size,
+        [dict(record) for record in records],
+    )
+    return records
 
 
 def _find_jsonl_record_by_id(
@@ -874,6 +997,170 @@ def _draft_recipient(record: JsonRecord, fallback: str = "Client") -> str:
     return _record_person_name(record) or fallback
 
 
+_TEMPLATE_TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def _first_name_from_person(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"client", "conversation", "client conversation"}:
+        return "there"
+    first = re.split(r"\s+", text, maxsplit=1)[0].strip(" ,")
+    return first or "there"
+
+
+def _record_field(record: JsonRecord, *keys: str) -> str:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    for child in ("name", "label", "value", "area", "city"):
+                        text = str(item.get(child) or "").strip()
+                        if text:
+                            return text
+                else:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+            continue
+        if isinstance(value, dict):
+            for child in ("name", "label", "value", "area", "city"):
+                text = str(value.get(child) or "").strip()
+                if text:
+                    return text
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _outreach_lane_for_thread(thread: JsonRecord) -> str:
+    label = str(thread.get("leadLabel") or thread.get("heatLabel") or "").strip().lower()
+    if label == "hot":
+        return "hot-leads-watcher"
+    if _safe_int(thread.get("outboundCount")) > 0:
+        return "follow-ups"
+    return "new-outreach"
+
+
+def _template_channel_for_thread(source_id: str, thread: JsonRecord) -> str:
+    outbound = _channel_for_source(source_id)
+    if outbound:
+        return outbound
+    raw = str(thread.get("channel") or "").strip().lower()
+    if "email" in raw or "gmail" in raw:
+        return "email"
+    if "message" in raw or "sms" in raw or "text" in raw:
+        return "sms"
+    if "instagram" in raw or "facebook" in raw or "messenger" in raw or "social" in raw:
+        return "social_dm"
+    return "any"
+
+
+def _template_values_for_thread(source: JsonRecord, thread: JsonRecord) -> dict[str, str]:
+    record = _as_dict(thread.get("record"))
+    latest = str(thread.get("latestText") or _latest_text(record) or "").strip()
+    area = _record_field(
+        record,
+        "area",
+        "areas",
+        "neighborhood",
+        "neighbourhood",
+        "city",
+        "market",
+        "location",
+    )
+    topic = _record_field(record, "topic", "intent", "title", "summary") or "your search"
+    source_label = str(thread.get("sourceLabel") or source.get("label") or source.get("source") or "your message").strip()
+    signal = str(thread.get("scoreReason") or "").strip()
+    if not signal:
+        label = str(thread.get("leadLabel") or thread.get("heatLabel") or "").strip()
+        signal = f"{label} signal" if label else "recent activity"
+    return {
+        "first_name": _first_name_from_person(thread.get("personName")),
+        "city": _record_field(record, "city", "market", "area", "location") or "the area",
+        "topic": topic,
+        "source": source_label,
+        "area": area or "the area",
+        "signal": signal,
+        "address": _record_field(record, "address", "property_address", "listing_address") or "the listing",
+        "criteria": _record_field(record, "criteria", "saved_search", "search_criteria", "summary") or "your search",
+        "delta": _record_field(record, "delta", "market_delta") or "a bit",
+        "latest_message": latest,
+    }
+
+
+def _render_outreach_template(body: str, source: JsonRecord, thread: JsonRecord) -> str:
+    values = _template_values_for_thread(source, thread)
+
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return values.get(key) or "that"
+
+    rendered = _TEMPLATE_TOKEN_RE.sub(repl, body or "").strip()
+    rendered = re.sub(r"[ \t]{2,}", " ", rendered)
+    rendered = re.sub(r"\s+([,.?!])", r"\1", rendered)
+    return rendered
+
+
+def _select_thread_template(source: JsonRecord, thread: JsonRecord) -> JsonRecord | None:
+    try:
+        from elevate_cli import outreach_db
+    except Exception:
+        return None
+
+    lane = _outreach_lane_for_thread(thread)
+    source_id = str(thread.get("sourceId") or source.get("id") or "")
+    channel = _template_channel_for_thread(source_id, thread)
+    try:
+        templates = outreach_db.list_templates(lane=lane, include_inactive=False)
+    except Exception:
+        return None
+
+    candidates: list[tuple[int, JsonRecord]] = []
+    for idx, template in enumerate(templates):
+        if not template.get("active"):
+            continue
+        if str(template.get("status") or "active") != "active":
+            continue
+        template_channel = str(template.get("channel") or "any").strip() or "any"
+        if template_channel not in {"any", channel}:
+            continue
+        candidates.append((idx, template))
+    if not candidates:
+        return None
+
+    def sort_key(item: tuple[int, JsonRecord]) -> tuple[int, float, float, int, int]:
+        idx, template = item
+        uses = _safe_int(template.get("uses"))
+        reply_rate = float(template.get("replyRate") or 0.0)
+        win_rate = float(template.get("winRate") or 0.0)
+        return (0 if uses == 0 else 1, -reply_rate, -win_rate, uses, idx)
+
+    _, selected = sorted(candidates, key=sort_key)[0]
+    selected = dict(selected)
+    selected["_outreachLane"] = lane
+    selected["_outreachChannel"] = channel
+    return selected
+
+
+def _templated_draft_for_thread(source: JsonRecord, thread: JsonRecord) -> JsonRecord | None:
+    template = _select_thread_template(source, thread)
+    if not template:
+        return None
+    rendered = _render_outreach_template(str(template.get("body") or ""), source, thread)
+    if not rendered:
+        return None
+    return {
+        "draftText": rendered,
+        "templateId": template.get("id"),
+        "templateName": template.get("name"),
+        "templateChannel": template.get("channel") or "any",
+        "outreachLane": template.get("_outreachLane") or _outreach_lane_for_thread(thread),
+    }
+
+
 def _fallback_draft_for_thread(thread: JsonRecord) -> str:
     name = str(thread.get("personName") or "there").strip()
     first = name.split()[0] if name and name.lower() not in {"client", "conversation"} else "there"
@@ -918,6 +1205,15 @@ def _draft_from_task(source: JsonRecord, record: JsonRecord, state: JsonRecord |
 def _draft_from_thread(source: JsonRecord, thread: JsonRecord) -> JsonRecord:
     source_id = str(thread.get("sourceId") or source.get("id") or "").strip()
     thread_id = str(thread.get("threadId") or _thread_key(_as_dict(thread.get("record"))))
+    template_draft = _templated_draft_for_thread(source, thread)
+    record = dict(_as_dict(thread.get("record")))
+    if template_draft:
+        record.update({
+            "template_id": template_draft.get("templateId"),
+            "template_name": template_draft.get("templateName"),
+            "template_channel": template_draft.get("templateChannel"),
+            "outreach_lane": template_draft.get("outreachLane"),
+        })
     return {
         "id": f"{source_id}:thread-draft:{thread_id}",
         "sourceId": source_id,
@@ -929,14 +1225,17 @@ def _draft_from_thread(source: JsonRecord, thread: JsonRecord) -> JsonRecord:
         "personName": str(thread.get("personName") or "Client"),
         "channel": str(thread.get("channel") or _channel_label(source_id, source, _as_dict(thread.get("record")))),
         "title": "Draft follow-up",
-        "draftText": _fallback_draft_for_thread(thread),
+        "draftText": str((template_draft or {}).get("draftText") or _fallback_draft_for_thread(thread)),
         "context": str(thread.get("latestText") or "").strip(),
         "latestAt": str(thread.get("latestAt") or ""),
         "status": "pending",
         "approvalRequired": True,
         "generated": True,
-        "fallback": True,
-        "record": thread.get("record") or {},
+        "fallback": template_draft is None,
+        "templateId": (template_draft or {}).get("templateId"),
+        "templateName": (template_draft or {}).get("templateName"),
+        "outreachLane": (template_draft or {}).get("outreachLane"),
+        "record": record,
     }
 
 
@@ -1216,6 +1515,11 @@ def _replace_jsonl(path: Path, records: list[JsonRecord]) -> None:
         for record in records:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     tmp_path.replace(path)
+    path_key = str(path)
+    for cache_key in list(_JSONL_RECORD_CACHE):
+        if cache_key[0] == path_key:
+            _JSONL_RECORD_CACHE.pop(cache_key, None)
+    _JSONL_COUNT_CACHE.pop(path_key, None)
 
 
 # ─── Snapshot lock (cross-file consistency) ───────────────────────────────
@@ -1908,69 +2212,210 @@ def _blueprint(source_id: str) -> JsonRecord | None:
 # Update these whenever the implementation changes — they are the
 # operator/agent-facing source of truth for what this connector does.
 
-_WIRED_SOURCE_PROMPTS: dict[str, str] = {
-    "apple-messages": """RUNS NOW (already wired):
-  CLI:    elevate sync apple-messages
-  Code:   elevate_cli.source_connectors.initialize_apple_messages_source()
-  Schedule: ai.elevate.sync-apple-messages (launchd, every 600s, installed by `elevate db init`)
 
-What happens when you click Run:
-  1. Walk macOS AddressBook (~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb)
-     via `elevate_cli.apple_contacts.walk_addressbook()` — pulls every contact card's
-     full name, phones (E.164 normalized), emails, apple_addressbook_id.
-  2. Walk the Messages chat.db at ~/Library/Messages/chat.db — every handle, chat,
-     message, attachment timestamp. Joined to AddressBook by phone/email so contacts
-     get human names instead of phone-number-shaped strings.
-  3. Write `<tools_root>/data/sources/apple-messages/contacts.jsonl`,
-     `conversations.jsonl`, `messages.jsonl` with the canonical 3-file shape.
-     Each contacts row includes an `identities[]` array
-     (apple_handle, phone, email, apple_addressbook_id, apple_chat_id).
-  4. Walk the JSONL into `$ELEVATE_HOME/data/operational.db` via
-     `elevate_cli.data.migrate.walk_jsonl_source()`. Identity-first resolution
-     collapses duplicates: same person across phone + email + apple_handle becomes
-     one contact_id. Collisions across sources go to `identity_conflicts` for
-     human review — never auto-merged.
+PromptRenderer = Callable[[], str]
 
-Dashboard surface after run: Outreach threads, Leads (people in Messages but NOT
-in CRM are surfaced via `elevate review-unmatched`), Today follow-ups, Approvals
-for any draft replies.
 
-If macOS Full Disk Access is missing for your terminal / Claude / Elevate, the
-chat.db read fails. status.json is marked blocked with the exact System Settings
-path the operator needs to grant.""",
+def _local_python_prefix() -> str:
+    cli_root = Path(__file__).resolve().parents[1]
+    python = cli_root / ".venv" / "bin" / "python"
+    return (
+        f"PYTHONPATH={shlex.quote(str(cli_root))} "
+        f"ELEVATE_PYTHON_SRC_ROOT={shlex.quote(str(cli_root))} "
+        f"{shlex.quote(str(python))}"
+    )
+
+
+def _local_sync_command(source_id: str) -> str:
+    return f"{_local_python_prefix()} -m elevate_cli.main sync {shlex.quote(source_id)} --json"
+
+
+def _local_counts_command(queries: dict[str, str]) -> str:
+    lines = [
+        f"{_local_python_prefix()} - <<'PY'",
+        "from elevate_cli.data import connect",
+        "queries = {",
+    ]
+    for label, sql in queries.items():
+        lines.append(f"    {label!r}: {sql!r},")
+    lines.extend([
+        "}",
+        "with connect() as conn:",
+        "    for label, sql in queries.items():",
+        "        row = conn.execute(sql).fetchone()",
+        "        print(f\"{label}={row['n'] if row else 0}\")",
+        "PY",
+    ])
+    return "\n".join(lines)
+
+
+def _source_file_count_commands(source_id: str) -> str:
+    source_root = Path(get_source_root_info()["sourceRoot"])
+    source_dir = _source_dir(source_root, source_id)
+    files = " ".join(shlex.quote(str(source_dir / name)) for name in JSONL_FILES)
+    return (
+        f"ls -la {shlex.quote(str(source_dir))}\n"
+        f"wc -l {files} 2>/dev/null || true\n"
+        f"cat {shlex.quote(str(source_dir / 'status.json'))} 2>/dev/null || true\n"
+        f"cat {shlex.quote(str(source_dir / 'source.json'))} 2>/dev/null || true"
+    )
+
+
+def _render_apple_messages_agent_prompt() -> str:
+    sync_cmd = _local_sync_command("apple-messages")
+    file_cmd = _source_file_count_commands("apple-messages")
+    counts_cmd = _local_counts_command({
+        "contacts": "SELECT COUNT(*) AS n FROM contacts",
+        "conversations": "SELECT COUNT(*) AS n FROM conversations",
+        "apple_events": (
+            "SELECT COUNT(*) AS n FROM events "
+            "WHERE source_id = 'apple-messages' OR channel = 'apple-messages'"
+        ),
+        "identities": "SELECT COUNT(*) AS n FROM identities",
+        "identity_conflicts_pending": (
+            "SELECT COUNT(*) AS n FROM identity_conflicts WHERE resolved_at IS NULL"
+        ),
+    })
+    return (
+        "TASK\n"
+        "Run the Apple Messages connector as a visible local session. This is a\n"
+        "read-only Mac Messages + AddressBook import; do not send or draft replies.\n\n"
+        "DO THIS\n"
+        f"1. Run the local sync command:\n   `{sync_cmd}`\n"
+        "2. If macOS blocks chat.db or AddressBook access, stop and report the exact\n"
+        "   Full Disk Access / Contacts permission error shown in status.json.\n"
+        "3. Verify source files and status with bash:\n"
+        "   ```bash\n"
+        f"{file_cmd}\n"
+        "   ```\n"
+        "4. Verify the operational Postgres writethrough with bash:\n"
+        "   ```bash\n"
+        f"{counts_cmd}\n"
+        "   ```\n"
+        "5. Final reply exactly:\n"
+        "   `DONE contacts=<contacts_db> conversations=<conversations_db> apple_events=<apple_events_db> identity_conflicts_pending=<pending_count>`\n"
+        "   If blocked, reply `FAILED <one-line reason>`.\n\n"
+        "CONSTRAINTS\n"
+        "- Local read/import only. Never send a message.\n"
+        "- Do not use deprecated ~/.elevate/data/operational.db for verification.\n"
+        "- Keep all output in the session so the operator can watch the run."
+    )
+
+
+def _render_social_agent_prompt() -> str:
+    sync_cmd = _local_sync_command("social")
+    source_root = Path(get_source_root_info()["sourceRoot"])
+    counts_cmd = _local_counts_command({
+        "contacts": "SELECT COUNT(*) AS n FROM contacts",
+        "conversations": "SELECT COUNT(*) AS n FROM conversations",
+        "lead_events": "SELECT COUNT(*) AS n FROM events WHERE source_id LIKE 'composio-%%' OR source_id = 'social'",
+    })
+    source_root_q = shlex.quote(str(source_root))
+    return (
+        "TASK\n"
+        "Run the Composio social-account connector as a visible local session.\n"
+        "Composio is the account hub; do not ask for raw social passwords.\n\n"
+        "DO THIS\n"
+        f"1. Run the local sync command:\n   `{sync_cmd}`\n"
+        "2. If COMPOSIO_MCP_SERVER/config is missing, surface the exact setup error\n"
+        "   and stop. If some toolkits are not connected, report them but continue\n"
+        "   with connected toolkits.\n"
+        "3. Verify per-toolkit source folders and status with bash:\n"
+        "   ```bash\n"
+        f"find {source_root_q} -maxdepth 1 -type d \\( -name 'composio-*' -o -name 'social' \\) -print\n"
+        f"find {source_root_q} -maxdepth 2 \\( -name status.json -o -name source.json \\) -path '*composio-*' -print -exec cat {{}} \\;\n"
+        "   ```\n"
+        "4. Verify operational Postgres rows with bash:\n"
+        "   ```bash\n"
+        f"{counts_cmd}\n"
+        "   ```\n"
+        "5. Final reply exactly:\n"
+        "   `DONE social_toolkits=<N> lead_events=<lead_events_db> conversations=<conversations_db> contacts=<contacts_db>`\n"
+        "   If the Composio hub is not configured, reply `FAILED <one-line reason>`.\n\n"
+        "CONSTRAINTS\n"
+        "- Never post, reply, DM, or modify social content from this connector run.\n"
+        "- Pull inbound/metrics only and leave outbound replies approval-gated.\n"
+        "- Keep all output in the visible session."
+    )
+
+
+def _render_buyer_brief_agent_prompt() -> str:
+    sync_cmd = _local_sync_command("buyer-brief")
+    counts_cmd = _local_counts_command({
+        "pcs_buyers": "SELECT COUNT(*) AS n FROM pcs_buyers",
+        "contacts_with_brief": (
+            "SELECT COUNT(*) AS n FROM contacts "
+            "WHERE COALESCE(enrichment_brief, '') <> ''"
+        ),
+        "warm_buyers": (
+            "SELECT COUNT(*) AS n FROM contacts WHERE activity_tier = 'warm'"
+        ),
+        "active_buyers": (
+            "SELECT COUNT(*) AS n FROM contacts WHERE activity_tier = 'active'"
+        ),
+    })
+    return (
+        "TASK\n"
+        "Run buyer-brief enrichment as a visible local session. This reads the\n"
+        "already-imported pcs_buyers rows and writes human-readable buyer context\n"
+        "and activity tiers back onto contacts. No browser and no external API.\n\n"
+        "DO THIS\n"
+        f"1. Run the local sync command:\n   `{sync_cmd}`\n"
+        "2. Verify Postgres enrichment counts with bash:\n"
+        "   ```bash\n"
+        f"{counts_cmd}\n"
+        "   ```\n"
+        "3. Spot-check two enriched contacts without printing private emails:\n"
+        "   ```bash\n"
+        f"{_local_python_prefix()} - <<'PY'\n"
+        "from elevate_cli.data import connect\n"
+        "with connect() as conn:\n"
+        "    rows = conn.execute(\"\"\"\n"
+        "        SELECT display_name, activity_tier, LEFT(enrichment_brief, 180) AS brief\n"
+        "        FROM contacts\n"
+        "        WHERE COALESCE(enrichment_brief, '') <> ''\n"
+        "        ORDER BY updated_at DESC\n"
+        "        LIMIT 2\n"
+        "    \"\"\").fetchall()\n"
+        "    for row in rows:\n"
+        "        print(dict(row))\n"
+        "PY\n"
+        "   ```\n"
+        "4. Final reply exactly:\n"
+        "   `DONE pcs_buyers=<pcs_buyers> contacts_with_brief=<contacts_with_brief> active=<active_buyers> warm=<warm_buyers>`\n"
+        "   If enrichment fails, reply `FAILED <one-line reason>`.\n\n"
+        "CONSTRAINTS\n"
+        "- No browser, no outbound messages, no external enrichment calls.\n"
+        "- Run after MLS Buyer Searches finishes; do not run concurrently with\n"
+        "  xposure-pcs or xposure-pcs-views because those touch the same buyer rows.\n"
+        "- Do not print private buyer emails in the final reply."
+    )
+
+
+def _render_xposure_pcs_agent_prompt() -> str:
+    from elevate_cli.xposure_pcs_connector import build_agent_session_prompt
+
+    return build_agent_session_prompt()
+
+
+def _render_xposure_pcs_views_agent_prompt() -> str:
+    from elevate_cli.xposure_pcs_views import build_agent_session_prompt
+
+    return build_agent_session_prompt()
+
+
+_WIRED_SOURCE_PROMPTS: dict[str, str | PromptRenderer] = {
+    "apple-messages": _render_apple_messages_agent_prompt,
 
     "crm": "__CRM_DYNAMIC__",  # rendered at runtime by _render_crm_prompt()
 
-    "social": """RUNS NOW (already wired, Composio is the account hub):
-  CLI:    elevate sync social
-  Code:   elevate_cli.composio_inbound.pull_all_supported()
-            → loops every connected toolkit (gmail, instagram, facebook,
-              whatsapp, telegram, slack) via Composio MCP.
-  Schedule: ai.elevate.sync-social (launchd, every 600s)
+    "social": _render_social_agent_prompt,
 
-What happens when you click Run:
-  1. Resolve Composio MCP server URL from config.integrations.composio.mcp_server
-     (or COMPOSIO_MCP_SERVER env). If missing, status.json → `needs_composio_mcp`
-     with the exact setup step. No pull.
-  2. For each toolkit Composio reports as connected:
-       pull_toolkit(toolkit) → hits the toolkit's inbound endpoint
-       (gmail messages, instagram DMs, whatsapp messages, etc.), paginated,
-       writes `<tools_root>/data/sources/<toolkit>/messages.jsonl` for the
-       raw inbound events.
-  3. synthesize_canonical_files(toolkit) derives contacts.jsonl + conversations.jsonl
-     from the messages-only feed. Uses `_TOOLKIT_TO_HANDLE_KIND` to map the
-     toolkit's native sender id → identity kind (gmail→email, instagram→instagram_id,
-     whatsapp→wa_id, etc.). Pure derivation — re-running is idempotent.
-  4. Walk into operational.db via the same writethrough. A gmail email and an
-     instagram DM from the same person (matched by phone/email) collapse to
-     one contact_id.
+    "xposure-pcs": _render_xposure_pcs_agent_prompt,
 
-Dashboard surface after run: Social Media pulse (metrics), Leads (DMs/comments
-that look like leads, lead-scored by tags + keywords), content tasks, Outreach
-approvals for drafted replies (NEVER auto-sends, always approval-gated).
+    "buyer-brief": _render_buyer_brief_agent_prompt,
 
-If a toolkit is not connected in Composio, it's skipped silently — the operator
-adds it inside the Composio account, then re-runs.""",
+    "xposure-pcs-views": _render_xposure_pcs_views_agent_prompt,
 }
 
 
@@ -1979,7 +2424,7 @@ def _render_crm_prompt() -> str:
 
     Resolves the configured provider (admin profile → config fallback) and
     peeks at last sync + contact count. The job is always the same: run
-    `elevate sync crm` to backfill the operator's CRM into operational.db.
+    `elevate sync crm` to backfill the operator's CRM into operational Postgres.
     Provider + credential are read from disk by the CLI — don't ask the user.
     """
     config = load_config()
@@ -1999,42 +2444,48 @@ def _render_crm_prompt() -> str:
     except Exception:
         pass
 
+    sync_cmd = _local_sync_command("crm")
+    file_cmd = _source_file_count_commands("crm")
+    counts_cmd = _local_counts_command({
+        "contacts": "SELECT COUNT(*) AS n FROM contacts",
+        "lifecycle_events": (
+            "SELECT COUNT(*) AS n FROM events WHERE kind = 'lifecycle_change'"
+        ),
+        "conversations": "SELECT COUNT(*) AS n FROM conversations",
+        "identities": "SELECT COUNT(*) AS n FROM identities",
+        "identity_conflicts_pending": (
+            "SELECT COUNT(*) AS n FROM identity_conflicts WHERE resolved_at IS NULL"
+        ),
+    })
+
     return (
         "TASK\n"
-        f"Backfill the operator's {provider_label} CRM into Elevate's operational.db,\n"
+        f"Backfill the operator's {provider_label} CRM into Elevate's operational Postgres DB,\n"
         f"then VERIFY the sync actually succeeded end-to-end. Don't trust the CLI's\n"
         f"exit code alone — check the resulting data with your own eyes. Do not ask\n"
         f"the operator for the API key; the CLI reads it from ~/.elevate/.env. If\n"
         f"the CLI raises a missing-key error, surface that error verbatim and stop.\n\n"
         "CURRENT STATE (snapshot at render time — verify against live values)\n"
         f"  provider:       {provider_label} ({provider or 'unset'})\n"
-        f"  contacts in DB: {contact_count}\n"
+        f"  contacts in source snapshot: {contact_count}\n"
         f"  last sync:      {last_sync or 'never'}\n\n"
         "DO THIS (every step. Don't skip the verification steps.)\n"
-        "1. Run: `elevate sync crm`\n"
+        f"1. Run the local sync command:\n   `{sync_cmd}`\n"
         "2. Wait for it to finish (paginated full backfill — may take a few minutes).\n"
         "   Watch stderr for HTTP 4xx/5xx, rate-limit, or auth errors. Do not silently\n"
         "   ignore non-zero exit codes.\n"
         "3. VERIFY the source files were written (jsonl, fresh timestamps):\n"
-        "     ls -la ~/.elevate/tools/data/sources/crm/\n"
-        "     wc -l ~/.elevate/tools/data/sources/crm/contacts.jsonl \\\n"
-        "           ~/.elevate/tools/data/sources/crm/conversations.jsonl \\\n"
-        "           ~/.elevate/tools/data/sources/crm/lead-events.jsonl \\\n"
-        "           ~/.elevate/tools/data/sources/crm/tasks.jsonl\n"
-        "     cat ~/.elevate/tools/data/sources/crm/source.json   # last_sync_at, record_counts (CUMULATIVE — source of truth)\n"
-        "     cat ~/.elevate/tools/data/sources/crm/status.json   # connected:true, blocked:false\n"
+        "   ```bash\n"
+        f"{file_cmd}\n"
+        "   ```\n"
         "   Note: jsonl line counts may be lower than source.json record_counts because\n"
         "   the jsonl is the latest snapshot (may be incremental), while record_counts\n"
         "   is cumulative across all syncs. Use record_counts for the totals.\n"
         "4. VERIFY the walker wrote rows into the operational Postgres DB (real schema —\n"
-        "   these are the only tables the walker actually populates). Use the\n"
-        "   `elevate_db` tool (preferred) or psql against the embedded socket:\n"
-        "     elevate_db \"SELECT COUNT(*) FROM contacts\"\n"
-        "     elevate_db \"SELECT COUNT(*) FROM events WHERE kind='lifecycle_change'\"  -- lead-events live here\n"
-        "     elevate_db \"SELECT COUNT(*) FROM conversations\"\n"
-        "     elevate_db \"SELECT COUNT(*) FROM identities\"\n"
-        "     elevate_db \"SELECT COUNT(*) FROM identity_conflicts WHERE resolved_at IS NULL\"\n"
-        "   (Fallback if elevate_db is unavailable: `psql -h ~/.elevate/pgdata -U postgres -d elevate_operational -c \"SELECT COUNT(*) FROM contacts\"`)\n"
+        "   these are the only tables the walker actually populates):\n"
+        "   ```bash\n"
+        f"{counts_cmd}\n"
+        "   ```\n"
         "   Counts should be > 0 and roughly match source.json record_counts. If DB\n"
         "   is empty but jsonl is populated, the writethrough is broken — flag it loudly.\n"
         "   NOTE: there is no `tasks` table by design — tasks live as JSONL only\n"
@@ -2042,7 +2493,20 @@ def _render_crm_prompt() -> str:
         "   lead lifecycle changes are stored in `events` with kind='lifecycle_change'.\n"
         "   DO NOT touch ~/.elevate/data/operational.db — that SQLite file is deprecated.\n"
         "5. Spot-check 2 real rows are coherent (use REAL column names):\n"
-        "     elevate_db \"SELECT id, display_name, primary_phone, primary_email FROM contacts ORDER BY updated_at DESC LIMIT 2\"\n"
+        "   ```bash\n"
+        f"{_local_python_prefix()} - <<'PY'\n"
+        "from elevate_cli.data import connect\n"
+        "with connect() as conn:\n"
+        "    rows = conn.execute(\"\"\"\n"
+        "        SELECT id, display_name, primary_phone, primary_email\n"
+        "        FROM contacts\n"
+        "        ORDER BY updated_at DESC\n"
+        "        LIMIT 2\n"
+        "    \"\"\").fetchall()\n"
+        "    for row in rows:\n"
+        "        print(dict(row))\n"
+        "PY\n"
+        "   ```\n"
         "   Both rows should have a real display_name plus primary_phone OR primary_email.\n"
         "   If they're empty strings or duplicates, the adapter mapping is broken — flag it.\n"
         "6. Report back with a CSV-style summary (use REAL table/column names):\n"
@@ -2053,7 +2517,7 @@ def _render_crm_prompt() -> str:
         "   Plus a one-line verdict: HEALTHY / DEGRADED / FAILED and what the operator\n"
         "   should look at next (e.g. 'review N identity_conflicts before merging').\n\n"
         "OUTCOME\n"
-        "  Success = both the source jsonl files and operational.db tables hold the\n"
+        "  Success = both the source jsonl files and operational Postgres tables hold the\n"
         "  same row counts (within rounding), the dashboard's /leads, /admin, /today\n"
         "  surfaces show live data, and any cross-CRM duplicates land in\n"
         "  identity_conflicts for human merge (NEVER auto-merge —\n"
@@ -2073,13 +2537,24 @@ def source_prompt_for(source_id: str) -> str:
         # CRM is rendered live so the agent gets current provider + credential
         # state, not a generic stub.
         if source_id == "crm":
-            wired = _render_crm_prompt()
-        # Live source — describe exactly what runs. Append the canonical
+            wired_text = _render_crm_prompt()
+        elif callable(wired):
+            wired_text = wired()
+        else:
+            wired_text = wired
+
+        if source_id in AGENT_SESSION_SOURCE_IDS:
+            return (
+                f"{blueprint['source']} — owner_agent={owner}, surfaces: {surfaces}\n\n"
+                f"{wired_text}"
+            )
+
+        # Live inline source — describe exactly what runs. Append the canonical
         # contract so the agent / operator still sees the universal storage
         # layout and identity rules.
         return (
             f"{blueprint['source']} — owner_agent={owner}, surfaces: {surfaces}\n\n"
-            f"{wired}\n\n"
+            f"{wired_text}\n\n"
             f"Canonical contract (applies to every Elevate source):\n{CONNECTION_CONTRACT}\n"
         )
 
@@ -2113,7 +2588,7 @@ def source_prompt_for(source_id: str) -> str:
         f"  do NOT branch in walker code.\n\n"
         f"Done when:\n{blueprint['successSignal']}\n"
         "- And: clicking Run on the connector card pulls live records into\n"
-        "  operational.db on a fresh install with no manual steps beyond providing\n"
+        "  the operational Postgres DB on a fresh install with no manual steps beyond providing\n"
         "  the operator's credential / file path.\n"
     )
 
@@ -2126,7 +2601,12 @@ def _initialize_behavior(source_id: str) -> str:
     return "agent_setup_task"
 
 
-def connector_view(source_root: Path, source_id: str) -> JsonRecord | None:
+def connector_view(
+    source_root: Path,
+    source_id: str,
+    *,
+    include_prompt: bool = True,
+) -> JsonRecord | None:
     blueprint = _blueprint(source_id)
     if not blueprint:
         return None
@@ -2155,7 +2635,9 @@ def connector_view(source_root: Path, source_id: str) -> JsonRecord | None:
     return {
         "id": source_id,
         "label": label,
-        "category": blueprint.get("category", "operations"),
+        "category": blueprint.get("category", "admin"),
+        "description": blueprint.get("description") or "",
+        "wired": source_id in WIRED_SOURCE_IDS,
         "state": state,
         "sourceExists": source_exists,
         "sourceDir": str(source_dir),
@@ -2166,6 +2648,11 @@ def connector_view(source_root: Path, source_id: str) -> JsonRecord | None:
         "syncMode": source.get("sync_mode") if isinstance(source, dict) else None,
         "authStatus": source.get("auth_status") if isinstance(source, dict) else None,
         "initializeBehavior": _initialize_behavior(source_id),
+        "runMode": (
+            "agent_session"
+            if source_id in AGENT_SESSION_SOURCE_IDS
+            else ("server_inline" if source_id in WIRED_SOURCE_IDS else "agent_setup_task")
+        ),
         "ownerAgent": owner_agent or OWNER_BY_SOURCE.get(source_id, "Executive Assistant"),
         "enabledUiSurfaces": [str(item) for item in enabled_surfaces if str(item).strip()],
         "connected": bool(status and status.get("connected") is True),
@@ -2183,23 +2670,38 @@ def connector_view(source_root: Path, source_id: str) -> JsonRecord | None:
         ),
         "lastCheckedAt": status.get("last_checked_at") if isinstance(status, dict) else None,
         "recordCounts": record_counts,
-        "prompt": source_prompt_for(source_id),
+        "prompt": source_prompt_for(source_id) if include_prompt else "",
     }
 
 
-def build_source_connectors_response(config: dict[str, Any] | None = None) -> JsonRecord:
+def build_source_connectors_response(
+    config: dict[str, Any] | None = None,
+    *,
+    include_prompts: bool = True,
+) -> JsonRecord:
     config = config or load_config()
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
-        if (view := connector_view(source_root, str(item["id"]))) is not None
+        if (view := connector_view(
+            source_root,
+            str(item["id"]),
+            include_prompt=include_prompts,
+        )) is not None
     ]
     return {
         **info,
-        "blueprints": [dict(item, prompt=source_prompt_for(str(item["id"]))) for item in SOURCE_CONNECTION_BLUEPRINTS],
+        "blueprints": [
+            dict(
+                item,
+                prompt=source_prompt_for(str(item["id"])) if include_prompts else "",
+            )
+            for item in SOURCE_CONNECTION_BLUEPRINTS
+        ],
         "promptCategories": list(SOURCE_PROMPT_CATEGORIES),
+        "categories": [dict(c) for c in SOURCE_CATEGORIES],
         "connectors": connectors,
     }
 
@@ -2303,6 +2805,7 @@ def _composio_connector_view(source_root: Path, source_id: str) -> JsonRecord | 
         "syncMode": "poll",
         "authStatus": None,
         "initializeBehavior": "composio_social_setup",
+        "runMode": "server_inline",
         "ownerAgent": OWNER_BY_SOURCE.get("social", "Executive Assistant"),
         "enabledUiSurfaces": UI_BY_SOURCE.get("social", []),
         "connected": True,
@@ -2342,7 +2845,7 @@ def build_source_inbox_response(
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
-        if (view := connector_view(source_root, str(item["id"]))) is not None
+        if (view := connector_view(source_root, str(item["id"]), include_prompt=False)) is not None
     ]
     # Fold in the composio per-toolkit dirs so messages pulled by the
     # inbound puller surface in /leads alongside Apple Messages and CRM.
@@ -3247,6 +3750,8 @@ def update_profile_state(
     profile_id: str,
     status: str | None,
     config: dict[str, Any] | None = None,
+    *,
+    return_inbox: bool = True,
 ) -> JsonRecord:
     """Persist the operator-set pipeline status for a profile.
 
@@ -3254,8 +3759,9 @@ def update_profile_state(
     :func:`set_pipeline_status` (migration 0014). Picking
     ``closed_seller`` / ``closed_buyer`` from the dropdown also calls
     :func:`close_to_admin` so the contact lands on /admin in the same
-    transaction. Returns the refreshed /leads response so the caller
-    can rerender without a second fetch.
+    transaction. By default returns the refreshed /leads response so legacy
+    callers can rerender without a second fetch; HTTP routes pass
+    ``return_inbox=False`` and build the DB-primary response once.
 
     Falls back to the legacy ``profile-state.json`` writer when the
     profile is not a contact UUID (e.g. composio thread-derived profiles
@@ -3310,7 +3816,7 @@ def update_profile_state(
                     actor="operator:leads-ui",
                     set_by="operator",
                 )
-                return build_source_inbox_response(config)
+                return build_source_inbox_response(config) if return_inbox else {"ok": True}
     except ValueError:
         raise
     except Exception:
@@ -3329,7 +3835,7 @@ def update_profile_state(
         profiles[pid] = {"status": normalized, "updated_at": _now()}
     state["profiles"] = profiles
     _write_profile_state(source_root, state)
-    return build_source_inbox_response(config)
+    return build_source_inbox_response(config) if return_inbox else {"ok": True}
 
 
 def update_source_thread_state(
@@ -3337,6 +3843,8 @@ def update_source_thread_state(
     thread_id: str,
     action: str,
     config: dict[str, Any] | None = None,
+    *,
+    return_inbox: bool = True,
 ) -> JsonRecord:
     config = config or load_config()
     if not _blueprint(source_id):
@@ -3358,7 +3866,30 @@ def update_source_thread_state(
         }
     state["threads"] = threads
     _write_source_ui_state(source_dir, state)
-    return build_source_inbox_response(config)
+    try:
+        from elevate_cli.data import connect
+
+        db_thread_id = thread_id
+        if db_thread_id.startswith(f"{source_id}:"):
+            db_thread_id = db_thread_id[len(source_id) + 1:]
+        db_status = "open" if normalized in {"restore", "open"} else (
+            "archived" if normalized == "archive" else "done"
+        )
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE conversations
+                SET status = ?, updated_at = ?
+                WHERE source_id = ? AND thread_key = ?
+                """,
+                (db_status, _now(), source_id, db_thread_id),
+            )
+    except Exception:
+        # Keep the legacy UI-state write available for rows that have not
+        # been merged into operational DB yet. DB-primary routes will still
+        # show the row until it has a matching conversation to update.
+        pass
+    return build_source_inbox_response(config) if return_inbox else {"ok": True}
 
 
 _SOURCE_TO_CHANNEL = {
@@ -3379,6 +3910,41 @@ def _channel_for_source(source_id: str) -> str | None:
     return _SOURCE_TO_CHANNEL.get(source_id)
 
 
+def _source_view_for_state(source_id: str, source_dir: Path) -> JsonRecord:
+    source = _read_json(source_dir / "source.json") or {}
+    blueprint = _blueprint(source_id) or {}
+    source.setdefault("id", source_id)
+    source.setdefault("label", blueprint.get("source") or source_id)
+    source.setdefault("source", blueprint.get("source") or source.get("label") or source_id)
+    source.setdefault("category", blueprint.get("category") or "messages")
+    return source
+
+
+def _thread_draft_template_state(source_id: str, task_id: str, source_dir: Path) -> JsonRecord:
+    prefix = "thread-draft:"
+    if not task_id.startswith(prefix):
+        return {}
+    thread_id = task_id[len(prefix):].strip()
+    if not thread_id:
+        return {}
+    source = _source_view_for_state(source_id, source_dir)
+    for record in _candidate_records_for_source(source_dir, source, 5000):
+        if _thread_key(record) != thread_id:
+            continue
+        thread = _thread_from_record(source, record, status="open")
+        template_draft = _templated_draft_for_thread(source, thread)
+        if not template_draft:
+            return {}
+        return {
+            "draft_text": template_draft.get("draftText"),
+            "template_id": template_draft.get("templateId"),
+            "template_name": template_draft.get("templateName"),
+            "template_channel": template_draft.get("templateChannel"),
+            "outreach_lane": template_draft.get("outreachLane"),
+        }
+    return {}
+
+
 def update_source_task_state(
     source_id: str,
     task_id: str,
@@ -3386,6 +3952,7 @@ def update_source_task_state(
     *,
     draft_text: str | None = None,
     config: dict[str, Any] | None = None,
+    return_inbox: bool = True,
 ) -> JsonRecord:
     config = config or load_config()
     if not _blueprint(source_id):
@@ -3403,13 +3970,20 @@ def update_source_task_state(
         tasks.pop(task_id, None)
         state["tasks"] = tasks
         _write_source_ui_state(source_dir, state)
-        return build_source_inbox_response(config)
+        return build_source_inbox_response(config) if return_inbox else {"ok": True}
 
     status = "approved" if normalized == "approve" else "skipped" if normalized == "skip" else "pending"
     existing = _as_dict(tasks.get(task_id))
     existing.update({"status": status, "updated_at": _now()})
     if draft_text is not None:
         existing["draft_text"] = str(draft_text)
+    if task_id.startswith("thread-draft:"):
+        template_state = _thread_draft_template_state(source_id, task_id, source_dir)
+        for key in ("template_id", "template_name", "template_channel", "outreach_lane"):
+            if template_state.get(key) and not existing.get(key):
+                existing[key] = template_state[key]
+        if template_state.get("draft_text") and not existing.get("draft_text"):
+            existing["draft_text"] = template_state["draft_text"]
     tasks[task_id] = existing
     state["tasks"] = tasks
 
@@ -3418,7 +3992,7 @@ def update_source_task_state(
     else:
         _write_source_ui_state(source_dir, state)
 
-    return build_source_inbox_response(config)
+    return build_source_inbox_response(config) if return_inbox else {"ok": True}
 
 
 def _approve_atomic(
@@ -3459,6 +4033,8 @@ def _approve_atomic(
             merged[k] = v
 
     thread_id = str(merged.get("thread_id") or merged.get("threadId") or task_id)
+    if thread_id == task_id and task_id.startswith("thread-draft:"):
+        thread_id = task_id.removeprefix("thread-draft:")
     draft_text = str(merged.get("draft_text") or _draft_text_for_task(merged) or "").strip()
     payload = {
         "draft_text": draft_text,
@@ -3479,9 +4055,33 @@ def _approve_atomic(
         "task_id": task_id,
     }
     attempt_id = merged.get("attempt_id") or merged.get("attemptId")
+    template_id = merged.get("template_id") or merged.get("templateId")
+    outreach_lane = merged.get("outreach_lane") or merged.get("outreachLane") or merged.get("lane")
+    if template_id:
+        payload["template_id"] = template_id
+        payload["templateId"] = template_id
+    if outreach_lane:
+        payload["outreach_lane"] = outreach_lane
+        payload["outreachLane"] = outreach_lane
 
     with outreach_db.connect() as conn:
         with outreach_db.transaction(conn):
+            if template_id and not attempt_id:
+                try:
+                    attempt_id = outreach_db.record_use_in_transaction(
+                        conn,
+                        str(template_id),
+                        lane=str(outreach_lane or "new-outreach"),
+                        source_id=source_id,
+                        thread_id=thread_id,
+                        task_id=task_id,
+                    )
+                    task_record["attempt_id"] = attempt_id
+                except Exception:
+                    attempt_id = None
+            if attempt_id:
+                payload["attempt_id"] = attempt_id
+                payload["attemptId"] = attempt_id
             outreach_db.enqueue_send(
                 conn,
                 source_id=source_id,
@@ -5184,9 +5784,9 @@ def sync_lofty_crm_source(
                 }
             )
 
-    # === PHASE 1 — Lead snapshot to disk + writethrough to operational.db ===
+    # === PHASE 1 — Lead snapshot to disk + writethrough to operational Postgres ===
     # Write the lead snapshot before enrichment so even if Phase 2 hangs or
-    # gets killed, downstream readers (operational.db, /leads UI, thread
+    # gets killed, downstream readers (operational Postgres, /leads UI, thread
     # drawer) already see the 21 leads with stage/score/source. Enrichment
     # in Phase 2 only adds the activity/note/task lead_events.
     base_lead_events = list(lead_events)
@@ -5422,7 +6022,7 @@ def sync_lofty_crm_source(
     if errors:
         _write_json(artifacts_dir / "last-sync-errors.json", {"checked_at": now, "errors": errors})
 
-    # Continuous ingest into operational.db so DB-primary readers see
+    # Continuous ingest into operational Postgres so DB-primary readers see
     # tonight's Lofty data without a manual ``elevate migrate-data`` rerun.
     # Codex audit P0 (2026-05-05): JSONL-only sync left the DB stale.
     # Phase 1 already ran a writethrough for the bare snapshot; this Phase 3
@@ -5604,6 +6204,31 @@ def scaffold_source(source_id: str, config: dict[str, Any] | None = None) -> Jso
         if provider in {"followupboss", "sierra", "boldtrail", "brivity", "custom"}:
             return sync_generic_crm_source(config)
         return sync_lofty_crm_source(config)
+    if source_id == "xposure-pcs":
+        # Real scraper + canonical writethrough lives in its own module
+        # (the source_connectors file is already 5,800 lines and the
+        # scraper is replaceable — keep it isolated).
+        from elevate_cli.xposure_pcs_connector import sync_xposure_pcs_source
+
+        # skip_scraper honored via env so cron + manual /api/source-
+        # connectors/{id}/run can choose to reuse the latest snapshot
+        # without burning a Lofty session.
+        skip = bool(os.getenv("ELEVATE_XPOSURE_SKIP_SCRAPER"))
+        return sync_xposure_pcs_source(config, skip_scraper=skip)
+    if source_id == "buyer-brief":
+        from elevate_cli.xposure_pcs_enrichment import run_enrichment
+
+        return run_enrichment(config)
+    if source_id == "xposure-pcs-views":
+        # Per-listing engagement scrape (one-way mirror Client View).
+        # Reuses the same Lofty/Xposure session as xposure-pcs but runs
+        # on its own 48h cadence so we can re-fetch view counts without
+        # re-running the criteria scrape every time.
+        from elevate_cli.xposure_pcs_views import run_views_sync
+
+        skip = bool(os.getenv("ELEVATE_XPOSURE_VIEWS_SKIP_SCRAPER"))
+        views_cfg = _as_dict(config.get("xposure_pcs_views")) or config
+        return run_views_sync(views_cfg, skip_scraper=skip)
 
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])

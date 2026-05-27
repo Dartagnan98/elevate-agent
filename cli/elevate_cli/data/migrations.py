@@ -1,17 +1,25 @@
-"""SQL migration runner for ``operational.db``.
+"""SQL migration runner for the embedded-Postgres operational store.
 
-Discovers numbered ``.sql`` files in ``elevate_cli/data/migrations/`` and
-applies them in lexical order against the central operational store.
-Each applied file is recorded in the ``_schema_migrations`` table with
-the file's SHA-256 — re-running is a no-op.
+Discovers numbered ``.sql`` files in ``elevate_cli/data/migrations_pg/``
+and applies them in lexical order against the central operational
+store. Each applied file is recorded in the ``_schema_migrations``
+table with the file's SHA-256 — re-running is a no-op.
+
+History note: pre-Postgres builds shipped 24 numbered migrations under
+``migrations/`` for SQLite. Those are kept on disk for archaeology but
+no longer applied. The Postgres cutover replaces them with a single
+``0001_pg_init.sql`` generated from the SQLite head-schema dump and
+translated by ``_tools/sqlite_to_pg.py``. Existing installs get their
+ledger seeded past history during the SQLite → PG data migration.
 
 Design rules:
 
 * **Append-only.** Once a migration ships, never edit it. Schema fixes
-  go in a new ``000N_*.sql`` file.
+  go in a new ``000N_*.sql`` file under ``migrations_pg/``.
 * **One file = one migration.** Multi-statement scripts are fine but
-  they're applied as a single SQLite ``executescript`` inside an
-  IMMEDIATE transaction.
+  they're applied as a single ``executescript`` call (one ``cur.execute``
+  with the whole body) — Postgres allows multi-statement strings as
+  long as none are parameterized.
 * **Hash mismatch is a hard error.** If the stored sha256 for an applied
   version differs from the on-disk file, ``run_pending`` raises
   ``MigrationDriftError`` rather than silently re-applying.
@@ -25,24 +33,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import NamedTuple
 
 
-_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+_MIGRATIONS_DIR = Path(__file__).parent / "migrations_pg"
 _VERSION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
-_COMPATIBLE_PRIOR_HASHES = {
-    # 0003 shipped briefly with province defaulting to "BC" before the
-    # package work moved jurisdiction defaults into config. The table shape is
-    # compatible with the current migration, and later migrations add the
-    # source-of-truth columns. Normalize the ledger instead of blocking existing
-    # local operator DBs forever.
-    "0003": {
-        "bbc136276d60302d56289888ccb91b7fb8bc30547aba07587168c6d1912d573a",
-    },
-}
+_COMPATIBLE_PRIOR_HASHES: dict[str, set[str]] = {}
 
 
 class MigrationError(RuntimeError):
@@ -94,7 +92,7 @@ def discover() -> list[_MigrationFile]:
     return files
 
 
-def _ensure_ledger(conn: sqlite3.Connection) -> None:
+def _ensure_ledger(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS _schema_migrations (
@@ -107,7 +105,7 @@ def _ensure_ledger(conn: sqlite3.Connection) -> None:
     )
 
 
-def applied(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+def applied(conn) -> dict[str, dict[str, str]]:
     """Map ``version → {name, sha256, applied_at}`` for everything in the ledger."""
     _ensure_ledger(conn)
     rows = conn.execute(
@@ -119,7 +117,7 @@ def applied(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
     return out
 
 
-def run_pending(conn: sqlite3.Connection) -> list[str]:
+def run_pending(conn) -> list[str]:
     """Apply any migrations not yet recorded in ``_schema_migrations``.
 
     Returns the list of versions that were applied this call. A no-op
@@ -144,22 +142,41 @@ def run_pending(conn: sqlite3.Connection) -> list[str]:
                     )
                     conn.commit()
                     continue
-                raise MigrationDriftError(
-                    f"migration {f.version} on disk differs from applied "
-                    f"copy: stored sha256={prior['sha256']} but file is "
-                    f"{f.sha256}. Migrations are append-only — fix this with "
-                    f"a new numbered migration, do not edit {f.name}."
-                )
-            continue
+                # Version-slot reuse: the on-disk migration has a different
+                # *filename* than what the ledger recorded. This happens when
+                # the PG ledger was pre-seeded with legacy SQLite migration
+                # labels (see `_pg_data_migrate._seed_legacy_ledger`) and a
+                # PG-era migration later took the same version number. The
+                # legacy seed is a label, not an actual applied schema, so
+                # we drop the ledger row and apply the on-disk file fresh.
+                #
+                # Genuine drift (same filename, edited body) still falls
+                # through to MigrationDriftError below.
+                if prior.get("name") and prior["name"] != f.name:
+                    conn.execute(
+                        "DELETE FROM _schema_migrations WHERE version=?",
+                        (f.version,),
+                    )
+                    conn.commit()
+                    # Fall through to the apply block.
+                else:
+                    raise MigrationDriftError(
+                        f"migration {f.version} on disk differs from applied "
+                        f"copy: stored sha256={prior['sha256']} but file is "
+                        f"{f.sha256}. Migrations are append-only — fix this with "
+                        f"a new numbered migration, do not edit {f.name}."
+                    )
+            else:
+                continue
 
         sql = f.path.read_text(encoding="utf-8")
-        # SQLite cannot run executescript inside an explicit transaction,
-        # but executescript itself wraps multi-statement DDL safely. We
-        # commit immediately after, then record the ledger row in its own
-        # write so partial-apply on crash leaves a recoverable state.
+        # Apply the DDL as one batched statement. Commit before recording
+        # the ledger row so a partial-apply crash leaves a recoverable
+        # state. (Postgres will roll back the implicit tx on error, but
+        # any DDL inside that tx is gone too — which is what we want.)
         try:
             conn.executescript(sql)
-        except sqlite3.Error as exc:
+        except Exception as exc:
             raise MigrationError(f"migration {f.name} failed: {exc}") from exc
 
         conn.execute(

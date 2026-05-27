@@ -41,6 +41,19 @@ _JOBS: tuple[tuple[str, str, int, str], ...] = (
     ("sync-apple-messages", "apple-messages", 600, "iMessage / SMS pull"),
     ("sync-crm",            "crm",            3600, "CRM adapter pull (provider-agnostic)"),
     ("sync-social",         "social",         600, "Composio inbound (gmail, ig, wa, fb, slack, ...)"),
+    # MLS private-search scraper. 48h cadence — Xposure scrapes are
+    # browser sessions that take ~3-5 min each, and the underlying
+    # buyer-search criteria don't change minute-to-minute. The buyer-
+    # brief enrichment runs immediately after and is a cheap local
+    # compute, so we chain them in one plist via the same source-id
+    # dispatch (see source_connectors.scaffold_source). 172800s = 2d.
+    ("sync-xposure-pcs",    "xposure-pcs",    172800, "MLS private-search scrape"),
+    ("sync-buyer-brief",    "buyer-brief",    172800, "Buyer-brief enrichment (post-scrape)"),
+    # Per-listing engagement (Client View one-way mirror). Same 48h
+    # cadence as the criteria scrape but staggered: this one cares
+    # about view counts / favorites / last_client_access and is the
+    # primary signal source for the activity + outreach flagger.
+    ("sync-xposure-pcs-views", "xposure-pcs-views", 172800, "MLS per-listing engagement scrape"),
 )
 
 
@@ -153,13 +166,36 @@ def _sane_path() -> str:
     return ":".join(parts)
 
 
+def _job_timeout_seconds(job: SchedulerJob) -> int:
+    """Hard runtime cap for one sync invocation.
+
+    Without a cap, a hung connector (Apple chat.db slow query, Composio
+    stalled fetch) holds a write lock on operational.db indefinitely and
+    every dashboard surface (Admin, Leads, sessions) starts returning
+    ``database is locked`` 500s. The cap kills the runaway child so the
+    next scheduled tick can recover. Half the interval (capped at 10min)
+    leaves headroom for the next tick to not pile up while still
+    interrupting an obvious hang.
+
+    The xposure-pcs* connectors drive an LLM agent against the AOIR MLS
+    portal — login + email MFA + ~1000-row DataTables render + per-row
+    extraction. 10 min isn't enough for the first MFA-bearing run, so
+    those two get a 25-minute ceiling instead.
+    """
+    if job.source_id in ("xposure-pcs", "xposure-pcs-views"):
+        return max(60, min(1500, job.interval_seconds // 2))
+    return max(60, min(600, job.interval_seconds // 2))
+
+
 def generate_plist(job: SchedulerJob) -> str:
     """Render an XML plist for one sync job.
 
-    The job calls ``python -m elevate_cli.main sync <source>`` directly —
-    no separate shell script file to ship. ``ELEVATE_HOME`` is baked in so
-    the launchd process points at the same store as the install that
-    registered it.
+    The job runs ``python -m elevate_cli.main sync <source>`` under a
+    bash watchdog that SIGKILLs the child if it exceeds the per-job
+    timeout. macOS launchd has no native runtime cap, and a hung sync
+    holds operational.db locks that break the dashboard, so the
+    watchdog is essential. ``ELEVATE_HOME`` is baked in so the launchd
+    process points at the same store as the install that registered it.
     """
     python = _python_path()
     home = _elevate_home_str()
@@ -168,6 +204,24 @@ def generate_plist(job: SchedulerJob) -> str:
     stdout = log_dir / f"{job.label}.log"
     stderr = log_dir / f"{job.label}.error.log"
     cwd = str(Path(__file__).parent.parent.resolve())
+    timeout = _job_timeout_seconds(job)
+
+    # Inline bash watchdog: background the python child, sleep for the cap,
+    # then SIGKILL if still alive. Single file, no extra shipping artifact.
+    bash_cmd = (
+        f'set -uo pipefail; '
+        f'"{python}" -m elevate_cli.main sync {job.source_id} & '
+        f'child=$!; '
+        f'( sleep {timeout}; '
+        f'kill -0 "$child" 2>/dev/null && '
+        f'kill -9 "$child" 2>/dev/null && '
+        f'echo "[watchdog] sync {job.source_id} TIMEOUT after {timeout}s — killed pid $child" >&2 '
+        f') & '
+        f'watchdog=$!; '
+        f'wait "$child"; rc=$?; '
+        f'kill -0 "$watchdog" 2>/dev/null && kill "$watchdog" 2>/dev/null; '
+        f'exit $rc'
+    )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -178,11 +232,9 @@ def generate_plist(job: SchedulerJob) -> str:
 
     <key>ProgramArguments</key>
     <array>
-        <string>{python}</string>
-        <string>-m</string>
-        <string>elevate_cli.main</string>
-        <string>sync</string>
-        <string>{job.source_id}</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>{bash_cmd}</string>
     </array>
 
     <key>WorkingDirectory</key>

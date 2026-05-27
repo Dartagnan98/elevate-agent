@@ -159,14 +159,14 @@ def _resolve_crm_from_admin(conn: sqlite3.Connection) -> tuple[str | None, str]:
             "SELECT crm_provider FROM admin_setup_profile WHERE id='default'"
         ).fetchone()
         provider = (row["crm_provider"] or "").strip() if row else ""
-    except sqlite3.OperationalError:
+    except Exception:
         provider = ""
     try:
         item_row = conn.execute(
             "SELECT status FROM admin_setup_items WHERE key='crm'"
         ).fetchone()
         admin_status = (item_row["status"] or "missing") if item_row else "missing"
-    except sqlite3.OperationalError:
+    except Exception:
         admin_status = "missing"
     if provider and admin_status in READY_STATUSES:
         return provider, "connected"
@@ -201,7 +201,7 @@ def _outreach_connectors_snapshot() -> list[dict[str, Any]]:
     except Exception:
         return []
     try:
-        resp = build_source_connectors_response()
+        resp = build_source_connectors_response(include_prompts=False)
     except Exception:
         return []
     connectors = resp.get("connectors") if isinstance(resp, dict) else None

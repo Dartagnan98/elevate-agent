@@ -70,13 +70,14 @@ _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {
     1: 2,
     2: 3,
     3: 4,
-    4: 5,
+    4: 6,
     6: 7,
     7: 8,
     8: 9,
+    9: 10,
 }
 _WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
-_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7, 8}
+_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7, 8, 9}
 _CHECKLIST_TRUE_VALUES = {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
 _CHECKLIST_FALSE_VALUES = {"0", "false", "no", "n", "unchecked", "todo", "incomplete", "not done", ""}
 
@@ -106,10 +107,10 @@ def _encode_json(value: Any) -> str | None:
 
 def _validate_stage(stage: int) -> int:
     if isinstance(stage, bool):
-        raise ValueError("stage must be an integer between 0 and 9")
+        raise ValueError("stage must be an integer between 0 and 10")
     stage_int = int(stage)
-    if stage_int < 0 or stage_int > 9:
-        raise ValueError("stage must be an integer between 0 and 9")
+    if stage_int < 0 or stage_int > 10:
+        raise ValueError("stage must be an integer between 0 and 10")
     return stage_int
 
 
@@ -324,6 +325,225 @@ def list_deals(
     sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     return [_row_to_deal(r) for r in conn.execute(sql, params).fetchall()]
+
+
+# --- Pipeline snapshot ------------------------------------------------
+#
+# One-call answer to "what's currently active in my pipeline and what
+# needs my attention." Saves the agent from chaining list_deals → N×
+# get_deal → elevate_db count queries when the user just wants a
+# briefing. Aggregates in Python because the active deal count is
+# always small (~10-50); a SQL GROUP BY would be premature optimization
+# and would force separate queries for each grouping anyway.
+
+_MOCK_SOURCE_TOKENS = ("mock", "beta", "dry-run", "dry_run", "dryrun", "test_")
+
+
+def _looks_like_mock_source(label: str | None, key: str | None) -> bool:
+    blob = f"{label or ''} {key or ''}".lower()
+    return any(tok in blob for tok in _MOCK_SOURCE_TOKENS)
+
+
+def _iso_to_date_naive(value: str | None) -> str | None:
+    """Slice an ISO timestamp to YYYY-MM-DD without touching tz logic."""
+    if not value:
+        return None
+    s = str(value).strip()
+    return s[:10] if len(s) >= 10 else None
+
+
+def _days_between(today_iso: str, target_iso: str | None) -> int | None:
+    """Whole days from today to target (positive = future). None if unparseable."""
+    if not target_iso:
+        return None
+    from datetime import date
+    try:
+        t = date.fromisoformat(today_iso[:10])
+        tgt = date.fromisoformat(str(target_iso)[:10])
+    except ValueError:
+        return None
+    return (tgt - t).days
+
+
+def deals_overview(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = "active",
+    side: str | None = None,
+    exclude_mock: bool = True,
+    near_close_days: int = 30,
+    near_subject_days: int = 21,
+    stale_days: int = 14,
+    today: str | None = None,
+) -> dict[str, Any]:
+    """Whole-pipeline snapshot in one call.
+
+    Returns a structured dict the agent can read once to answer
+    "where are my deals and what needs attention" without N round-trips.
+
+    Aggregates and lists:
+      * ``totals``: counts by status, side, source-mock filtering applied
+      * ``byStage``: dict of stage→count (0-10)
+      * ``bySource``: dict of source_label → count
+      * ``mockDeals``: thin list of any source-tagged mock/beta entries
+        (always returned so the agent knows what was filtered out)
+      * ``closingsSoon``: deals with completion_date inside ``near_close_days``
+      * ``subjectsSoon``: deals with subject_removal_date inside ``near_subject_days``
+      * ``staleStages``: deals whose stage_entered_at is older than
+        ``stale_days`` and aren't in a terminal stage
+      * ``deals``: thin scan-friendly list of every active deal
+        (id, title, side, currentStage, stageEnteredAt, completionDate,
+        subjectRemovalDate, listingDate, listPrice, sourceLabel,
+        primaryContactId) — sorted by stage then completion date
+
+    Pass ``status=None`` to include all statuses. Pass ``exclude_mock=False``
+    to keep mock/beta source entries in the aggregates.
+    """
+    if status is not None and status not in _VALID_STATUSES:
+        raise ValueError(f"invalid status {status!r}")
+    if side is not None and side not in _VALID_SIDES:
+        raise ValueError(f"invalid side {side!r}")
+
+    sql = "SELECT * FROM deals WHERE 1=1"
+    params: list[Any] = []
+    if status is not None:
+        sql += " AND status = ?"
+        params.append(status)
+    if side is not None:
+        sql += " AND side = ?"
+        params.append(side)
+    sql += " ORDER BY current_stage ASC, completion_date ASC NULLS LAST, updated_at DESC"
+
+    rows = conn.execute(sql, params).fetchall()
+    all_deals = [_row_to_deal(r) for r in rows]
+
+    today_iso = today or now_iso()[:10]
+
+    mock_deals: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for d in all_deals:
+        if exclude_mock and _looks_like_mock_source(
+            d.get("sourceLabel"), d.get("sourceKey")
+        ):
+            mock_deals.append({
+                "id": d["id"],
+                "title": d.get("title"),
+                "sourceLabel": d.get("sourceLabel"),
+                "sourceKey": d.get("sourceKey"),
+            })
+        else:
+            kept.append(d)
+
+    by_stage: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    by_side: dict[str, int] = {}
+
+    closings_soon: list[dict[str, Any]] = []
+    subjects_soon: list[dict[str, Any]] = []
+    stale_stages: list[dict[str, Any]] = []
+    thin_list: list[dict[str, Any]] = []
+
+    _TERMINAL_STAGES = {10}
+
+    for d in kept:
+        stage = d.get("currentStage")
+        if stage is not None:
+            by_stage[str(stage)] = by_stage.get(str(stage), 0) + 1
+        src = d.get("sourceLabel") or d.get("sourceKey") or "unknown"
+        by_source[str(src)] = by_source.get(str(src), 0) + 1
+        st = str(d.get("status") or "")
+        by_status[st] = by_status.get(st, 0) + 1
+        sd = str(d.get("side") or "")
+        by_side[sd] = by_side.get(sd, 0) + 1
+
+        completion = _iso_to_date_naive(d.get("completionDate"))
+        subject = _iso_to_date_naive(d.get("subjectRemovalDate"))
+        stage_at = _iso_to_date_naive(d.get("stageEnteredAt"))
+
+        days_to_close = _days_between(today_iso, completion)
+        if days_to_close is not None and -7 <= days_to_close <= near_close_days:
+            closings_soon.append({
+                "id": d["id"],
+                "title": d.get("title"),
+                "currentStage": stage,
+                "completionDate": completion,
+                "daysToClose": days_to_close,
+                "listPrice": d.get("listPrice"),
+                "offerPrice": d.get("offerPrice"),
+            })
+
+        days_to_subject = _days_between(today_iso, subject)
+        if days_to_subject is not None and -3 <= days_to_subject <= near_subject_days:
+            subjects_soon.append({
+                "id": d["id"],
+                "title": d.get("title"),
+                "currentStage": stage,
+                "subjectRemovalDate": subject,
+                "daysToSubject": days_to_subject,
+            })
+
+        days_in_stage = _days_between(stage_at, today_iso) if stage_at else None
+        if (
+            days_in_stage is not None
+            and days_in_stage >= stale_days
+            and stage not in _TERMINAL_STAGES
+        ):
+            stale_stages.append({
+                "id": d["id"],
+                "title": d.get("title"),
+                "currentStage": stage,
+                "stageEnteredAt": stage_at,
+                "daysInStage": days_in_stage,
+            })
+
+        thin_list.append({
+            "id": d["id"],
+            "title": d.get("title"),
+            "side": d.get("side"),
+            "currentStage": stage,
+            "stageEnteredAt": stage_at,
+            "completionDate": completion,
+            "subjectRemovalDate": subject,
+            "listingDate": _iso_to_date_naive(d.get("listingDate")),
+            "listPrice": d.get("listPrice"),
+            "offerPrice": d.get("offerPrice"),
+            "sourceLabel": d.get("sourceLabel"),
+            "sourceKey": d.get("sourceKey"),
+            "primaryContactId": d.get("primaryContactId"),
+            "mlsNumber": d.get("mlsNumber"),
+        })
+
+    closings_soon.sort(key=lambda x: (x.get("daysToClose") is None, x.get("daysToClose")))
+    subjects_soon.sort(key=lambda x: (x.get("daysToSubject") is None, x.get("daysToSubject")))
+    stale_stages.sort(key=lambda x: -(x.get("daysInStage") or 0))
+
+    return {
+        "generatedAt": now_iso(),
+        "today": today_iso,
+        "filters": {
+            "status": status,
+            "side": side,
+            "excludeMock": exclude_mock,
+            "nearCloseDays": near_close_days,
+            "nearSubjectDays": near_subject_days,
+            "staleDays": stale_days,
+        },
+        "totals": {
+            "activeAfterFilter": len(kept),
+            "mockExcluded": len(mock_deals),
+            "rawMatched": len(all_deals),
+            "byStatus": by_status,
+            "bySide": by_side,
+        },
+        "byStage": by_stage,
+        "bySource": by_source,
+        "mockDeals": mock_deals,
+        "closingsSoon": closings_soon,
+        "subjectsSoon": subjects_soon,
+        "staleStages": stale_stages,
+        "deals": thin_list,
+    }
 
 
 def list_deal_events(
@@ -812,7 +1032,7 @@ def move_deal_stage(
     force: bool = False,
     gate_checked: bool = False,
 ) -> dict[str, Any]:
-    """Move a deal to a 0-9 stage and append a stage_transition event."""
+    """Move a deal to a 0-10 stage and append a stage_transition event."""
     to_stage = _validate_stage(to_stage)
     existing = get_deal(conn, deal_id)
     if existing is None:
@@ -858,6 +1078,21 @@ def move_deal_stage(
             ("stage_entry", {"to_stage": to_stage}),
         ),
     )
+    # Auto-touch the working-state journal so the next session knows where
+    # this deal sits without re-reading deal_events. Best-effort: a failure
+    # here must not block the stage transition itself.
+    try:
+        from elevate_cli.data.working_state import touch_deal_stage_move
+        touch_deal_stage_move(
+            conn,
+            deal_id=deal_id,
+            deal_title=str(existing.get("title") or existing.get("address") or ""),
+            from_stage=from_stage,
+            to_stage=to_stage,
+            agent_kind=actor,
+        )
+    except Exception:
+        pass
     return get_deal(conn, deal_id)  # type: ignore[return-value]
 
 
@@ -966,7 +1201,7 @@ def _maybe_advance_from_workflow_signal(
 ) -> dict[str, Any] | None:
     try:
         if field in _WORKFLOW_ACCEPTED_OFFER_FIELDS and _present_signal(value):
-            return _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
+            return _move_if_current_stage(conn, deal_id, current_stage=6, to_stage=7, actor=actor)
     except DealPhaseGateBlocked:
         return None
     completed_stage = _workflow_stage_complete_stage(field)
@@ -1235,7 +1470,7 @@ def set_deal_fields(
     moved = None
     if _present_signal(updates.get("offer_accepted_at")):
         try:
-            moved = _move_if_current_stage(conn, deal_id, current_stage=5, to_stage=6, actor=actor)
+            moved = _move_if_current_stage(conn, deal_id, current_stage=6, to_stage=7, actor=actor)
         except DealPhaseGateBlocked:
             moved = None
     if moved is None:

@@ -8053,24 +8053,52 @@ For more help on a command:
     db_init_parser.set_defaults(func=cmd_db, db_action="init")
     db_parser.set_defaults(func=cmd_db, db_action="init", no_memory=False, quiet=False)
 
+    db_purge_parser = db_subparsers.add_parser(
+        "purge-sqlite-backup",
+        help="Delete SQLite snapshots left by the Postgres migration",
+        description=(
+            "Remove ~/.elevate/*.pre-pg-*-migration and "
+            "state.db.bak-* files created when data was copied into "
+            "Postgres. Defaults to dry-run; pass --confirm to actually "
+            "delete. Live .db / .sqlite files are never touched."
+        ),
+    )
+    db_purge_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually delete the backup files (default: dry-run preview)",
+    )
+    db_purge_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Only set the exit code (no per-file output)",
+    )
+    db_purge_parser.set_defaults(func=cmd_db, db_action="purge-sqlite-backup")
+
     # =========================================================================
     # parity-report + migrate-data commands (data module — Sprint 1D/1E)
     # =========================================================================
     from elevate_cli.data_cli import (
         add_apple_contacts_parser,
+        add_drift_check_parser,
+        add_migrate_aux_data_parser,
         add_migrate_data_parser,
         add_parity_report_parser,
         add_review_contacts_parser,
         add_review_unmatched_parser,
         add_scheduler_parser,
         add_sync_parser,
+        add_xposure_pcs_parser,
     )
     add_parity_report_parser(subparsers)
     add_migrate_data_parser(subparsers)
+    add_migrate_aux_data_parser(subparsers)
+    add_drift_check_parser(subparsers)
     add_review_contacts_parser(subparsers)
     add_sync_parser(subparsers)
     add_review_unmatched_parser(subparsers)
     add_apple_contacts_parser(subparsers)
+    add_xposure_pcs_parser(subparsers)
     add_scheduler_parser(subparsers)
 
     # =========================================================================

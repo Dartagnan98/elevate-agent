@@ -76,7 +76,8 @@ import {
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { api, type CronJob, type SessionInfo } from "@/lib/api";
-import type { AccessStatusResponse } from "@/lib/api-types";
+import type { AccessStatusResponse, LicenseStatusResponse } from "@/lib/api-types";
+import { LoginCard } from "@/components/LoginCard";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
@@ -147,8 +148,71 @@ function AccessLoadingPage() {
   );
 }
 
-function LockedDashboardRedirect() {
-  return <Navigate to="/hub" replace />;
+// Soft-locked page shown when a user lands on a route whose skill pack
+// they don't have (or had revoked). Doesn't break navigation — just an
+// upgrade CTA pointing them at Billing on Elevation HQ. Stays mounted so
+// when an admin restores access the polling pick-up flips it back to the
+// real feature route without the user reloading.
+function UpgradeRequiredPage() {
+  const billingUrl = "https://api.elevationrealestatehq.com/account#billing";
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        minHeight: "60vh",
+        padding: "32px 24px",
+        textAlign: "center",
+        gap: 14,
+      }}
+    >
+      <div
+        style={{
+          width: 44,
+          height: 44,
+          borderRadius: 10,
+          background: "rgba(217, 119, 87, 0.12)",
+          border: "1px solid rgba(217, 119, 87, 0.35)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#d97757",
+          fontSize: 20,
+        }}
+      >
+        ✦
+      </div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text-strong, #f5f4f2)" }}>
+        Upgrade to unlock this section
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text-dim, #8a8c8a)", maxWidth: 380, lineHeight: 1.45 }}>
+        This skill pack isn't on your current plan. Add it from your Elevation
+        Real Estate HQ billing to bring this tab back online.
+      </div>
+      <a
+        href={billingUrl}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          marginTop: 4,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "9px 18px",
+          background: "#d97757",
+          color: "#fff",
+          borderRadius: 6,
+          textDecoration: "none",
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        Open billing
+      </a>
+    </div>
+  );
 }
 
 function MarketingRedirect() {
@@ -381,7 +445,7 @@ function buildAccessControlledBuiltinRoutes(
   accessPending = false,
 ): Record<string, ComponentType> {
   const realEstateDashboard = hasRealEstateDashboard(packs);
-  const PendingOrLocked = accessPending ? AccessLoadingPage : LockedDashboardRedirect;
+  const PendingOrLocked = accessPending ? AccessLoadingPage : UpgradeRequiredPage;
   return {
     "/": accessPending ? AccessLoadingPage : realEstateDashboard ? RootRedirect : CoreRootRedirect,
     "/today": realEstateDashboard ? RealEstateTodayPage : PendingOrLocked,
@@ -440,6 +504,8 @@ export default function App() {
   const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
   const [accessChecked, setAccessChecked] = useState(false);
   const [accessVersion, setAccessVersion] = useState(0);
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
+  const [licenseChecked, setLicenseChecked] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -460,10 +526,47 @@ export default function App() {
     };
   }, [accessVersion]);
 
+  // License gate — if a fresh install has no signed-in user, render
+  // <LoginCard /> full-screen instead of dropping into an empty dashboard.
+  // Re-checks on the same auth-changed / focus signals as accessStatus.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getLicenseStatus()
+      .then((status) => {
+        if (!cancelled) setLicenseStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setLicenseStatus({ authenticated: false } as LicenseStatusResponse);
+      })
+      .finally(() => {
+        if (!cancelled) setLicenseChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accessVersion]);
+
   useEffect(() => {
     const handler = () => setAccessVersion((v) => v + 1);
     window.addEventListener("elevate:auth-changed", handler);
-    return () => window.removeEventListener("elevate:auth-changed", handler);
+
+    // Refresh entitlements when the window regains focus and every 30s so an
+    // admin revoking a skill pack lands on the user within seconds. The
+    // existing auth-changed event only fires on local login/logout, which
+    // misses remote revocations entirely.
+    const onFocus = () => setAccessVersion((v) => v + 1);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") onFocus();
+    });
+    const interval = window.setInterval(onFocus, 30_000);
+
+    return () => {
+      window.removeEventListener("elevate:auth-changed", handler);
+      window.removeEventListener("focus", onFocus);
+      window.clearInterval(interval);
+    };
   }, []);
 
   const realEstatePacks = accessStatus?.packs ?? DEFAULT_REAL_ESTATE_PACKS;
@@ -523,6 +626,30 @@ export default function App() {
     mql.addEventListener("change", onChange);
     return () => mql.removeEventListener("change", onChange);
   }, []);
+
+  // Auth gate — block the app shell until we know the license state. If the
+  // backend says unauthenticated, render the sign-in card full-screen. The
+  // LoginCard already dispatches `elevate:auth-changed` on success, which
+  // bumps accessVersion above and unmounts this gate automatically.
+  if (!licenseChecked) {
+    return (
+      <FullWindowAurora
+        label="Spinning up your agents"
+        title="Starting Elevate"
+        subtitle="Bringing the local agent runtime online."
+      />
+    );
+  }
+  if (!licenseStatus?.authenticated) {
+    return (
+      <div className="onboarding-overlay relative flex h-dvh items-center justify-center overflow-hidden px-4 py-8">
+        <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+        <div className="relative w-full max-w-md">
+          <LoginCard />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

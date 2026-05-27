@@ -5,6 +5,7 @@ import {
   logAdminAction,
   revokeLicensesForUser,
   setUserDeveloperFlag,
+  updateUserBlockedEntitlements,
   updateUserEntitlements,
   updateUserStatus,
   updateUserTier,
@@ -14,6 +15,7 @@ export const runtime = "nodejs";
 
 const Body = z.object({
   entitlements: z.array(z.string()).optional(),
+  blocked_entitlements: z.array(z.string()).optional(),
   tier: z.enum(["pro", "builder"]).optional(),
   status: z.enum(["active", "trialing", "inactive", "canceled", "past_due"]).optional(),
   revoke_licenses: z.boolean().optional(),
@@ -31,6 +33,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   if (body.entitlements) {
     await updateUserEntitlements(id, body.entitlements);
+  }
+  if (body.blocked_entitlements) {
+    await updateUserBlockedEntitlements(id, body.blocked_entitlements);
   }
   if (body.tier) {
     await updateUserTier(id, body.tier);

@@ -54,7 +54,7 @@ def compute_onboarding_status() -> dict[str, Any]:
 
     # 2. At least one source connector is in 'connected' state.
     try:
-        conns = build_source_connectors_response().get("connectors", [])
+        conns = build_source_connectors_response(include_prompts=False).get("connectors", [])
         connected = [c for c in conns if str(c.get("state") or "").lower() in {"connected", "ok"}]
         checks.append({
             "id": "source_connector",

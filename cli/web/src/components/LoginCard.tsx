@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, ChevronDown, Loader2, LogOut, Package } from "lucide-react";
 import { api } from "@/lib/api";
+import { useTheme } from "@/themes/context";
 import type {
   LicenseStatusResponse,
   LicenseActivateResponse,
@@ -24,6 +25,9 @@ interface Props {
 }
 
 export function LoginCard({ onAuthChange }: Props) {
+  const { themeName } = useTheme();
+  const logoSrc =
+    themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
   const [phase, setPhase] = useState<Phase>("loading");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -50,6 +54,22 @@ export function LoginCard({ onAuthChange }: Props) {
   }, [onAuthChange]);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  // Self-heal: if the desktop main process refreshes the license (admin
+  // revokes a pack on HQ, sign-out from another tab, etc.) or the window
+  // regains focus, re-fetch status so the form/card flips without a reload.
+  useEffect(() => {
+    const handler = () => loadStatus();
+    window.addEventListener("elevate:auth-changed", handler);
+    window.addEventListener("focus", handler);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") handler();
+    });
+    return () => {
+      window.removeEventListener("elevate:auth-changed", handler);
+      window.removeEventListener("focus", handler);
+    };
+  }, [loadStatus]);
 
   const handleSignIn = async () => {
     if (!email.trim() || !password) return;
@@ -227,9 +247,16 @@ export function LoginCard({ onAuthChange }: Props) {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Sign in to Elevation HQ</CardTitle>
-        <CardDescription>
+      <CardHeader className="items-center text-center">
+        <div className="flex h-8 items-center justify-center">
+          <img
+            src={logoSrc}
+            alt="Elevation"
+            className="h-7 w-auto object-contain"
+            draggable={false}
+          />
+        </div>
+        <CardDescription className="pt-1">
           Enter your Elevation Real Estate HQ credentials to unlock your skill packs.
         </CardDescription>
       </CardHeader>

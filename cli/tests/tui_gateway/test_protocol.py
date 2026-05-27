@@ -93,6 +93,7 @@ def test_emit_with_payload(capture):
     assert msg["method"] == "event"
     assert msg["params"]["type"] == "test.event"
     assert msg["params"]["session_id"] == "s1"
+    assert isinstance(msg["params"]["ts"], float)
     assert msg["params"]["payload"]["key"] == "val"
 
 
@@ -100,7 +101,9 @@ def test_emit_without_payload(capture):
     server, buf = capture
     server._emit("ping", "s2")
 
-    assert "payload" not in json.loads(buf.getvalue())["params"]
+    params = json.loads(buf.getvalue())["params"]
+    assert "payload" not in params
+    assert isinstance(params["ts"], float)
 
 
 # ── Blocking prompt round-trip ───────────────────────────────────────
@@ -221,9 +224,26 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
     lock = threading.Lock()
     server._sessions["live1234"] = {
         "agent": object(),
+        "events": [
+            {
+                "type": "message.start",
+                "session_id": "live1234",
+                "ts": 1710000000.0,
+            }
+        ],
+        "events_lock": lock,
+        "events_seq": 1,
         "history": [{"role": "user", "content": "keep going"}],
         "history_lock": lock,
         "running": True,
+        "running_tools": {
+            "tool-1": {
+                "tool_id": "tool-1",
+                "name": "browser_navigate",
+                "context": "https://example.test",
+                "started_at": 1710000001.0,
+            }
+        },
         "session_key": "20260409_010101_abc123",
         "transport": None,
     }
@@ -241,6 +261,17 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
     assert resp["result"]["session_id"] == "live1234"
     assert resp["result"]["persisted_session_id"] == "20260409_010101_abc123"
     assert resp["result"]["running"] is True
+    assert resp["result"]["replay_events"] == [
+        {"type": "message.start", "session_id": "live1234", "ts": 1710000000.0}
+    ]
+    assert resp["result"]["running_tools"] == [
+        {
+            "tool_id": "tool-1",
+            "name": "browser_navigate",
+            "context": "https://example.test",
+            "started_at": 1710000001.0,
+        }
+    ]
     assert resp["result"]["messages"] == [{"role": "user", "text": "keep going"}]
 
 

@@ -1,4 +1,4 @@
-import type { SourceInboxProfile, SourceInboxThread } from "@/lib/api";
+import type { SourceInboxProfile, SourceInboxResponse, SourceInboxThread } from "@/lib/api";
 import { isoTimeAgo } from "@/lib/utils";
 
 export function threadWhen(thread: SourceInboxThread): string {
@@ -150,6 +150,41 @@ export function isFollowUpThread(thread: SourceInboxThread): boolean {
   if ((thread.outboundCount ?? 0) < 1) return false;
   // Ball is in our court: last message came in.
   return thread.direction === "inbound";
+}
+
+export function leadSectionCount(
+  sourceInbox: SourceInboxResponse | null | undefined,
+  sectionId: string,
+  fallback = 0,
+): number {
+  const value = sourceInbox?.leadSections?.[sectionId]?.count;
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function threadMatchesSectionId(thread: SourceInboxThread, id: string): boolean {
+  if (thread.id === id) return true;
+  if (thread.threadId === id) return true;
+  if (thread.conversationId && thread.conversationId === id) return true;
+  return false;
+}
+
+export function leadSectionThreads(
+  threads: SourceInboxThread[],
+  sourceInbox: SourceInboxResponse | null | undefined,
+  sectionId: string,
+  fallback: SourceInboxThread[],
+): SourceInboxThread[] {
+  const section = sourceInbox?.leadSections?.[sectionId];
+  if (!section) return fallback;
+  const threadIds = new Set(section.threadIds ?? []);
+  return threads.filter((thread) => {
+    if (thread.leadSectionIds?.includes(sectionId)) return true;
+    if (threadIds.size === 0) return false;
+    for (const id of threadIds) {
+      if (threadMatchesSectionId(thread, id)) return true;
+    }
+    return false;
+  });
 }
 
 export function leadThreadBuckets(threads: SourceInboxThread[]) {

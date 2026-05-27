@@ -6,6 +6,7 @@ import {
   findUserByEmail,
   logAdminAction,
 } from "@/lib/store";
+import { mailerEnabled, passwordResetEmail, sendMail } from "@/lib/mailer";
 
 export const runtime = "nodejs";
 
@@ -13,10 +14,9 @@ const Body = z.object({
   email: z.string().email(),
 });
 
-// Returns `{ ok: true }` either way to prevent email-enumeration. The token
-// is delivered out-of-band — for now we surface `reset_url` in dev mode so an
-// admin can copy it to the user manually (matches the invite-acceptance UX).
-// Once Mailjet is wired into Elevate HQ, drop the dev_only block.
+// Returns `{ ok: true }` either way to prevent email-enumeration. When Mailjet
+// is configured we email the link silently. When it isn't, we fall back to
+// returning `dev_only.reset_url` so an admin can paste it to the user.
 export async function POST(req: NextRequest) {
   const parsed = Body.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) {
@@ -53,12 +53,30 @@ export async function POST(req: NextRequest) {
     payload: { ip, ua },
   });
 
-  // TODO: send via Mailjet once email infra lands. Until then, expose the URL
-  // in the response so the admin can paste it into Telegram/text. This is
-  // gated on the request URL origin so production callers still get the
-  // standard `{ ok: true }` and only the admin-panel side surfaces it.
   const origin = new URL(req.url).origin;
   const reset_url = `${origin}/reset?token=${token}`;
+
+  // Try to email it. If Mailjet isn't configured (or the send fails), fall
+  // back to surfacing the link in the response so an admin can deliver it
+  // manually — same behavior as before.
+  if (mailerEnabled()) {
+    const { subject, html } = passwordResetEmail({
+      resetUrl: reset_url,
+      expiresInMinutes: 60,
+    });
+    const result = await sendMail({
+      to: user.email,
+      subject,
+      html,
+    });
+
+    if (result.ok) {
+      return NextResponse.json({ ok: true });
+    }
+    // Log the failure but still respond 200 to avoid leaking state. Surface
+    // the dev fallback in case the operator needs it.
+    console.error("[auth/forgot] mailer failed:", result.error);
+  }
 
   return NextResponse.json({
     ok: true,

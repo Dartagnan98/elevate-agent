@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elevate</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #1a1b1a;
+    color: #f5f4f2;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 32px;
+  }
+  .card {
+    width: 380px;
+    background: #212321;
+    border: 1px solid #2a2c2a;
+    border-radius: 12px;
+    padding: 32px 28px;
+    -webkit-app-region: no-drag;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 4px;
+  }
+  .brand-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    background: #d97757;
+  }
+  .brand-name {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  h1 {
+    margin: 16px 0 6px;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .subtitle {
+    margin: 0 0 24px;
+    font-size: 13px;
+    color: #8a8c8a;
+    line-height: 1.4;
+  }
+  form { display: flex; flex-direction: column; gap: 12px; }
+  label {
+    font-size: 12px;
+    color: #b5b7b5;
+    margin-bottom: -8px;
+  }
+  input[type=email], input[type=password] {
+    background: #1a1b1a;
+    border: 1px solid #2a2c2a;
+    border-radius: 6px;
+    color: #f5f4f2;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus { border-color: #d97757; }
+  button.primary {
+    background: #d97757;
+    color: #fff;
+    border: 0;
+    border-radius: 6px;
+    padding: 11px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 6px;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+  button.primary:hover:not(:disabled) { background: #c66848; }
+  button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
+  .row-links {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 14px;
+    font-size: 12px;
+  }
+  a {
+    color: #d97757;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  a:hover { text-decoration: underline; }
+  .status {
+    min-height: 18px;
+    font-size: 12px;
+    margin-top: 8px;
+    line-height: 1.4;
+  }
+  .status.error { color: #e08a7a; }
+  .status.info { color: #8a8c8a; }
+  .divider {
+    border-top: 1px solid #2a2c2a;
+    margin: 20px 0 16px;
+  }
+  .alt-action {
+    font-size: 12px;
+    color: #8a8c8a;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <div class="brand-name">Elevate</div>
+    </div>
+    <h1>Sign in</h1>
+    <p class="subtitle">Use your Elevation Real Estate HQ account.</p>
+    <form id="loginForm">
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="email" autofocus required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <button id="submit" class="primary" type="submit">Sign in</button>
+      <div id="status" class="status"></div>
+    </form>
+    <div class="row-links">
+      <a id="forgot">Forgot password?</a>
+      <a id="signup">Create account</a>
+    </div>
+    <div class="divider"></div>
+    <div class="alt-action">
+      <a id="link-device">Sign in with a code instead</a>
+    </div>
+  </div>
+
+  <script>
+    const api = window.elevateDesktop.auth;
+
+    const form = document.getElementById("loginForm");
+    const status = document.getElementById("status");
+    const submit = document.getElementById("submit");
+    const emailInput = document.getElementById("email");
+    const passwordInput = document.getElementById("password");
+
+    function setStatus(text, kind) {
+      status.textContent = text || "";
+      status.className = "status" + (kind ? " " + kind : "");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
+      if (!email || !password) return;
+
+      submit.disabled = true;
+      setStatus("Signing in...", "info");
+
+      try {
+        const result = await api.login({ email, password });
+        if (result.ok) {
+          setStatus("Welcome back. Loading...", "info");
+          // main.js will swap the window to the dashboard once this resolves.
+        } else {
+          setStatus(result.error || "Could not sign in.", "error");
+          submit.disabled = false;
+        }
+      } catch (err) {
+        setStatus(err && err.message ? err.message : String(err), "error");
+        submit.disabled = false;
+      }
+    });
+
+    document.getElementById("forgot").addEventListener("click", () => {
+      api.openExternal("forgot");
+    });
+    document.getElementById("signup").addEventListener("click", () => {
+      api.openExternal("signup");
+    });
+    document.getElementById("link-device").addEventListener("click", () => {
+      api.openExternal("link");
+    });
+  </script>
+</body>
+</html>

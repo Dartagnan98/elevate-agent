@@ -23,6 +23,7 @@ import {
   Sparkles,
   Users,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { SkillInfo, SkillTreeNode } from "@/lib/api";
@@ -87,22 +88,164 @@ const REAL_ESTATE_WORKFLOWS = [
   },
 ] as const;
 
+const REAL_ESTATE_SKILL_NAMES = new Set([
+  "admin-agent",
+  "admin-result-writer",
+  "closing-admin",
+  "cma",
+  "cma-router",
+  "deal-matcher",
+  "digisign",
+  "gmail-doc-router",
+  "listing-build",
+  "marketing",
+  "marketing-landing",
+  "mlc",
+  "offer-review",
+  "outreach",
+  "outreach-lanes",
+  "photo-cleanup",
+  "real-estate-first-touch-outreach-run",
+  "relisting",
+  "seller-package",
+  "seller-update",
+  "seller-updates",
+  "signing-package",
+  "skyslope-listing-creation",
+  "skyslope-sync",
+  "subject-removal",
+  "webforms",
+  "xposure-pcs-pipeline",
+]);
+
+const REAL_ESTATE_KEYWORDS = [
+  "cma",
+  "deal",
+  "digisign",
+  "listing",
+  "lofty",
+  "mlc",
+  "offer",
+  "outreach",
+  "realtor",
+  "seller",
+  "signing",
+  "skyslope",
+  "subject-removal",
+  "webforms",
+  "xposure",
+];
+
+interface SkillGroupDefinition {
+  key: string;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}
+
+const SKILL_GROUPS: SkillGroupDefinition[] = [
+  {
+    key: "real-estate",
+    label: "Real estate skills",
+    description: "Forms, signatures, listings, leads, outreach, and MLS workflows.",
+    icon: BriefcaseBusiness,
+  },
+  {
+    key: "marketing-ads",
+    label: "Marketing & ads",
+    description: "Campaigns, ad audits, social posts, and growth workflows.",
+    icon: Megaphone,
+  },
+  {
+    key: "creative-media",
+    label: "Creative & media",
+    description: "Design, images, video, presentation, and content production.",
+    icon: Paintbrush,
+  },
+  {
+    key: "productivity-docs",
+    label: "Productivity & documents",
+    description: "Documents, PDFs, email, notes, and everyday work utilities.",
+    icon: FileText,
+  },
+  {
+    key: "research-data",
+    label: "Research & data",
+    description: "Research, data science, ML, and analysis helpers.",
+    icon: Search,
+  },
+  {
+    key: "engineering-automation",
+    label: "Engineering & automation",
+    description: "Coding, GitHub, agents, MCP, DevOps, and automation helpers.",
+    icon: Code2,
+  },
+  {
+    key: "other",
+    label: "Other skills",
+    description: "Installed skills that do not declare a clearer purpose yet.",
+    icon: Package,
+  },
+];
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-const PERSONAL_CATEGORIES = new Set<string | null>([null, "general", ""]);
-
-function isBuiltInSkill(skill: SkillInfo): boolean {
-  // Built-in skills ship inside ~/.elevate (Anthropic-distributed). Personal
-  // skills come from external dirs and almost always have a category set.
-  return PERSONAL_CATEGORIES.has(skill.category ?? null);
-}
 
 function fileIcon(name: string) {
   if (name === "SKILL.md") return Sparkles;
   if (name.endsWith(".md")) return FileText;
   return FileText;
+}
+
+function normalizeSkillCategory(category: string | null | undefined): string {
+  return (category || "uncategorized").trim().toLowerCase();
+}
+
+function isRealEstateSkill(skill: SkillInfo): boolean {
+  const name = skill.name.toLowerCase();
+  const category = normalizeSkillCategory(skill.category);
+  return (
+    category === "real-estate" ||
+    category === "real-estate-admin" ||
+    REAL_ESTATE_SKILL_NAMES.has(name) ||
+    REAL_ESTATE_KEYWORDS.some((keyword) => name.includes(keyword))
+  );
+}
+
+function skillGroupKey(skill: SkillInfo): string {
+  if (isRealEstateSkill(skill)) return "real-estate";
+
+  const category = normalizeSkillCategory(skill.category);
+  if (["ads", "direct-response", "social-media"].includes(category)) {
+    return "marketing-ads";
+  }
+  if (["creative", "media", "gaming"].includes(category)) {
+    return "creative-media";
+  }
+  if (["email", "note-taking", "productivity", "smart-home"].includes(category)) {
+    return "productivity-docs";
+  }
+  if (["data", "data-science", "mlops", "red-teaming", "research"].includes(category)) {
+    return "research-data";
+  }
+  if (["apple", "autonomous-ai-agents", "devops", "github", "mcp", "software-development"].includes(category)) {
+    return "engineering-automation";
+  }
+  return "other";
+}
+
+function groupSkillsByPurpose(skills: SkillInfo[]) {
+  const grouped = new Map(SKILL_GROUPS.map((group) => [group.key, [] as SkillInfo[]]));
+  for (const skill of skills) {
+    const key = skillGroupKey(skill);
+    const bucket = grouped.get(key) ?? grouped.get("other");
+    bucket?.push(skill);
+  }
+  return SKILL_GROUPS.map((definition) => ({
+    definition,
+    items: (grouped.get(definition.key) ?? []).sort((a, b) => a.name.localeCompare(b.name)),
+  })).filter((group) => group.items.length > 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -232,18 +375,8 @@ export default function SkillsPage() {
     );
   }, [skills, isSearching, lowerSearch]);
 
-  const personalSkills = useMemo(
-    () =>
-      filteredSkills
-        .filter((s) => !isBuiltInSkill(s))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    [filteredSkills],
-  );
-  const builtInSkills = useMemo(
-    () =>
-      filteredSkills
-        .filter(isBuiltInSkill)
-        .sort((a, b) => a.name.localeCompare(b.name)),
+  const skillGroups = useMemo(
+    () => groupSkillsByPurpose(filteredSkills),
     [filteredSkills],
   );
 
@@ -408,42 +541,26 @@ export default function SkillsPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto px-1 py-2">
-            <TreeSection
-              label="Personal skills"
-              items={personalSkills}
-              skillsByName={skillsByName}
-              trees={trees}
-              loadingTree={loadingTree}
-              expandedSkills={expandedSkills}
-              expandedFolders={expandedFolders}
-              selectedSkill={selectedSkill}
-              selectedPath={selectedPath}
-              togglingSkills={togglingSkills}
-              onSelectSkill={handleSelectSkill}
-              onToggleExpand={toggleSkillExpansion}
-              onToggleFolder={toggleFolder}
-              onToggleEnable={handleToggleSkill}
-              isSearching={isSearching}
-              defaultOpen={true}
-            />
-            <TreeSection
-              label="Built-in skills"
-              items={builtInSkills}
-              skillsByName={skillsByName}
-              trees={trees}
-              loadingTree={loadingTree}
-              expandedSkills={expandedSkills}
-              expandedFolders={expandedFolders}
-              selectedSkill={selectedSkill}
-              selectedPath={selectedPath}
-              togglingSkills={togglingSkills}
-              onSelectSkill={handleSelectSkill}
-              onToggleExpand={toggleSkillExpansion}
-              onToggleFolder={toggleFolder}
-              onToggleEnable={handleToggleSkill}
-              isSearching={isSearching}
-              defaultOpen={false}
-            />
+            {skillGroups.map(({ definition, items }) => (
+              <TreeSection
+                key={definition.key}
+                definition={definition}
+                items={items}
+                trees={trees}
+                loadingTree={loadingTree}
+                expandedSkills={expandedSkills}
+                expandedFolders={expandedFolders}
+                selectedSkill={selectedSkill}
+                selectedPath={selectedPath}
+                togglingSkills={togglingSkills}
+                onSelectSkill={handleSelectSkill}
+                onToggleExpand={toggleSkillExpansion}
+                onToggleFolder={toggleFolder}
+                onToggleEnable={handleToggleSkill}
+                isSearching={isSearching}
+                defaultOpen={definition.key === "real-estate"}
+              />
+            ))}
 
             {filteredSkills.length === 0 && (
               <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
@@ -484,9 +601,8 @@ export default function SkillsPage() {
 /* ------------------------------------------------------------------ */
 
 interface TreeSectionProps {
-  label: string;
+  definition: SkillGroupDefinition;
   items: SkillInfo[];
-  skillsByName: Map<string, SkillInfo>;
   trees: Record<string, SkillTreeNode[]>;
   loadingTree: string | null;
   expandedSkills: Set<string>;
@@ -504,7 +620,7 @@ interface TreeSectionProps {
 
 function TreeSection(props: TreeSectionProps) {
   const {
-    label,
+    definition,
     items,
     trees,
     loadingTree,
@@ -512,13 +628,17 @@ function TreeSection(props: TreeSectionProps) {
     expandedFolders,
     selectedSkill,
     selectedPath,
+    togglingSkills,
     onSelectSkill,
     onToggleExpand,
     onToggleFolder,
+    onToggleEnable,
     isSearching,
     defaultOpen,
   } = props;
   const [open, setOpen] = useState(defaultOpen || isSearching);
+  const Icon = definition.icon;
+  const enabledCount = items.filter((skill) => skill.enabled).length;
 
   useEffect(() => {
     if (isSearching) setOpen(true);
@@ -531,13 +651,23 @@ function TreeSection(props: TreeSectionProps) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-medium tracking-wide text-muted-foreground/70 hover:text-foreground transition-colors"
+        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-muted-foreground/80 transition-colors hover:bg-foreground/5 hover:text-foreground"
       >
         <ChevronRight
-          className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+          className={`h-3 w-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
         />
-        <span className="uppercase">{label}</span>
-        <span className="text-muted-foreground/40">({items.length})</span>
+        <Icon className="h-3.5 w-3.5 shrink-0 text-primary/80" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[11px] font-semibold text-foreground">
+            {definition.label}
+          </span>
+          <span className="block truncate text-[9.5px] leading-4 text-muted-foreground/65">
+            {definition.description}
+          </span>
+        </span>
+        <span className="shrink-0 rounded-sm border border-border px-1.5 py-0.5 text-[9.5px] tabular-nums text-muted-foreground">
+          {enabledCount}/{items.length}
+        </span>
       </button>
       {open && (
         <ul className="mt-0.5 space-y-px">
@@ -552,8 +682,10 @@ function TreeSection(props: TreeSectionProps) {
                   skill={skill}
                   selected={isSelected && selectedPath === "SKILL.md"}
                   expanded={isExpanded}
+                  toggling={togglingSkills.has(skill.name)}
                   onSelect={() => onSelectSkill(skill.name, "SKILL.md")}
                   onToggleExpand={() => onToggleExpand(skill.name)}
+                  onToggleEnable={() => onToggleEnable(skill)}
                 />
                 {isExpanded && (
                   <div className="ml-6 mt-0.5 mb-1 border-l border-border/60 pl-2">
@@ -595,56 +727,65 @@ function SkillRailRow({
   skill,
   selected,
   expanded,
+  toggling,
   onSelect,
   onToggleExpand,
+  onToggleEnable,
 }: {
   skill: SkillInfo;
   selected: boolean;
   expanded: boolean;
+  toggling: boolean;
   onSelect: () => void;
   onToggleExpand: () => void;
+  onToggleEnable: () => void;
 }) {
-  const handleRowClick = () => {
-    if (expanded) {
-      onToggleExpand();
-    } else {
-      onSelect();
-    }
-  };
   return (
-    <button
-      type="button"
-      onClick={handleRowClick}
-      aria-expanded={expanded}
+    <div
       className={`group flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left transition-colors ${
         selected
           ? "bg-foreground/10 text-foreground"
           : "text-foreground/85 hover:bg-foreground/5"
       }`}
     >
-      <span
-        className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/70 group-hover:text-foreground"
-        aria-hidden
+      <button
+        type="button"
+        onClick={onToggleExpand}
+        aria-expanded={expanded}
+        aria-label={expanded ? `Collapse ${skill.name}` : `Expand ${skill.name}`}
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:bg-foreground/10 hover:text-foreground"
       >
         <ChevronRight
           className={`h-3 w-3 transition-transform ${expanded ? "rotate-90" : ""}`}
         />
-      </span>
-      <Sparkles
-        className={`h-3 w-3 shrink-0 ${
-          skill.enabled ? "text-primary" : "text-muted-foreground/50"
-        }`}
-      />
-      <span
-        className={`min-w-0 flex-1 truncate text-[12px] ${
-          skill.enabled
-            ? "text-foreground"
-            : "text-muted-foreground line-through decoration-muted-foreground/40"
-        }`}
+      </button>
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-0.5 text-left"
       >
-        {skill.name}
-      </span>
-    </button>
+        <Sparkles
+          className={`h-3 w-3 shrink-0 ${
+            skill.enabled ? "text-primary" : "text-muted-foreground/50"
+          }`}
+        />
+        <span
+          className={`min-w-0 flex-1 truncate text-[12px] ${
+            skill.enabled
+              ? "text-foreground"
+              : "text-muted-foreground line-through decoration-muted-foreground/40"
+          }`}
+        >
+          {skill.name}
+        </span>
+      </button>
+      <Switch
+        checked={skill.enabled}
+        disabled={toggling}
+        onCheckedChange={() => onToggleEnable()}
+        className="h-4 w-7 [&>span]:h-3 [&>span]:w-3"
+      />
+    </div>
   );
 }
 

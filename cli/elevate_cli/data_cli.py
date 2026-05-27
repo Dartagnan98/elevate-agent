@@ -299,6 +299,116 @@ def add_migrate_data_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=lambda a: sys.exit(cmd_migrate_data(a)))
 
 
+# ─── elevate migrate-aux-data ──────────────────────────────────────────
+
+
+def cmd_migrate_aux_data(args: argparse.Namespace) -> int:
+    """Run the auxiliary one-shot migrations:
+
+      * orchestration.db          → PG orchestration_* tables
+      * usage_ledger.sqlite       → PG turn_usage
+      * state.db turn_usage rows  → PG turn_usage
+      * state.db chat tables      → PG chat_* tables
+      * ~/.elevate/sessions/*.jsonl → PG chat_messages
+
+    Idempotent — each step is sentinel-gated in ``_schema_migrations``.
+    Re-running this command after the first success is a no-op for
+    already-completed steps.
+    """
+    from elevate_cli.data._aux_data_migrate import run_all
+
+    try:
+        summary = run_all()
+    except Exception as exc:
+        print(f"migrate-aux-data failed: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True, default=str))
+    else:
+        print("migrate-aux-data summary:")
+        for step, result in summary.items():
+            if step == "completed_at":
+                continue
+            ran = result.get("ran") if isinstance(result, dict) else None
+            reason = result.get("reason") if isinstance(result, dict) else None
+            totals = result.get("totals") if isinstance(result, dict) else None
+            tag = "ran" if ran else f"skip ({reason})"
+            print(f"  - {step:18s} {tag}")
+            if totals:
+                for sub, pair in totals.items():
+                    print(f"      {sub}: total={pair[0]}  copied={pair[1]}")
+        print(f"completed_at: {summary.get('completed_at')}")
+    return 0
+
+
+def cmd_drift_check(args: argparse.Namespace) -> int:
+    """Compare SQLite SessionDB to the PG shadow.
+
+    Exit 0 if fully converged, 1 if drift detected, 2 on runner failure.
+    Read-only, takes no destructive action. Designed to be run at the
+    end of the SessionDB shadow soak before flipping reads to PG.
+    """
+    from elevate_cli.data._pg_drift_check import format_report, run
+
+    try:
+        result = run(sqlite_path=args.sqlite_path)
+    except Exception as exc:
+        print(f"drift-check failed: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_report(result))
+
+    return 0 if result["converged"] else 1
+
+
+def add_drift_check_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "drift-check",
+        help="Compare SQLite SessionDB to the PG shadow for SessionDB cutover gate",
+        description=(
+            "Read-only comparison between the legacy SQLite SessionDB "
+            "(~/.elevate/state.db) and the PG shadow. Reports row counts, "
+            "rows missing on either side, and content-hash mismatches "
+            "for sessions/messages/state_meta. Exit 0 means fully "
+            "converged — safe to flip reads to PG."
+        ),
+    )
+    parser.add_argument(
+        "--sqlite-path",
+        type=Path,
+        default=None,
+        help="Path to SQLite source (default: ~/.elevate/state.db)",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of human-readable output",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_drift_check(a)))
+
+
+def add_migrate_aux_data_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "migrate-aux-data",
+        help="Backfill PG from orchestration.db, usage_ledger.sqlite, state.db chat tables, and JSONL sessions",
+        description=(
+            "One-shot auxiliary data migration. Moves orchestration, "
+            "usage ledger, chat sessions/messages, and any legacy JSONL "
+            "transcripts into Postgres. Sentinel-gated and safe to "
+            "re-run. The chat-session migration is infrastructure-only "
+            "until the SessionDB writer cutover ships."
+        ),
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON instead of human-readable output",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_migrate_aux_data(a)))
+
+
 # ─── elevate review-contacts ────────────────────────────────────────────
 
 
@@ -408,7 +518,15 @@ def add_review_contacts_parser(subparsers: argparse._SubParsersAction) -> None:
 # ``integrations.crm.provider`` in the config and routes itself.
 
 
-_KNOWN_SOURCE_IDS = ("apple-messages", "crm", "social", "gmail")
+_KNOWN_SOURCE_IDS = (
+    "apple-messages",
+    "crm",
+    "social",
+    "gmail",
+    "xposure-pcs",
+    "buyer-brief",
+    "xposure-pcs-views",
+)
 
 
 def _load_connector_config() -> dict[str, Any]:
@@ -431,7 +549,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         targets = [s.strip() for s in args.source.split(",") if s.strip()]
     else:
         print(
-            "elevate sync: pass a source id (e.g. crm, apple-messages, social) or --all",
+            "elevate sync: pass a source id (e.g. crm, apple-messages, social, xposure-pcs) or --all",
             file=sys.stderr,
         )
         return 2
@@ -484,7 +602,7 @@ def add_sync_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.add_argument(
         "source", nargs="?", default=None,
-        help="Source id: apple-messages, crm, social, gmail (comma-separated for several)",
+        help="Source id: apple-messages, crm, social, gmail, xposure-pcs (comma-separated for several)",
     )
     parser.add_argument(
         "--all", action="store_true",
@@ -691,6 +809,61 @@ def add_apple_contacts_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Commit changes. Default is dry-run.",
     )
     parser.set_defaults(func=lambda a: sys.exit(cmd_apple_contacts(a)))
+
+
+def cmd_xposure_pcs(args: argparse.Namespace) -> int:
+    """elevate xposure-pcs resolve [--apply]
+
+    Heal the xposure-pcs identity gap. The legacy finalize-pcs-run.py
+    script wrote contacts straight into a SQLite operational.db that no
+    longer exists after the PG cutover — contacts came through the
+    migration but identity rows did not, so ~1,000 xposure-pcs rows
+    sit with primary_email/phone set and zero identities. That breaks
+    cross-source matching with Lofty / FUB / etc.
+
+    This walks every xposure-pcs contact, normalizes email + phone,
+    and either:
+
+      * merges the xposure-pcs contact INTO the canonical CRM contact
+        when an identity match exists (pcs_buyers + events + identities
+        all move over, xposure-pcs row deleted), or
+      * writes email/phone identity rows on the standalone xposure-pcs
+        contact so the next cross-source pull can merge.
+
+    Default is dry-run; pass --apply to commit.
+    """
+    from elevate_cli.xposure_pcs_backfill import render, run
+
+    sub = getattr(args, "xposure_pcs_cmd", None)
+    if sub != "resolve":
+        print("usage: elevate xposure-pcs resolve [--apply]")
+        return 2
+
+    stats = run(apply=bool(getattr(args, "apply", False)))
+    print(render(stats, applied=bool(getattr(args, "apply", False))))
+    return 0 if not stats.errors else 1
+
+
+def add_xposure_pcs_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "xposure-pcs",
+        help="Heal xposure-pcs identity gap (post-PG-cutover backfill)",
+        description=(
+            "Walk xposure-pcs contacts and write identity rows + merge "
+            "into canonical CRM contacts when emails/phones match. "
+            "Enrichment + merge only — never invents new contacts."
+        ),
+    )
+    sub = parser.add_subparsers(dest="xposure_pcs_cmd")
+    resolve = sub.add_parser(
+        "resolve",
+        help="Walk xposure-pcs contacts, write identities, merge dupes",
+    )
+    resolve.add_argument(
+        "--apply", action="store_true",
+        help="Commit changes. Default is dry-run.",
+    )
+    parser.set_defaults(func=lambda a: sys.exit(cmd_xposure_pcs(a)))
 
 
 # ─── elevate scheduler ─────────────────────────────────────────────────
