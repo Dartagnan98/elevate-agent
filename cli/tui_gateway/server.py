@@ -2624,6 +2624,43 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"status": "interrupted"})
 
 
+@method("session.stop")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    interrupted = False
+    killed = 0
+    if hasattr(session["agent"], "interrupt"):
+        try:
+            session["agent"].interrupt()
+            interrupted = True
+        except Exception:
+            pass
+    try:
+        from tools.process_registry import process_registry
+
+        killed = process_registry.kill_all()
+    except Exception:
+        pass
+    _clear_pending(params.get("session_id", ""))
+    try:
+        from tools.approval import resolve_gateway_approval
+
+        resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
+    except Exception:
+        pass
+    _mark_session_idle(session)
+    return _ok(
+        rid,
+        {
+            "status": "stopped",
+            "interrupted": interrupted,
+            "killed": killed,
+        },
+    )
+
+
 # ── Delegation: subagent tree observability + controls ───────────────
 # Powers the TUI's /agents overlay (see ui-tui/src/components/agentsOverlay).
 # The registry lives in tools/delegate_tool — these handlers are thin
@@ -2938,6 +2975,18 @@ def _emit_sign_in_nag(sid: str) -> None:
     )
 
 
+def _mark_session_idle(session: dict) -> None:
+    """Release the dashboard running latch once the visible turn is complete."""
+    lock = session.get("history_lock")
+    if lock is None:
+        session["running"] = False
+        session["running_tools"] = {}
+        return
+    with lock:
+        session["running"] = False
+        session["running_tools"] = {}
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
@@ -3097,6 +3146,18 @@ def _(rid, params: dict) -> dict:
                     raw = str(result)
                     status = "complete"
 
+                followup = None
+                if isinstance(result, dict) and status != "interrupted":
+                    followup = (
+                        result.get("pending_steer")
+                        or result.get("pending_soft_interrupt")
+                    )
+                has_followup = (
+                    bool(followup)
+                    and bool(str(followup).strip())
+                    and followup_rounds < 8
+                )
+
                 payload = {"text": raw, "usage": _get_usage(agent), "status": status}
                 if last_reasoning:
                     payload["reasoning"] = last_reasoning
@@ -3105,6 +3166,8 @@ def _(rid, params: dict) -> dict:
                 rendered = render_message(raw, cols)
                 if rendered:
                     payload["rendered"] = rendered
+                if not has_followup:
+                    _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
 
                 # Auto-generate a session title after the first exchange.
@@ -3135,12 +3198,6 @@ def _(rid, params: dict) -> dict:
                     except Exception as title_exc:
                         logger.debug("auto-title skipped: %s", title_exc)
 
-                followup = None
-                if isinstance(result, dict) and status != "interrupted":
-                    followup = (
-                        result.get("pending_steer")
-                        or result.get("pending_soft_interrupt")
-                    )
                 if (
                     not followup
                     or not str(followup).strip()
@@ -3200,12 +3257,13 @@ def _(rid, params: dict) -> dict:
             except Exception:
                 pass
             _clear_session_context(session_tokens)
-            with session["history_lock"]:
-                session["running"] = False
-                # Turn over — drop any running-tool snapshot so a later
-                # resume doesn't rebuild stale cards (e.g. a tool that
-                # errored out without a tool.complete frame).
-                session["running_tools"] = {}
+            # Turn over — drop any running-tool snapshot so a later resume
+            # doesn't rebuild stale cards (e.g. a tool that errored out without
+            # a tool.complete frame).  This is idempotent because final visible
+            # turns release the latch before post-response work such as title
+            # generation, avoiding "answer is done but chat is still running"
+            # on dashboard reattach.
+            _mark_session_idle(session)
 
     threading.Thread(target=run, daemon=True).start()
     return _ok(rid, {"status": "streaming"})

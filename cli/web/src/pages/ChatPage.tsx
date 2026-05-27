@@ -1912,6 +1912,7 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const currentAssistantRef = useRef<string | null>(null);
+  const stoppedAssistantIdsRef = useRef<Set<string>>(new Set());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -2805,6 +2806,13 @@ export default function ChatPage() {
     unsubs.push(
       gw.on("message.delta", (ev) => {
         if (!accepts(ev)) return;
+        const activeAssistantId = currentAssistantRef.current;
+        if (
+          activeAssistantId &&
+          stoppedAssistantIdsRef.current.has(activeAssistantId)
+        ) {
+          return;
+        }
         const text = eventText(ev);
         if (!text) return;
         ensureAssistant(eventMillis(ev));
@@ -2824,6 +2832,7 @@ export default function ChatPage() {
         const status = eventString(ev, "status") || "complete";
         const warning = eventString(ev, "warning");
         const messageId = currentAssistantRef.current ?? ensureAssistant(at);
+        const stopForced = stoppedAssistantIdsRef.current.has(messageId);
 
         // Snapshot the finished turn's tools + reasoning traces onto the
         // message so the activity digest survives a session resume. Any
@@ -2869,13 +2878,15 @@ export default function ChatPage() {
           return {
             ...message,
             content: finalContent,
-            status: status === "interrupted" ? "interrupted" : "complete",
+            status:
+              stopForced || status === "interrupted" ? "interrupted" : "complete",
             warning: warning || undefined,
             tools: turnTools.length ? turnTools : message.tools,
             traces: turnTraces.length ? turnTraces : message.traces,
             tokenCount: realTurnOutput ?? (estimatedTurnTokens || undefined),
           };
         });
+        stoppedAssistantIdsRef.current.delete(messageId);
         if (text) {
           addArtifacts(artifactsFromText(text, "assistant", messageId));
         }
@@ -3622,15 +3633,57 @@ export default function ChatPage() {
   const interruptCurrentTurn = useCallback(() => {
     if (!sessionId || state !== "open") return;
 
+    const activeAssistantId =
+      currentAssistantRef.current ??
+      [...messages]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.status === "streaming")
+        ?.id ??
+      null;
+    if (activeAssistantId) {
+      stoppedAssistantIdsRef.current.add(activeAssistantId);
+      currentAssistantRef.current = activeAssistantId;
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === activeAssistantId && message.status === "streaming"
+            ? { ...message, status: "interrupted" }
+            : message,
+        ),
+      );
+    }
     setQueuedInputs([]);
-    setStatusText("Interrupting...");
+    setTools([]);
+    setActivityTrace([]);
+    setSubagents((prev) =>
+      prev.map((subagent) =>
+        subagent.status === "running"
+          ? { ...subagent, completedAt: Date.now(), status: "error" }
+          : subagent,
+      ),
+    );
+    setBusy(false);
+    setStatusText("Stopping...");
     void gw
-      .request("session.interrupt", { session_id: sessionId })
+      .request("session.stop", { session_id: sessionId })
+      .then(() => {
+        setStatusText("Stopped");
+      })
       .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setBanner(`Interrupt failed: ${message}`);
+        void gw
+          .request("session.interrupt", { session_id: sessionId })
+          .then(() => {
+            setStatusText("Interrupted");
+          })
+          .catch((interruptError) => {
+            const message =
+              interruptError instanceof Error
+                ? interruptError.message
+                : String(interruptError);
+            const stopMessage = error instanceof Error ? error.message : String(error);
+            setBanner(`Stop failed: ${stopMessage}; interrupt failed: ${message}`);
+          });
       });
-  }, [gw, sessionId, state]);
+  }, [gw, messages, sessionId, state]);
 
   const removeQueuedInput = useCallback((queuedId: string) => {
     setQueuedInputs((prev) => prev.filter((item) => item.id !== queuedId));

@@ -639,6 +639,55 @@ def test_prompt_submit_forwards_persist_user_message(monkeypatch):
     }
 
 
+def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
+    captured = {}
+
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    fake_title = types.ModuleType("agent.title_generator")
+
+    def _maybe_auto_title(*args, **kwargs):
+        captured["running_during_title"] = server._sessions["sid"]["running"]
+
+    fake_title.maybe_auto_title = _maybe_auto_title
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setitem(sys.modules, "agent.title_generator", fake_title)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "ping"},
+            }
+        )
+
+        assert resp["result"]["status"] == "streaming"
+        assert captured["running_during_title"] is False
+        assert server._sessions["sid"]["running"] is False
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_image_attach_appends_local_image(monkeypatch):
     fake_cli = types.ModuleType("cli")
     fake_cli._IMAGE_EXTENSIONS = {".png"}
@@ -1204,6 +1253,40 @@ def test_interrupt_clears_multiple_own_pending():
         for key in ("r1", "r2"):
             server._pending.pop(key, None)
             server._answers.pop(key, None)
+
+
+def test_session_stop_forces_idle_and_kills_processes(monkeypatch):
+    calls = {"interrupt": 0}
+
+    class _Agent:
+        def interrupt(self):
+            calls["interrupt"] += 1
+
+    fake_registry = types.ModuleType("tools.process_registry")
+    fake_registry.process_registry = types.SimpleNamespace(kill_all=lambda: 2)
+    monkeypatch.setitem(sys.modules, "tools.process_registry", fake_registry)
+
+    server._sessions["sid"] = _session(
+        agent=_Agent(),
+        running=True,
+        running_tools={"tool-1": {"tool_id": "tool-1", "name": "shell"}},
+    )
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.stop", "params": {"session_id": "sid"}}
+        )
+
+        assert resp["result"] == {
+            "status": "stopped",
+            "interrupted": True,
+            "killed": 2,
+        }
+        assert calls["interrupt"] == 1
+        assert server._sessions["sid"]["running"] is False
+        assert server._sessions["sid"]["running_tools"] == {}
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_clear_pending_without_sid_clears_all():
