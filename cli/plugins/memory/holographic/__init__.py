@@ -661,6 +661,9 @@ class HolographicMemoryProvider(MemoryProvider):
             store = self._store
             retriever = self._retriever
 
+            def dump(payload: object) -> str:
+                return json.dumps(payload, default=str)
+
             if action == "add":
                 fact_id = store.add_fact(
                     args["content"],
@@ -697,7 +700,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     status="done",
                     data={"query": args.get("query"), "count": len(results)},
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return dump({"results": results, "count": len(results)})
 
             elif action == "probe":
                 results = retriever.probe(
@@ -705,7 +708,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return dump({"results": results, "count": len(results)})
 
             elif action == "related":
                 results = retriever.related(
@@ -713,7 +716,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return dump({"results": results, "count": len(results)})
 
             elif action == "reason":
                 entities = args.get("entities", [])
@@ -724,14 +727,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return dump({"results": results, "count": len(results)})
 
             elif action == "contradict":
                 results = retriever.contradict(
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return dump({"results": results, "count": len(results)})
 
             elif action == "embedding_status":
                 return json.dumps(store.embedding_status())
@@ -1019,7 +1022,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     min_trust=float(args.get("min_trust", 0.0)),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"facts": facts, "count": len(facts)})
+                return dump({"facts": facts, "count": len(facts)})
 
             else:
                 return tool_error(f"Unknown action: {action}")

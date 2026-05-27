@@ -529,35 +529,77 @@ class FactRetriever:
         """
         conn = self.store._conn
 
+        def rollback_quietly() -> None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        def pg_candidates(search_query: str) -> list:
+            """Use the Postgres tsvector index created by the memory migration."""
+            pg_params: list = [search_query]
+            pg_where = [
+                "f.search_tsv @@ q.query",
+                "COALESCE(f.status, 'active') = 'active'",
+            ]
+            if category:
+                pg_where.append("f.category = ?")
+                pg_params.append(category)
+            pg_where.append("f.trust_score >= ?")
+            pg_params.append(min_trust)
+            pg_where_sql = " AND ".join(pg_where)
+            pg_sql = f"""
+                WITH q AS (SELECT websearch_to_tsquery('english', ?) AS query)
+                SELECT f.*, ts_rank_cd(f.search_tsv, q.query) AS fts_rank_raw
+                FROM facts f, q
+                WHERE {pg_where_sql}
+                ORDER BY fts_rank_raw DESC
+                LIMIT ?
+            """
+            pg_params.append(limit)
+            try:
+                return conn.execute(pg_sql, pg_params).fetchall()
+            except Exception:
+                rollback_quietly()
+                return []
+
+        rows = pg_candidates(query)
+        if not rows:
+            fallback_query = self._fallback_fts_query(query)
+            if fallback_query and fallback_query != query:
+                rows = pg_candidates(fallback_query)
+
         # Build query - FTS5 rank is negative (lower = better match)
         # We need to join facts_fts with facts to get all columns
-        params: list = []
-        where_clauses = ["facts_fts MATCH ?", "COALESCE(f.status, 'active') = 'active'"]
-        params.append(query)
+        if not rows:
+            params: list = []
+            where_clauses = ["facts_fts MATCH ?", "COALESCE(f.status, 'active') = 'active'"]
+            params.append(query)
 
-        if category:
-            where_clauses.append("f.category = ?")
-            params.append(category)
+            if category:
+                where_clauses.append("f.category = ?")
+                params.append(category)
 
-        where_clauses.append("f.trust_score >= ?")
-        params.append(min_trust)
+            where_clauses.append("f.trust_score >= ?")
+            params.append(min_trust)
 
-        where_sql = " AND ".join(where_clauses)
+            where_sql = " AND ".join(where_clauses)
 
-        sql = f"""
-            SELECT f.*, facts_fts.rank as fts_rank_raw
-            FROM facts_fts
-            JOIN facts f ON f.fact_id = facts_fts.rowid
-            WHERE {where_sql}
-            ORDER BY facts_fts.rank
-            LIMIT ?
-        """
-        params.append(limit)
+            sql = f"""
+                SELECT f.*, facts_fts.rank as fts_rank_raw
+                FROM facts_fts
+                JOIN facts f ON f.fact_id = facts_fts.rowid
+                WHERE {where_sql}
+                ORDER BY facts_fts.rank
+                LIMIT ?
+            """
+            params.append(limit)
 
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except Exception:
-            rows = []
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except Exception:
+                rollback_quietly()
+                rows = []
 
         if not rows:
             fallback_query = self._fallback_fts_query(query)
@@ -566,6 +608,7 @@ class FactRetriever:
                 try:
                     rows = conn.execute(sql, fallback_params).fetchall()
                 except Exception:
+                    rollback_quietly()
                     rows = []
 
         if not rows:
