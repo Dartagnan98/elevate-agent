@@ -42,15 +42,33 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 
 const REAL_ESTATE_WORKFLOWS = [
   {
-    key: "leads",
-    icon: Users,
-    label: "Leads",
+    key: "marketing",
+    icon: Megaphone,
+    label: "Marketing",
     names: [
+      "cma",
+      "cma-generator",
+      "cma-router",
+      "market-stats-watcher",
+      "marketing",
+      "marketing-landing",
+      "seller-update",
+      "seller-updates",
+      "humanizer",
+      "photo-cleanup",
+    ],
+  },
+  {
+    key: "sales",
+    icon: Users,
+    label: "Sales",
+    names: [
+      "lead-scorer",
+      "listing-outreach",
+      "outreach",
       "outreach-lanes",
       "real-estate-first-touch-outreach-run",
-      "lead-scorer",
-      "property-lookup",
-      "gmail-doc-router",
+      "xposure-pcs-pipeline",
     ],
   },
   {
@@ -59,9 +77,7 @@ const REAL_ESTATE_WORKFLOWS = [
     label: "Admin",
     names: [
       "admin-agent",
-      "cma",
       "listing-build",
-      "seller-update",
       "seller-package",
       "offer-review",
       "deal-matcher",
@@ -71,7 +87,10 @@ const REAL_ESTATE_WORKFLOWS = [
       "skyslope-sync",
       "mlc",
       "webforms",
-      "photo-cleanup",
+      "property-lookup",
+      "quickbooks",
+      "relisting",
+      "skyleigh-vault",
     ],
   },
   {
@@ -80,12 +99,6 @@ const REAL_ESTATE_WORKFLOWS = [
     label: "Social Media",
     names: ["social-content-engine"],
   },
-  {
-    key: "ads",
-    icon: Megaphone,
-    label: "Ads",
-    names: ["marketing"],
-  },
 ] as const;
 
 const REAL_ESTATE_SKILL_NAMES = new Set([
@@ -93,18 +106,25 @@ const REAL_ESTATE_SKILL_NAMES = new Set([
   "admin-result-writer",
   "closing-admin",
   "cma",
+  "cma-generator",
   "cma-router",
   "deal-matcher",
   "digisign",
   "gmail-doc-router",
+  "humanizer",
+  "lead-scorer",
   "listing-build",
+  "listing-outreach",
   "marketing",
   "marketing-landing",
+  "market-stats-watcher",
   "mlc",
   "offer-review",
   "outreach",
   "outreach-lanes",
   "photo-cleanup",
+  "property-lookup",
+  "quickbooks",
   "real-estate-first-touch-outreach-run",
   "relisting",
   "seller-package",
@@ -113,10 +133,53 @@ const REAL_ESTATE_SKILL_NAMES = new Set([
   "signing-package",
   "skyslope-listing-creation",
   "skyslope-sync",
+  "social-content-engine",
   "subject-removal",
   "webforms",
   "xposure-pcs-pipeline",
 ]);
+
+const REAL_ESTATE_CATEGORY_GROUPS: Record<string, string> = {
+  "real-estate": "real-estate-admin",
+  "real-estate-admin": "real-estate-admin",
+  "real-estate-cma": "real-estate-marketing",
+  "real-estate-leads": "real-estate-sales",
+  "real-estate-marketing": "real-estate-marketing",
+  "real-estate-sales": "real-estate-sales",
+  "real-estate-social": "real-estate-social-media",
+  "real-estate-social-media": "real-estate-social-media",
+};
+
+const REAL_ESTATE_GROUP_LABELS: Record<string, string> = {
+  "real-estate-admin": "Admin",
+  "real-estate-marketing": "Marketing",
+  "real-estate-sales": "Sales",
+  "real-estate-social-media": "Social Media",
+};
+
+const REAL_ESTATE_MARKETING_SKILLS = new Set([
+  "cma",
+  "cma-generator",
+  "cma-router",
+  "humanizer",
+  "market-stats-watcher",
+  "marketing",
+  "marketing-landing",
+  "photo-cleanup",
+  "seller-update",
+  "seller-updates",
+]);
+
+const REAL_ESTATE_SALES_SKILLS = new Set([
+  "lead-scorer",
+  "listing-outreach",
+  "outreach",
+  "outreach-lanes",
+  "real-estate-first-touch-outreach-run",
+  "xposure-pcs-pipeline",
+]);
+
+const REAL_ESTATE_SOCIAL_SKILLS = new Set(["social-content-engine"]);
 
 const REAL_ESTATE_KEYWORDS = [
   "cma",
@@ -145,10 +208,28 @@ interface SkillGroupDefinition {
 
 const SKILL_GROUPS: SkillGroupDefinition[] = [
   {
-    key: "real-estate",
-    label: "Real estate skills",
-    description: "Forms, signatures, listings, leads, outreach, and MLS workflows.",
+    key: "real-estate-marketing",
+    label: "Marketing",
+    description: "CMA, listing launch, seller updates, and market-facing assets.",
+    icon: Megaphone,
+  },
+  {
+    key: "real-estate-sales",
+    label: "Sales",
+    description: "Lead scoring, outreach, follow-up lanes, and buyer/seller handoff.",
+    icon: Users,
+  },
+  {
+    key: "real-estate-admin",
+    label: "Admin",
+    description: "Forms, signatures, deals, listings, docs, and MLS operations.",
     icon: BriefcaseBusiness,
+  },
+  {
+    key: "real-estate-social-media",
+    label: "Social Media",
+    description: "Social content ideation, queueing, scheduling, and approvals.",
+    icon: Paintbrush,
   },
   {
     key: "marketing-ads",
@@ -206,6 +287,7 @@ function isRealEstateSkill(skill: SkillInfo): boolean {
   const name = skill.name.toLowerCase();
   const category = normalizeSkillCategory(skill.category);
   return (
+    category.startsWith("real-estate") ||
     category === "real-estate" ||
     category === "real-estate-admin" ||
     REAL_ESTATE_SKILL_NAMES.has(name) ||
@@ -213,8 +295,32 @@ function isRealEstateSkill(skill: SkillInfo): boolean {
   );
 }
 
+function realEstateSkillGroupKey(skill: SkillInfo): string | null {
+  const name = skill.name.toLowerCase();
+  const category = normalizeSkillCategory(skill.category);
+  const categoryGroup = REAL_ESTATE_CATEGORY_GROUPS[category];
+  if (categoryGroup) return categoryGroup;
+  if (REAL_ESTATE_SOCIAL_SKILLS.has(name)) return "real-estate-social-media";
+  if (REAL_ESTATE_MARKETING_SKILLS.has(name)) return "real-estate-marketing";
+  if (REAL_ESTATE_SALES_SKILLS.has(name)) return "real-estate-sales";
+  if (isRealEstateSkill(skill)) return "real-estate-admin";
+  return null;
+}
+
+function displaySkillCategory(skill: SkillInfo): string {
+  const realEstateGroup = realEstateSkillGroupKey(skill);
+  if (realEstateGroup) return REAL_ESTATE_GROUP_LABELS[realEstateGroup] ?? "Real Estate";
+  const category = normalizeSkillCategory(skill.category);
+  if (!category || category === "uncategorized") return "Local";
+  return category
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function skillGroupKey(skill: SkillInfo): string {
-  if (isRealEstateSkill(skill)) return "real-estate";
+  const realEstateGroup = realEstateSkillGroupKey(skill);
+  if (realEstateGroup) return realEstateGroup;
 
   const category = normalizeSkillCategory(skill.category);
   if (["ads", "direct-response", "social-media"].includes(category)) {
@@ -503,7 +609,7 @@ export default function SkillsPage() {
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
               <Route className="h-3.5 w-3.5 text-primary" />
-              Real estate workflows
+              Real estate skill sections
             </div>
             <Badge variant="outline">
               {enabledCount}/{skills.length} enabled
@@ -558,7 +664,7 @@ export default function SkillsPage() {
                 onToggleFolder={toggleFolder}
                 onToggleEnable={handleToggleSkill}
                 isSearching={isSearching}
-                defaultOpen={definition.key === "real-estate"}
+                defaultOpen={definition.key.startsWith("real-estate-")}
               />
             ))}
 
@@ -904,7 +1010,7 @@ function SkillDetail({
     return skill.enabled ? "Slash command + auto" : "Disabled";
   }, [skill.enabled]);
 
-  const addedBy = skill.category || "Local";
+  const addedBy = displaySkillCategory(skill);
 
   return (
     <div className="flex flex-1 flex-col">
@@ -1075,7 +1181,7 @@ function WorkflowFlowCard({
         ))}
       </div>
       <div className="mt-3 text-[0.68rem] leading-4 text-muted-foreground">
-        {enabled} enabled in this workflow.
+        {enabled} enabled in this section.
       </div>
     </div>
   );

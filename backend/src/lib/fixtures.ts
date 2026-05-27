@@ -16,6 +16,7 @@ export const FIXTURE_SKILLS = [
     tier_required: "pro",
     manifest: {
       description: "Generate a comparative market analysis from MLS + local comps.",
+      category: "real-estate-marketing",
       tags: ["real-estate", "pricing"],
       entitlement: "real_estate_cma",
     },
@@ -27,6 +28,7 @@ export const FIXTURE_SKILLS = [
     tier_required: "pro",
     manifest: {
       description: "Draft seller outreach messages tuned to the listing's condition.",
+      category: "real-estate-sales",
       tags: ["real-estate", "outreach"],
       entitlement: "real_estate_sales",
     },
@@ -38,6 +40,7 @@ export const FIXTURE_SKILLS = [
     tier_required: "builder",
     manifest: {
       description: "Advanced skill — only visible at builder tier.",
+      category: "real-estate-admin",
       entitlement: "real_estate_admin",
     },
     body: "# Builder-Only\n\nThis would only show up for builder-tier subs.\n",

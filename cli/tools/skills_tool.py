@@ -645,7 +645,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if len(description) > MAX_DESCRIPTION_LENGTH:
                     description = description[:MAX_DESCRIPTION_LENGTH - 3] + "..."
 
-                category = _get_category_from_path(skill_md)
+                raw_category = frontmatter.get("category")
+                category = str(raw_category).strip() if raw_category else None
+                if not category:
+                    category = _get_category_from_path(skill_md)
 
                 seen_names.add(name)
                 skills.append({

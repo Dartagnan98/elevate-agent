@@ -100,6 +100,13 @@ def _write_skill(root: Path, name: str, body: str, manifest: dict) -> None:
     desc = manifest.get("description")
     if desc:
         front.append(f"description: {json.dumps(str(desc))}")
+    category = (
+        manifest.get("category")
+        or manifest.get("skill_category")
+        or manifest.get("section_key")
+    )
+    if category:
+        front.append(f"category: {json.dumps(str(category))}")
     tags = manifest.get("tags")
     if tags:
         front.append(f"tags: {json.dumps(list(tags))}")

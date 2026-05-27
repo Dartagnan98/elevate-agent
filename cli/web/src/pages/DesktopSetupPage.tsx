@@ -81,7 +81,7 @@ const REQUIRED_AGENT_IDS = new Set(["executive-assistant", "admin"]);
 const PACK_ACCENT: Record<string, string> = {
   elevate_core: "Basic",
   real_estate_admin: "Admin",
-  real_estate_sales: "Leads",
+  real_estate_sales: "Sales",
   real_estate_marketing: "Marketing",
   real_estate_cma: "CMA",
 };

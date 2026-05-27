@@ -98,9 +98,9 @@ PACK_SPECS: tuple[PackSpec, ...] = (
     ),
     PackSpec(
         pack_id=ENTITLEMENT_REAL_ESTATE_SALES,
-        label="Leads",
+        label="Sales",
         entitlement=ENTITLEMENT_REAL_ESTATE_SALES,
-        description="Lead inbox, profile matching, buyer searches, follow-ups, skipped/hot lead queues, and handoff to Admin.",
+        description="Sales inbox, profile matching, buyer searches, follow-ups, skipped/hot lead queues, and handoff to Admin.",
         items=(
             PackItemSpec("crm_source", "accounts", "CRM / lead database", "Where leads, profiles, conversations, and pipeline status come from.", ("CRM_API_KEY", "LOFTY_API_KEY", "FOLLOWUPBOSS_API_KEY", "SIERRA_API_KEY"), sort_order=10),
             PackItemSpec("message_sources", "accounts", "Message sources", "Email, SMS, Instagram, WhatsApp, or CRM messages that populate conversations.", ("GMAIL_CLIENT_ID", "TWILIO_ACCOUNT_SID", "META_ACCESS_TOKEN", "WHATSAPP_TOKEN"), sort_order=20),

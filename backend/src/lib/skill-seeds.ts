@@ -14,6 +14,8 @@ export type SeedSkill = {
 type SeedRoot = {
   dir: string;
   entitlement: string;
+  category: string;
+  dashboardModules?: string[];
 };
 
 type ParseSkillOptions = {
@@ -30,6 +32,10 @@ type ContentPackSkill = {
   entitlement?: unknown;
   tier_required?: unknown;
   tierRequired?: unknown;
+  category?: unknown;
+  skillCategory?: unknown;
+  section?: unknown;
+  sectionLabel?: unknown;
   dashboardModules?: unknown;
   dashboard_modules?: unknown;
   tags?: unknown;
@@ -58,22 +64,28 @@ function defaultSeedRoots(): SeedRoot[] {
     {
       dir: path.join(root, "cli", "skills", "real-estate-admin"),
       entitlement: "real_estate_admin",
+      category: "real-estate-admin",
     },
     {
       dir: path.join(root, "cli", "skills", "lead-scorer"),
       entitlement: "real_estate_sales",
+      category: "real-estate-sales",
     },
     {
       dir: path.join(root, "cli", "skills", "outreach-lanes"),
       entitlement: "real_estate_sales",
+      category: "real-estate-sales",
     },
     {
       dir: path.join(root, "cli", "skills", "social-content-engine"),
       entitlement: "real_estate_marketing",
+      category: "real-estate-social-media",
+      dashboardModules: ["real_estate_marketing"],
     },
     {
       dir: path.join(root, "cli", "skills", "cma"),
       entitlement: "real_estate_cma",
+      category: "real-estate-marketing",
     },
   ];
 }
@@ -92,6 +104,7 @@ function configuredSeedRoots(): SeedRoot[] {
       return {
         entitlement: entitlement.trim() || "real_estate_admin",
         dir: path.resolve(dir.trim()),
+        category: "real-estate-admin",
       };
     });
 }
@@ -184,6 +197,8 @@ function parseSkillFile(
       name = options.name || unquote(value);
     } else if (key === "description") {
       manifest.description = unquote(value);
+    } else if (key === "category") {
+      manifest.category = unquote(value);
     } else if (key === "tags") {
       tags = parseList(value);
     }
@@ -298,6 +313,9 @@ function contentPackSkills(): SeedSkill[] {
       if (!fs.existsSync(skillFile)) continue;
 
       const skillName = asText(rawSkill.name);
+      const category =
+        asText(rawSkill.category) || asText(rawSkill.skillCategory);
+      const section = asText(rawSkill.section) || asText(rawSkill.sectionLabel);
       const dashboardModules = [
         ...asList(rawSkill.dashboardModules),
         ...asList(rawSkill.dashboard_modules),
@@ -317,6 +335,8 @@ function contentPackSkills(): SeedSkill[] {
         pack_label: packLabel,
         pack_version: packVersion || undefined,
       };
+      if (category) extraManifest.category = category;
+      if (section) extraManifest.section = section;
       if (dashboardModules.length > 0) extraManifest.dashboard_modules = dashboardModules;
       if (defaultJobState) extraManifest.default_job_state = defaultJobState;
       if (extraTags.length > 0) extraManifest.tags = extraTags;
@@ -345,7 +365,11 @@ export function defaultSkills(): SeedSkill[] {
 
   for (const root of configuredSeedRoots()) {
     for (const file of collectSkillFiles(root.dir)) {
-      const skill = parseSkillFile(file, root.entitlement);
+      const manifest: Record<string, unknown> = { category: root.category };
+      if (root.dashboardModules?.length) {
+        manifest.dashboard_modules = root.dashboardModules;
+      }
+      const skill = parseSkillFile(file, root.entitlement, { manifest });
       if (skill) byName.set(skill.name, skill);
     }
   }
