@@ -94,6 +94,26 @@ SKILLS_DIR = ELEVATE_HOME / "skills"
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
+_REAL_ESTATE_SKILL_CATEGORIES = {
+    "cma": "real-estate-marketing",
+    "cma-generator": "real-estate-marketing",
+    "cma-router": "real-estate-marketing",
+    "humanizer": "real-estate-marketing",
+    "market-stats-watcher": "real-estate-marketing",
+    "marketing": "real-estate-marketing",
+    "marketing-landing": "real-estate-marketing",
+    "photo-cleanup": "real-estate-marketing",
+    "seller-update": "real-estate-marketing",
+    "seller-updates": "real-estate-marketing",
+    "lead-scorer": "real-estate-sales",
+    "listing-outreach": "real-estate-sales",
+    "outreach": "real-estate-sales",
+    "outreach-lanes": "real-estate-sales",
+    "real-estate-first-touch-outreach-run": "real-estate-sales",
+    "xposure-pcs-pipeline": "real-estate-sales",
+    "social-content-engine": "real-estate-social-media",
+}
+
 # Platform identifiers for the 'platforms' frontmatter field.
 # Maps user-friendly names to sys.platform prefixes.
 _PLATFORM_MAP = {
@@ -645,8 +665,11 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if len(description) > MAX_DESCRIPTION_LENGTH:
                     description = description[:MAX_DESCRIPTION_LENGTH - 3] + "..."
 
+                inferred_category = _REAL_ESTATE_SKILL_CATEGORIES.get(str(name).lower())
                 raw_category = frontmatter.get("category")
                 category = str(raw_category).strip() if raw_category else None
+                if inferred_category:
+                    category = inferred_category
                 if not category:
                     category = _get_category_from_path(skill_md)
 

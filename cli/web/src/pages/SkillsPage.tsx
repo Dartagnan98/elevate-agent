@@ -298,11 +298,11 @@ function isRealEstateSkill(skill: SkillInfo): boolean {
 function realEstateSkillGroupKey(skill: SkillInfo): string | null {
   const name = skill.name.toLowerCase();
   const category = normalizeSkillCategory(skill.category);
-  const categoryGroup = REAL_ESTATE_CATEGORY_GROUPS[category];
-  if (categoryGroup) return categoryGroup;
   if (REAL_ESTATE_SOCIAL_SKILLS.has(name)) return "real-estate-social-media";
   if (REAL_ESTATE_MARKETING_SKILLS.has(name)) return "real-estate-marketing";
   if (REAL_ESTATE_SALES_SKILLS.has(name)) return "real-estate-sales";
+  const categoryGroup = REAL_ESTATE_CATEGORY_GROUPS[category];
+  if (categoryGroup) return categoryGroup;
   if (isRealEstateSkill(skill)) return "real-estate-admin";
   return null;
 }
