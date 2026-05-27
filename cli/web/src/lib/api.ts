@@ -818,10 +818,14 @@ export const api = {
     fetchJSON<ActionResponse>("/api/gateway/restart", { method: "POST" }),
   updateElevate: () =>
     fetchJSON<ActionResponse>("/api/elevate/update", { method: "POST" }),
-  getUpdateStatus: (refresh = false) =>
-    refresh
-      ? fetchJSON<UpdateStatusResponse>("/api/elevate/update/status?refresh=true")
-      : cachedFetchJSON<UpdateStatusResponse>("/api/elevate/update/status", 30_000),
+  getUpdateStatus: (refresh = false) => {
+    if (refresh) {
+      clearGetCache();
+      return fetchJSON<UpdateStatusResponse>("/api/elevate/update/status?refresh=true")
+        .finally(clearGetCache);
+    }
+    return cachedFetchJSON<UpdateStatusResponse>("/api/elevate/update/status", 30_000);
+  },
   getActionStatus: (name: string, lines = 200) =>
     fetchJSON<ActionStatusResponse>(
       `/api/actions/${encodeURIComponent(name)}/status?lines=${lines}`,
