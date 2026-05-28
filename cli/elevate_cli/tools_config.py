@@ -347,28 +347,9 @@ TOOL_CATEGORIES = {
         "icon": "🌐",
         "providers": [
             {
-                "name": "Nous Subscription (Browser Use cloud)",
-                "badge": "subscription",
-                "tag": "Managed Browser Use billed to your subscription",
-                "env_vars": [],
-                "browser_provider": "browser-use",
-                "requires_nous_auth": True,
-                "managed_nous_feature": "browser",
-                "override_env_vars": ["BROWSER_USE_API_KEY"],
-            },
-            {
-                "name": "Browser Use",
-                "badge": "paid",
-                "tag": "Cloud browser automation; no local Playwright or Chromium install",
-                "env_vars": [
-                    {"key": "BROWSER_USE_API_KEY", "prompt": "Browser Use API key", "url": "https://browser-use.com"},
-                ],
-                "browser_provider": "browser-use",
-            },
-            {
                 "name": "Local Browser",
                 "badge": "★ recommended · free",
-                "tag": "Headless Chromium, no API key needed",
+                "tag": "Runs on your machine — your real logged-in Chrome on desktop, headless Chromium otherwise. No API key.",
                 "env_vars": [],
                 "browser_provider": "local",
             },

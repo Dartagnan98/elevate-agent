@@ -4345,7 +4345,7 @@ def show_config():
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),
         ("TAVILY_API_KEY", "Tavily"),
-        ("BROWSER_USE_API_KEY", "Browser Use"),
+        # Browser Use cloud removed — Elevate is local-first; no browser key.
         ("FAL_KEY", "FAL"),
     ]
     

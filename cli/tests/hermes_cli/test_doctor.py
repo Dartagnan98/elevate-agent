@@ -248,9 +248,11 @@ def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkey
     out = helper._run_doctor_and_capture(monkeypatch, tmp_path, provider="")
 
     assert "Docker backend is not available inside Termux" in out
-    assert "Browser Use not configured" in out
-    assert "1) Run elevate setup and choose Browser Use" in out
-    assert "2) Set BROWSER_USE_API_KEY, or activate managed Browser Use" in out
+    # Elevate is local-first now: doctor reports local browser mode and never
+    # nags about the removed Browser Use cloud key.
+    assert "Browser Use" not in out
+    assert "BROWSER_USE_API_KEY" not in out
+    assert "local mode" in out
     assert "Node.js not found (optional developer tooling in Termux)" in out
     assert "docker not found (optional)" not in out
 
@@ -345,8 +347,9 @@ def test_run_doctor_termux_does_not_mark_browser_available_without_agent_browser
     assert "✓ browser" not in out
     assert "browser" in out
     assert "system dependency not met" in out
-    assert "Browser Use not configured" in out
-    assert "Set BROWSER_USE_API_KEY, or activate managed Browser Use" in out
+    # Browser Use cloud removed — doctor is local-first and never references it.
+    assert "Browser Use" not in out
+    assert "BROWSER_USE_API_KEY" not in out
 
 
 def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, tmp_path):

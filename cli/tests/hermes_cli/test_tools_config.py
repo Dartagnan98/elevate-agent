@@ -343,7 +343,10 @@ def test_save_platform_tools_still_preserves_mcp_with_platform_default_present()
     assert "terminal" not in saved
 
 
-def test_visible_providers_include_nous_subscription_when_logged_in(monkeypatch):
+def test_browser_category_is_local_first_no_browser_use_cloud(monkeypatch):
+    """Browser Use cloud (and its Nous-managed entry) were removed — Elevate is
+    local-first. Even logged into Nous, the browser picker offers only local
+    backends and never the cloud Browser Use provider."""
     monkeypatch.setattr("elevate_cli.tools_config.managed_nous_tools_enabled", lambda: True)
     config = {"model": {"provider": "nous"}}
 
@@ -354,7 +357,12 @@ def test_visible_providers_include_nous_subscription_when_logged_in(monkeypatch)
 
     providers = _visible_providers(TOOL_CATEGORIES["browser"], config)
 
-    assert providers[0]["name"].startswith("Nous Subscription")
+    names = [p["name"] for p in providers]
+    assert providers[0]["name"] == "Local Browser"
+    assert not any("Browser Use" in n or "Nous Subscription" in n for n in names)
+    assert not any(
+        p.get("browser_provider") == "browser-use" for p in providers
+    )
 
 
 def test_visible_providers_hide_nous_subscription_when_feature_flag_is_off(monkeypatch):

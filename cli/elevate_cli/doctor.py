@@ -91,13 +91,6 @@ def _system_package_install_cmd(pkg: str) -> str:
     return f"sudo apt install {pkg}"
 
 
-def _browser_use_setup_steps() -> list[str]:
-    return [
-        "1) Run elevate setup and choose Browser Use",
-        "2) Set BROWSER_USE_API_KEY, or activate managed Browser Use",
-    ]
-
-
 def _has_provider_env_config(content: str) -> bool:
     """Return True when ~/.elevate/.env contains provider auth/base URL settings."""
     return any(key in content for key in _PROVIDER_ENV_HINTS)
@@ -1073,14 +1066,16 @@ def run_doctor(args):
             check_fail("daytona SDK not installed", "(pip install daytona)")
             issues.append("Install daytona SDK: pip install daytona")
 
-    # Browser Use cloud is the supported base browser automation path. Node.js
-    # remains optional developer tooling and should not be required by doctor.
-    if os.getenv("BROWSER_USE_API_KEY"):
-        check_ok("Browser Use", "(BROWSER_USE_API_KEY configured)")
-    else:
-        check_info("Browser Use not configured (set BROWSER_USE_API_KEY or activate managed tools)")
-        for step in _browser_use_setup_steps():
-            check_info(step)
+    # Elevate is local-first: the browser tool runs the open-source
+    # agent-browser engine on this machine (and, on desktops, the user's real
+    # logged-in Chrome via the visible-browser auto-provision). No cloud key is
+    # needed — readiness of the engine is surfaced by the tool-availability
+    # check, not here. Node.js remains optional developer tooling.
+    check_ok(
+        "Browser",
+        "(local mode — agent-browser on your machine, drives your logged-in "
+        "Chrome on desktop, no API key)",
+    )
 
     if _which("node"):
         check_ok("Node.js", "(optional developer tooling)")
