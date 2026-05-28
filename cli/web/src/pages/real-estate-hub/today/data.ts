@@ -50,6 +50,17 @@ export type UrgentItem = {
   runId?: string;
 };
 
+export type IntelligenceItem = {
+  id: string;
+  kind: "approvals" | "pcs" | "admin" | "identity" | "memory" | "source" | string;
+  title: string;
+  value: number;
+  meta: string;
+  tone: "neutral" | "good" | "warn" | "danger";
+  to: string;
+  updatedAt: string | null;
+};
+
 function parseTs(value: string | null | undefined): number | null {
   if (!value) return null;
   const t = Date.parse(value);
@@ -124,7 +135,7 @@ export function bucketThreadsByDay(
   for (const run of actionRuns) {
     const completed = parseTs(run.completedAt);
     if (completed == null) continue;
-    if (run.status !== "completed" && run.status !== "success" && run.status !== "approved") continue;
+    if (!["succeeded", "completed", "success", "approved"].includes(run.status)) continue;
     const bucket = bucketFor(completed);
     if (bucket) bucket.dealsAdvanced += 1;
   }
@@ -289,8 +300,8 @@ export function urgentAdminTasks(
   }
 
   for (const run of actionRuns) {
-    if (run.status === "completed" || run.status === "success") continue;
-    if (run.status !== "needs_input" && run.status !== "blocked" && run.status !== "error" && run.status !== "failed") continue;
+    if (["succeeded", "completed", "success", "approved", "skipped", "cancelled"].includes(run.status)) continue;
+    if (!["waiting_human", "waiting_external", "needs_input", "blocked", "error", "failed"].includes(run.status)) continue;
     const updated = parseTs(run.updatedAt) ?? parseTs(run.createdAt);
     const waited = updated ? Math.round((now - updated) / 60000) : null;
     const tone: UrgentItem["tone"] = run.status === "error" || run.status === "failed" ? "danger" : "warn";
@@ -391,7 +402,7 @@ export function liveSessions(sessions: SessionInfo[]): SessionInfo[] {
 
 export function inFlightRuns(actionRuns: AdminActionRun[]): AdminActionRun[] {
   return actionRuns
-    .filter((r) => r.status === "running" || r.status === "in_progress" || r.status === "pending")
+    .filter((r) => r.status === "running" || r.status === "in_progress" || r.status === "pending" || r.status === "queued")
     .sort((a, b) => (parseTs(b.startedAt ?? b.createdAt) ?? 0) - (parseTs(a.startedAt ?? a.createdAt) ?? 0))
     .slice(0, 5);
 }
@@ -420,5 +431,6 @@ export function buildTodayData(input: {
     scheduled: scheduledNext24h(input.cronJobs),
     live: liveSessions(input.sessions),
     running: inFlightRuns(input.actionRuns),
+    intelligence: [] as IntelligenceItem[],
   };
 }

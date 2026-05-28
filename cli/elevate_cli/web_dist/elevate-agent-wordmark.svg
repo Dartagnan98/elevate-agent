@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="260" height="56" viewBox="0 0 260 56" role="img" aria-labelledby="title">
   <title id="title">Elevate Agent</title>
-  <rect x="1" y="10" width="36" height="36" rx="8" fill="#1B2A4A"/>
-  <rect x="27" y="35" width="8" height="8" rx="2.2" fill="#CE823E"/>
-  <text x="19" y="32.5" text-anchor="middle" font-family="Aptos, Avenir Next, Segoe UI, system-ui, sans-serif" font-size="20" font-weight="800" fill="#F7F7F7">E</text>
-  <text x="48" y="31.5" font-family="Aptos, Avenir Next, Segoe UI, system-ui, sans-serif" font-size="21" font-weight="750" fill="#1B2A4A">Elevate</text>
-  <text x="129" y="31.5" font-family="Aptos, Avenir Next, Segoe UI, system-ui, sans-serif" font-size="21" font-weight="650" fill="#044B35">Agent</text>
+  <rect x="1" y="10" width="36" height="36" rx="8" fill="#202020"/>
+  <rect x="27" y="35" width="8" height="8" rx="2.2" fill="#B0B0B0"/>
+  <text x="19" y="32.5" text-anchor="middle" font-family="Aptos, Avenir Next, Segoe UI, system-ui, sans-serif" font-size="20" font-weight="800" fill="#ECECEC">E</text>
+  <text x="48" y="31.5" font-family="Aptos, Avenir Next, Segoe UI, system-ui, sans-serif" font-size="21" font-weight="750" fill="#ECECEC">Elevate</text>
+  <text x="129" y="31.5" font-family="Aptos, Avenir Next, Segoe UI, system-ui, sans-serif" font-size="21" font-weight="650" fill="#B0B0B0">Agent</text>
 </svg>

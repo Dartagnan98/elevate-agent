@@ -986,6 +986,27 @@ export interface AdminDealsResponse {
   jurisdiction?: AdminJurisdiction;
 }
 
+export interface AdminUpcomingEvent {
+  id: string;
+  source: "gcal" | "deal_date" | string;
+  sourceEventId: string;
+  dealId: string | null;
+  title: string;
+  location: string | null;
+  address: string;
+  startAt: string | null;
+  endAt: string | null;
+  kind: string;
+  syncedAt: string | null;
+}
+
+export interface AdminUpcomingEventsResponse {
+  items: AdminUpcomingEvent[];
+  count: number;
+  days: number;
+  generatedAt: string;
+}
+
 export interface AdminContact {
   id: string;
   displayName: string | null;
@@ -1363,6 +1384,74 @@ export interface SourceInboxResponse {
   leadSections?: Record<string, LeadSectionSummary>;
 }
 
+export interface TodayHourBucket {
+  hour: number;
+  label: string;
+  leadsIn: number;
+  repliesOut: number;
+}
+
+export interface TodayDayBucket {
+  iso: string;
+  label: string;
+  leadsIn: number;
+  repliesOut: number;
+  dealsAdvanced: number;
+}
+
+export interface TodayPulseStat {
+  label: string;
+  value: string;
+  rawValue: number;
+  delta: number | null;
+  deltaLabel: string | null;
+  spark: number[];
+  tone: "neutral" | "good" | "warn" | "danger";
+}
+
+export interface TodayUrgentItem {
+  id: string;
+  kind: "draft" | "hot-lead" | "deal-task" | "action-run";
+  title: string;
+  meta: string;
+  waitedMinutes: number | null;
+  tone: "neutral" | "warn" | "danger";
+  to: string;
+  sourceId?: string;
+  threadId?: string;
+  taskId?: string;
+  runId?: string;
+}
+
+export interface TodayIntelligenceItem {
+  id: string;
+  kind: "approvals" | "pcs" | "admin" | "identity" | "memory" | "source" | string;
+  title: string;
+  value: number;
+  meta: string;
+  tone: "neutral" | "good" | "warn" | "danger";
+  to: string;
+  updatedAt: string | null;
+}
+
+export interface TodayDashboardResponse {
+  generatedAt: string;
+  activityUpdatedAt: string | null;
+  todayWindow: {
+    start: string;
+    end: string;
+    timezone: string | null;
+  };
+  pulse: TodayPulseStat[];
+  hourBuckets: TodayHourBucket[];
+  dayBuckets: TodayDayBucket[];
+  priority: TodayUrgentItem[];
+  scheduled: CronJob[];
+  live: SessionInfo[];
+  running: AdminActionRun[];
+  intelligence: TodayIntelligenceItem[];
+}
+
 export interface SourceInboxSentItem {
   id: string;
   idempotencyKey: string;
@@ -1470,6 +1559,43 @@ export interface UpdateStatusResponse {
   origin_url: string | null;
   repo_dir: string | null;
   upstream: string | null;
+}
+
+export interface WorkspaceGitStatus {
+  ok: boolean;
+  error: string | null;
+  path: string | null;
+  repo_path: string | null;
+  working_directory: string | null;
+  display_name: string | null;
+  repo_name: string | null;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  changed_files: number;
+  insertions: number;
+  deletions: number;
+  untracked: number;
+  dirty: boolean;
+  repo_changed_files: number;
+  repo_insertions: number;
+  repo_deletions: number;
+  repo_untracked: number;
+  repo_dirty: boolean;
+  diff_scope: "repo" | "session";
+  baseline_created: boolean;
+  baseline_at: number | null;
+  short_sha: string | null;
+  origin_url: string | null;
+  repo_url: string | null;
+  pr_url: string | null;
+  checked_at: number;
+}
+
+export interface WorkspaceOpenResponse {
+  ok: boolean;
+  path: string;
 }
 
 export interface PlatformStatus {
@@ -2036,6 +2162,8 @@ export interface AnalyticsSkillsSummary {
 export interface AnalyticsResponse {
   daily: AnalyticsDailyEntry[];
   by_model: AnalyticsModelEntry[];
+  period_days?: number;
+  source?: "postgres" | "sqlite";
   totals: {
     total_input: number;
     total_output: number;

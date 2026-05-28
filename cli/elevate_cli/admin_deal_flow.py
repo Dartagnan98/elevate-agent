@@ -95,9 +95,9 @@ _BC: dict[str, Any] = {
         "stages": [
             _stage(
                 "Pre-CMA",
-                "Google Form + contact verification",
+                "Dashboard setup + contact verification",
                 [
-                    ("pre_cma_google_form", "Pre-CMA Google Form filled"),
+                    ("pre_cma_dashboard_setup", "Pre-CMA dashboard setup complete"),
                     ("lofty_contact_verified", "Lofty contact verified / created"),
                     ("pre_cma_handoff", "Client/property notes saved for CMA"),
                 ],
@@ -108,7 +108,7 @@ _BC: dict[str, Any] = {
                     _wf("CMA date requested", "CMA Date Requested"),
                 ],
                 triggers=[
-                    ("pre-cma-google-form", "Verify pre-CMA Google Form", "pre-cma-google-form"),
+                    ("pre-cma-dashboard-setup", "Set up Pre-CMA dashboard", "pre-cma-dashboard-setup"),
                     ("lofty-crm-client-contacts", "Verify Lofty contact", "lofty-crm-client-contacts"),
                 ],
             ),

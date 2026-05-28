@@ -57,7 +57,10 @@ export interface Translations {
     footer: {
       org: string;
     };
+    agentActivityLabel: string;
     activeSessionsLabel: string;
+    appOpenLabel: string;
+    appOpenValue: string;
     gatewayStatusLabel: string;
     gatewayStrip: {
       failed: string;

@@ -47,8 +47,6 @@ const REAL_ESTATE_WORKFLOWS = [
     label: "Marketing",
     names: [
       "cma",
-      "cma-generator",
-      "cma-router",
       "market-stats-watcher",
       "marketing",
       "marketing-landing",
@@ -106,8 +104,6 @@ const REAL_ESTATE_SKILL_NAMES = new Set([
   "admin-result-writer",
   "closing-admin",
   "cma",
-  "cma-generator",
-  "cma-router",
   "deal-matcher",
   "digisign",
   "gmail-doc-router",
@@ -159,8 +155,6 @@ const REAL_ESTATE_GROUP_LABELS: Record<string, string> = {
 
 const REAL_ESTATE_MARKETING_SKILLS = new Set([
   "cma",
-  "cma-generator",
-  "cma-router",
   "humanizer",
   "market-stats-watcher",
   "marketing",

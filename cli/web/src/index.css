@@ -55,12 +55,12 @@
   --midground: color-mix(in srgb, #ececec 100%, transparent);
   --midground-base: #ececec;
   --midground-alpha: 1;
-  --background: color-mix(in srgb, #1a1b1a 100%, transparent);
-  --background-base: #1a1b1a;
+  --background: color-mix(in srgb, #0F0F0F 100%, transparent);
+  --background-base: #0F0F0F;
   --background-alpha: 1;
 
   /* Consumed by <Backdrop />; also theme-switchable. */
-  --warm-glow: rgba(217, 119, 87, 0.14);
+  --warm-glow: rgba(176, 176, 176, 0.08);
   --noise-opacity-mul: 0;
 
   /* Typography tokens — rewritten by ThemeProvider. Geist Sans is the primary
@@ -86,41 +86,74 @@
   --font-courier: var(--theme-font-sans);
 
   /* Layout tokens. */
-  --radius: 0.375rem;
-  --theme-radius: 0.375rem;
-  --theme-spacing-mul: 1;
-  --theme-density: comfortable;
+  --radius: 0.4375rem;
+  --theme-radius: 0.4375rem;
+  --theme-spacing-mul: 0.85;
+  --theme-density: compact;
 
-  /* Shared chat-shell tokens. These derive from the active theme so the
-     ChatGPT-style workspace stays coherent in both dark and light modes. */
-  --chat-bg: var(--background-base);
-  --chat-surface: color-mix(in srgb, var(--midground-base) 4%, var(--background-base));
-  --chat-surface-strong: color-mix(in srgb, var(--midground-base) 7%, var(--background-base));
-  --chat-surface-soft: color-mix(in srgb, var(--midground-base) 2%, var(--background-base));
-  --chat-border: color-mix(in srgb, var(--midground-base) 14%, transparent);
-  --chat-border-strong: color-mix(in srgb, var(--midground-base) 22%, transparent);
-  --chat-text: var(--midground);
-  --chat-muted: color-mix(in srgb, var(--midground-base) 58%, transparent);
-  --chat-muted-strong: color-mix(in srgb, var(--midground-base) 72%, transparent);
-  --chat-user: color-mix(in srgb, #0b6bff 14%, transparent);
-  --chat-user-text: color-mix(in srgb, #ffffff 90%, transparent);
-  --chat-accent: var(--color-primary, #D97757);
-  --chat-accent-soft: color-mix(in srgb, var(--chat-accent) 18%, var(--background-base));
-  --chat-success: var(--color-success, #44c487);
-  --chat-warning: var(--color-warning, #f3bf67);
-  --chat-danger: var(--color-destructive, #ff827d);
-  --sidebar-bg: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
-  --sidebar-row: color-mix(in srgb, var(--midground-base) 4%, transparent);
-  --sidebar-row-hover: color-mix(in srgb, var(--midground-base) 8%, transparent);
-  --sidebar-row-active: color-mix(in srgb, var(--color-primary, #D97757) 15%, var(--midground-base) 7%);
-  --sidebar-border: color-mix(in srgb, var(--midground-base) 10%, transparent);
-  --sidebar-text: #ffffff;
-  --sidebar-text-strong: #ffffff;
-  --sidebar-text-active: #ffffff;
-  --sidebar-text-muted: color-mix(in srgb, #ffffff 72%, transparent);
-  --sidebar-text-faint: color-mix(in srgb, #ffffff 58%, transparent);
-  --sidebar-icon: #ffffff;
-  --sidebar-icon-muted: color-mix(in srgb, #ffffff 66%, transparent);
+  /* Standalone HTML source tokens. Keep these exact unless the mock changes. */
+  --bg: #0F0F0F;
+  --bg-1: #161616;
+  --bg-2: #1A1A1A;
+  --bg-3: #202020;
+  --bg-soft: #181818;
+  --border: #2A2A2A;
+  --border-soft: #1F1F1F;
+  --border-strong: #353535;
+  --fg: #ECECEC;
+  --fg-muted: #A0A0A0;
+  --fg-faint: #707070;
+  --fg-dim: #525252;
+  --accent: #8A8A8A;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-ring: color-mix(in srgb, var(--accent) 28%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 40%, transparent);
+  --accent-fg: #0F0F0F;
+  --accent-vivid: #6A6A6A;
+  --status-done: #4FC38A;
+  --status-work: var(--accent);
+  --status-warn: #E0B257;
+  --status-neon-orange: #ff7a18;
+  --status-neon-orange-hot: #ff9d35;
+  --status-error: #E07570;
+  --status-idle: #4F4F4F;
+  --sidebar-w: 268px;
+  --sidebar-gap: 8px;
+  --row-radius: 7px;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Shared app aliases mapped directly onto the standalone tokens. */
+  --chat-bg: var(--bg);
+  --chat-layout-width: 760px;
+  --chat-surface: var(--bg-2);
+  --chat-surface-strong: var(--bg-3);
+  --chat-surface-soft: var(--bg-soft);
+  --chat-border: var(--border);
+  --chat-border-strong: var(--border-strong);
+  --chat-text: var(--fg);
+  --chat-muted: var(--fg-muted);
+  --chat-muted-strong: #B0B0B0;
+  --chat-user: color-mix(in srgb, var(--fg) 7%, var(--bg-2));
+  --chat-user-text: var(--fg);
+  --chat-accent: var(--accent);
+  --chat-accent-soft: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  --chat-success: var(--status-done);
+  --chat-warning: var(--status-warn);
+  --chat-danger: var(--status-error);
+  --sidebar-bg: var(--bg-1);
+  --sidebar-row: color-mix(in srgb, var(--fg) 4%, transparent);
+  --sidebar-row-hover: color-mix(in srgb, var(--fg) 5%, transparent);
+  --sidebar-row-active: color-mix(in srgb, var(--fg) 7%, transparent);
+  --sidebar-border: var(--border-soft);
+  --sidebar-border-strong: var(--border);
+  --sidebar-text: var(--fg);
+  --sidebar-text-strong: var(--fg);
+  --sidebar-text-active: var(--fg);
+  --sidebar-text-muted: var(--fg-muted);
+  --sidebar-text-faint: var(--fg-faint);
+  --sidebar-text-dim: var(--fg-dim);
+  --sidebar-icon: var(--fg);
+  --sidebar-icon-muted: var(--fg-muted);
   --sidebar-logo-bg: color-mix(in srgb, var(--background-base) 72%, var(--midground-base) 28%);
   --sidebar-logo-border: color-mix(in srgb, var(--midground-base) 14%, transparent);
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
@@ -156,6 +189,2068 @@ html .font-expanded,
 html .font-compressed,
 html .font-courier {
   font-family: var(--theme-font-sans);
+}
+
+.sidebar-foot {
+  border-top: 1px solid var(--border-soft);
+  padding: 6px;
+}
+
+.user-pill-wrap {
+  position: relative;
+}
+
+.user-pill {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+  transition: background 120ms var(--ease-out);
+}
+
+.user-pill:hover,
+.user-pill.open {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 60%, #1A1A1A),
+    color-mix(in srgb, var(--accent) 30%, #1A1A1A)
+  );
+  display: grid;
+  place-items: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--fg);
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.user-pill .who {
+  line-height: 1.2;
+  min-width: 0;
+  flex: 1;
+}
+
+.user-pill .name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.user-pill .role {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  margin-top: 1px;
+}
+
+.user-pill .user-chev {
+  width: 13px;
+  height: 13px;
+  color: var(--fg-faint);
+  transition: transform 180ms var(--ease-out);
+}
+
+.user-pill .user-chev.open {
+  transform: rotate(180deg);
+}
+
+.user-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow:
+    0 24px 60px -16px rgba(0,0,0,0.7),
+    0 1px 0 rgba(255,255,255,0.03) inset;
+  padding: 4px;
+  z-index: 30;
+  animation: menu-rise 140ms var(--ease-out) both;
+}
+
+@keyframes menu-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.user-menu-email {
+  padding: 9px 10px 8px;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border-soft);
+  word-break: break-all;
+}
+
+.user-menu-section {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.user-menu-section:last-child {
+  border-bottom: 0;
+}
+
+.user-menu-section.system {
+  padding-bottom: 6px;
+}
+
+.user-menu-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font: 400 13px/1 "Geist", sans-serif;
+  color: var(--fg);
+  text-align: left;
+  transition: background 100ms var(--ease-out);
+}
+
+.user-menu-row:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.user-menu-row svg {
+  width: 14px;
+  height: 14px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.user-menu-row.danger {
+  color: var(--fg-muted);
+}
+
+.user-menu-row.danger:hover {
+  color: var(--status-error);
+  background: color-mix(in srgb, var(--status-error) 8%, transparent);
+}
+
+.user-menu-row.danger:hover svg {
+  color: var(--status-error);
+}
+
+.user-menu-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.user-menu-tag {
+  margin-left: auto;
+  font: 600 9px/1 "Geist Mono", monospace;
+  color: var(--accent-fg);
+  background: var(--status-warn);
+  padding: 3px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.user-menu-toggles {
+  display: flex;
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.user-menu-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  font: 500 12.5px/1 "Geist", sans-serif;
+  color: var(--fg);
+  transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out);
+}
+
+.user-menu-toggle:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-color: var(--border);
+}
+
+.user-menu-toggle.active {
+  border-color: var(--border);
+}
+
+.user-menu-toggle svg {
+  width: 13px;
+  height: 13px;
+}
+
+.user-menu-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 12px;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.user-menu-status .dim {
+  color: var(--fg-faint);
+}
+
+.user-menu-status .ok {
+  color: var(--status-done);
+  font: 500 11px/1 "Geist Mono", monospace;
+}
+
+.user-menu-status .warn {
+  color: var(--status-warn);
+  font: 500 11px/1 "Geist Mono", monospace;
+}
+
+/* Standalone HTML shell classes. These mirror the supplied Elevation Agent
+   mock so the React app can use the same spacing and rhythm directly. */
+.sidebar {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.025) inset,
+    0 18px 40px -22px rgba(0,0,0,0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 12px 8px 14px;
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+}
+
+.sidebar-top > * {
+  -webkit-app-region: no-drag;
+}
+
+.sidebar-top .tools {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 6px;
+  -ms-overflow-style: none;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: none;
+}
+
+.sidebar-scroll,
+.sidebar-scroll * {
+  -ms-overflow-style: none;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: none;
+}
+
+.sidebar-scroll::-webkit-scrollbar,
+.sidebar-scroll *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
+.icon-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out), transform 80ms var(--ease-out);
+}
+
+.icon-btn:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
+}
+
+.icon-btn:active {
+  transform: scale(0.94);
+}
+
+.icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-btn.sm {
+  width: 22px;
+  height: 22px;
+}
+
+.icon-btn.sm svg {
+  width: 12px;
+  height: 12px;
+}
+
+.new-chat {
+  margin: 6px 8px 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border-soft);
+  color: var(--fg);
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out);
+}
+
+.new-chat:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  border-color: var(--border);
+}
+
+.new-chat .kbd {
+  margin-left: auto;
+  font: 500 10.5px/1 "Geist Mono", monospace;
+  color: var(--fg-faint);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border-soft);
+}
+
+.new-chat svg {
+  width: 14px;
+  height: 14px;
+  color: var(--fg-muted);
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 14px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-faint);
+  font: 500 10.5px/1 "Geist Mono", monospace;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.section-label svg {
+  width: 9px;
+  height: 9px;
+  transition: transform 160ms var(--ease-out);
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.section-label.collapsed svg {
+  transform: rotate(-90deg);
+}
+
+.section-label > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+}
+
+.section-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.section-badge .dim { color: var(--fg-dim); }
+.section-badge .live-ind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--status-done);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.section-badge .live-ind .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--status-done);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 20%, transparent);
+  animation: ap-pulse 1.6s ease-in-out infinite;
+}
+
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: var(--nav-pad, 5px 12px);
+  margin: 0 6px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+  line-height: 1.3;
+}
+
+.nav-row:hover,
+.nav-row.active {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
+}
+
+.nav-row svg {
+  width: 14px;
+  height: 14px;
+  color: currentColor;
+  opacity: 0.78;
+  flex-shrink: 0;
+}
+
+.nav-row > span:not(.nav-badge) {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-group-label {
+  padding: 8px 14px 3px;
+  font: 500 10px/1 "Geist Mono", monospace;
+  color: var(--fg-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.session-list,
+.auto-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--row-gap, 0);
+  padding: 0 6px;
+}
+
+.session-row,
+.auto-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: var(--row-pad, 5px 10px);
+  border-radius: var(--row-radius);
+  color: var(--fg);
+  border: 1px solid transparent;
+  transition: background 120ms var(--ease-out);
+  overflow: hidden;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.auto-row {
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+}
+
+.auto-row > svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.auto-row[data-status="live"] > svg {
+  color: var(--fg-faint);
+}
+
+.auto-row[data-status="warn"] > svg,
+.auto-row[data-status="paused"] > svg {
+  color: var(--status-warn);
+}
+
+.auto-row[data-status="paused"] > svg {
+  opacity: 0.85;
+}
+
+.session-row:hover,
+.auto-row:hover {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.session-row.active,
+.auto-row.active {
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+}
+
+.session-row .status-cell {
+  display: grid;
+  place-items: center;
+}
+
+.session-row .title,
+.auto-row .title {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 400;
+}
+
+.session-row .age,
+.auto-row .auto-trail {
+  font: 500 11px/1 "Geist Mono", monospace;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+
+.auto-row .auto-trail.dash {
+  color: var(--fg-dim);
+}
+
+.auto-row .auto-trail.paused {
+  color: var(--fg-faint);
+  font-family: "Geist", sans-serif;
+  font-size: 12px;
+}
+
+.auto-row .auto-chev {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  color: var(--fg-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: transform 160ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.auto-row .auto-chev:hover {
+  color: var(--fg-muted);
+}
+
+.auto-row .auto-chev svg {
+  width: 12px;
+  height: 12px;
+}
+
+.session-row .age {
+  opacity: 0;
+  transition: opacity 140ms var(--ease-out);
+}
+
+.session-row:hover .age,
+.session-row.active .age {
+  opacity: 1;
+}
+
+.session-row[data-status="inactive"] .title {
+  color: var(--fg-muted);
+}
+
+.session-row[data-status="needs-perms"] .title,
+.session-row[data-status="working"] .title {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.session-row .session-actions {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  display: flex;
+  transform: translateY(-50%);
+  gap: 1px;
+  border-radius: 7px;
+  background: var(--bg-2);
+  box-shadow: 0 0 0 1px var(--border-soft);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms var(--ease-out);
+}
+
+.session-row:hover .session-actions,
+.session-row:focus-within .session-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-idle);
+}
+
+.dot.done {
+  background: var(--status-done);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 16%, transparent);
+}
+
+.dot.warn {
+  background: var(--status-warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 18%, transparent);
+}
+
+.dot.error {
+  background: var(--status-error);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-error) 18%, transparent);
+}
+
+.dot.idle {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+}
+
+.dots-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dots-working span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--status-work);
+  animation: dot-bounce 1s ease-in-out infinite;
+}
+
+.dots-working span:nth-child(2) { animation-delay: 110ms; }
+.dots-working span:nth-child(3) { animation-delay: 220ms; }
+
+@keyframes dot-bounce {
+  0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+
+.chat-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 18px 0 22px;
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+}
+
+.chat-top > * {
+  -webkit-app-region: no-drag;
+}
+
+.chat-top .breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  min-width: 0;
+  color: var(--fg);
+}
+
+.breadcrumb .crumb {
+  color: var(--fg-faint);
+  flex-shrink: 0;
+}
+
+.breadcrumb .sep {
+  color: var(--fg-dim);
+  flex-shrink: 0;
+}
+
+.breadcrumb .here {
+  color: var(--fg);
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumb .chev {
+  color: var(--fg-faint);
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  border: 0;
+  background: transparent;
+}
+
+.breadcrumb .chev:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.breadcrumb svg {
+  width: 13px;
+  height: 13px;
+}
+
+.toggle-rail {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  scroll-behavior: auto;
+}
+
+.chat-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.chat-inner {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 38px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.user-msg {
+  max-width: 88%;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--fg) 7%, var(--bg-2));
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 14.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.asst-msg {
+  color: var(--fg);
+  font-size: 14.5px;
+  line-height: 1.7;
+  max-width: 720px;
+}
+
+.asst-msg p { margin: 0 0 12px; }
+.asst-msg p:last-child { margin-bottom: 0; }
+.asst-msg ul { margin: 8px 0 12px; padding-left: 22px; }
+.asst-msg li { margin: 5px 0; }
+.asst-msg li::marker { color: var(--fg-faint); }
+.asst-msg code {
+  font: 500 12.5px/1.4 "Geist Mono", monospace;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  padding: 1px 6px;
+  border-radius: 5px;
+  color: color-mix(in srgb, var(--accent) 30%, var(--fg));
+}
+.asst-msg strong { font-weight: 600; }
+.asst-msg em { font-style: italic; color: var(--fg-muted); }
+.asst-msg a { color: var(--accent); text-decoration: none; }
+.asst-msg a:hover { text-decoration: underline; }
+
+.user-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  margin-right: 6px;
+  opacity: 0;
+  transition: opacity 140ms var(--ease-out);
+}
+
+.group:hover .user-actions {
+  opacity: 1;
+}
+
+.asst-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+  opacity: 0;
+  transition: opacity 140ms var(--ease-out);
+}
+
+.group:hover .asst-actions {
+  opacity: 1;
+}
+
+.asst-actions.pinned {
+  opacity: 1;
+}
+
+.asst-actions .time {
+  margin-left: 4px;
+  font: 500 11px/1 "Geist Mono", monospace;
+  color: var(--fg-faint);
+}
+
+.message-action-active {
+  color: var(--status-neon-orange-hot);
+  background: color-mix(in srgb, var(--status-neon-orange) 10%, transparent);
+}
+
+.message-action-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.message-actions-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 50;
+  width: 158px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+  box-shadow:
+    0 18px 50px -18px rgba(0,0,0,0.82),
+    0 1px 0 rgba(255,255,255,0.035) inset;
+}
+
+.message-actions-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: 500 12.5px/1 "Geist", sans-serif;
+  text-align: left;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.message-actions-menu button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
+}
+
+.message-actions-menu button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.tool-link,
+.reasoning-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font-size: 13.5px;
+  cursor: pointer;
+  text-align: left;
+  margin: 4px 0;
+  width: 100%;
+  transition: color 120ms var(--ease-out);
+}
+
+.tool-link:disabled {
+  cursor: default;
+}
+
+.tool-link:hover,
+.reasoning-head:hover {
+  color: var(--fg);
+}
+
+.tool-link .name { color: inherit; }
+.tool-link .target {
+  color: var(--fg-faint);
+  font: 500 12.5px/1 "Geist Mono", monospace;
+}
+.tool-link .chev,
+.reasoning-head .chev {
+  width: 12px;
+  height: 12px;
+  color: var(--fg-faint);
+  transition: transform 140ms var(--ease-out);
+  flex-shrink: 0;
+}
+.tool-link.open .chev,
+.reasoning.open .reasoning-head .chev {
+  transform: rotate(180deg);
+}
+.tool-link .duration,
+.reasoning-head .duration {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font: 500 11px/1 "Geist Mono", monospace;
+}
+
+.tool-body {
+  margin: 4px 0 8px 18px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, #000 18%, var(--bg-2));
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  font: 500 12px/1.6 "Geist Mono", monospace;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.reasoning {
+  margin: 4px 0;
+  display: block;
+}
+
+.reasoning-head {
+  color: var(--fg-faint);
+  font: 500 12.5px/1 "Geist", sans-serif;
+  white-space: nowrap;
+  margin: 0;
+}
+
+.reasoning-head:hover {
+  color: var(--fg-muted);
+}
+
+.reasoning-inline .reasoning-head {
+  min-width: 0;
+}
+
+.reasoning-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.reasoning-body {
+  margin: 6px 0 8px 18px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border-radius: 8px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  color: var(--fg-faint);
+  font: 500 12.5px/1.4 "Geist", sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.processing-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px 6px 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg);
+  font: 500 13.5px/1 "Geist", sans-serif;
+  transition: color 120ms var(--ease-out);
+}
+
+.processing-glow {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--status-neon-orange-hot);
+  filter:
+    drop-shadow(0 0 3px color-mix(in srgb, var(--status-neon-orange-hot) 88%, transparent))
+    drop-shadow(0 0 9px color-mix(in srgb, var(--status-neon-orange) 72%, transparent))
+    drop-shadow(0 0 18px color-mix(in srgb, var(--status-neon-orange) 44%, transparent));
+  animation: pb-glow 1.6s ease-in-out infinite;
+}
+
+.processing-glow svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.55;
+}
+
+@keyframes pb-glow {
+  0%, 100% {
+    transform: scale(1);
+    filter:
+      drop-shadow(0 0 3px color-mix(in srgb, var(--status-neon-orange-hot) 78%, transparent))
+      drop-shadow(0 0 9px color-mix(in srgb, var(--status-neon-orange) 64%, transparent))
+      drop-shadow(0 0 16px color-mix(in srgb, var(--status-neon-orange) 34%, transparent));
+  }
+  50% {
+    transform: scale(1.14);
+    filter:
+      drop-shadow(0 0 4px color-mix(in srgb, var(--status-neon-orange-hot) 96%, transparent))
+      drop-shadow(0 0 12px color-mix(in srgb, var(--status-neon-orange) 84%, transparent))
+      drop-shadow(0 0 24px color-mix(in srgb, var(--status-neon-orange) 56%, transparent));
+  }
+}
+
+.processing-label {
+  color: var(--fg-muted);
+  font-weight: 500;
+  animation: pb-fadein 320ms var(--ease-out) both;
+}
+
+@keyframes pb-fadein {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.processing-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-faint);
+  font-size: 12.5px;
+}
+
+.processing-meta .num {
+  font: 500 12.5px/1 "Geist Mono", monospace;
+  color: var(--fg-muted);
+}
+
+.processing-meta .dot-sep {
+  color: var(--fg-dim);
+}
+
+.processing-chev {
+  width: 12px;
+  height: 12px;
+  color: var(--fg-faint);
+  margin-left: 4px;
+  transition: transform 160ms var(--ease-out);
+}
+
+.processing-chev.open {
+  transform: rotate(180deg);
+}
+
+.processing-body {
+  margin-left: 0;
+  padding-left: 0;
+}
+
+.chat-start {
+  width: min(620px, calc(100% - 48px));
+  min-height: 26rem;
+  margin: 0 auto;
+  padding: 30px 0 96px;
+  color: var(--fg);
+}
+
+.chat-start-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-start-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: #e9784d;
+}
+
+.chat-start-mark svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2.4;
+}
+
+.chat-start-title h2 {
+  margin: 0;
+  color: var(--fg);
+  font: 500 22px/1.25 "Geist", sans-serif;
+  letter-spacing: 0;
+}
+
+.chat-start-card {
+  width: min(456px, 100%);
+  margin-top: 28px;
+  padding: 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg-2));
+  border: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.chat-start-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.chat-start-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.chat-start-tabs.compact {
+  gap: 2px;
+}
+
+.chat-start-tab {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: 500 12px/1 "Geist", sans-serif;
+  padding: 5px 8px;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.chat-start-tab:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.chat-start-tab.active {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+}
+
+.chat-start-window {
+  margin: -2px 0 8px;
+  overflow: hidden;
+  color: var(--fg-faint);
+  font: 500 10.5px/1.25 "Geist Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-start-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.chat-start-metric {
+  min-width: 0;
+  min-height: 40px;
+  padding: 6px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.chat-start-metric span {
+  display: block;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font: 500 12px/1.05 "Geist", sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-start-metric strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--fg);
+  font: 600 16px/1.1 "Geist", sans-serif;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-start-heatmap {
+  display: grid;
+  grid-auto-rows: 18px;
+  grid-template-columns: repeat(13, 18px);
+  gap: 3px;
+  margin-top: 8px;
+}
+
+.chat-start-heat {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  min-width: 0;
+  outline: none;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.chat-start-heat:is(:hover, :focus-visible)::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  z-index: 40;
+  width: max-content;
+  max-width: 220px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  box-shadow: 0 14px 36px -18px rgba(0, 0, 0, 0.85);
+  color: var(--fg);
+  font: 500 11px/1.35 "Geist", sans-serif;
+  text-align: left;
+  transform: translateX(-50%);
+  white-space: pre-line;
+  pointer-events: none;
+}
+
+.chat-start-heat:is(:hover, :focus-visible)::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 2px);
+  z-index: 41;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  transform: translateX(-50%) rotate(45deg);
+  pointer-events: none;
+}
+
+.chat-start-heat.heat-1 { background: #28466a; }
+.chat-start-heat.heat-2 { background: #3e6fa9; }
+.chat-start-heat.heat-3 { background: #5d91d8; }
+.chat-start-heat.heat-4 { background: #80acf1; }
+.chat-start-heat.heat-5 { background: #3f7ee8; }
+
+.chat-start-note {
+  margin: 8px 0 1px;
+  color: var(--fg-muted);
+  font: 500 12px/1.35 "Geist", sans-serif;
+}
+
+.chat-start-models {
+  display: grid;
+  gap: 5px;
+}
+
+.chat-start-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg-muted);
+  font: 500 12px/1.2 "Geist", sans-serif;
+}
+
+.chat-start-model .model-name {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-start-empty-models {
+  display: grid;
+  min-height: 72px;
+  place-items: center;
+  color: var(--fg-muted);
+  font: 500 12.5px/1.35 "Geist", sans-serif;
+}
+
+.composer-wrap {
+  padding: 12px 24px 18px;
+  background: linear-gradient(180deg, transparent, var(--bg) 24px);
+}
+
+.composer-stage {
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 46px;
+  padding: 0 6px 0 14px;
+  border-radius: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+  font-size: 12.5px;
+}
+
+.composer-stage .repo {
+  color: var(--fg);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.composer-stage svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+}
+
+.composer-stage .branch {
+  color: var(--fg-muted);
+  font: 500 12px/1 "Geist Mono", monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.stage-link {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 4px 6px;
+  border-radius: 5px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  transition: background 120ms var(--ease-out);
+}
+
+.stage-link.workspace {
+  flex: 0 0 auto;
+  max-width: 180px;
+}
+
+.stage-link.workspace .repo {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-link:not(.workspace) {
+  max-width: min(34%, 280px);
+}
+
+.stage-link:not(.workspace) .branch {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-link:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.composer-stage .branch-meta {
+  color: var(--fg-faint);
+  font: 500 11px/1 "Geist Mono", monospace;
+  white-space: nowrap;
+}
+
+.stage-spacer { flex: 1; }
+
+.composer-stage .diff-stat {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  font: 500 11.5px/1 "Geist Mono", monospace;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms var(--ease-out);
+}
+
+.composer-stage .diff-stat:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.composer-stage .diff-stat.clean {
+  color: var(--fg-faint);
+}
+
+.composer-stage .diff-stat .files {
+  color: var(--fg-faint);
+}
+
+.composer-stage .diff-stat:disabled,
+.composer-stage .stage-action:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.composer-stage .diff-stat .add { color: var(--status-done); }
+.composer-stage .diff-stat .del { color: var(--status-error); }
+
+.composer-stage .stage-action {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  color: var(--fg-faint);
+  cursor: pointer;
+  border: 1px solid var(--border-soft);
+  white-space: nowrap;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.composer-stage .stage-action:not(:disabled):hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+
+.composer-stage .stage-action:not(:disabled):hover svg {
+  color: var(--fg);
+}
+
+.composer {
+  position: relative;
+  max-width: 760px;
+  margin: 0 auto;
+  border-radius: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 14px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 12px 40px -16px rgba(0,0,0,0.6);
+  transition: border-color 120ms var(--ease-out);
+}
+
+.composer:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.composer-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.input-mirror {
+  position: absolute;
+  inset: 0;
+  padding: 11px 0;
+  font: 400 14px/1.5 "Geist", system-ui, sans-serif;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  pointer-events: none;
+  color: var(--fg);
+  overflow: hidden;
+  user-select: none;
+}
+
+.input-mirror .slash-token,
+.input-mirror .skill-token {
+  color: #7AA9E5;
+  font-weight: 500;
+}
+
+.composer-input {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--fg);
+  -webkit-text-fill-color: transparent;
+  font: 400 14px/1.5 "Geist", system-ui, sans-serif;
+  padding: 11px 0;
+  min-height: 22px;
+  max-height: 200px;
+  width: 100%;
+}
+
+.composer-input::placeholder {
+  color: var(--fg-faint);
+  -webkit-text-fill-color: var(--fg-faint);
+}
+
+.stop-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-faint);
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.stop-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.stop-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-foot {
+  max-width: 760px;
+  margin: 8px auto 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+  flex-wrap: wrap;
+  position: relative;
+}
+
+.foot-wrap { position: relative; }
+
+.foot-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.foot-btn:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
+}
+
+.foot-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.foot-btn.icon-only {
+  padding: 0;
+  width: 28px;
+  justify-content: center;
+}
+
+.foot-btn.warn {
+  color: var(--status-warn);
+  padding-left: 4px;
+}
+
+.foot-btn.warn .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-warn);
+  margin: 0 6px 0 4px;
+}
+
+.foot-btn.warn:hover {
+  background: color-mix(in srgb, var(--status-warn) 10%, transparent);
+}
+
+.foot-btn.recording {
+  color: var(--status-error);
+}
+
+.foot-btn.recording::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-error);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-error) 22%, transparent);
+  margin-right: 4px;
+  animation: ap-pulse 1.2s ease-in-out infinite;
+}
+
+.foot-spacer { flex: 1; }
+
+.model-pill {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--fg-muted);
+  background: transparent;
+  cursor: pointer;
+  font: 500 13px/1 "Geist", sans-serif;
+  white-space: nowrap;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.model-pill:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
+}
+
+.model-pill .dim {
+  color: var(--fg-faint);
+  font: 500 12px/1 "Geist Mono", monospace;
+  margin-left: 2px;
+}
+
+.spinner-ring {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  border-top-color: var(--status-warn);
+  border-right-color: var(--status-warn);
+  animation: spin 0.95s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.slash-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px -16px rgba(0,0,0,0.75), 0 1px 0 rgba(255,255,255,0.03) inset;
+  padding: 4px;
+  z-index: 40;
+  animation: menu-rise 140ms var(--ease-out) both;
+}
+
+.slash-popover::-webkit-scrollbar { width: 8px; }
+.slash-popover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.slash-group {
+  padding: 6px 10px 3px;
+  font: 500 10.5px/1 "Geist Mono", monospace;
+  color: var(--fg-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.slash-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg);
+  font: 500 12.5px/1.2 "Geist", sans-serif;
+  transition: background 80ms var(--ease-out);
+}
+
+.slash-row svg {
+  width: 13px;
+  height: 13px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.slash-row .slash-name {
+  color: var(--fg);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.slash-row .slash-desc {
+  color: var(--fg-faint);
+  font-weight: 400;
+  font-size: 12px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slash-row .slash-kind {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--fg-faint);
+  font: 500 10.5px/1 "Geist Mono", monospace;
+}
+
+.slash-row.active,
+.slash-row:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.steer-bar {
+  max-width: 760px;
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 6px 7px 12px;
+  border-radius: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.025) inset;
+  animation: menu-rise 200ms var(--ease-out) both;
+  min-height: 38px;
+  min-width: 0;
+}
+
+.steer-bar .steer-tag {
+  font: 600 9.5px/1 "Geist Mono", monospace;
+  letter-spacing: 0.1em;
+  color: var(--fg-faint);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  padding: 3px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.steer-bar .steer-text {
+  color: var(--fg);
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.steer-bar .steer-hint {
+  font: 500 11px/1 "Geist Mono", monospace;
+  color: var(--fg-dim);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.steer-bar .steer-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.steer-bar .steer-btn {
+  appearance: none;
+  padding: 5px 11px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: 500 12.5px/1 "Geist", sans-serif;
+  transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.steer-bar .steer-btn.cancel {
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  color: var(--fg-faint);
+}
+
+.steer-bar .steer-btn.steer {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.ap-shell {
+  display: flex;
+  max-height: calc(100dvh - 80px);
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  box-shadow: 0 24px 60px -20px rgba(0,0,0,0.7), 0 1px 0 rgba(255,255,255,0.04) inset;
+}
+
+.ap-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 8px 14px;
+}
+
+.ap-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.ap-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 500 10px/1 "Geist Mono", monospace;
+  color: var(--status-done);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ap-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--status-done);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 22%, transparent);
+  animation: ap-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes ap-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.ap-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+
+.ap-feed {
+  padding: 0 8px 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ap-artifacts {
+  padding: 6px 8px 8px;
+}
+
+.ap-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.ap-row.file {
+  cursor: pointer;
+  transition: background 120ms var(--ease-out);
+}
+
+.ap-row.file:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.ap-row svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--status-done);
+}
+
+.ap-row.file svg {
+  color: var(--fg-muted);
+}
+
+.ap-row .label {
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ap-row .time {
+  margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font: 500 10.5px/1 "Geist Mono", monospace;
+  color: var(--fg-faint);
+}
+
+.ap-toggle {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 10px 8px 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--fg-faint);
+  font: 500 11.5px/1 "Geist Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  text-align: left;
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0;
+  transition: color 120ms var(--ease-out);
+}
+
+.ap-toggle:hover {
+  color: var(--fg-muted);
+}
+
+.ap-toggle-chev {
+  width: 11px;
+  height: 11px;
+  transition: transform 160ms var(--ease-out);
+  opacity: 0.7;
+}
+
+.ap-toggle.open .ap-toggle-chev {
+  transform: rotate(90deg);
+}
+
+.ap-files {
+  display: flex;
+  flex-direction: column;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.ap-empty {
+  padding: 8px 8px 12px;
+  color: var(--chat-muted);
+  font-size: 12.5px;
+  line-height: 20px;
+}
+
+@media (max-width: 900px) {
+  .steer-bar .steer-hint { display: none; }
+
+  .chat-start {
+    width: min(100% - 28px, 620px);
+    padding-top: 24px;
+  }
+
+  .chat-start-card {
+    margin-top: 24px;
+  }
+
+  .chat-start-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .chat-start-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chat-start-heatmap {
+    grid-auto-rows: 16px;
+    grid-template-columns: repeat(13, 16px);
+  }
+
+  .chat-start-heat {
+    width: 16px;
+    height: 16px;
+  }
+
+  .chat-start-model {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
+  }
 }
 
 /* Structural labels — column headers, timestamps, key shortcuts, status
@@ -260,7 +2355,7 @@ code { font-size: 0.875rem; }
 
   --color-card: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
   --color-card-foreground: var(--midground);
-  --color-primary: #D97757;
+  --color-primary: #8A8A8A;
   --color-primary-foreground: var(--background-base);
   --color-secondary: color-mix(in srgb, var(--midground-base) 9%, var(--background-base));
   --color-secondary-foreground: var(--midground);
@@ -268,13 +2363,13 @@ code { font-size: 0.875rem; }
   --color-muted-foreground: color-mix(in srgb, var(--midground-base) 55%, transparent);
   --color-accent: color-mix(in srgb, var(--color-primary) 14%, var(--background-base));
   --color-accent-foreground: var(--midground);
-  --color-destructive: #ff827d;
+  --color-destructive: #E07570;
   --color-destructive-foreground: var(--background-base);
-  --color-success: #44c487;
-  --color-warning: #f3bf67;
-  --color-border: #2a2c2a;
-  --color-input: #2a2c2a;
-  --color-ring: #D97757;
+  --color-success: #4FC38A;
+  --color-warning: #E0B257;
+  --color-border: #2A2A2A;
+  --color-input: #2A2A2A;
+  --color-ring: #B0B0B0;
   --color-popover: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
   --color-popover-foreground: var(--midground);
 

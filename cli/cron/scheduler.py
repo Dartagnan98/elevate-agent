@@ -58,6 +58,74 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
+def _cron_session_notice(job: dict, session_id: str) -> str:
+    job_name = str(job.get("name") or job.get("id") or "Automation").strip()
+    schedule = str(job.get("schedule") or "").strip()
+    lines = [
+        f"Automation run started: {job_name}",
+        "",
+        "The local agent has picked up this cron run.",
+        f"Session: {session_id}",
+    ]
+    if schedule:
+        lines.append(f"Schedule: {schedule}")
+    return "\n".join(lines)
+
+
+def _precreate_cron_session(job: dict, session_id: str) -> bool:
+    """Make a cron run visible in the sidebar as soon as execution begins."""
+    if job.get("no_agent"):
+        return False
+    try:
+        from elevate_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id=session_id,
+                source="cron",
+                model=job.get("model") or os.getenv("ELEVATE_MODEL") or None,
+            )
+            try:
+                title_job = str(job.get("name") or job.get("id") or "Automation").strip()
+                title_job = title_job[:60] or "Automation"
+                db.set_session_title(session_id, f"Run - {title_job} - {session_id[-15:]}")
+            except Exception:
+                pass
+            try:
+                if db.message_count(session_id) == 0:
+                    db.append_message(
+                        session_id=session_id,
+                        role="system",
+                        content=_cron_session_notice(job, session_id),
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Cron job '%s': early session marker failed: %s",
+                    job.get("id", "?"),
+                    exc,
+                )
+        finally:
+            db.close()
+        return True
+    except Exception as exc:
+        logger.debug("Cron job '%s': early session create failed: %s", job.get("id", "?"), exc)
+        return False
+
+
+def _end_precreated_cron_session(session_id: str) -> None:
+    try:
+        from elevate_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.end_session(session_id, "cron_complete")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("Cron job '%s': early session end failed: %s", session_id, exc)
+
+
 def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
     """Resolve the toolset list for a cron job.
 
@@ -125,7 +193,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import advance_next_run, ensure_system_jobs, get_due_jobs, mark_job_run, save_job_output
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -1042,6 +1110,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
+        "DATA: Admin, CRM, outreach, and deal-file data now live in the "
+        "embedded Postgres-backed Elevate operational store via the "
+        "`elevate_cli.data` helpers and gated tools like `deals_overview` "
+        "or `elevate_db`; do not call `sqlite3` or old local operational DB "
+        "files for those records. Session/cache stores may still be SQLite, "
+        "but they are not the source of truth for cron/admin work. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
@@ -1346,20 +1420,40 @@ def _run_job_impl(
     # events fire into the void and the cron run looks like nothing
     # is happening from the user's perspective.
     _tg_cron_callbacks: dict = {}
+    _tg_server = None
     try:
         from tui_gateway import server as _tg_server
         import collections as _collections
+        _tg_ready = threading.Event()
         _tg_server._sessions[_cron_session_id] = {
+            "agent": None,
+            "agent_error": None,
+            "agent_ready": _tg_ready,
+            "attached_images": [],
+            "attached_videos": [],
+            "attached_files": [],
+            "cols": 80,
+            "edit_snapshots": {},
             "transport": _tg_server._fanout_transport,
             "events": _collections.deque(maxlen=_tg_server._EVENT_RING_MAXLEN),
             "events_lock": threading.Lock(),
             "events_seq": 0,
             "running_tools": {},
-            "history": [],
+            "history": [
+                {
+                    "role": "system",
+                    "content": _cron_session_notice(job, _cron_session_id),
+                }
+            ],
             "history_lock": threading.Lock(),
+            "history_version": 0,
+            "image_counter": 0,
+            "running": True,
+            "session_key": _cron_session_id,
+            "slash_worker": None,
             "tool_started_at": {},
-            "tool_progress_mode": "auto",
-            "show_reasoning": False,
+            "tool_progress_mode": _tg_server._load_tool_progress_mode(),
+            "show_reasoning": _tg_server._load_show_reasoning(),
             "is_cron": True,
             "job_id": job_id,
         }
@@ -1629,6 +1723,25 @@ def _run_job_impl(
             session_db=_session_db,
             **_tg_cron_callbacks,
         )
+        try:
+            if _tg_server is not None:
+                _tg_live = _tg_server._sessions.get(_cron_session_id)
+                if _tg_live is not None:
+                    _tg_live["agent"] = agent
+                    _tg_live["running"] = True
+                    _tg_ready = _tg_live.get("agent_ready")
+                    if hasattr(_tg_ready, "set"):
+                        _tg_ready.set()
+                    try:
+                        _tg_server._emit(
+                            "session.info",
+                            _cron_session_id,
+                            _tg_server._light_session_info(agent),
+                        )
+                    except Exception:
+                        pass
+        except Exception as _e:
+            logger.debug("Cron live session attach failed: %s", _e)
         
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
@@ -1809,6 +1922,17 @@ def _run_job_impl(
                 _session_db.close()
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
+        try:
+            if _tg_server is not None:
+                _tg_live = _tg_server._sessions.get(_cron_session_id)
+                if _tg_live is not None:
+                    _tg_live["running"] = False
+                    _tg_live["running_tools"] = {}
+                    _tg_ready = _tg_live.get("agent_ready")
+                    if hasattr(_tg_ready, "set"):
+                        _tg_ready.set()
+        except Exception as e:
+            logger.debug("Job '%s': failed to mark cron live session idle: %s", job_id, e)
         # Release subprocesses, terminal sandboxes, browser daemons, and the
         # main OpenAI/httpx client held by this ephemeral cron agent. Without
         # this, a gateway that ticks cron every N minutes leaks fds per job
@@ -1862,6 +1986,12 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         return 0
 
     try:
+        if os.getenv("ELEVATE_DISABLE_SYSTEM_CRON_ENSURE") != "1":
+            try:
+                ensure_system_jobs()
+            except Exception as exc:
+                logger.warning("Failed to ensure system cron jobs: %s", exc)
+
         due_jobs = get_due_jobs()
 
         if verbose and not due_jobs:
@@ -1914,6 +2044,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
             _cron_session_id = (
                 f"cron_{job['id']}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
             )
+            _session_precreated = _precreate_cron_session(job, _cron_session_id)
             try:
                 success, output, final_response, error = run_job(
                     job, session_id=_cron_session_id
@@ -1978,6 +2109,8 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 )
                 return False
             finally:
+                if _session_precreated:
+                    _end_precreated_cron_session(_cron_session_id)
                 # Drop the synthetic cron session from tui_gateway so the
                 # _sessions dict doesn't grow unbounded across thousands of
                 # cron runs. The event ring + history are GC'd with it.

@@ -63,8 +63,30 @@ let backendReady = false;
 let installProcess = null;
 let backendPort = PREFERRED_PORT;
 let backendUrl = `http://${HOST}:${backendPort}`;
+const startupStartedAt = Date.now();
+const startupEvents = [];
+let startupSummaryLogged = false;
 
 app.setName("Elevate");
+
+function markStartup(name, detail = "") {
+  const ms = Date.now() - startupStartedAt;
+  const event = { ms, name, detail };
+  startupEvents.push(event);
+  log.info(`[startup] ${ms}ms ${name}${detail ? ` ${detail}` : ""}`);
+}
+
+function finishStartup(reason) {
+  if (startupSummaryLogged) return;
+  startupSummaryLogged = true;
+  const total = Date.now() - startupStartedAt;
+  const timeline = startupEvents
+    .map((event) => `${event.ms}ms:${event.name}${event.detail ? `(${event.detail})` : ""}`)
+    .join(" | ");
+  log.info(`[startup-summary] ${reason} ${total}ms ${timeline}`);
+}
+
+markStartup("main:module-loaded");
 
 function repoRoot() {
   return path.resolve(__dirname, "..", "..");
@@ -458,18 +480,23 @@ function appendBackendLog(data) {
 }
 
 async function ensureBackend() {
+  markStartup("backend:ensure-start");
   await chooseBackendPort();
+  markStartup("backend:port-selected", String(backendPort));
 
   if (await backendMatchesDesktopMode()) {
+    markStartup("backend:already-ready");
     return true;
   }
 
   const launcher = resolveElevateLauncher();
   if (!launcher) {
+    markStartup("backend:launcher-missing");
     return false;
   }
 
   const baseEnv = EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {};
+  markStartup("backend:spawn", path.basename(launcher.command));
   backendProcess = spawn(launcher.command, launcher.args, {
     cwd: launcher.cwd,
     env: envWithPath({ ...baseEnv, ...(launcher.extraEnv || {}) }),
@@ -485,7 +512,9 @@ async function ensureBackend() {
     ownsBackend = false;
   });
 
-  return waitForBackend();
+  const ready = await waitForBackend();
+  markStartup(ready ? "backend:ready" : "backend:timeout");
+  return ready;
 }
 
 function createMenu() {
@@ -575,13 +604,14 @@ function createMenu() {
 }
 
 function createWindow() {
+  markStartup("window:create");
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
     minWidth: 980,
     minHeight: 680,
     title: "Elevate",
-    backgroundColor: "#1a1b1a",
+    backgroundColor: "#0F0F0F",
     show: false,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition:
@@ -595,7 +625,20 @@ function createWindow() {
   });
 
   mainWindow.once("ready-to-show", () => {
+    markStartup("window:ready-to-show");
     mainWindow.show();
+  });
+
+  mainWindow.webContents.on("dom-ready", () => {
+    const url = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "";
+    markStartup("renderer:dom-ready", url.startsWith(backendUrl) ? "dashboard" : path.basename(url));
+  });
+
+  mainWindow.webContents.on("did-finish-load", () => {
+    const url = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "";
+    const isDashboard = url.startsWith(backendUrl);
+    markStartup("renderer:did-finish-load", isDashboard ? "dashboard" : path.basename(url));
+    if (isDashboard) finishStartup("dashboard-loaded");
   });
 
   // Without this, a closed main window leaves `mainWindow` pointing at a
@@ -702,6 +745,7 @@ function startOverlayWatcher() {
 
 function loadLocalPage(fileName) {
   if (!mainWindow) return;
+  markStartup("window:load-local", fileName);
   mainWindow.loadFile(path.join(__dirname, fileName));
 }
 
@@ -734,7 +778,7 @@ function openLoginWindow() {
     maximizable: false,
     fullscreenable: false,
     title: "Sign in to Elevate",
-    backgroundColor: "#1a1b1a",
+    backgroundColor: "#0F0F0F",
     parent: mainWindow || undefined,
     modal: false,
     show: false,
@@ -755,6 +799,7 @@ function openLoginWindow() {
 
 function loadAppPath(pathname = START_PATH) {
   if (!mainWindow) return;
+  markStartup("window:load-dashboard", pathname);
   mainWindow.loadURL(`${backendUrl}${pathname}`);
 }
 
@@ -776,6 +821,7 @@ function setupPermissions() {
 }
 
 async function startDesktop() {
+  markStartup("desktop:start");
   setupPermissions();
   createWindow();
   createMenu();
@@ -786,6 +832,7 @@ async function startDesktop() {
   const ready = await ensureBackend();
   backendReady = ready;
   if (ready) {
+    markStartup("desktop:backend-ready");
     // The auth gate is enforced inside the chat endpoint, not at window load,
     // so the user can browse the dashboard while signed out. The chat will
     // reply with a "sign in required" message until ~/.elevate/license.json
@@ -836,6 +883,7 @@ async function startDesktop() {
       forceRefreshLicense().catch(() => {});
     }, 60_000);
   } else {
+    markStartup("desktop:backend-unavailable");
     loadLocalPage("install.html");
   }
 }
@@ -1113,6 +1161,7 @@ ipcMain.handle("updater:check", async () => {
 });
 
 app.whenReady().then(async () => {
+  markStartup("electron:ready");
   await startDesktop();
   kickoffUpdates();
 });

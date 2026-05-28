@@ -124,6 +124,7 @@ import {
   type HubData,
 } from "@/pages/real-estate-hub/_shared";
 import { LeadsSetupLaunch, useLeadsSetup } from "@/pages/real-estate-hub/leads/onboarding";
+import { LeadsDesignShell } from "@/pages/real-estate-hub/leads/LeadsDesignShell";
 
 export type { BoardAction, HubData };
 
@@ -594,7 +595,7 @@ const LeadBoardRow = memo(function LeadBoardRow({
 
   const openInChat = async () => {
     try {
-      await api.updateSourceInboxThread(thread.sourceId, thread.threadId, "open");
+      await api.updateSourceInboxThread(thread.sourceId, thread.threadId, "open", { returnInbox: false });
     } catch {
       // best-effort
     }
@@ -923,7 +924,7 @@ function DraftMessagesBoard({
   const openInChat = useCallback(
     async (draft: SourceInboxDraft) => {
       try {
-        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "open", draft.draftText);
+        await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "open", draft.draftText, { returnInbox: false });
       } catch {
         // best-effort
       }
@@ -3712,7 +3713,7 @@ function SentMessagesBoard({ filterSourceId }: { filterSourceId: string | null }
   );
 }
 
-export function RealEstateLeadsPage() {
+function RealEstateLeadsPageLegacy() {
   const data = useRealEstateHubData();
   useHubHeader("Leads", data);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
@@ -3787,33 +3788,49 @@ export function RealEstateLeadsPage() {
     [data.sourceInbox?.privateSearchBuyers, sourceFilter],
   );
 
-  const followUpJobs = data.cronJobs.filter((job) =>
-    jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
+  const followUpJobs = useMemo(
+    () =>
+      data.cronJobs.filter((job) =>
+        jobMatches(job, ["lead", "outreach", "follow-up", "follow up", "buyer", "seller"]),
+      ),
+    [data.cronJobs],
   );
-  const leadJobIds = new Set(followUpJobs.map((job) => job.id));
-  const leadSessions = data.sessions.filter((session) => {
-    if (sessionMatches(session, ["lead", "outreach", "buyer", "seller", "follow-up", "follow up"])) {
-      return true;
-    }
-    if ((session.source ?? "") === "cron" && session.id?.startsWith("cron_")) {
-      const jobIdGuess = session.id.replace(/^cron_/, "").split("_", 1)[0];
-      return leadJobIds.has(jobIdGuess);
-    }
-    return false;
-  });
+  const leadJobIds = useMemo(() => new Set(followUpJobs.map((job) => job.id)), [followUpJobs]);
+  const leadSessions = useMemo(
+    () =>
+      data.sessions.filter((session) => {
+        if (sessionMatches(session, ["lead", "outreach", "buyer", "seller", "follow-up", "follow up"])) {
+          return true;
+        }
+        if ((session.source ?? "") === "cron" && session.id?.startsWith("cron_")) {
+          const jobIdGuess = session.id.replace(/^cron_/, "").split("_", 1)[0];
+          return leadJobIds.has(jobIdGuess);
+        }
+        return false;
+      }),
+    [data.sessions, leadJobIds],
+  );
 
-  const leadBuckets = leadThreadBuckets(threads);
-  const hotLeadThreads = leadSectionThreads(
-    threads,
-    data.sourceInbox,
-    "hot",
-    leadBuckets.hot,
+  const leadBuckets = useMemo(() => leadThreadBuckets(threads), [threads]);
+  const hotLeadThreads = useMemo(
+    () =>
+      leadSectionThreads(
+        threads,
+        data.sourceInbox,
+        "hot",
+        leadBuckets.hot,
+      ),
+    [data.sourceInbox, leadBuckets.hot, threads],
   );
-  const followUpThreads = leadSectionThreads(
-    threads,
-    data.sourceInbox,
-    "follow_up",
-    leadBuckets.followUp,
+  const followUpThreads = useMemo(
+    () =>
+      leadSectionThreads(
+        threads,
+        data.sourceInbox,
+        "follow_up",
+        leadBuckets.followUp,
+      ),
+    [data.sourceInbox, leadBuckets.followUp, threads],
   );
   const useBackendLeadSections = sourceFilter === null;
   const hotLeads = useBackendLeadSections
@@ -3828,13 +3845,19 @@ export function RealEstateLeadsPage() {
   const skippedCount = useBackendLeadSections
     ? leadSectionCount(data.sourceInbox, "skipped", skippedDrafts.length)
     : skippedDrafts.length;
-  const sectionCounts = {
-    hot: hotLeads,
-    followUp: followUpThreadCount,
-    buyerSearch: buyerSearchCount,
-    skipped: skippedCount,
-  };
-  const blockedSources = allSources.filter((source) => source.blocked);
+  const sectionCounts = useMemo(
+    () => ({
+      hot: hotLeads,
+      followUp: followUpThreadCount,
+      buyerSearch: buyerSearchCount,
+      skipped: skippedCount,
+    }),
+    [buyerSearchCount, followUpThreadCount, hotLeads, skippedCount],
+  );
+  const blockedSources = useMemo(
+    () => allSources.filter((source) => source.blocked),
+    [allSources],
+  );
   const pulse = useMemo(() => computeResponsePulse(threads), [threads]);
 
   const refresh = data.refresh;
@@ -4053,6 +4076,44 @@ export function RealEstateLeadsPage() {
     </HubShell>
     </ThreadDrawerProvider>
   );
+}
+
+void RealEstateLeadsPageLegacy;
+
+export function RealEstateLeadsPage() {
+  const leadsSetup = useLeadsSetup();
+  const [forceOnboarding, setForceOnboarding] = useState(false);
+  const showOnboarding =
+    !leadsSetup.loading && !!leadsSetup.setup && (!leadsSetup.setup.complete || forceOnboarding);
+  const setupSnapshot = leadsSetup.setup;
+
+  if (leadsSetup.loading) {
+    return (
+      <div className="rounded-md border border-border bg-card px-4 py-6 text-sm text-muted-foreground m-5">
+        Loading leads onboarding…
+      </div>
+    );
+  }
+  if (leadsSetup.error) {
+    return (
+      <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground m-5">
+        Could not load leads setup: {leadsSetup.error}
+      </div>
+    );
+  }
+  if (showOnboarding && setupSnapshot) {
+    return (
+      <div className="m-5">
+        <LeadsSetupLaunch
+          setup={setupSnapshot}
+          onSetupUpdated={(next) => leadsSetup.setSetup(next)}
+          forceOnboarding={forceOnboarding}
+          onForceOnboardingDone={() => setForceOnboarding(false)}
+        />
+      </div>
+    );
+  }
+  return <LeadsDesignShell />;
 }
 
 export { RealEstateAdminPage } from "@/pages/real-estate-hub/admin";

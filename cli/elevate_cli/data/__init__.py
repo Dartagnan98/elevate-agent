@@ -150,6 +150,11 @@ from elevate_cli.data.deals import (
     set_deal_money,
     set_deal_toggle,
 )
+from elevate_cli.data.admin_calendar import (
+    list_upcoming_admin_events,
+    match_deal_by_address,
+    upsert_calendar_event,
+)
 from elevate_cli.data.dispatch import (
     approve_action_run,
     create_action,

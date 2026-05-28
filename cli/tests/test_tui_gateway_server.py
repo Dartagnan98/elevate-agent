@@ -1268,6 +1268,16 @@ def test_session_stop_forces_idle_and_kills_processes(monkeypatch):
 
     server._sessions["sid"] = _session(
         agent=_Agent(),
+        events=[
+            {"type": "message.start", "session_id": "sid", "ts": 1710000000.0},
+            {
+                "type": "tool.start",
+                "session_id": "sid",
+                "ts": 1710000001.0,
+                "payload": {"tool_id": "tool-1", "name": "shell"},
+            },
+        ],
+        events_lock=threading.Lock(),
         running=True,
         running_tools={"tool-1": {"tool_id": "tool-1", "name": "shell"}},
     )
@@ -1285,6 +1295,7 @@ def test_session_stop_forces_idle_and_kills_processes(monkeypatch):
         assert calls["interrupt"] == 1
         assert server._sessions["sid"]["running"] is False
         assert server._sessions["sid"]["running_tools"] == {}
+        assert server._sessions["sid"]["events"] == []
     finally:
         server._sessions.pop("sid", None)
 

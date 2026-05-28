@@ -23,6 +23,7 @@ build/
 /cli/.elevate-dev/
 /cli/web_dist/
 /cli/tsconfig.tsbuildinfo
+/cli/webforms/
 /temp_vision_images/
 
 # Backend build artifacts

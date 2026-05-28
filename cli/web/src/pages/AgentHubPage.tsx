@@ -961,11 +961,9 @@ export default function AgentHubPage() {
 
   if (loading && !snapshot) {
     return (
-      <FullWindowAurora
-        label="Agent Hub · loading"
-        title="Spinning up your agents"
-        subtitle="Pulling agent configs, memory snapshots, and connector status."
-      />
+      <div role="status" aria-live="polite" className="min-h-[20rem] w-full">
+        <span className="sr-only">Loading Agent Hub</span>
+      </div>
     );
   }
 

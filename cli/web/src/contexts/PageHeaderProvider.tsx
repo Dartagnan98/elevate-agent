@@ -46,6 +46,8 @@ export function PageHeaderProvider({
 
   const isConfigRoute = pathname === "/config" || pathname === "/config/";
   const isChatRoute = pathname === "/" || pathname.startsWith("/chat");
+  const isLeadsRoute = pathname === "/leads" || pathname === "/leads/";
+  const isTodayRoute = pathname === "/today" || pathname === "/today/";
 
   const value = useMemo(
     () => ({
@@ -62,7 +64,7 @@ export function PageHeaderProvider({
   return (
     <PageHeaderContext.Provider value={value}>
       <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        {!isConfigRoute && !isChatRoute && (
+        {!isConfigRoute && !isChatRoute && !isLeadsRoute && !isTodayRoute && (
           <header
             className={cn(
               "z-1 w-full shrink-0",

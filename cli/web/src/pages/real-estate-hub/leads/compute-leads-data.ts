@@ -1,0 +1,321 @@
+import type {
+  BuyerWatchlistEntry,
+  OutreachTemplate,
+  SourceConnectorStatus,
+  SourceInboxDraft,
+  SourceInboxProfile,
+  SourceInboxSentItem,
+  SourceInboxThread,
+} from "@/lib/api-types";
+import type {
+  LeadsDraft,
+  LeadsHeat,
+  LeadsHotEntry,
+  LeadsPipeline,
+  LeadsProfile,
+  LeadsSentMessage,
+  LeadsSkippedEntry,
+  LeadsSource,
+  LeadsSourceHealth,
+  LeadsTemplateItem,
+  LeadsTemplateLane,
+} from "./leads-data";
+
+function ageLabel(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (!isFinite(t) || t <= 0) return "—";
+  const diffMs = Date.now() - t;
+  if (diffMs < 0) return "now";
+  const m = Math.floor(diffMs / 60000);
+  if (m < 1) return "now";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  const w = Math.floor(d / 7);
+  if (w < 5) return `${w}w`;
+  const mo = Math.floor(d / 30);
+  if (mo < 12) return `${mo}mo`;
+  return `${Math.floor(d / 365)}y`;
+}
+
+function sourceHealth(s: SourceConnectorStatus): LeadsSourceHealth {
+  if (s.blocked || s.lastError) return "blocked";
+  if (s.state === "error") return "error";
+  return "live";
+}
+
+function heatFromScore(score: number | null | undefined, label?: string): LeadsHeat {
+  if (label === "hot") return "hot";
+  if (label === "warm" || label === "watch") return "warm";
+  if (typeof score === "number" && score >= 0.7) return "hot";
+  if (typeof score === "number" && score >= 0.35) return "warm";
+  return "cold";
+}
+
+export function mapLeadsSources(
+  sources: SourceConnectorStatus[],
+  drafts: SourceInboxDraft[],
+  threads: SourceInboxThread[],
+): LeadsSource[] {
+  const out: LeadsSource[] = [];
+  const totalCount = drafts.length + threads.length;
+  out.push({ id: "all", label: "All", count: totalCount, isAll: true });
+
+  const draftCounts = new Map<string, number>();
+  for (const d of drafts) draftCounts.set(d.sourceId, (draftCounts.get(d.sourceId) ?? 0) + 1);
+  const threadCounts = new Map<string, number>();
+  for (const t of threads) threadCounts.set(t.sourceId, (threadCounts.get(t.sourceId) ?? 0) + 1);
+
+  for (const s of sources) {
+    if (!s.connected && !s.importOnly) continue;
+    const count = (draftCounts.get(s.id) ?? 0) + (threadCounts.get(s.id) ?? 0);
+    if (count === 0 && !s.connected) continue;
+    out.push({
+      id: s.id,
+      label: s.label,
+      count,
+      health: sourceHealth(s),
+    });
+  }
+  return out;
+}
+
+export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
+  return drafts.map((d) => ({
+    id: d.id,
+    name: d.personName || "Unknown",
+    source: d.sourceLabel || d.sourceId,
+    channel: (d.channel || "").toUpperCase() || "—",
+    age: ageLabel(d.latestAt),
+    body: d.draftText || "",
+    heat: heatFromScore(d.score ?? null, d.leadLabel ?? undefined),
+    sourceId: d.sourceId,
+    taskId: d.taskId,
+  }));
+}
+
+function statusLabel(profile: SourceInboxProfile): string {
+  if (profile.status === "new_lead") return "New lead";
+  if (profile.status === "follow_up") return "Follow up";
+  if (profile.status === "ghosting") return "Ghosting";
+  if (profile.status === "dead") return "Dead";
+  if (profile.status === "closed_seller") return "Closed seller";
+  if (profile.status === "closed_buyer") return "Closed buyer";
+  if (profile.crmStage) return profile.crmStage;
+  return profile.heatLabel === "hot" ? "Hot" : "Open";
+}
+
+export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[] {
+  return profiles.map((p) => {
+    const verified = p.verifiers.length > 0 || p.hasCrm;
+    const heatLabel = p.heatLabel === "hot" ? "hot" : p.heatLabel === "warm" ? "warm" : "watch";
+    const group: LeadsProfile["group"] = heatLabel === "hot" ? "active" : verified ? "verified" : "unverified";
+    const firstThreadKey = (p.threadIds && p.threadIds[0]) || "";
+    const firstSourceId = (p.sourceIds && p.sourceIds[0]) || "";
+    let sourceId = firstSourceId;
+    let threadId = firstThreadKey;
+    if (firstThreadKey.includes(":") && firstSourceId) {
+      const prefix = firstSourceId + ":";
+      if (firstThreadKey.startsWith(prefix)) {
+        threadId = firstThreadKey.slice(prefix.length);
+      }
+    }
+    if (!sourceId && firstThreadKey.includes(":")) {
+      sourceId = firstThreadKey.split(":", 1)[0];
+    }
+    return {
+      id: p.id,
+      name: p.displayName || "Unknown",
+      heat: typeof p.heatScore === "number" ? p.heatScore : 0,
+      group,
+      verified,
+      status: statusLabel(p),
+      source: (p.sources && p.sources[0]) || (p.sourceIds && p.sourceIds[0]) || "—",
+      email: p.emails[0] || "",
+      phone: p.phones[0] || "",
+      contact: p.emails[0] || p.phones[0] || "",
+      threads: p.threadCount,
+      age: ageLabel(p.latestAt),
+      tags: p.tags || [],
+      sub: p.crmStage || (p.leadSource ? `Source: ${p.leadSource}` : ""),
+      lastMsg: p.latestText || "",
+      lastTouch: ageLabel(p.statusUpdatedAt || p.latestAt),
+      sourceId,
+      threadId,
+    };
+  });
+}
+
+export function mapLeadsPipeline(
+  drafts: SourceInboxDraft[],
+  skipped: SourceInboxDraft[],
+  buyers: BuyerWatchlistEntry[],
+): LeadsPipeline {
+  const hot: LeadsHotEntry[] = drafts
+    .filter((d) => d.leadLabel === "hot" || (typeof d.score === "number" && d.score >= 0.7))
+    .slice(0, 8)
+    .map((d) => ({
+      id: d.id,
+      name: d.personName || "Unknown",
+      signal: d.scoreReason || "Hot signal",
+      age: ageLabel(d.latestAt),
+    }));
+
+  const followups: LeadsHotEntry[] = drafts
+    .filter((d) => d.outreachLane === "follow-ups")
+    .slice(0, 8)
+    .map((d) => ({
+      id: d.id,
+      name: d.personName || "Unknown",
+      signal: d.scoreReason || "Follow-up cadence",
+      age: ageLabel(d.latestAt),
+    }));
+
+  const skippedOut: LeadsSkippedEntry[] = skipped.slice(0, 12).map((d) => ({
+    id: d.id,
+    name: d.personName || "Unknown",
+    reason: d.scoreReason || "Skipped",
+  }));
+
+  return { hot, followups, buyers: buyers.length, skipped: skippedOut };
+}
+
+export function computeLeadsKpis(
+  drafts: SourceInboxDraft[],
+  profiles: SourceInboxProfile[],
+): {
+  drafts: number;
+  hot: number;
+  avgFirstTouch: string;
+  avgDaysSinceTouch: string;
+  replyRate: string;
+  newLeads7d: string | number;
+  medianWait: string;
+  nextRun: string;
+} {
+  const hot = drafts.filter(
+    (d) => d.leadLabel === "hot" || (typeof d.score === "number" && d.score >= 0.7),
+  ).length;
+
+  const now = Date.now();
+  const sevenD = 7 * 24 * 60 * 60 * 1000;
+  const newLeads7d = profiles.filter((p) => {
+    const t = new Date(p.statusUpdatedAt || p.latestAt).getTime();
+    return isFinite(t) && now - t < sevenD;
+  }).length;
+
+  const fiveYears = 5 * 365 * 24 * 60 * 60 * 1000;
+  const touchAges = profiles
+    .map((p) => {
+      const t = new Date(p.statusUpdatedAt || p.latestAt).getTime();
+      if (!isFinite(t) || t <= 0) return null;
+      const age = now - t;
+      if (age < 0 || age > fiveYears) return null;
+      return age;
+    })
+    .filter((v): v is number => v !== null);
+  const avgDaysMs =
+    touchAges.length > 0 ? touchAges.reduce((a, b) => a + b, 0) / touchAges.length : 0;
+  const avgDays = Math.round(avgDaysMs / (24 * 60 * 60 * 1000));
+
+  return {
+    drafts: drafts.length,
+    hot,
+    avgFirstTouch: "—",
+    avgDaysSinceTouch: avgDays > 0 ? `${avgDays}d` : "—",
+    replyRate: "—",
+    newLeads7d,
+    medianWait: "—",
+    nextRun: "—",
+  };
+}
+
+const LANE_LABELS: Record<string, string> = {
+  "new-outreach": "New outreach",
+  "hot-leads-watcher": "Hot leads watcher",
+  "follow-ups": "Follow-ups",
+};
+
+const LANE_ICONS: Record<string, string> = {
+  "new-outreach": "sparkles",
+  "hot-leads-watcher": "flame",
+  "follow-ups": "clock",
+};
+
+export function mapLeadsTemplates(templates: OutreachTemplate[]): LeadsTemplateLane[] {
+  const byLane = new Map<string, OutreachTemplate[]>();
+  for (const t of templates) {
+    const lane = t.lane || "new-outreach";
+    if (!byLane.has(lane)) byLane.set(lane, []);
+    byLane.get(lane)!.push(t);
+  }
+  const result: LeadsTemplateLane[] = [];
+  const order = ["new-outreach", "hot-leads-watcher", "follow-ups"];
+  const seen = new Set<string>();
+  const push = (lane: string, list: OutreachTemplate[]) => {
+    seen.add(lane);
+    const active = list.filter((t) => t.active && t.status === "active").length;
+    const sent = list.reduce((s, t) => s + (t.uses || 0), 0);
+    const replies = list.reduce((s, t) => s + (t.replies || 0), 0);
+    const replyRate = sent > 0 ? Math.round((replies / sent) * 100) : 0;
+    const items: LeadsTemplateItem[] = list.map((t) => ({
+      id: t.id,
+      name: t.name || "(untitled)",
+      body: t.body || "",
+      used: t.uses || 0,
+      replies: t.replies || 0,
+      replyRate: typeof t.replyRate === "number" ? Math.round(t.replyRate * 100) : null,
+    }));
+    result.push({
+      lane: LANE_LABELS[lane] || lane,
+      icon: LANE_ICONS[lane] || "sparkles",
+      active,
+      sent,
+      replyRate,
+      needMore: "",
+      templates: items,
+    });
+  };
+  for (const lane of order) {
+    if (byLane.has(lane)) push(lane, byLane.get(lane)!);
+  }
+  for (const [lane, list] of byLane.entries()) {
+    if (!seen.has(lane)) push(lane, list);
+  }
+  return result;
+}
+
+function transportFromChannel(channel: string | undefined): LeadsSentMessage["transport"] {
+  const c = (channel || "").toLowerCase();
+  if (c.includes("imessage")) return "IMESSAGE";
+  if (c.includes("sms")) return "SMS";
+  if (c.includes("stub")) return "STUB";
+  return (channel || "").toUpperCase() || "STUB";
+}
+
+export function mapLeadsSent(items: SourceInboxSentItem[]): LeadsSentMessage[] {
+  return items.map((it) => {
+    const recipient =
+      it.payload?.recipient?.person_name ||
+      it.payload?.recipient?.phone ||
+      it.payload?.recipient?.email ||
+      it.payload?.recipient?.social_handle ||
+      "—";
+    const source = it.payload?.channel_meta?.toolkit
+      ? String(it.payload.channel_meta.toolkit)
+      : it.sourceId;
+    return {
+      id: it.id,
+      when: ageLabel(it.createdAt),
+      recipient,
+      source,
+      transport: transportFromChannel(it.channel),
+      message: it.payload?.draft_text || "",
+      msgId: it.providerMessageId || it.idempotencyKey || it.id,
+      status: it.status === "sent" ? "sent" : it.status === "failed" ? "failed" : it.status,
+    };
+  });
+}

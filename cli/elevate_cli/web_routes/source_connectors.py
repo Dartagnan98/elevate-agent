@@ -8,12 +8,14 @@ from pydantic import BaseModel
 
 class SourceInboxThreadAction(BaseModel):
     action: str
+    returnInbox: bool = True
     sourceId: str
     threadId: str
 
 
 class SourceInboxDraftAction(BaseModel):
     action: str
+    returnInbox: bool = True
     sourceId: str
     taskId: str
     draftText: str = ""
@@ -21,6 +23,7 @@ class SourceInboxDraftAction(BaseModel):
 
 class SourceInboxProfileAction(BaseModel):
     profileId: str
+    returnInbox: bool = True
     status: str | None = None
 
 
@@ -145,6 +148,8 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
                 body.action,
                 return_inbox=False,
             )
+            if not body.returnInbox:
+                return {"ok": True}
             return _source_inbox_response()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -163,6 +168,8 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
                 body.status,
                 return_inbox=False,
             )
+            if not body.returnInbox:
+                return {"ok": True}
             return _source_inbox_response()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -183,6 +190,8 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
                 draft_text=body.draftText,
                 return_inbox=False,
             )
+            if not body.returnInbox:
+                return {"ok": True}
             return _source_inbox_response()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))

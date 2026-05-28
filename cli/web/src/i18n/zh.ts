@@ -56,7 +56,10 @@ export const zh: Translations = {
     footer: {
       org: "Elevation Real Estate HQ",
     },
-    activeSessionsLabel: "活跃会话：",
+    agentActivityLabel: "代理活动：",
+    activeSessionsLabel: "代理活动：",
+    appOpenLabel: "应用：",
+    appOpenValue: "已打开",
     gatewayStatusLabel: "网关状态：",
     gatewayStrip: {
       failed: "启动失败",

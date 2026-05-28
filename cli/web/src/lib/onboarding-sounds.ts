@@ -84,18 +84,38 @@ export function playOnboardingClick() {
   osc.stop(now + 0.12);
 }
 
-/**
- * Cinematic whoosh — plays `/sounds/onboarding-whoosh.wav` (Foundation
- * Ocular Whooshes - "Dark Air"). Fired on Start onboarding / Continue
- * transitions to give the welcome -> wizard motion a cinematic edge
- * over the synthesized swell alone.
- */
+/** Cinematic whoosh — synthesized noise sweep for onboarding transitions. */
 export function playOnboardingWhoosh() {
-  if (muted || typeof window === "undefined") return;
+  const ac = getCtx();
+  if (!ac) return;
   try {
-    const audio = new Audio("/sounds/onboarding-whoosh.wav");
-    audio.volume = 0.55;
-    void audio.play().catch(() => {});
+    const now = ac.currentTime;
+    const duration = 0.72;
+    const sampleCount = Math.max(1, Math.floor(ac.sampleRate * duration));
+    const buffer = ac.createBuffer(1, sampleCount, ac.sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i += 1) {
+      const t = i / sampleCount;
+      channel[i] = (Math.random() * 2 - 1) * (1 - t);
+    }
+
+    const source = ac.createBufferSource();
+    source.buffer = buffer;
+
+    const filter = ac.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(1400, now);
+    filter.frequency.exponentialRampToValueAtTime(220, now + duration);
+    filter.Q.setValueAtTime(0.8, now);
+
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.06, now + 0.06);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+    source.connect(filter).connect(gain).connect(ac.destination);
+    source.start(now);
+    source.stop(now + duration);
   } catch {
     // audio unavailable - silent fail
   }

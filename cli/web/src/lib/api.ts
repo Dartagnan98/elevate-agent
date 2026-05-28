@@ -24,6 +24,7 @@ import type {
   AdminActionRun,
   AdminDealTasksResponse,
   AdminDealTaskRunRequest,
+  AdminUpcomingEventsResponse,
   DealRunResultRequest,
   DealContext,
   AdminProvinceGuide,
@@ -54,6 +55,7 @@ import type {
   ThreadContextResponse,
   SourceInboxResponse,
   SourceInboxSentResponse,
+  TodayDashboardResponse,
   SourceInboxProfileStatus,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
@@ -61,6 +63,8 @@ import type {
   ActionResponse,
   ActionStatusResponse,
   UpdateStatusResponse,
+  WorkspaceGitStatus,
+  WorkspaceOpenResponse,
   StatusResponse,
   AgentHandoff,
   AgentHandoffCreateRequest,
@@ -93,6 +97,7 @@ import type {
   DashboardThemesResponse,
   PluginManifestResponse,
 } from "./api-types";
+import { recordStartupApiTiming } from "./startup-performance";
 
 // Ephemeral session token for protected endpoints.
 // Injected into index.html by the server — never fetched via API.
@@ -129,18 +134,27 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
     setSessionHeader(headers, token);
   }
   const method = (init?.method ?? "GET").toUpperCase();
-  if (method !== "GET") {
-    clearGetCache();
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  let status = 0;
+  try {
+    const res = await fetch(`${BASE}${url}`, { ...init, headers });
+    status = res.status;
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    if (method !== "GET") {
+      clearGetCache();
+    }
+    const json = await res.json();
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    recordStartupApiTiming(url, method, status, endedAt - startedAt, true);
+    return json;
+  } catch (error) {
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    recordStartupApiTiming(url, method, status, endedAt - startedAt, false);
+    throw error;
   }
-  const res = await fetch(`${BASE}${url}`, { ...init, headers });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
-  }
-  if (method !== "GET") {
-    clearGetCache();
-  }
-  return res.json();
 }
 
 function cachedFetchJSON<T>(url: string, ttlMs: number): Promise<T> {
@@ -160,6 +174,11 @@ function cachedFetchJSON<T>(url: string, ttlMs: number): Promise<T> {
   });
   GET_CACHE.set(key, { expiresAt: now + ttlMs, promise });
   return promise;
+}
+
+function maxSessionLimit(limit: number): number {
+  const parsed = Number.isFinite(limit) ? Math.trunc(limit) : 20;
+  return Math.max(1, Math.min(parsed || 20, 200));
 }
 
 async function fetchBlob(url: string, init?: RequestInit): Promise<BlobResponse> {
@@ -192,7 +211,10 @@ async function getSessionToken(): Promise<string> {
 }
 
 export const api = {
-  getStatus: () => cachedFetchJSON<StatusResponse>("/api/status", 1_000),
+  getStatus: (options?: { refresh?: boolean }) =>
+    options?.refresh
+      ? fetchJSON<StatusResponse>("/api/status")
+      : cachedFetchJSON<StatusResponse>("/api/status", 2_000),
   getAccessStatus: () => cachedFetchJSON<AccessStatusResponse>("/api/access", 5_000),
   getLicenseStatus: () =>
     cachedFetchJSON<LicenseStatusResponse>("/api/license/status", 5_000),
@@ -213,15 +235,32 @@ export const api = {
   getSessions: (
     limit = 20,
     offset = 0,
-    options?: { includeTotal?: boolean; includeDetails?: boolean },
+    options?: { includeTotal?: boolean; includeDetails?: boolean; refresh?: boolean },
   ) => {
+    const requestedLimit = maxSessionLimit(limit);
+    const shouldUseSharedShellList =
+      offset === 0 && options?.includeTotal === false && !options?.includeDetails && requestedLimit <= 48;
+    const fetchLimit = shouldUseSharedShellList ? 48 : requestedLimit;
     const qs = new URLSearchParams({
-      limit: String(limit),
+      limit: String(fetchLimit),
       offset: String(offset),
     });
     if (options?.includeTotal === false) qs.set("include_total", "false");
     if (options?.includeDetails) qs.set("include_details", "true");
-    return cachedFetchJSON<PaginatedSessions>(`/api/sessions?${qs.toString()}`, 1_000);
+    const url = `/api/sessions?${qs.toString()}`;
+    const request = options?.refresh
+      ? fetchJSON<PaginatedSessions>(url)
+      : cachedFetchJSON<PaginatedSessions>(url, 2_500);
+    return request.then((resp) => {
+      if (!shouldUseSharedShellList) return resp;
+      const sessions = resp.sessions.slice(0, requestedLimit);
+      return {
+        ...resp,
+        sessions,
+        limit: requestedLimit,
+        total: offset + sessions.length,
+      };
+    });
   },
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
@@ -463,11 +502,12 @@ export const api = {
   },
 
   // Cron jobs
-  getCronJobs: (options?: { compact?: boolean }) =>
-    cachedFetchJSON<CronJob[]>(
-      `/api/cron/jobs${options?.compact ? "?compact=true" : ""}`,
-      2_000,
-    ),
+  getCronJobs: (options?: { compact?: boolean; refresh?: boolean }) => {
+    const url = `/api/cron/jobs${options?.compact ? "?compact=true" : ""}`;
+    return options?.refresh
+      ? fetchJSON<CronJob[]>(url)
+      : cachedFetchJSON<CronJob[]>(url, 2_000);
+  },
   createCronJob: (job: CronJobCreateRequest) =>
     fetchJSON<CronJob>("/api/cron/jobs", {
       method: "POST",
@@ -826,6 +866,22 @@ export const api = {
     }
     return cachedFetchJSON<UpdateStatusResponse>("/api/elevate/update/status", 30_000);
   },
+  getWorkspaceGitStatus: (params?: { force?: boolean; sessionId?: string | null; workingDirectory?: string | null }) => {
+    const qs = new URLSearchParams();
+    if (params?.sessionId) qs.set("session_id", params.sessionId);
+    if (params?.workingDirectory) qs.set("working_directory", params.workingDirectory);
+    const suffix = qs.toString();
+    const url = `/api/workspace/git/status${suffix ? `?${suffix}` : ""}`;
+    return params?.force
+      ? fetchJSON<WorkspaceGitStatus>(url)
+      : cachedFetchJSON<WorkspaceGitStatus>(url, 5_000);
+  },
+  openWorkspace: (path?: string | null) =>
+    fetchJSON<WorkspaceOpenResponse>("/api/workspace/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(path ? { path } : {}),
+    }),
   getActionStatus: (name: string, lines = 200) =>
     fetchJSON<ActionStatusResponse>(
       `/api/actions/${encodeURIComponent(name)}/status?lines=${lines}`,
@@ -986,7 +1042,10 @@ export const api = {
     ),
 
   // Leads onboarding gate
-  getLeadsSetup: () => fetchJSON<LeadsSetupSnapshot>("/api/leads/setup"),
+  getLeadsSetup: (options?: { refresh?: boolean }) =>
+    options?.refresh
+      ? fetchJSON<LeadsSetupSnapshot>("/api/leads/setup")
+      : cachedFetchJSON<LeadsSetupSnapshot>("/api/leads/setup", 30_000),
   updateLeadsSetup: (items: LeadsSetupItemUpdate[]) =>
     fetchJSON<LeadsSetupSnapshot>("/api/leads/setup", {
       method: "PUT",
@@ -1068,7 +1127,14 @@ export const api = {
     if (params.limit != null) qs.set("limit", String(params.limit));
     if (params.offset != null) qs.set("offset", String(params.offset));
     const tail = qs.toString() ? `?${qs.toString()}` : "";
-    return fetchJSON<AdminDealsResponse>(`/api/admin/deals${tail}`);
+    return cachedFetchJSON<AdminDealsResponse>(`/api/admin/deals${tail}`, 2_500);
+  },
+  getAdminUpcomingEvents: (days = 21) => {
+    const safeDays = Math.max(1, Math.min(Math.trunc(days || 21), 90));
+    return cachedFetchJSON<AdminUpcomingEventsResponse>(
+      `/api/admin/upcoming-events?days=${encodeURIComponent(String(safeDays))}`,
+      2_500,
+    );
   },
   createAdminDeal: (body: AdminDealCreateRequest) =>
     fetchJSON<AdminDeal>("/api/admin/deals", {
@@ -1142,7 +1208,7 @@ export const api = {
     if (params.limit != null) qs.set("limit", String(params.limit));
     if (params.offset != null) qs.set("offset", String(params.offset));
     const tail = qs.toString() ? `?${qs.toString()}` : "";
-    return fetchJSON<{ items: AdminActionRun[]; count: number }>(`/api/admin/action-runs${tail}`);
+    return cachedFetchJSON<{ items: AdminActionRun[]; count: number }>(`/api/admin/action-runs${tail}`, 2_500);
   },
   ensureDefaultAdminActions: () =>
     fetchJSON<{ created: AdminAction[]; updated?: AdminAction[]; skipped: AdminAction[]; count: number }>("/api/admin/actions/defaults", {
@@ -1160,7 +1226,7 @@ export const api = {
     if (params.limit != null) qs.set("limit", String(params.limit));
     if (params.offset != null) qs.set("offset", String(params.offset));
     const tail = qs.toString() ? `?${qs.toString()}` : "";
-    return fetchJSON<AdminDealTasksResponse>(`/api/admin/tasks${tail}`);
+    return cachedFetchJSON<AdminDealTasksResponse>(`/api/admin/tasks${tail}`, 2_500);
   },
   runAdminDealTask: (body: AdminDealTaskRunRequest) =>
     fetchJSON<AdminActionRun>("/api/admin/tasks/run", {
@@ -1193,8 +1259,10 @@ export const api = {
     fetchJSON<{ sourceId: string; prompt: string }>(
       `/api/source-connectors/${encodeURIComponent(sourceId)}/prompt`,
     ),
+  getToday: (sourceLimit = 160) =>
+    fetchJSON<TodayDashboardResponse>(`/api/today?source_limit=${encodeURIComponent(String(sourceLimit))}`),
   getSourceInbox: (limit = 16) =>
-    fetchJSON<SourceInboxResponse>(`/api/source-inbox?limit=${limit}`),
+    cachedFetchJSON<SourceInboxResponse>(`/api/source-inbox?limit=${limit}`, 5_000),
   getThreadContext: (sourceId: string, threadId: string, limit = 200) =>
     fetchJSON<ThreadContextResponse>(
       `/api/source-inbox/thread/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}?limit=${limit}`,
@@ -1215,23 +1283,38 @@ export const api = {
         fetched?: number;
       }>;
     }>("/api/composio/inbound/pull", { method: "POST" }),
-  updateSourceInboxThread: (sourceId: string, threadId: string, action: "done" | "archive" | "restore" | "open") =>
+  updateSourceInboxThread: (
+    sourceId: string,
+    threadId: string,
+    action: "done" | "archive" | "restore" | "open",
+    options?: { returnInbox?: boolean },
+  ) =>
     fetchJSON<SourceInboxResponse>("/api/source-inbox/thread", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceId, threadId, action }),
+      body: JSON.stringify({ sourceId, threadId, action, returnInbox: options?.returnInbox ?? true }),
     }),
-  updateSourceInboxDraft: (sourceId: string, taskId: string, action: "approve" | "edit" | "skip" | "restore" | "open", draftText = "") =>
+  updateSourceInboxDraft: (
+    sourceId: string,
+    taskId: string,
+    action: "approve" | "edit" | "skip" | "restore" | "open",
+    draftText = "",
+    options?: { returnInbox?: boolean },
+  ) =>
     fetchJSON<SourceInboxResponse>("/api/source-inbox/draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceId, taskId, action, draftText }),
+      body: JSON.stringify({ sourceId, taskId, action, draftText, returnInbox: options?.returnInbox ?? true }),
     }),
-  updateSourceInboxProfile: (profileId: string, status: SourceInboxProfileStatus | null) =>
+  updateSourceInboxProfile: (
+    profileId: string,
+    status: SourceInboxProfileStatus | null,
+    options?: { returnInbox?: boolean },
+  ) =>
     fetchJSON<SourceInboxResponse>("/api/source-inbox/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profileId, status }),
+      body: JSON.stringify({ profileId, status, returnInbox: options?.returnInbox ?? true }),
     }),
   // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
   // (status=sent by default). Set includePending=true to also see queued /

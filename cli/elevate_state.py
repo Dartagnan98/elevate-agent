@@ -1305,7 +1305,34 @@ class SessionDB:
             )
             return cursor.rowcount
         rowcount = self._execute_write(_do)
-        return rowcount > 0
+        pg_rowcount = 0
+        try:
+            from elevate_cli.data.connection import connect as _pg_connect
+
+            with _pg_connect() as conn:
+                if title:
+                    conflict = conn.execute(
+                        "SELECT id FROM chat_sessions WHERE title = ? AND id != ?",
+                        (title, session_id),
+                    ).fetchone()
+                    if conflict:
+                        conflict_id = (
+                            conflict["id"] if isinstance(conflict, dict) else conflict[0]
+                        )
+                        raise ValueError(
+                            f"Title '{title}' is already in use by session {conflict_id}"
+                        )
+                cursor = conn.execute(
+                    "UPDATE chat_sessions SET title = ? WHERE id = ?",
+                    (title, session_id),
+                )
+                pg_rowcount = max(0, int(getattr(cursor, "rowcount", 0) or 0))
+                conn.commit()
+        except ValueError:
+            raise
+        except Exception:
+            pass
+        return (rowcount or 0) > 0 or pg_rowcount > 0
 
     def get_session_title(self, session_id: str) -> Optional[str]:
         """Get the title for a session, or None."""
@@ -2354,15 +2381,27 @@ class SessionDB:
         if include_ancestors:
             session_ids = self._session_lineage_root_to_tip(session_id)
 
-        with self._lock:
-            placeholders = ",".join("?" for _ in session_ids)
-            rows = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name, "
-                "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id "
-                f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
-                tuple(session_ids),
-            ).fetchall()
+        rows = None
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import get_messages_for_sessions as _pg_get_messages_for_sessions
+
+                rows = _pg_get_messages_for_sessions(session_ids)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "get_messages_as_conversation PG read failed, falling back: %s",
+                    exc,
+                )
+        if rows is None:
+            with self._lock:
+                placeholders = ",".join("?" for _ in session_ids)
+                rows = self._conn.execute(
+                    "SELECT role, content, tool_call_id, tool_calls, tool_name, "
+                    "finish_reason, reasoning, reasoning_content, reasoning_details, "
+                    "codex_reasoning_items, codex_message_items, platform_message_id "
+                    f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
+                    tuple(session_ids),
+                ).fetchall()
 
         messages = []
         for row in rows:
@@ -3749,4 +3788,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

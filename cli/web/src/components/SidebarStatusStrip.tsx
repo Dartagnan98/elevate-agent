@@ -12,14 +12,14 @@ export function SidebarStatusStrip() {
 
   if (status === null) {
     return (
-      <div className="px-5 py-1.5" aria-hidden>
-        <div className="h-2 w-[80%] max-w-full animate-pulse rounded-sm bg-midground/10" />
+      <div className="px-2 py-1" aria-hidden>
+        <div className="h-6 w-full max-w-full animate-pulse rounded-[7px] bg-[var(--sidebar-row)]" />
       </div>
     );
   }
 
   const gw = gatewayLine(status, t);
-  const { activeSessionsLabel, gatewayStatusLabel } = t.app;
+  const { agentActivityLabel, appOpenLabel, appOpenValue, gatewayStatusLabel } = t.app;
   const overviewPath = isDashboardEmbeddedChatEnabled() ? "/chat" : "/tasks";
 
   return (
@@ -27,28 +27,54 @@ export function SidebarStatusStrip() {
       to={overviewPath}
       title={t.app.statusOverview}
       className={cn(
-        "flex min-h-11 items-center text-left lg:min-h-0",
-        "px-5 pb-2 pt-1 lg:px-4 lg:pb-1 lg:pt-0.5",
-        "text-[var(--sidebar-text-muted)]",
-        "transition-colors hover:text-[var(--sidebar-text)]",
+        "mx-0.5 mb-1 flex min-h-0 items-center rounded-[7px] px-2 py-1.5 text-left",
+        "text-[var(--sidebar-text-muted)] transition-colors",
+        "hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text)]",
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40",
         "focus-visible:ring-inset",
       )}
     >
-      <div className="flex flex-col gap-1 font-mondwest text-[0.72rem] leading-snug tracking-[0.06em] lg:gap-0.5 lg:text-[0.68rem]">
-        <p className="break-words">
-          <span className="text-[var(--sidebar-text-faint)]">{gatewayStatusLabel}</span>{" "}
-          <span className={cn("font-medium", gw.tone)}>{gw.label}</span>
-        </p>
+      <div className="flex w-full flex-col gap-1 text-[11.5px] leading-[1.35]">
+        <StatusRow
+          label={appOpenLabel}
+          value={appOpenValue}
+          valueClassName="text-success"
+        />
 
-        <p className="break-words">
-          <span className="text-[var(--sidebar-text-faint)]">{activeSessionsLabel}</span>{" "}
-          <span className="tabular-nums text-[var(--sidebar-text-muted)]">
-            {status.active_sessions}
-          </span>
-        </p>
+        <StatusRow
+          label={gatewayStatusLabel}
+          value={gw.label}
+          valueClassName={gw.tone}
+        />
+
+        <StatusRow
+          label={agentActivityLabel}
+          value={String(status.active_sessions)}
+          valueClassName="tabular-nums text-[var(--sidebar-text-muted)]"
+        />
       </div>
     </Link>
+  );
+}
+
+function StatusRow({
+  label,
+  value,
+  valueClassName,
+}: {
+  label: string;
+  value: string;
+  valueClassName?: string;
+}) {
+  return (
+    <p className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+      <span className="min-w-0 truncate text-[var(--sidebar-text-faint)]">
+        {label}
+      </span>
+      <span className={cn("shrink-0 font-medium", valueClassName)}>
+        {value}
+      </span>
+    </p>
   );
 }
 

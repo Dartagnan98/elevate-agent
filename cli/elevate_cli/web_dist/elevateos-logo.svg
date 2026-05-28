@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="220" height="48" viewBox="0 0 220 48">
-  <rect x="0" y="8" width="32" height="32" rx="6" fill="#1B2A4A"/>
-  <rect x="23" y="31" width="7" height="7" rx="2" fill="#CE823E"/>
-  <text x="16" y="30" text-anchor="middle" font-family="Manrope, system-ui, -apple-system, sans-serif" font-size="18" font-weight="800" fill="white">E</text>
-  <text x="44" y="30" font-family="Manrope, system-ui, -apple-system, sans-serif" font-size="20" font-weight="700" fill="#1B2A4A" letter-spacing="-0.3">ElevateOS</text>
+  <rect x="0" y="8" width="32" height="32" rx="6" fill="#202020"/>
+  <rect x="23" y="31" width="7" height="7" rx="2" fill="#B0B0B0"/>
+  <text x="16" y="30" text-anchor="middle" font-family="Manrope, system-ui, -apple-system, sans-serif" font-size="18" font-weight="800" fill="#ECECEC">E</text>
+  <text x="44" y="30" font-family="Manrope, system-ui, -apple-system, sans-serif" font-size="20" font-weight="700" fill="#ECECEC" letter-spacing="-0.3">ElevateOS</text>
 </svg>

@@ -2977,6 +2977,14 @@ def _emit_sign_in_nag(sid: str) -> None:
 
 def _mark_session_idle(session: dict) -> None:
     """Release the dashboard running latch once the visible turn is complete."""
+    events_lock = session.get("events_lock")
+    events = session.get("events")
+    if events is not None:
+        if events_lock is None:
+            events.clear()
+        else:
+            with events_lock:
+                events.clear()
     lock = session.get("history_lock")
     if lock is None:
         session["running"] = False

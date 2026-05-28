@@ -96,8 +96,6 @@ MAX_DESCRIPTION_LENGTH = 1024
 
 _REAL_ESTATE_SKILL_CATEGORIES = {
     "cma": "real-estate-marketing",
-    "cma-generator": "real-estate-marketing",
-    "cma-router": "real-estate-marketing",
     "humanizer": "real-estate-marketing",
     "market-stats-watcher": "real-estate-marketing",
     "marketing": "real-estate-marketing",
@@ -937,11 +935,38 @@ def skill_view(
         JSON string with skill content or error message
     """
     try:
+        source_root: str | None = None
+        original_name = name
+        source_prefixes = (
+            ("local/", "local"),
+            ("local:", "local"),
+            ("skills/", "local"),
+            ("skills:", "local"),
+            ("cloud/", "cloud"),
+            ("cloud:", "cloud"),
+            ("cloud-skills/", "cloud"),
+            ("cloud-skills:", "cloud"),
+        )
+        for prefix, root in source_prefixes:
+            if name.startswith(prefix):
+                source_root = root
+                name = name[len(prefix):].strip("/")
+                if not name:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": f"Skill source prefix '{prefix.rstrip('/:')}' needs a skill name.",
+                            "hint": "Use e.g. 'local/outreach-lanes' or 'cloud/outreach-lanes'.",
+                        },
+                        ensure_ascii=False,
+                    )
+                break
+
         local_category_name: str | None = None
         # ── Qualified name dispatch (plugin skills) ──────────────────
         # Names containing ':' are routed to the plugin skill registry.
         # Bare names fall through to the existing flat-tree scan below.
-        if ":" in name:
+        if ":" in name and source_root is None:
             from agent.skill_utils import is_valid_namespace, parse_qualified_name
             from elevate_cli.plugins import discover_plugins, get_plugin_manager
 
@@ -1008,10 +1033,18 @@ def skill_view(
         from agent.skill_utils import get_external_skills_dirs
 
         # Build list of all skill directories to search
-        all_dirs = []
-        if SKILLS_DIR.exists():
-            all_dirs.append(SKILLS_DIR)
-        all_dirs.extend(get_external_skills_dirs())
+        external_dirs = get_external_skills_dirs()
+        if source_root == "local":
+            all_dirs = [SKILLS_DIR] if SKILLS_DIR.exists() else []
+        elif source_root == "cloud":
+            all_dirs = [d for d in external_dirs if d.name == "cloud-skills"]
+            if not all_dirs:
+                all_dirs = external_dirs
+        else:
+            all_dirs = []
+            if SKILLS_DIR.exists():
+                all_dirs.append(SKILLS_DIR)
+            all_dirs.extend(external_dirs)
 
         if not all_dirs:
             return json.dumps(
@@ -1080,21 +1113,22 @@ def skill_view(
             paths = [str(smd) for _, smd in candidates]
             logging.getLogger(__name__).warning(
                 "Skill name collision for '%s': %d candidates — %s",
-                name, len(candidates), "; ".join(paths),
+                original_name, len(candidates), "; ".join(paths),
             )
             return json.dumps(
                 {
                     "success": False,
                     "error": (
-                        f"Ambiguous skill name '{name}': {len(candidates)} skills "
+                        f"Ambiguous skill name '{original_name}': {len(candidates)} skills "
                         "match across your local skills dir and external_dirs. "
                         "Refusing to guess — load one explicitly by its categorized path."
                     ),
                     "matches": paths,
                     "hint": (
                         "Pass the full relative path instead of the bare name "
-                        "(e.g., 'category/skill-name'), or rename one of the "
-                        "colliding skills so each name is unique."
+                        "(e.g., 'category/skill-name'), use a source-qualified "
+                        "name like 'local/skill-name' or 'cloud/skill-name', "
+                        "or rename one of the colliding skills."
                     ),
                 },
                 ensure_ascii=False,
@@ -1132,7 +1166,11 @@ def skill_view(
         _outside_skills_dir = True
         _trusted_dirs = [SKILLS_DIR.resolve()]
         try:
-            _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
+            _trusted_dirs.extend(
+                d.resolve()
+                for d in all_dirs
+                if d.exists() and d.resolve() != SKILLS_DIR.resolve()
+            )
         except Exception:
             pass
         for _td in _trusted_dirs:

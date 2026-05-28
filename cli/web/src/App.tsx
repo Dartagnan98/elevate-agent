@@ -35,7 +35,6 @@ import {
   Code,
   Copy,
   Database,
-  Download,
   ExternalLink,
   Eye,
   FileText,
@@ -46,7 +45,6 @@ import {
   Home,
   KeyRound,
   ListChecks,
-  Loader2,
   MailOpen,
   Maximize2,
   Menu,
@@ -59,7 +57,6 @@ import {
   Pin,
   Plus,
   Puzzle,
-  RotateCw,
   Search,
   Settings,
   Shield,
@@ -82,17 +79,14 @@ import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
-import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { Toast } from "@/components/Toast";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
-import { useSystemActions } from "@/contexts/useSystemActions";
-import type { SystemAction } from "@/contexts/system-actions-context";
 import { useI18n } from "@/i18n";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
-import { FullWindowAurora } from "@/components/FullWindowAurora";
+import { markStartup, reportStartup } from "@/lib/startup-performance";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
 
@@ -178,14 +172,35 @@ function normalizePreloadPath(path: string): string {
   return base;
 }
 
+function preloadRealEstateRouteData(path: string): void {
+  if (!["/", "/today", "/leads", "/admin", "/tasks", "/memory", "/social-media"].includes(path)) return;
+  void import("@/pages/real-estate-hub/_shared/use-hub-data").then((module) => {
+    void module.preloadRealEstateHubData(path);
+  });
+  if (path === "/leads") {
+    void import("@/pages/real-estate-hub/leads/onboarding").then((module) => {
+      void module.preloadLeadsSetup();
+    });
+  }
+}
+
 function preloadRoute(path: string): void {
   const key = normalizePreloadPath(path);
   const loader = ROUTE_PRELOADERS[key];
-  if (!loader || PRELOADED_ROUTES.has(key)) return;
+  if (!loader) {
+    preloadRealEstateRouteData(key);
+    return;
+  }
+  if (PRELOADED_ROUTES.has(key)) {
+    preloadRealEstateRouteData(key);
+    return;
+  }
   PRELOADED_ROUTES.add(key);
-  void loader().catch(() => {
-    PRELOADED_ROUTES.delete(key);
-  });
+  void loader()
+    .then(() => preloadRealEstateRouteData(key))
+    .catch(() => {
+      PRELOADED_ROUTES.delete(key);
+    });
 }
 
 function scheduleRouteWarmup(paths: string[]): () => void {
@@ -196,10 +211,10 @@ function scheduleRouteWarmup(paths: string[]): () => void {
     uniquePaths.forEach((path, index) => {
       const id = window.setTimeout(() => {
         if (!cancelled) preloadRoute(path);
-      }, index * 90);
+      }, index * 250);
       timers.push(id);
     });
-  }, 350);
+  }, 1500);
   timers.push(start);
 
   return () => {
@@ -217,12 +232,18 @@ function CoreRootRedirect() {
 }
 
 function AccessLoadingPage() {
+  return <RouteBundleFallback />;
+}
+
+function RouteBundleFallback() {
   return (
-    <FullWindowAurora
-      label="Checking access"
-      title="Opening Elevate"
-      subtitle="Verifying your workspace and signing you in."
-    />
+    <div
+      role="status"
+      aria-live="polite"
+      className="min-h-[20rem] w-full"
+    >
+      <span className="sr-only">Loading view</span>
+    </div>
   );
 }
 
@@ -251,21 +272,21 @@ function UpgradeRequiredPage() {
           width: 44,
           height: 44,
           borderRadius: 10,
-          background: "rgba(217, 119, 87, 0.12)",
-          border: "1px solid rgba(217, 119, 87, 0.35)",
+          background: "color-mix(in srgb, var(--color-primary) 12%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--color-primary) 35%, transparent)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: "#d97757",
+          color: "var(--color-primary)",
           fontSize: 20,
         }}
       >
         ✦
       </div>
-      <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text-strong, #f5f4f2)" }}>
+      <div style={{ fontSize: 18, fontWeight: 600, color: "var(--chat-text, #ECECEC)" }}>
         Upgrade to unlock this section
       </div>
-      <div style={{ fontSize: 13, color: "var(--text-dim, #8a8c8a)", maxWidth: 380, lineHeight: 1.45 }}>
+      <div style={{ fontSize: 13, color: "var(--chat-muted, #A0A0A0)", maxWidth: 380, lineHeight: 1.45 }}>
         This skill pack isn't on your current plan. Add it from your Elevation
         Real Estate HQ billing to bring this tab back online.
       </div>
@@ -279,8 +300,8 @@ function UpgradeRequiredPage() {
           alignItems: "center",
           gap: 6,
           padding: "9px 18px",
-          background: "#d97757",
-          color: "#fff",
+          background: "var(--color-primary)",
+          color: "var(--color-primary-foreground)",
           borderRadius: 6,
           textDecoration: "none",
           fontSize: 13,
@@ -578,22 +599,35 @@ export default function App() {
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
   const isConfigRoute = normalizedPath === "/config";
+  const isAdminRoute = normalizedPath === "/admin";
+  const isLeadsRoute = normalizedPath === "/leads";
+  const isTodayRoute = normalizedPath === "/today";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
   const [accessStatus, setAccessStatus] = useState<AccessStatusResponse | null>(null);
   const [accessChecked, setAccessChecked] = useState(false);
   const [accessVersion, setAccessVersion] = useState(0);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [licenseChecked, setLicenseChecked] = useState(false);
+  const startupReportedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    if (accessVersion === 0) markStartup("access:request");
     api
       .getAccessStatus()
       .then((status) => {
-        if (!cancelled) setAccessStatus(status);
+        if (!cancelled) {
+          if (accessVersion === 0) {
+            markStartup("access:ready", status.mode ?? status.profile);
+          }
+          setAccessStatus(status);
+        }
       })
       .catch(() => {
-        if (!cancelled) setAccessStatus(null);
+        if (!cancelled) {
+          if (accessVersion === 0) markStartup("access:error");
+          setAccessStatus(null);
+        }
       })
       .finally(() => {
         if (!cancelled) setAccessChecked(true);
@@ -608,13 +642,22 @@ export default function App() {
   // Re-checks on the same auth-changed / focus signals as accessStatus.
   useEffect(() => {
     let cancelled = false;
+    if (accessVersion === 0) markStartup("license:request");
     api
       .getLicenseStatus()
       .then((status) => {
-        if (!cancelled) setLicenseStatus(status);
+        if (!cancelled) {
+          if (accessVersion === 0) {
+            markStartup("license:ready", status.authenticated ? "authenticated" : "signed-out");
+          }
+          setLicenseStatus(status);
+        }
       })
       .catch(() => {
-        if (!cancelled) setLicenseStatus({ authenticated: false } as LicenseStatusResponse);
+        if (!cancelled) {
+          if (accessVersion === 0) markStartup("license:error");
+          setLicenseStatus({ authenticated: false } as LicenseStatusResponse);
+        }
       })
       .finally(() => {
         if (!cancelled) setLicenseChecked(true);
@@ -652,23 +695,32 @@ export default function App() {
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
 
   useEffect(() => {
+    if (startupReportedRef.current || !licenseChecked) return;
+    if (licenseStatus?.authenticated && !accessChecked) return;
+    startupReportedRef.current = true;
+    markStartup(
+      licenseStatus?.authenticated ? "ui:dashboard-ready" : "ui:login-ready",
+      pathname,
+    );
+    window.requestAnimationFrame(() => reportStartup("initial-ready"));
+  }, [accessChecked, licenseChecked, licenseStatus?.authenticated, pathname]);
+
+  useEffect(() => {
     preloadRoute(pathname);
   }, [pathname]);
 
   useEffect(() => {
     if (!licenseChecked || !licenseStatus?.authenticated || !accessChecked) return;
     const warmPaths = [
-      embeddedChat ? "/chat" : "/hub",
-      realEstateDashboard ? "/today" : "/hub",
-      realEstatePacks.realEstateSales ? "/leads" : "",
-      realEstatePacks.realEstateAdmin ? "/admin" : "",
-      realEstatePacks.realEstateMarketing ? "/social-media" : "",
-      "/tasks",
-      "/memory",
-      "/skills",
-      "/cron",
-      "/hub",
-    ];
+      embeddedChat ? "/chat" : realEstateDashboard ? "/today" : "/hub",
+      realEstatePacks.realEstateSales
+        ? "/leads"
+        : realEstatePacks.realEstateAdmin
+          ? "/admin"
+          : realEstatePacks.realEstateMarketing
+            ? "/social-media"
+            : "",
+    ].filter(Boolean).slice(0, 2);
     return scheduleRouteWarmup(warmPaths);
   }, [
     accessChecked,
@@ -736,19 +788,9 @@ export default function App() {
     return () => mql.removeEventListener("change", onChange);
   }, []);
 
-  // Auth gate — block the app shell until we know the license state. If the
-  // backend says unauthenticated, render the sign-in card full-screen. The
-  // LoginCard already dispatches `elevate:auth-changed` on success, which
-  // bumps accessVersion above and unmounts this gate automatically.
-  if (!licenseChecked) {
-    return (
-      <FullWindowAurora
-        label="Spinning up your agents"
-        title="Starting Elevate"
-        subtitle="Bringing the local agent runtime online."
-      />
-    );
-  }
+  // Auth gate — only block until we know whether to show login. Entitlement
+  // checks can resolve behind the shell; route fallbacks stay visually quiet.
+  if (!licenseChecked) return <RouteBundleFallback />;
   if (!licenseStatus?.authenticated) {
     return (
       <div className="onboarding-overlay relative flex h-dvh items-center justify-center overflow-hidden px-4 py-8">
@@ -762,7 +804,12 @@ export default function App() {
 
   return (
     <div
+      data-accent="graphite"
+      data-active-row="fill"
+      data-artifacts="floating"
+      data-density="compact"
       data-layout-variant={layoutVariant}
+      data-sections="micro"
       className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-background-base font-sans normal-case text-midground antialiased"
     >
       <SelectionSwitcher />
@@ -818,19 +865,15 @@ export default function App() {
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
-              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[312px] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col",
-              "bg-[var(--sidebar-bg)]",
+              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[calc(var(--sidebar-w)+var(--sidebar-gap)*2)] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col p-[var(--sidebar-gap)]",
+              "bg-transparent",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               sidebarCollapsed
                 ? "lg:hidden"
                 : cn(
                     "lg:sticky lg:translate-x-0 lg:shrink-0",
-                    // Floating / pilled treatment on desktop: inset from the
-                    // window edges so the page background frames the sidebar.
-                    "lg:top-2 lg:my-2 lg:ml-2 lg:h-[calc(100dvh-1rem)]",
-                    "lg:overflow-hidden lg:rounded-xl lg:border lg:border-[var(--sidebar-border)]",
-                    "lg:shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.45)]",
+                    "lg:top-0 lg:h-dvh",
                   ),
               isConfigRoute && "lg:hidden",
             )}
@@ -856,7 +899,10 @@ export default function App() {
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
                 isConfigRoute && "p-0",
                 isChatRoute && "p-0 bg-[var(--chat-bg)]",
-                !isConfigRoute && !isChatRoute && "px-3 sm:px-6 pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
+                isAdminRoute && "p-0",
+                isLeadsRoute && "p-0",
+                isTodayRoute && "p-0",
+                !isConfigRoute && !isChatRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "px-3 sm:px-6 pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
                 isDocsRoute && "min-h-0 flex-1",
               )}
             >
@@ -864,27 +910,21 @@ export default function App() {
               <div
                 className={cn(
                   "w-full min-w-0",
-                  !isChatRoute && !isConfigRoute && "elevate-page-shell",
+                  !isChatRoute && !isConfigRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "elevate-page-shell",
                   isDocsRoute && "elevate-docs-shell",
-                  (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
+                  (isDocsRoute || isChatRoute || isAdminRoute || isLeadsRoute || isTodayRoute) && "min-h-0 flex flex-1 flex-col",
                 )}
               >
                 <div
                   key={normalizedPath}
                   className={cn(
                     "min-w-0",
-                    (isDocsRoute || isChatRoute) && "min-h-0 flex flex-1 flex-col",
-                    !isChatRoute && !isConfigRoute && "elevate-route-transition",
+                    (isDocsRoute || isChatRoute || isAdminRoute || isLeadsRoute || isTodayRoute) && "min-h-0 flex flex-1 flex-col",
+                    !isChatRoute && !isConfigRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "elevate-route-transition",
                   )}
                 >
                   <Suspense
-                    fallback={
-                      <FullWindowAurora
-                        label="Loading"
-                        title="Opening view"
-                        subtitle="Loading the page bundle."
-                      />
-                    }
+                    fallback={<RouteBundleFallback />}
                   >
                     <Routes>
                       {routes.map(({ key, path, element }) => (
@@ -979,6 +1019,14 @@ function cronJobIdFromSession(session: SessionInfo): string | null {
 
 function isCronSession(session: SessionInfo): boolean {
   return cronJobIdFromSession(session) !== null;
+}
+
+function shouldShowCronSession(session: SessionInfo, nowSec: number): boolean {
+  if (!isCronSession(session)) return false;
+  if ((session.message_count ?? 0) > 0) return true;
+  if (session.is_active) return true;
+  const startedAt = session.started_at ?? session.last_active ?? 0;
+  return startedAt > 0 && nowSec - startedAt < 120;
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
@@ -1099,27 +1147,37 @@ function DesktopSidebar({
   const sidebarLogoSrc =
     themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
 
-  const loadSessions = useCallback(() => {
+  const loadSessions = useCallback((options?: { refresh?: boolean }) => {
     api
-      .getSessions(SIDEBAR_SESSION_LIMIT, 0, { includeTotal: false })
+      .getSessions(SIDEBAR_SESSION_LIMIT, 0, {
+        includeTotal: false,
+        refresh: options?.refresh,
+      })
       .then((resp) => {
-        // Filter out sidebar noise: empty sessions older than 5 min are
-        // almost always abandoned bootstrap leftovers (a /chat visit that
-        // minted a session and never sent a message). They make the sidebar
-        // look like delegation "fan-out" when nothing is actually happening.
-        // Keep brand-new empty sessions for ~5 min so the active one a user
-        // just opened still shows up before their first message lands.
+        // Filter out sidebar noise: a new-chat click is a draft until the
+        // user sends text, so empty persisted sessions are abandoned
+        // bootstrap leftovers and should not show as real chats.
         const nowSec = Date.now() / 1000;
         const filtered = resp.sessions.filter((s) => {
+          if (isCronSession(s)) return shouldShowCronSession(s, nowSec);
           if ((s.message_count ?? 0) > 0) return true;
           const startedAt = s.started_at ?? 0;
-          return nowSec - startedAt < 300;
+          return s.is_active && nowSec - startedAt < 10;
         });
         setSessions(filtered);
         setSessionError(false);
       })
       .catch(() => setSessionError(true))
       .finally(() => setSessionsLoading(false));
+  }, []);
+
+  const loadCronJobs = useCallback((options?: { refresh?: boolean }) => {
+    api
+      .getCronJobs({ compact: true, refresh: options?.refresh })
+      .then((jobs) => setCronJobs(jobs ?? []))
+      .catch(() => {
+        /* sidebar can render empty if cron API is down */
+      });
   }, []);
 
   useEffect(() => {
@@ -1134,7 +1192,7 @@ function DesktopSidebar({
       if (id) { window.clearInterval(id); id = null; }
     };
     const onVisibility = () => {
-      if (document.hidden) stop(); else { loadSessions(); start(); }
+      if (document.hidden) stop(); else { loadSessions({ refresh: true }); start(); }
     };
     start();
     document.addEventListener("visibilitychange", onVisibility);
@@ -1147,27 +1205,27 @@ function DesktopSidebar({
 
   useEffect(() => {
     if (!readyToLoad) return;
-    let cancelled = false;
-    const loadJobs = () => {
-      api
-        .getCronJobs()
-        .then((jobs) => {
-          if (!cancelled) setCronJobs(jobs ?? []);
-        })
-        .catch(() => {
-          /* sidebar can render empty if cron API is down */
-        });
-    };
-    const initialLoad = window.setTimeout(loadJobs, 300);
+    const initialLoad = window.setTimeout(loadCronJobs, 300);
     const id = window.setInterval(() => {
-      if (typeof document === "undefined" || !document.hidden) loadJobs();
+      if (typeof document === "undefined" || !document.hidden) loadCronJobs();
     }, 20000);
     return () => {
-      cancelled = true;
       window.clearTimeout(initialLoad);
       window.clearInterval(id);
     };
-  }, [readyToLoad]);
+  }, [loadCronJobs, readyToLoad]);
+
+  useEffect(() => {
+    if (!readyToLoad) return;
+    const onCronJobsChanged = () => {
+      loadCronJobs({ refresh: true });
+      loadSessions({ refresh: true });
+    };
+    window.addEventListener("elevate:cron-jobs-changed", onCronJobsChanged);
+    return () => {
+      window.removeEventListener("elevate:cron-jobs-changed", onCronJobsChanged);
+    };
+  }, [loadCronJobs, loadSessions, readyToLoad]);
 
   useEffect(() => {
     writePinnedSessionIds(pinnedIds);
@@ -1258,9 +1316,11 @@ function DesktopSidebar({
     .slice(0, 18);
   const cronSessionsByJobId = useMemo(() => {
     const map = new Map<string, SessionInfo[]>();
+    const nowSec = Date.now() / 1000;
     for (const session of sessions) {
       const jobId = cronJobIdFromSession(session);
       if (!jobId) continue;
+      if (!shouldShowCronSession(session, nowSec)) continue;
       const list = map.get(jobId) ?? [];
       list.push(session);
       map.set(jobId, list);
@@ -1482,7 +1542,7 @@ function DesktopSidebar({
       : item.label;
 
   return (
-    <div className="normal-case flex min-h-0 flex-1 flex-col font-sans text-[14px] tracking-normal text-[var(--sidebar-text)]">
+    <div className="sidebar normal-case font-sans text-[14px] tracking-normal text-[var(--sidebar-text)]">
       <Toast toast={toast} />
       <DeleteConfirmDialog
         open={sessionArchive.isOpen}
@@ -1520,10 +1580,10 @@ function DesktopSidebar({
         />
       )}
       <div
-        className="relative flex h-11 shrink-0 items-center pl-[5.25rem] pr-3 lg:pl-[5.25rem]"
+        className="sidebar-top"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        <div className="flex h-7 w-[9.75rem] min-w-0 items-center">
+        <div className="flex h-7 w-[9.75rem] min-w-0 items-center pl-[3.75rem]">
           <img
             src={sidebarLogoSrc}
             alt="Elevation"
@@ -1547,7 +1607,7 @@ function DesktopSidebar({
         </button>
 
         <div
-          className="absolute right-2 top-1/2 hidden lg:flex -translate-y-1/2 items-center gap-1"
+          className="tools hidden lg:flex"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
           <button
@@ -1556,8 +1616,7 @@ function DesktopSidebar({
             aria-label={searchOpen ? "Close search" : "Search"}
             aria-pressed={searchOpen}
             className={cn(
-              "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
-              "text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-text-active)] hover:bg-[var(--sidebar-row-hover)]",
+              "icon-btn",
               "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               searchOpen && "bg-[var(--sidebar-row-hover)] text-[var(--sidebar-text-active)]",
             )}
@@ -1570,8 +1629,7 @@ function DesktopSidebar({
             onClick={onToggleSidebar}
             aria-label="Collapse sidebar"
             className={cn(
-              "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
-              "text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-text-active)] hover:bg-[var(--sidebar-row-hover)]",
+              "icon-btn",
               "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             )}
           >
@@ -1580,17 +1638,16 @@ function DesktopSidebar({
         </div>
       </div>
 
-      <PluginSlot name="header-left" />
-
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-0.5">
+      <div className="sidebar-scroll overflow-x-hidden">
         <div className="space-y-0.5">
           <button
             type="button"
             onClick={startNewChat}
-            className={sidebarActionClass(false, true)}
+            className="new-chat"
           >
-            <Plus className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
+            <Plus />
             <span className="truncate">New chat</span>
+            <span className="kbd">⌘N</span>
           </button>
           {searchOpen && (
             <div className="relative">
@@ -1608,7 +1665,7 @@ function DesktopSidebar({
                 aria-label="Search chats and navigation"
                 placeholder="Search"
                 className={cn(
-                  "h-11 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)] lg:h-8 lg:rounded-md",
+                  "h-11 w-full rounded-lg bg-[var(--sidebar-row)] shadow-[inset_0_0_0_1px_var(--sidebar-border)] lg:h-8 lg:rounded-[7px]",
                   "pl-9 pr-9 text-[0.9rem] text-[var(--sidebar-text-strong)] placeholder:text-[var(--sidebar-text-muted)] lg:text-[0.86rem]",
                   "outline-none transition-colors focus:bg-[var(--chat-surface-strong)] focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-primary)_34%,transparent),0_0_0_3px_color-mix(in_srgb,var(--color-primary)_10%,transparent)]",
                 )}
@@ -1617,7 +1674,7 @@ function DesktopSidebar({
                 type="button"
                 onClick={closeSearch}
                 aria-label={query ? t.common.clear : "Close search"}
-                className="absolute right-0.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-md text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)] lg:h-7 lg:w-7 lg:right-0.5"
+                className="absolute right-0.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-[7px] text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)] lg:h-7 lg:w-7 lg:right-0.5"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -1780,10 +1837,9 @@ function DesktopSidebar({
           </div>
         )}
 
-        <SidebarSystemActions onNavigate={onNavigate} />
       </div>
 
-      <div className="shrink-0 px-2 pb-2">
+      <div className="sidebar-foot shrink-0">
         <SidebarUserPill />
       </div>
     </div>
@@ -1791,50 +1847,44 @@ function DesktopSidebar({
 }
 
 function SidebarSectionLabel({
+  badge,
   children,
   collapsed,
   onToggle,
 }: {
+  badge?: ReactNode;
   children: ReactNode;
   collapsed?: boolean;
   onToggle?: () => void;
 }) {
-  const baseClass =
-    "mb-0.5 mt-3 first:mt-0 px-2 text-[0.62rem] font-semibold uppercase tracking-wider text-[var(--sidebar-text)]";
   if (!onToggle) {
-    return <div className={baseClass}>{children}</div>;
+    return (
+      <div className="section-label">
+        <ChevronDown />
+        <span>{children}</span>
+        {badge && <span className="section-badge">{badge}</span>}
+      </div>
+    );
   }
   return (
     <button
       type="button"
       onClick={onToggle}
       aria-expanded={!collapsed}
-      className={cn(
-        baseClass,
-        "group flex w-full items-center justify-between gap-1.5 cursor-pointer",
-        "hover:text-[var(--sidebar-text-active)] transition-colors",
-        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm",
-      )}
+      className={cn("section-label", collapsed && "collapsed")}
     >
+      <ChevronDown />
       <span>{children}</span>
-      <ChevronDown
-        className={cn(
-          "h-3 w-3 shrink-0 transition-transform duration-150",
-          collapsed && "-rotate-90",
-        )}
-      />
+      {badge && <span className="section-badge">{badge}</span>}
     </button>
   );
 }
 
 function sidebarActionClass(active: boolean, primary = false) {
   return cn(
-    "group flex min-h-7 w-full items-center rounded-md px-2 py-0.5 text-left text-sm",
-    "cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-    primary && "font-medium text-[var(--sidebar-text-strong)]",
-    active
-      ? "text-[var(--sidebar-text-active)] font-medium"
-      : "text-[var(--sidebar-text)] hover:text-[var(--sidebar-text-active)]",
+    "nav-row focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+    primary && "font-medium",
+    active && "active",
   );
 }
 
@@ -1866,10 +1916,10 @@ function SidebarAction({
         onNavigate(path);
       }}
       className={({ isActive }) =>
-        cn(sidebarActionClass(isActive, primary), "flex items-center gap-2")
+        sidebarActionClass(isActive, primary)
       }
     >
-      <Icon className="h-4 w-4 shrink-0 text-[var(--sidebar-icon)]" />
+      <Icon />
       <span className="min-w-0 truncate">{label}</span>
     </NavLink>
   );
@@ -1904,26 +1954,54 @@ function SessionSection({
   statusText?: string;
   unreadIds: string[];
 }) {
+  const groupedSessions = useMemo(() => {
+    if (label !== "Chats") return null;
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
+    const groups: Array<{ label: string; sessions: SessionInfo[] }> = [
+      { label: "Today", sessions: [] },
+      { label: "Yesterday", sessions: [] },
+      { label: "Earlier", sessions: [] },
+    ];
+    for (const session of sessions) {
+      const lastActive = (session.last_active ?? 0) * 1000;
+      if (lastActive >= startOfToday) groups[0].sessions.push(session);
+      else if (lastActive >= startOfYesterday) groups[1].sessions.push(session);
+      else groups[2].sessions.push(session);
+    }
+    return groups.filter((group) => group.sessions.length > 0);
+  }, [label, sessions]);
+
+  const renderSession = (session: SessionInfo) => (
+    <SessionListItem
+      key={session.id}
+      embeddedChat={embeddedChat}
+      isRenaming={renamingSessionId === session.id}
+      onCancelRename={onCancelRename}
+      onCommitRename={onCommitRename}
+      onOpenContextMenu={onOpenContextMenu}
+      onOpenSession={onOpenSession}
+      onTogglePinned={onTogglePinned}
+      pinned={pinnedIds.includes(session.id)}
+      session={session}
+      unread={unreadIds.includes(session.id)}
+    />
+  );
+
   return (
     <div className="mt-3 lg:mt-2.5">
       <SidebarSectionLabel>{label}</SidebarSectionLabel>
-      <div className="space-y-0.5">
-        {sessions.map((session) => (
-          <SessionListItem
-            key={session.id}
-            embeddedChat={embeddedChat}
-            isRenaming={renamingSessionId === session.id}
-            onCancelRename={onCancelRename}
-            onCommitRename={onCommitRename}
-            onOpenContextMenu={onOpenContextMenu}
-            onOpenSession={onOpenSession}
-            onTogglePinned={onTogglePinned}
-            pinned={pinnedIds.includes(session.id)}
-            session={session}
-            unread={unreadIds.includes(session.id)}
-          />
-        ))}
-      </div>
+      {groupedSessions ? (
+        groupedSessions.map((group) => (
+          <div key={group.label}>
+            <div className="session-group-label">{group.label}</div>
+            <div className="session-list">{group.sessions.map(renderSession)}</div>
+          </div>
+        ))
+      ) : (
+        <div className="session-list">{sessions.map(renderSession)}</div>
+      )}
 
       {(loading || statusText) && sessions.length === 0 && (
         <div className="px-2.5 py-1 text-[0.8rem] text-[var(--sidebar-text-muted)]">
@@ -1958,19 +2036,15 @@ function SessionStatusDot({
     tone = "ok";
     label = "Done";
   }
-  const dotClass =
-    tone === "warning"
-      ? "bg-[var(--color-warning,#d9a040)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-warning,#d9a040)_14%,transparent)]"
-      : tone === "idle"
-        ? "bg-[var(--sidebar-icon-muted)]"
-        : "bg-[var(--color-success,#7a9e87)]";
   return (
     <span
       aria-label={label}
       title={label}
       className={cn(
-        "h-2 w-2 shrink-0 rounded-full lg:h-1.5 lg:w-1.5",
-        dotClass,
+        "dot",
+        tone === "warning" && "warn",
+        tone === "idle" && "idle",
+        tone === "ok" && "done",
       )}
     />
   );
@@ -2016,14 +2090,11 @@ function SessionListItem({
 
   if (isRenaming) {
     return (
-      <div className={cn(
-        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[28px] lg:rounded-md",
-        "bg-[var(--sidebar-row-active)]",
-      )}>
+      <div className="session-row active">
         <input
           ref={renameRef}
           defaultValue={title}
-          className="min-w-0 flex-1 rounded-md bg-transparent px-2.5 py-2 text-[0.9rem] font-medium leading-5 text-[var(--sidebar-text-active)] outline-none ring-1 ring-[var(--color-primary)] lg:px-2 lg:py-0.5"
+          className="col-span-3 min-w-0 rounded-[7px] bg-transparent px-1 py-0.5 text-[13px] leading-[1.3] text-[var(--fg)] outline-none ring-1 ring-[var(--accent-ring)]"
           onBlur={(event) => onCommitRename?.(session.id, event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") { event.preventDefault(); onCommitRename?.(session.id, event.currentTarget.value); }
@@ -2037,41 +2108,45 @@ function SessionListItem({
   return (
     <div
       onContextMenu={(event) => onOpenContextMenu(session, event)}
+      onClick={() => onOpenSession(session)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenSession(session);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      title={title}
+      data-status={unread ? "needs-perms" : Date.now() - (session.last_active ?? 0) * 1000 > SESSION_IDLE_MS ? "inactive" : "done"}
       className={cn(
-        "group relative flex min-h-11 items-center rounded-lg lg:min-h-[28px] lg:rounded-md",
-        "transition-colors duration-150",
-        active
-          ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
-          : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
+        "session-row",
+        active && "active",
       )}
     >
       <NavLink
         to={route}
         onClick={(event) => {
           event.preventDefault();
+          event.stopPropagation();
           onOpenSession(session);
         }}
-        className="flex min-w-0 flex-1 self-stretch items-center gap-2 rounded-lg px-2.5 py-2 pr-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground lg:gap-1.5 lg:px-2 lg:py-0.5 lg:group-hover:pr-16 lg:group-focus-within:pr-16"
+        className="contents"
       >
-        {/* `is_active` is a 25s recency flag, not a turn-running signal — it
-            lags a finished turn and misses long ones — so it must not drive a
-            spinner. The status dot conveys freshness without a false "Running". */}
+        <span className="status-cell">
         <SessionStatusDot
           lastActive={session.last_active}
           unread={unread}
         />
-        <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
-          {title}
         </span>
-        <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem] lg:transition-opacity lg:duration-100 lg:group-hover:opacity-0 lg:group-focus-within:opacity-0">
-          <span className="tabular-nums">{compactSessionAge(session.last_active)}</span>
-        </span>
+        <span className="title">{title}</span>
+        <span className="age">{compactSessionAge(session.last_active)}</span>
         <span className="sr-only">
           {title} · {session.is_active ? "running, " : ""}
           {session.source ?? "local"} {timeAgo(session.last_active)}
         </span>
       </NavLink>
-      <div className="pointer-events-none absolute right-1 top-1/2 hidden -translate-y-1/2 items-center rounded-md bg-[var(--sidebar-row-hover)] opacity-0 shadow-[0_0_0_1px_var(--sidebar-border)] transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 lg:flex">
+      <div className="session-actions hidden lg:flex">
         <button
           type="button"
           aria-label={pinned ? "Unpin chat" : "Pin chat"}
@@ -2080,12 +2155,7 @@ function SessionListItem({
             event.stopPropagation();
             onTogglePinned(session.id);
           }}
-          className={cn(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
-            pinned
-              ? "text-primary"
-              : "text-[var(--sidebar-icon-muted)] hover:text-[var(--sidebar-icon)]",
-          )}
+          className={cn("icon-btn sm", pinned && "text-primary")}
         >
           <Pin className="h-3.5 w-3.5" />
         </button>
@@ -2094,47 +2164,11 @@ function SessionListItem({
           aria-label="Open chat menu"
           title="Open chat menu"
           onClick={(event) => onOpenContextMenu(session, event)}
-          className={cn(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
-            "text-[var(--sidebar-icon-muted)] transition-colors",
-            "hover:text-[var(--sidebar-icon)]",
-            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
-          )}
+          className="icon-btn sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50"
         >
           <MoreHorizontal className="h-3.5 w-3.5" />
         </button>
       </div>
-      <button
-        type="button"
-        aria-label={pinned ? "Unpin chat" : "Pin chat"}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onTogglePinned(session.id);
-        }}
-        className={cn(
-          "flex h-11 w-11 shrink-0 items-center justify-center rounded-md transition-colors lg:hidden",
-          pinned
-            ? "text-primary"
-            : "text-[var(--sidebar-icon-muted)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-icon)]",
-        )}
-      >
-        <Pin className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        aria-label="Open chat menu"
-        title="Open chat menu"
-        onClick={(event) => onOpenContextMenu(session, event)}
-        className={cn(
-          "mr-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md lg:hidden",
-          "text-[var(--sidebar-icon-muted)] transition-colors",
-          "hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-icon)]",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/50",
-        )}
-      >
-        <MoreHorizontal className="h-3.5 w-3.5" />
-      </button>
     </div>
   );
 }
@@ -2188,29 +2222,25 @@ function AutomationsSection({
   };
   return (
     <div className="mt-3 lg:mt-2.5">
-      <SidebarSectionLabel collapsed={!open} onToggle={onToggle}>
-        <span className="flex w-full items-center gap-1.5">
-          <span>Automations</span>
-          <span className="font-normal normal-case tracking-normal text-[var(--sidebar-text-muted)]/80 tabular-nums">
-            {jobs.length}
-          </span>
-          {liveCount > 0 && (
-            <span className="ml-auto flex items-center gap-1 normal-case tracking-normal text-[var(--sidebar-text-muted)]">
-              {runningCount > 0 ? (
-                <span className="relative flex h-2 w-2 items-center justify-center">
-                  <span className="absolute h-2 w-2 animate-ping rounded-full bg-success/60" />
-                  <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
-                </span>
-              ) : (
-                <Clock className="h-3 w-3" />
-              )}
-              {runningCount > 0 ? `${runningCount} running` : `${liveCount} live`}
-            </span>
-          )}
-        </span>
+      <SidebarSectionLabel
+        collapsed={!open}
+        onToggle={onToggle}
+        badge={
+          <>
+            <span className="dim">{jobs.length}</span>
+            {liveCount > 0 && (
+              <span className="live-ind">
+                <span className="dot" />
+                {runningCount > 0 ? `${runningCount} running` : `${liveCount} live`}
+              </span>
+            )}
+          </>
+        }
+      >
+        Automations
       </SidebarSectionLabel>
       {open && (
-        <div className="mt-1 space-y-0.5 lg:mt-0.5">
+        <div className="auto-list">
           {visible.map((job) => {
             const title =
               (job.name && job.name.trim()) ||
@@ -2222,68 +2252,49 @@ function AutomationsSection({
             const runs = sessionsByJobId.get(job.id) ?? [];
             const isExpanded = expanded.has(job.id);
             const recentRuns = runs.slice(0, 8);
+            const Icon = errored ? AlertTriangle : paused ? Pause : Clock;
+            const status = errored ? "warn" : paused ? "paused" : "live";
+            const trail = running ? "live" : paused ? "paused" : formatNextRun(job.next_run_at);
             return (
               <div key={job.id}>
-              <div className="group/row flex min-h-11 w-full items-center lg:min-h-[28px]">
-              <button
-                type="button"
+              <div
+                className="auto-row"
+                data-status={status}
                 onClick={() => onOpenCron(job.id)}
-                className={cn(
-                  "group flex min-h-11 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[28px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-0.5",
-                  "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
-                )}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpenCron(job.id);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
                 title={`${title} · ${job.schedule_display}${running ? " · running now" : ""}${job.last_error ? ` · ${job.last_error}` : ""}`}
               >
-                {running ? (
-                  <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
-                    <span className="absolute h-2.5 w-2.5 animate-ping rounded-full bg-success/60" />
-                    <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
-                  </span>
-                ) : errored ? (
-                  <AlertTriangle className="h-3 w-3 shrink-0 text-destructive" />
-                ) : paused ? (
-                  <Pause className="h-3 w-3 shrink-0 text-warning" />
-                ) : (
-                  <Clock className="h-3 w-3 shrink-0 text-[var(--sidebar-icon-muted)]" />
+                <Icon />
+                <span className="title">{title}</span>
+                <span className={cn("auto-trail", paused && "paused", trail === "—" && "dash")}>
+                  {trail}
+                </span>
+                {runs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      toggleExpand(job.id);
+                    }}
+                    className={cn("auto-chev", isExpanded && "rotate-90")}
+                    title={`${runs.length} run${runs.length === 1 ? "" : "s"}`}
+                    aria-label={isExpanded ? "Collapse run history" : "Expand run history"}
+                    aria-expanded={isExpanded}
+                  >
+                    <ChevronRight />
+                  </button>
                 )}
-                <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
-                  {title}
-                </span>
-                <span
-                  className={cn(
-                    "ml-auto shrink-0 text-[0.75rem] leading-none tabular-nums lg:text-[0.82rem]",
-                    running ? "text-success" : "text-[var(--sidebar-text-muted)]",
-                  )}
-                >
-                  {running ? "live" : paused ? "paused" : formatNextRun(job.next_run_at)}
-                </span>
-              </button>
-              {runs.length > 0 && (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleExpand(job.id);
-                  }}
-                  className={cn(
-                    "ml-0.5 flex h-7 w-6 shrink-0 items-center justify-center rounded-md text-[var(--sidebar-text-muted)] transition-colors",
-                    "hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
-                  )}
-                  title={`${runs.length} run${runs.length === 1 ? "" : "s"}`}
-                  aria-label={isExpanded ? "Collapse run history" : "Expand run history"}
-                  aria-expanded={isExpanded}
-                >
-                  <ChevronRight
-                    className={cn(
-                      "h-3.5 w-3.5 transition-transform",
-                      isExpanded && "rotate-90",
-                    )}
-                  />
-                </button>
-              )}
               </div>
               {isExpanded && recentRuns.length > 0 && (
-                <div className="ml-3.5 mt-0.5 mb-1 space-y-0.5 border-l border-[var(--sidebar-border)]/60 pl-1.5 lg:mt-0.5 lg:space-y-0">
+                <div className="session-list mb-1 mt-0.5">
                   {recentRuns.map((session) => {
                     const runLabel =
                       session.preview?.trim() ||
@@ -2296,18 +2307,15 @@ function AutomationsSection({
                       key={session.id}
                       type="button"
                       onClick={() => onOpenSession(session)}
-                      className={cn(
-                        "flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors lg:min-h-[28px] lg:gap-1.5 lg:rounded-md lg:px-2 lg:py-0.5",
-                        "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
-                      )}
+                      className="session-row"
+                      data-status="done"
                       title={`${runLabel} · ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
                     >
-                      <span className="min-w-0 flex-1 truncate text-[0.9rem] font-medium leading-5 lg:text-[0.9rem] lg:leading-5">
-                        {runLabel}
+                      <span className="status-cell">
+                        <span className="dot done" />
                       </span>
-                      <span className="ml-auto shrink-0 text-[0.75rem] leading-none text-[var(--sidebar-text-muted)] tabular-nums lg:text-[0.82rem]">
-                        {compactSessionAge(session.last_active ?? 0)}
-                      </span>
+                      <span className="title">{runLabel}</span>
+                      <span className="age">{compactSessionAge(session.last_active ?? 0)}</span>
                     </button>
                     );
                   })}
@@ -2397,8 +2405,9 @@ function SessionContextMenu({
         onContextMenu={(event) => event.preventDefault()}
         style={{ left, top }}
         className={cn(
-          "fixed z-[100] w-[16.5rem] rounded-lg p-1.5 outline-none",
-          "border border-border bg-card text-midground shadow-[0_8px_24px_rgba(0,0,0,0.18)]",
+          "fixed z-[100] w-[16.5rem] rounded-[10px] p-1 outline-none",
+          "border border-[var(--sidebar-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-muted-strong)]",
+          "shadow-[0_24px_60px_-16px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.03)_inset]",
         )}
       >
       <SessionMenuButton
@@ -2457,7 +2466,7 @@ function SessionContextMenu({
 
 function SessionMenuSeparator() {
   return (
-    <div className="my-1 h-px bg-[color-mix(in_srgb,var(--midground-base)_12%,transparent)]" />
+    <div className="my-1 h-px bg-[var(--sidebar-border)]" />
   );
 }
 
@@ -2482,130 +2491,16 @@ function SessionMenuButton({
         onClick();
       }}
       className={cn(
-        "flex min-h-9 w-full items-center gap-3 rounded-xl px-3 text-left text-[0.9rem] font-semibold leading-none",
+        "flex min-h-8 w-full items-center gap-2.5 rounded-[6px] px-2.5 text-left text-[12.5px] font-medium leading-none",
         "transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
         destructive
-          ? "text-destructive hover:bg-destructive/10"
-          : "text-midground hover:bg-accent/80",
+          ? "text-[var(--chat-danger)] hover:bg-[color-mix(in_srgb,var(--chat-danger)_10%,transparent)]"
+          : "text-[var(--chat-muted-strong)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--chat-text)]",
       )}
     >
-      <Icon className="h-4 w-4 shrink-0 opacity-75" />
+      <Icon className="h-3.5 w-3.5 shrink-0 opacity-75" />
       <span className="truncate">{label}</span>
     </button>
-  );
-}
-
-function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const { activeAction, isBusy, isRunning, pendingAction, runAction, updateStatus } =
-    useSystemActions();
-  const updateBehind = updateStatus?.available ? updateStatus.behind : null;
-
-  const items: SystemActionItem[] = [
-    {
-      action: "restart",
-      icon: RotateCw,
-      label: t.status.restartGateway,
-      runningLabel: t.status.restartingGateway,
-      spin: true,
-    },
-    {
-      action: "update",
-      icon: Download,
-      label: updateStatus?.available ? t.status.updatesAvailable : t.status.updateElevate,
-      runningLabel: t.status.updatingElevate,
-      spin: false,
-    },
-  ];
-
-  const handleClick = (action: SystemAction) => {
-    if (isBusy) return;
-    void runAction(action);
-    navigate("/tasks");
-    onNavigate();
-  };
-
-  return (
-    <div
-      className={cn(
-        "shrink-0 flex flex-col px-2 py-2 lg:py-1.5",
-      )}
-    >
-      <span
-        className={cn(
-          "px-2.5 pt-0.5 pb-1 lg:px-2 lg:pb-0.5",
-          "text-[0.72rem] font-semibold tracking-normal text-[var(--sidebar-text-muted)]",
-        )}
-      >
-        {t.app.system}
-      </span>
-
-      <SidebarStatusStrip />
-
-      <ul className="flex flex-col">
-        {items.map(({ action, icon: Icon, label, runningLabel, spin }) => {
-          const isPending = pendingAction === action;
-          const isActionRunning =
-            activeAction === action && isRunning && !isPending;
-          const busy = isPending || isActionRunning;
-          const displayLabel = isActionRunning ? runningLabel : label;
-          const disabled = isBusy && !busy;
-
-          return (
-            <li key={action}>
-              <button
-                type="button"
-                onClick={() => handleClick(action)}
-                disabled={disabled}
-                aria-busy={busy}
-                className={cn(
-                  "group relative flex w-full items-center gap-3 lg:gap-2",
-                  "min-h-11 rounded-lg px-2.5 py-2 lg:min-h-8 lg:rounded-md lg:px-2 lg:py-0.5",
-                  "text-[0.92rem] font-medium tracking-normal lg:text-[0.9rem]",
-                  "text-left whitespace-nowrap transition-colors cursor-pointer",
-                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-                  busy
-                    ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
-                    : "text-[var(--sidebar-text)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
-                  "disabled:cursor-not-allowed disabled:opacity-30",
-                )}
-              >
-                {isPending ? (
-                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--sidebar-icon)]" />
-                ) : (
-                  <Icon
-                    className={cn(
-                      "h-[17px] w-[17px] shrink-0 text-[var(--sidebar-icon)] lg:h-4 lg:w-4",
-                      isActionRunning && spin && "animate-spin",
-                      isActionRunning && !spin && "animate-pulse",
-                    )}
-                  />
-                )}
-
-                <span className="truncate">{displayLabel}</span>
-
-                {action === "update" && updateBehind && updateBehind > 0 && !busy && (
-                  <span
-                    aria-label={`${updateBehind} update commits available`}
-                    className="ml-auto rounded-full bg-warning/15 px-1.5 py-0.5 text-[0.68rem] font-semibold leading-none text-warning"
-                  >
-                    {updateBehind}
-                  </span>
-                )}
-
-                {busy && (
-                  <span
-                    aria-hidden
-                    className="ml-auto h-1.5 w-1.5 rounded-full bg-success"
-                  />
-                )}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
   );
 }
 
@@ -2614,12 +2509,4 @@ interface NavItem {
   label: string;
   labelKey?: string;
   path: string;
-}
-
-interface SystemActionItem {
-  action: SystemAction;
-  icon: ComponentType<{ className?: string }>;
-  label: string;
-  runningLabel: string;
-  spin: boolean;
 }

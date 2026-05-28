@@ -70,6 +70,14 @@ const STATUS_VARIANT: Record<string, "success" | "warning" | "destructive"> = {
   completed: "destructive",
 };
 
+function notifyCronSidebarChanged(): void {
+  if (typeof window === "undefined") return;
+  const emit = () => window.dispatchEvent(new CustomEvent("elevate:cron-jobs-changed"));
+  emit();
+  window.setTimeout(emit, 1500);
+  window.setTimeout(emit, 5000);
+}
+
 type ScheduleMode =
   | "daily"
   | "weekdays"
@@ -934,9 +942,9 @@ export default function CronPage() {
   }, [editParam, setSearchParams]);
 
   /* ---- Load jobs ---- */
-  const loadJobs = useCallback(() => {
+  const loadJobs = useCallback((options?: { refresh?: boolean }) => {
     api
-      .getCronJobs()
+      .getCronJobs({ refresh: options?.refresh })
       .then((next) => {
         setJobs(next);
         // Auto-select first job if nothing selected
@@ -1091,7 +1099,8 @@ export default function CronPage() {
           "success",
         );
       }
-      loadJobs();
+      notifyCronSidebarChanged();
+      loadJobs({ refresh: true });
     } catch (e) {
       showToast(`${t.status.error}: ${e}`, "error");
     }
@@ -1104,7 +1113,8 @@ export default function CronPage() {
         `${t.cron.triggerNow}: "${job.name || job.prompt.slice(0, 30)}"`,
         "success",
       );
-      loadJobs();
+      notifyCronSidebarChanged();
+      loadJobs({ refresh: true });
     } catch (e) {
       showToast(`${t.status.error}: ${e}`, "error");
     }
@@ -1126,7 +1136,8 @@ export default function CronPage() {
             const remaining = jobs.filter((j) => j.id !== id);
             return remaining[0]?.id ?? null;
           });
-          loadJobs();
+          notifyCronSidebarChanged();
+          loadJobs({ refresh: true });
         } catch (e) {
           showToast(`${t.status.error}: ${e}`, "error");
           throw e;
@@ -1305,7 +1316,8 @@ export default function CronPage() {
                   onCancel={() => setShowCreate(false)}
                   onCreated={() => {
                     setShowCreate(false);
-                    loadJobs();
+                    notifyCronSidebarChanged();
+                    loadJobs({ refresh: true });
                   }}
                 />
               </div>
@@ -1326,7 +1338,8 @@ export default function CronPage() {
               onDelete={() => jobDelete.requestDelete(selectedJob.id)}
               onSaved={() => {
                 closeEditor();
-                loadJobs();
+                notifyCronSidebarChanged();
+                loadJobs({ refresh: true });
               }}
               onCancelEdit={closeEditor}
             />

@@ -1,6 +1,8 @@
 """Cron job management routes for the Elevate dashboard."""
 
 import logging
+import threading
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -309,6 +311,32 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
         job = trigger_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        def _run_due_tick() -> None:
+            # Manual runs should feel immediate in the dashboard. trigger_job()
+            # only marks the row due; this starts the scheduler now instead of
+            # waiting for the gateway's next 60s poll.
+            try:
+                from cron.scheduler import tick
+            except Exception:
+                _log.exception("cron trigger: scheduler import failed for %s", job_id)
+                return
+            for attempt in range(6):
+                try:
+                    ran = tick(verbose=False)
+                    if ran:
+                        return
+                except Exception:
+                    _log.exception("cron trigger: manual tick failed for %s", job_id)
+                    return
+                if attempt < 5:
+                    time.sleep(0.75)
+
+        threading.Thread(
+            target=_run_due_tick,
+            name=f"cron-trigger-{job['id']}",
+            daemon=True,
+        ).start()
         return job
 
 

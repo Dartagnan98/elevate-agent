@@ -21,10 +21,10 @@ export function useSidebarStatus() {
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => {
+    const load = (refresh = false) => {
       if (document.visibilityState === "hidden") return;
       api
-        .getStatus()
+        .getStatus({ refresh })
         .then((next) => {
           if (!cancelled) {
             setStatus((prev) => (sameShellStatus(prev, next) ? prev : next));
@@ -33,16 +33,17 @@ export function useSidebarStatus() {
         .catch(() => {});
     };
     const onVisible = () => {
-      if (document.visibilityState === "visible") load();
+      if (document.visibilityState === "visible") load(true);
     };
-    load();
+    load(true);
     const id = setInterval(load, POLL_MS);
-    window.addEventListener("focus", load);
+    const onFocus = () => load(true);
+    window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       clearInterval(id);
-      window.removeEventListener("focus", load);
+      window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);

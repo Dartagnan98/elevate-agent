@@ -16,6 +16,7 @@ queries that benefit from PG's better indexing.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from elevate_cli.data.connection import connect
@@ -427,6 +428,115 @@ def session_count(source: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
+def active_session_count(window_sec: int) -> int:
+    """Count recently active open sessions without constructing SessionDB."""
+    cutoff = time.time() - max(1, int(window_sec or 1))
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM chat_sessions s
+            WHERE s.ended_at IS NULL
+              AND (
+                s.parent_session_id IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM chat_sessions p
+                    WHERE p.id = s.parent_session_id
+                      AND p.end_reason = 'branched'
+                      AND s.started_at >= p.ended_at
+                )
+              )
+              AND COALESCE(
+                (SELECT MAX(m.timestamp) FROM chat_messages m WHERE m.session_id = s.id),
+                s.started_at
+              ) >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def list_session_summaries(
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    source: str | None = None,
+    exclude_sources: List[str] | None = None,
+    include_children: bool = False,
+) -> List[Dict[str, Any]]:
+    """Slim dashboard list reader for sidebar/session cards.
+
+    Selects only fields rendered by the dashboard shell and computes preview
+    + last_active in PG. This keeps polling endpoints off the legacy SQLite
+    SessionDB initializer while the rich reader remains available for full
+    details.
+    """
+    limit = max(1, min(int(limit or 20), 200))
+    offset = max(0, int(offset or 0))
+    where_clauses: List[str] = []
+    params: List[Any] = []
+
+    if not include_children:
+        where_clauses.append(
+            "(s.parent_session_id IS NULL"
+            " OR EXISTS (SELECT 1 FROM chat_sessions p"
+            "            WHERE p.id = s.parent_session_id"
+            "            AND p.end_reason = 'branched'"
+            "            AND s.started_at >= p.ended_at))"
+        )
+    if source:
+        where_clauses.append("s.source = ?")
+        params.append(source)
+    if exclude_sources:
+        placeholders = ",".join("?" for _ in exclude_sources)
+        where_clauses.append(f"s.source NOT IN ({placeholders})")
+        params.extend(exclude_sources)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    params.extend([limit, offset])
+
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                s.id,
+                s.source,
+                s.user_id,
+                s.model,
+                s.parent_session_id,
+                s.started_at,
+                s.ended_at,
+                s.end_reason,
+                s.message_count,
+                s.tool_call_count,
+                s.input_tokens,
+                s.output_tokens,
+                s.cache_read_tokens,
+                s.cache_write_tokens,
+                s.reasoning_tokens,
+                s.title,
+                s.api_call_count,
+                COALESCE(
+                    (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
+                     FROM chat_messages m
+                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     ORDER BY m.timestamp, m.id LIMIT 1),
+                    ''
+                ) AS preview,
+                COALESCE(
+                    (SELECT MAX(m2.timestamp) FROM chat_messages m2 WHERE m2.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+            FROM chat_sessions s
+            {where_sql}
+            ORDER BY s.started_at DESC, s.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     """Fetch one session by id, returned as a plain dict.
 
@@ -459,6 +569,20 @@ def get_messages(session_id: str) -> List[Dict[str, Any]]:
         rows = conn.execute(
             "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id",
             (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_messages_for_sessions(session_ids: List[str]) -> List[Dict[str, Any]]:
+    """Fetch raw messages for multiple sessions in insertion order."""
+    ids = [session_id for session_id in session_ids if session_id]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM chat_messages WHERE session_id IN ({placeholders}) ORDER BY id",
+            tuple(ids),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -508,7 +632,7 @@ def search_messages(query: str, limit: int = 25) -> List[Dict[str, Any]]:
             """
             SELECT id, session_id, role, content, tool_name, timestamp
             FROM chat_messages
-            WHERE content_tsv @@ plainto_tsquery('english', ?)
+            WHERE content_tsv @@ plainto_tsquery('simple', ?)
             ORDER BY timestamp DESC
             LIMIT ?
             """,
@@ -524,8 +648,11 @@ __all__ = [
     "session_exists",
     "message_count",
     "session_count",
+    "active_session_count",
+    "list_session_summaries",
     "get_session",
     "get_messages",
+    "get_messages_for_sessions",
     "recent_sessions",
     "get_meta",
     "set_meta",

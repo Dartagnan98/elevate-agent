@@ -67,16 +67,32 @@ _VALID_RUN_STATUSES = {
 }
 
 _ADMIN_AGENT_ID = "admin"
-_ADMIN_ORCHESTRATOR_SKILL = "admin-agent"
-_ADMIN_RESULT_WRITER_SKILL = "admin-result-writer"
-_ADMIN_DEAL_MATCHER_SKILL = "deal-matcher"
+_ADMIN_ORCHESTRATOR_SKILL = "real-estate-admin/admin-agent"
+_ADMIN_RESULT_WRITER_SKILL = "real-estate-admin/admin-result-writer"
+_ADMIN_DEAL_MATCHER_SKILL = "real-estate-admin/deal-matcher"
+
+_ADMIN_WORKER_SKILL_REFS = {
+    "admin-agent": _ADMIN_ORCHESTRATOR_SKILL,
+    "admin-result-writer": _ADMIN_RESULT_WRITER_SKILL,
+    "deal-matcher": _ADMIN_DEAL_MATCHER_SKILL,
+    "closing-admin": "real-estate-admin/closing-admin",
+    "listing-build": "real-estate-admin/listing-build",
+    "marketing": "real-estate-admin/marketing",
+    "mlc": "real-estate-admin/mlc",
+    "offer-review": "real-estate-admin/offer-review",
+    "photo-cleanup": "real-estate-admin/photo-cleanup",
+    "property-lookup": "real-estate-admin/property-lookup",
+    "signing-package": "real-estate-admin/signing-package",
+    "skyslope-sync": "real-estate-admin/skyslope-sync",
+    "subject-removal": "real-estate-admin/subject-removal",
+}
 
 
 _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S1 Collect listing info for MLC",
         "trigger": "stage_entry",
-        "skill": "mlc",
+        "skill": "real-estate-admin/mlc",
         "skill_args": {"mode": "intake"},
         "side": "listing",
         "to_stage": 1,
@@ -85,7 +101,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S2 Prepare MLC package",
         "trigger": "stage_entry",
-        "skill": "mlc",
+        "skill": "real-estate-admin/mlc",
         "skill_args": {"mode": "documents"},
         "side": "listing",
         "to_stage": 2,
@@ -94,7 +110,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S2 Sync signing status",
         "trigger": "stage_entry",
-        "skill": "signing-package",
+        "skill": "real-estate-admin/signing-package",
         "skill_args": {
             "mode": "sync",
             "provider": "digisign",
@@ -108,7 +124,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S2 Check SkySlope opening docs",
         "trigger": "stage_entry",
-        "skill": "skyslope-sync",
+        "skill": "real-estate-admin/skyslope-sync",
         "side": "listing",
         "to_stage": 2,
         "priority": 70,
@@ -116,7 +132,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S3 Prepare listing-ready photos",
         "trigger": "stage_entry",
-        "skill": "photo-cleanup",
+        "skill": "real-estate-admin/photo-cleanup",
         "side": "listing",
         "to_stage": 3,
         "priority": 90,
@@ -124,7 +140,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S4 Research prior listing context",
         "trigger": "stage_entry",
-        "skill": "property-lookup",
+        "skill": "real-estate-admin/property-lookup",
         "side": "listing",
         "to_stage": 4,
         "priority": 85,
@@ -132,7 +148,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S4 Build MLS launch package",
         "trigger": "stage_entry",
-        "skill": "listing-build",
+        "skill": "real-estate-admin/listing-build",
         "side": "listing",
         "to_stage": 4,
         "priority": 80,
@@ -140,7 +156,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S5 Run listing-live marketing",
         "trigger": "stage_entry",
-        "skill": "marketing",
+        "skill": "real-estate-admin/marketing",
         "side": "listing",
         "to_stage": 5,
         "priority": 80,
@@ -148,7 +164,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S6 Review accepted-offer package",
         "trigger": "stage_entry",
-        "skill": "offer-review",
+        "skill": "real-estate-admin/offer-review",
         "side": "listing",
         "to_stage": 6,
         "priority": 90,
@@ -156,7 +172,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S7 Run subject-removal admin check",
         "trigger": "stage_entry",
-        "skill": "subject-removal",
+        "skill": "real-estate-admin/subject-removal",
         "side": "listing",
         "to_stage": 7,
         "priority": 90,
@@ -164,7 +180,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S7 Sync subject-removal signing",
         "trigger": "stage_entry",
-        "skill": "signing-package",
+        "skill": "real-estate-admin/signing-package",
         "skill_args": {
             "mode": "sync",
             "provider": "digisign",
@@ -178,7 +194,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S8 Run closing admin check",
         "trigger": "stage_entry",
-        "skill": "closing-admin",
+        "skill": "real-estate-admin/closing-admin",
         "side": "listing",
         "to_stage": 8,
         "priority": 90,
@@ -186,7 +202,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S9 Verify SkySlope closeout",
         "trigger": "stage_entry",
-        "skill": "skyslope-sync",
+        "skill": "real-estate-admin/skyslope-sync",
         "side": "listing",
         "to_stage": 9,
         "priority": 90,
@@ -194,7 +210,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "S9 Create sold update and nurture handoff",
         "trigger": "stage_entry",
-        "skill": "marketing",
+        "skill": "real-estate-admin/marketing",
         "side": "listing",
         "to_stage": 9,
         "priority": 70,
@@ -221,12 +237,22 @@ def _encode_json(value: Any) -> str | None:
     return json.dumps(value, separators=(",", ":"), default=str)
 
 
+def _canonical_admin_skill_ref(skill: str | None) -> str:
+    """Return a skill reference that cron can load without name collisions."""
+    text = str(skill or "").strip()
+    if not text:
+        return ""
+    if "/" in text or ":" in text:
+        return text
+    return _ADMIN_WORKER_SKILL_REFS.get(text, text)
+
+
 def _admin_action_skill_chain(worker_skill: str | None) -> list[str]:
     """Return the ordered skill stack for Admin cron orchestration."""
     ordered = [
         _ADMIN_ORCHESTRATOR_SKILL,
         _ADMIN_DEAL_MATCHER_SKILL,
-        str(worker_skill or "").strip(),
+        _canonical_admin_skill_ref(worker_skill),
         _ADMIN_RESULT_WRITER_SKILL,
     ]
     seen: set[str] = set()
@@ -364,7 +390,7 @@ def list_actions(
         params.append(1 if enabled else 0)
     if skill is not None:
         sql += " AND skill = ?"
-        params.append(skill)
+        params.append(_canonical_admin_skill_ref(skill))
     sql += " ORDER BY priority DESC, created_at ASC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     return [_row_to_action(r) for r in conn.execute(sql, params).fetchall()]
@@ -403,6 +429,7 @@ def create_action(
         raise ValueError(f"invalid side {side!r}")
     if not skill or not skill.strip():
         raise ValueError("skill is required")
+    skill_ref = _canonical_admin_skill_ref(skill)
     if trigger == "toggle_change" and not field_key:
         raise ValueError("toggle_change rules require field_key")
     from_stage = _validate_stage(from_stage)
@@ -428,7 +455,7 @@ def create_action(
             trigger,
             field_key,
             _encode_json(dict(condition)) if condition else None,
-            skill.strip(),
+            skill_ref,
             _encode_json(dict(skill_args)) if skill_args else None,
             _encode_json(list(province_filter)) if province_filter else None,
             1 if enabled else 0,
@@ -535,7 +562,7 @@ def update_action(
         if not skill.strip():
             raise ValueError("skill must be non-empty")
         sets.append("skill=?")
-        params.append(skill.strip())
+        params.append(_canonical_admin_skill_ref(skill))
     if side is not None or "side" in {}:  # placeholder; explicit None means "set NULL"
         pass  # Side updates handled below for clarity
     if side is not None:
@@ -805,7 +832,7 @@ def _non_empty_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _agent_run_context_for_prompt(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
-    """Build the compact SQLite context injected into Admin skill runs."""
+    """Build the compact operational-store context injected into Admin skill runs."""
     try:
         from elevate_cli.data.deals import get_deal_context
         from elevate_cli.data.admin_setup import get_admin_setup
@@ -838,7 +865,7 @@ def _agent_run_context_for_prompt(conn: sqlite3.Connection, deal_id: str) -> dic
         gate = flow.get("gate") or {}
         province_guide = context.get("provinceGuide") or {}
         return {
-            "source": "sqlite:deal_context",
+            "source": "operational:deal_context",
             "deal": {
                 "id": deal.get("id"),
                 "title": deal.get("title"),
@@ -915,7 +942,7 @@ def _agent_run_context_for_prompt(conn: sqlite3.Connection, deal_id: str) -> dic
         }
     except Exception as exc:
         return {
-            "source": "sqlite:deal_context",
+            "source": "operational:deal_context",
             "deal": {"id": deal_id},
             "contextError": str(exc),
         }
@@ -1443,7 +1470,7 @@ def _spawn_cron_job(
             "",
             "Admin Telegram handoff:",
             "- If you processed documents, routed artifacts, created drafts, or need human approval, include human_prompt in the result callback and make your final response a concise confirmation summary for the Admin agent Telegram lane.",
-            "- Report SQLite changes only after the result callback succeeds. If the callback fails, say no SQLite updates were written and explain the callback/database mismatch.",
+            "- Report operational database changes only after the result callback succeeds. If the callback fails, say no operational updates were written and explain the callback/database mismatch.",
             "- Include the deal, documents/artifacts processed, callback status, and the exact decision needed.",
             "- If there is no new document/artifact and no human confirmation needed, respond exactly [SILENT].",
             "- Do not use send_message yourself; cron delivery handles the Admin agent Telegram lane.",
@@ -1454,7 +1481,7 @@ def _spawn_cron_job(
             prompt_lines.extend(
                 [
                     "",
-                    "Injected source-of-truth context from SQLite. Treat this as the run's working memory.",
+                    "Injected source-of-truth context from the operational data store. Treat this as the run's working memory.",
                     "Use agentGuideMemory for province guide/reference/checklist/form material.",
                     "Use sourcePath values when the full local guide file is needed.",
                     json.dumps(agent_context, indent=2, default=str),

@@ -93,6 +93,7 @@ import {
   sessionAction,
   sessionMatches,
 } from "@/pages/real-estate-hub/_shared/page-helpers";
+import { AdminDesignShell } from "./AdminDesignShell";
 
 const DEFAULT_ADMIN_AUTOMATIONS = [
   {
@@ -344,10 +345,10 @@ const ADMIN_COLUMNS: AdminColumn[] = [
 const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminPhaseAutomationInfo>> = {
   listing: {
     0: {
-      agents: ["pre-cma-google-form", "lofty-crm-client-contacts"],
+      agents: ["pre-cma-dashboard-setup", "lofty-crm-client-contacts"],
       background: [],
-      moveSignal: "pre-CMA Google Form complete + Lofty contact verified",
-      approvalGate: "confirm missing contact/form details",
+      moveSignal: "pre-CMA dashboard setup complete + Lofty contact verified",
+      approvalGate: "confirm missing contact/setup details",
     },
     1: {
       agents: ["cma", "seller-package"],
@@ -929,7 +930,7 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function useAdminSetup(): {
+export function useAdminSetup(): {
   setup: AdminSetupSnapshot | null;
   loading: boolean;
   error: string | null;
@@ -2209,7 +2210,7 @@ function OnboardingProvinceField({
   );
 }
 
-function AdminSetupLaunch({
+export function AdminSetupLaunch({
   setup,
   onSetupUpdated,
   forceOnboarding = false,
@@ -5154,7 +5155,7 @@ function AdminKanbanBoard() {
   );
 }
 
-export function RealEstateAdminPage() {
+function RealEstateAdminPageLegacy() {
   const data = useRealEstateHubData();
   const adminSetup = useAdminSetup();
   const [forceOnboarding, setForceOnboarding] = useState(false);
@@ -5223,6 +5224,7 @@ export function RealEstateAdminPage() {
     setCoachOpen(true);
   }, [initialCoachQuestion]);
   useHubHeader("Admin", data);
+  const refreshHubData = data.refresh;
   useEffect(() => {
     if (!adminSetup.setup?.complete) return;
     let cancelled = false;
@@ -5235,7 +5237,7 @@ export function RealEstateAdminPage() {
         const changedCronDefaults = cronDefaults.created.length + (cronDefaults.updated?.length ?? 0);
         const changedActionDefaults = actionDefaults.created.length + (actionDefaults.updated?.length ?? 0);
         if (!cancelled && (changedCronDefaults > 0 || changedActionDefaults > 0)) {
-          await data.refresh();
+          await refreshHubData();
         }
       } catch {
         // Best-effort defaults. Existing cron jobs still render, and the Cron
@@ -5245,25 +5247,33 @@ export function RealEstateAdminPage() {
     return () => {
       cancelled = true;
     };
-  }, [adminSetup.setup?.complete, data.refresh]);
-  const sessions = data.sessions.filter((session) =>
-    sessionMatches(session, ADMIN_WORKFLOW_KEYWORDS),
+  }, [adminSetup.setup?.complete, refreshHubData]);
+  const sessions = useMemo(
+    () => data.sessions.filter((session) => sessionMatches(session, ADMIN_WORKFLOW_KEYWORDS)),
+    [data.sessions],
   );
-  const jobs = data.cronJobs.filter((job) =>
-    jobMatches(job, ADMIN_WORKFLOW_KEYWORDS),
+  const jobs = useMemo(
+    () => data.cronJobs.filter((job) => jobMatches(job, ADMIN_WORKFLOW_KEYWORDS)),
+    [data.cronJobs],
   );
-  const activeSessions = sessions.filter((session) => session.is_active);
-  const actions = [
-    ...approvalCueActions(sessions, jobs, "Admin"),
-    ...jobs
-      .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
-      .slice(0, 5)
-      .map((job) => jobAction(job, "Admin check", CalendarClock)),
-    ...sessions
-      .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
-      .slice(0, 5)
-      .map((session) => sessionAction(session, "Admin workflow", FileCheck2)),
-  ];
+  const activeSessions = useMemo(
+    () => sessions.filter((session) => session.is_active),
+    [sessions],
+  );
+  const actions = useMemo(
+    () => [
+      ...approvalCueActions(sessions, jobs, "Admin"),
+      ...jobs
+        .filter((job) => !jobMatches(job, APPROVAL_CUE_KEYWORDS))
+        .slice(0, 5)
+        .map((job) => jobAction(job, "Admin check", CalendarClock)),
+      ...sessions
+        .filter((session) => !sessionMatches(session, APPROVAL_CUE_KEYWORDS))
+        .slice(0, 5)
+        .map((session) => sessionAction(session, "Admin workflow", FileCheck2)),
+    ],
+    [jobs, sessions],
+  );
 
   return (
     <HubShell
@@ -5372,4 +5382,15 @@ export function RealEstateAdminPage() {
       )}
     </HubShell>
   );
+}
+
+// ---------------------------------------------------------------------------
+// New design shell (full replacement for /admin) — wraps the ported sidebar +
+// admin board. Live data wiring layered on top in subsequent passes.
+// ---------------------------------------------------------------------------
+
+void RealEstateAdminPageLegacy;
+
+export function RealEstateAdminPage() {
+  return <AdminDesignShell />;
 }

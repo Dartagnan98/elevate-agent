@@ -15,7 +15,8 @@ export type HubData = {
   dealTasks: AdminDealTask[];
   error: string | null;
   loading: boolean;
-  refresh: () => Promise<void>;
+  refreshing: boolean;
+  refresh: (options?: { force?: boolean }) => Promise<void>;
   setSourceInbox: (sourceInbox: SourceInboxResponse | null) => void;
   sourceInbox: SourceInboxResponse | null;
   sessions: SessionInfo[];

@@ -10,6 +10,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -72,6 +73,16 @@ WEB_DIST = Path(os.environ["ELEVATE_WEB_DIST"]) if "ELEVATE_WEB_DIST" in os.envi
 _log = logging.getLogger(__name__)
 
 app = FastAPI(title="Elevate", version=__version__)
+
+
+class ImmutableStaticFiles(StaticFiles):
+    """StaticFiles variant for hashed Vite assets."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -827,6 +838,10 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
 
 @app.get("/api/status")
 async def get_status():
+    cached = _cached_status_payload()
+    if cached is not None:
+        return cached
+
     current_ver, latest_ver = check_config_version()
 
     # --- Gateway liveness detection ---
@@ -897,23 +912,28 @@ async def get_status():
 
     active_sessions = 0
     try:
-        from elevate_state import SessionDB
-        db = SessionDB()
-        try:
-            sessions = db.list_sessions_rich(limit=50)
-            now = time.time()
-            active_sessions = sum(
-                1 for s in sessions
-                if s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0)))
-                < _SESSION_ACTIVE_WINDOW_SEC
-            )
-        finally:
-            db.close()
-    except Exception:
-        pass
+        from elevate_cli.data.chat_sessions import active_session_count
 
-    return {
+        active_sessions = active_session_count(_SESSION_ACTIVE_WINDOW_SEC)
+    except Exception:
+        try:
+            from elevate_state import SessionDB
+            db = SessionDB()
+            try:
+                sessions = db.list_sessions_rich(limit=50)
+                now = time.time()
+                active_sessions = sum(
+                    1 for s in sessions
+                    if s.get("ended_at") is None
+                    and (now - s.get("last_active", s.get("started_at", 0)))
+                    < _SESSION_ACTIVE_WINDOW_SEC
+                )
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    payload = {
         "version": __version__,
         "release_date": __release_date__,
         "project_root": str(PROJECT_ROOT),
@@ -931,6 +951,8 @@ async def get_status():
         "gateway_updated_at": gateway_updated_at,
         "active_sessions": active_sessions,
     }
+    _store_status_payload(payload)
+    return payload
 
 
 @app.get("/api/access")
@@ -1076,6 +1098,7 @@ async def logout_license(request: Request):
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.cron import create_cron_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
+from elevate_cli.web_routes.today import create_today_router
 
 # ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
@@ -1760,14 +1783,20 @@ async def update_elevate():
     }
 
 
-def _git_value(repo_dir: Path, *args: str) -> str | None:
+def _git_value(
+    repo_dir: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    timeout: int = 5,
+) -> str | None:
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=repo_dir,
+            env=env,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=timeout,
         )
     except Exception:
         return None
@@ -1775,6 +1804,519 @@ def _git_value(repo_dir: Path, *args: str) -> str | None:
         return None
     value = (result.stdout or "").strip()
     return value or None
+
+
+def _parse_git_shortstat(raw: str) -> Dict[str, int]:
+    stats = {"files": 0, "insertions": 0, "deletions": 0}
+    for key, pattern in {
+        "files": r"(\d+)\s+files?\s+changed",
+        "insertions": r"(\d+)\s+insertions?\(\+\)",
+        "deletions": r"(\d+)\s+deletions?\(-\)",
+    }.items():
+        match = re.search(pattern, raw)
+        if match:
+            stats[key] = int(match.group(1))
+    return stats
+
+
+def _git_shortstat(repo_dir: Path) -> Dict[str, int]:
+    raw = _git_value(repo_dir, "diff", "--shortstat", "HEAD") or ""
+    return _parse_git_shortstat(raw)
+
+
+def _git_run_for_tree(repo_dir: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+
+def _nul_paths(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part for part in raw.split("\0") if part]
+
+
+def _git_worktree_changed_paths(repo_dir: Path) -> list[str]:
+    """Return paths that need hashing to mirror `git add -A` in a temp index."""
+
+    tracked = _git_value(
+        repo_dir,
+        "diff",
+        "--name-only",
+        "-z",
+        "HEAD",
+        "--",
+        timeout=10,
+    )
+    untracked = _git_value(
+        repo_dir,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        timeout=10,
+    )
+    return sorted(set(_nul_paths(tracked) + _nul_paths(untracked)))
+
+
+def _git_worktree_fingerprint(repo_dir: Path, changed_paths: list[str]) -> str:
+    h = hashlib.sha256()
+    for rel in changed_paths:
+        h.update(rel.encode("utf-8", "surrogateescape"))
+        h.update(b"\0")
+        path = repo_dir / rel
+        try:
+            st = path.lstat()
+            h.update(f"{st.st_mtime_ns}:{st.st_size}:{st.st_mode}".encode("ascii"))
+        except FileNotFoundError:
+            h.update(b"missing")
+        except OSError as exc:
+            h.update(f"error:{type(exc).__name__}".encode("ascii"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _git_worktree_tree(repo_dir: Path, changed_paths: list[str] | None = None) -> str:
+    """Return a git tree object for the current working tree.
+
+    Uses a temporary index, so it does not touch the user's real index or
+    staging area. The resulting tree lets the dashboard compare "this chat's
+    baseline" to "right now" instead of showing the same global dirty diff in
+    every chat.
+    """
+    if changed_paths is None:
+        changed_paths = _git_worktree_changed_paths(repo_dir)
+    with tempfile.TemporaryDirectory(prefix="elevate-git-index-") as tmp:
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = str(Path(tmp) / "index")
+
+        read = _git_run_for_tree(repo_dir, env, "read-tree", "HEAD")
+        if read.returncode != 0:
+            read = _git_run_for_tree(repo_dir, env, "read-tree", "--empty")
+        if read.returncode != 0:
+            raise RuntimeError((read.stderr or read.stdout or "git read-tree failed").strip())
+
+        if changed_paths:
+            add = subprocess.run(
+                ["git", "update-index", "--add", "--remove", "-z", "--stdin"],
+                cwd=repo_dir,
+                env=env,
+                input="\0".join(changed_paths) + "\0",
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if add.returncode != 0:
+                raise RuntimeError((add.stderr or add.stdout or "git update-index failed").strip())
+
+        tree = _git_run_for_tree(repo_dir, env, "write-tree")
+        if tree.returncode != 0:
+            raise RuntimeError((tree.stderr or tree.stdout or "git write-tree failed").strip())
+        value = (tree.stdout or "").strip()
+        if not value:
+            raise RuntimeError("git write-tree returned no tree")
+        return value
+
+
+def _git_tree_exists(repo_dir: Path, tree: str | None) -> bool:
+    if not tree:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{tree}^{{tree}}"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _git_tree_shortstat(repo_dir: Path, baseline_tree: str, current_tree: str) -> Dict[str, int]:
+    raw = _git_value(
+        repo_dir,
+        "diff",
+        "--shortstat",
+        baseline_tree,
+        current_tree,
+        timeout=20,
+    ) or ""
+    return _parse_git_shortstat(raw)
+
+
+def _session_git_baseline_path(session_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id).strip("._")[:140]
+    if not safe_id:
+        safe_id = "session"
+    return get_elevate_home() / "session_git_baselines" / f"{safe_id}.json"
+
+
+def _session_git_status_cache_path(session_id: str) -> Path:
+    path = _session_git_baseline_path(session_id)
+    return path.with_name(f"{path.stem}.status.json")
+
+
+def _read_session_git_baseline(session_id: str, repo_dir: Path) -> Dict[str, Any] | None:
+    try:
+        path = _session_git_baseline_path(session_id)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("repo_path") != str(repo_dir):
+            return None
+        tree = str(raw.get("tree") or "")
+        if not _git_tree_exists(repo_dir, tree):
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def _write_session_git_baseline(
+    session_id: str,
+    repo_dir: Path,
+    *,
+    branch: str | None,
+    short_sha: str | None,
+    tree: str,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "version": 1,
+        "session_id": session_id,
+        "repo_path": str(repo_dir),
+        "repo_name": repo_dir.name,
+        "branch": branch,
+        "short_sha": short_sha,
+        "tree": tree,
+        "created_at": time.time(),
+    }
+    path = _session_git_baseline_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+    return payload
+
+
+def _read_session_git_status_cache(
+    session_id: str,
+    repo_dir: Path,
+    *,
+    baseline_tree: str,
+    fingerprint: str,
+) -> Dict[str, Any] | None:
+    try:
+        path = _session_git_status_cache_path(session_id)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("repo_path") != str(repo_dir):
+            return None
+        if raw.get("baseline_tree") != baseline_tree:
+            return None
+        if raw.get("fingerprint") != fingerprint:
+            return None
+        stats = raw.get("stats")
+        if not isinstance(stats, dict):
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def _write_session_git_status_cache(
+    session_id: str,
+    repo_dir: Path,
+    *,
+    baseline_tree: str,
+    fingerprint: str,
+    stats: Dict[str, int],
+    changed_files: int,
+) -> None:
+    try:
+        payload = {
+            "version": 1,
+            "session_id": session_id,
+            "repo_path": str(repo_dir),
+            "baseline_tree": baseline_tree,
+            "fingerprint": fingerprint,
+            "stats": stats,
+            "changed_files": changed_files,
+            "created_at": time.time(),
+        }
+        path = _session_git_status_cache_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _git_ahead_behind(repo_dir: Path) -> tuple[int, int]:
+    raw = _git_value(repo_dir, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+    if not raw:
+        return 0, 0
+    parts = raw.split()
+    if len(parts) < 2:
+        return 0, 0
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return 0, 0
+
+
+def _github_repo_url(remote_url: str | None) -> str | None:
+    if not remote_url:
+        return None
+    url = remote_url.strip()
+    if url.startswith("git@github.com:"):
+        path = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        path = urllib.parse.urlparse(url).path.lstrip("/")
+    else:
+        return None
+    if path.endswith(".git"):
+        path = path[:-4]
+    if path.count("/") < 1:
+        return None
+    return f"https://github.com/{path}"
+
+
+def _github_compare_url(repo_url: str | None, branch: str | None, upstream: str | None) -> str | None:
+    if not repo_url or not branch or branch in {"HEAD", "main", "master"}:
+        return None
+    base = "main"
+    if upstream:
+        upstream_branch = upstream.split("/", 1)[1] if "/" in upstream else upstream
+        if upstream_branch and upstream_branch != branch:
+            base = upstream_branch
+    return (
+        f"{repo_url}/compare/"
+        f"{urllib.parse.quote(base, safe='')}..."
+        f"{urllib.parse.quote(branch, safe='')}?expand=1"
+    )
+
+
+def _resolve_workspace_repo_dir() -> Path | None:
+    local_root = _git_value(PROJECT_ROOT, "rev-parse", "--show-toplevel")
+    if local_root:
+        return Path(local_root).resolve()
+    try:
+        from elevate_cli.banner import _resolve_repo_dir
+
+        repo_dir = _resolve_repo_dir()
+        return Path(repo_dir).resolve() if repo_dir else None
+    except Exception:
+        return PROJECT_ROOT
+
+
+def _workspace_display_dir(repo_dir: Path, working_directory: str | None = None) -> Path:
+    fallback = repo_dir
+    try:
+        project_root = PROJECT_ROOT.resolve()
+        project_root.relative_to(repo_dir.resolve())
+        fallback = project_root
+    except Exception:
+        fallback = repo_dir
+
+    if working_directory:
+        try:
+            candidate = Path(working_directory).expanduser()
+            if not candidate.is_absolute():
+                candidate = (repo_dir / candidate).resolve()
+            else:
+                candidate = candidate.resolve()
+            if candidate.exists():
+                try:
+                    candidate.relative_to(repo_dir.resolve())
+                except Exception:
+                    return fallback
+                return candidate
+        except Exception:
+            pass
+    return fallback
+
+
+def _repo_relative_display(repo_dir: Path, path: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(repo_dir.resolve())
+    except Exception:
+        return path.name or str(path)
+    if str(rel) == ".":
+        return repo_dir.name
+    return f"{repo_dir.name}/{rel.as_posix()}"
+
+
+def _empty_workspace_git_payload(error: str | None = None) -> Dict[str, Any]:
+    return {
+        "ok": error is None,
+        "error": error,
+        "path": None,
+        "repo_path": None,
+        "working_directory": None,
+        "display_name": None,
+        "repo_name": None,
+        "branch": None,
+        "upstream": None,
+        "ahead": 0,
+        "behind": 0,
+        "changed_files": 0,
+        "insertions": 0,
+        "deletions": 0,
+        "untracked": 0,
+        "dirty": False,
+        "repo_changed_files": 0,
+        "repo_insertions": 0,
+        "repo_deletions": 0,
+        "repo_untracked": 0,
+        "repo_dirty": False,
+        "diff_scope": "repo",
+        "baseline_created": False,
+        "baseline_at": None,
+        "short_sha": None,
+        "origin_url": None,
+        "repo_url": None,
+        "pr_url": None,
+        "checked_at": time.time(),
+    }
+
+
+def _workspace_git_status_payload(
+    session_id: str | None = None,
+    working_directory: str | None = None,
+) -> Dict[str, Any]:
+    repo_dir = _resolve_workspace_repo_dir()
+    if repo_dir is None:
+        return _empty_workspace_git_payload("not_git_install")
+
+    display_dir = _workspace_display_dir(repo_dir, working_directory)
+    branch = _git_value(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
+    upstream = _git_value(repo_dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    ahead, behind = _git_ahead_behind(repo_dir)
+    porcelain = _git_value(repo_dir, "status", "--porcelain=v1") or ""
+    status_lines = [line for line in porcelain.splitlines() if line.strip()]
+    untracked = sum(1 for line in status_lines if line.startswith("??"))
+    repo_stats = _git_shortstat(repo_dir)
+    origin_url = _git_value(repo_dir, "remote", "get-url", "origin")
+    repo_url = _github_repo_url(origin_url)
+    short_sha = _git_value(repo_dir, "rev-parse", "--short", "HEAD")
+    diff_scope = "repo"
+    baseline_created = False
+    baseline_at: float | None = None
+    display_stats = repo_stats
+    display_changed_files = len(status_lines)
+    display_untracked = untracked
+
+    if session_id:
+        changed_paths = _git_worktree_changed_paths(repo_dir)
+        fingerprint = _git_worktree_fingerprint(repo_dir, changed_paths)
+        baseline = _read_session_git_baseline(session_id, repo_dir)
+        cache = (
+            _read_session_git_status_cache(
+                session_id,
+                repo_dir,
+                baseline_tree=str(baseline["tree"]),
+                fingerprint=fingerprint,
+            )
+            if baseline
+            else None
+        )
+        if cache:
+            baseline_at = float(baseline.get("created_at") or 0) or None
+            cached_stats = cache.get("stats") or {}
+            display_stats = {
+                "files": int(cached_stats.get("files") or 0),
+                "insertions": int(cached_stats.get("insertions") or 0),
+                "deletions": int(cached_stats.get("deletions") or 0),
+            }
+            display_changed_files = int(cache.get("changed_files") or display_stats["files"])
+        else:
+            current_tree = _git_worktree_tree(repo_dir, changed_paths=changed_paths)
+            if not baseline:
+                baseline = _write_session_git_baseline(
+                    session_id,
+                    repo_dir,
+                    branch=branch,
+                    short_sha=short_sha,
+                    tree=current_tree,
+                )
+                baseline_created = True
+            baseline_at = float(baseline.get("created_at") or 0) or None
+            display_stats = _git_tree_shortstat(repo_dir, str(baseline["tree"]), current_tree)
+            display_changed_files = display_stats["files"]
+            _write_session_git_status_cache(
+                session_id,
+                repo_dir,
+                baseline_tree=str(baseline["tree"]),
+                fingerprint=fingerprint,
+                stats=display_stats,
+                changed_files=display_changed_files,
+            )
+        display_untracked = 0
+        diff_scope = "session"
+
+    return {
+        "ok": True,
+        "error": None,
+        "path": str(repo_dir),
+        "repo_path": str(repo_dir),
+        "working_directory": str(display_dir),
+        "display_name": _repo_relative_display(repo_dir, display_dir),
+        "repo_name": repo_dir.name,
+        "branch": branch,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "changed_files": display_changed_files,
+        "insertions": display_stats["insertions"],
+        "deletions": display_stats["deletions"],
+        "untracked": display_untracked,
+        "dirty": bool(display_changed_files),
+        "repo_changed_files": len(status_lines),
+        "repo_insertions": repo_stats["insertions"],
+        "repo_deletions": repo_stats["deletions"],
+        "repo_untracked": untracked,
+        "repo_dirty": bool(status_lines),
+        "diff_scope": diff_scope,
+        "baseline_created": baseline_created,
+        "baseline_at": baseline_at,
+        "short_sha": short_sha,
+        "origin_url": origin_url,
+        "repo_url": repo_url,
+        "pr_url": _github_compare_url(repo_url, branch, upstream),
+        "checked_at": time.time(),
+    }
+
+
+@app.get("/api/workspace/git/status")
+async def get_workspace_git_status(
+    session_id: str | None = None,
+    working_directory: str | None = None,
+):
+    try:
+        return await asyncio.to_thread(
+            _workspace_git_status_payload,
+            session_id=session_id,
+            working_directory=working_directory,
+        )
+    except Exception as exc:
+        _log.exception("GET /api/workspace/git/status failed")
+        return _empty_workspace_git_payload(str(exc))
+
+
+@app.post("/api/workspace/open")
+async def open_workspace(payload: dict[str, Any] | None = Body(default=None)):
+    repo_dir = _resolve_workspace_repo_dir()
+    if repo_dir is None:
+        raise HTTPException(status_code=404, detail="Workspace repo not found")
+    requested = str((payload or {}).get("path") or "").strip()
+    target = _workspace_display_dir(repo_dir, requested)
+    _open_in_file_manager(target)
+    return {"ok": True, "path": str(target)}
 
 
 @app.get("/api/elevate/update/status")
@@ -2075,6 +2617,10 @@ async def upload_attachment(session_id: str, file: UploadFile = File(...)):
 # landed within this many seconds. The spinner means genuinely working right
 # now, not recently-touched — so this stays tight. 300s made idle chats spin.
 _SESSION_ACTIVE_WINDOW_SEC = 25
+_STATUS_CACHE_TTL_SEC = 1.5
+_status_cache_payload: dict[str, Any] | None = None
+_status_cache_expires_at = 0.0
+_status_cache_lock = threading.Lock()
 
 
 _SESSION_LIST_FIELDS = (
@@ -2107,6 +2653,21 @@ def _session_list_payload(session: dict[str, Any]) -> dict[str, Any]:
     return {key: session.get(key) for key in _SESSION_LIST_FIELDS if key in session}
 
 
+def _cached_status_payload() -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _status_cache_lock:
+        if _status_cache_payload is None or _status_cache_expires_at <= now:
+            return None
+        return dict(_status_cache_payload)
+
+
+def _store_status_payload(payload: dict[str, Any]) -> None:
+    global _status_cache_payload, _status_cache_expires_at
+    with _status_cache_lock:
+        _status_cache_payload = dict(payload)
+        _status_cache_expires_at = time.monotonic() + _STATUS_CACHE_TTL_SEC
+
+
 @app.get("/api/sessions")
 async def get_sessions(
     limit: int = 20,
@@ -2115,9 +2676,29 @@ async def get_sessions(
     include_details: bool = False,
 ):
     try:
-        from elevate_state import SessionDB
         limit = max(1, min(int(limit or 20), 200))
         offset = max(0, int(offset or 0))
+        if not include_details:
+            try:
+                from elevate_cli.data.chat_sessions import (
+                    list_session_summaries,
+                    session_count as pg_session_count,
+                )
+
+                sessions = list_session_summaries(limit=limit, offset=offset)
+                total = pg_session_count() if include_total else offset + len(sessions)
+                now = time.time()
+                for s in sessions:
+                    s["is_active"] = (
+                        s.get("ended_at") is None
+                        and (now - s.get("last_active", s.get("started_at", 0)))
+                        < _SESSION_ACTIVE_WINDOW_SEC
+                    )
+                return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
+            except Exception:
+                _log.debug("PG slim session list failed, falling back to SessionDB", exc_info=True)
+
+        from elevate_state import SessionDB
         db = SessionDB()
         try:
             sessions = db.list_sessions_rich(limit=limit, offset=offset)
@@ -3815,6 +4396,8 @@ app.include_router(create_cron_router(log=_log))
 
 app.include_router(create_source_connectors_router(log=_log))
 
+app.include_router(create_today_router(log=_log))
+
 # ---------------------------------------------------------------------------
 # Sprint 3: lifecycle UX (classify, park, active leads, admin contacts,
 # identity conflicts, lead signal graduate). Single-user product so every
@@ -5238,6 +5821,25 @@ async def get_admin_deals(
     except Exception as exc:
         _log.exception("GET /api/admin/deals failed")
         raise HTTPException(status_code=500, detail=f"Admin deals failed: {exc}")
+
+
+@app.get("/api/admin/upcoming-events")
+async def get_admin_upcoming_events(days: int = 21):
+    """Return merged Admin calendar feed: Google Calendar + deal milestone dates."""
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data.admin_calendar import list_upcoming_admin_events
+
+        safe_days = max(1, min(int(days or 21), 90))
+        with connect() as conn:
+            return list_upcoming_admin_events(conn, days=safe_days)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/admin/upcoming-events failed")
+        raise HTTPException(status_code=500, detail=f"Admin upcoming events failed: {exc}")
 
 
 @app.post("/api/admin/deals")
@@ -7673,9 +8275,91 @@ async def get_usage_analytics(days: int = 30):
     from elevate_state import SessionDB
     from agent.insights import InsightsEngine
 
+    cutoff = time.time() - (days * 86400) if days > 0 else None
+    where_sql = "WHERE started_at > ?" if cutoff is not None else ""
+    params = (cutoff,) if cutoff is not None else ()
+    try:
+        from elevate_cli.data.connection import connect
+
+        with connect() as conn:
+            cur = conn.execute(f"""
+                SELECT to_timestamp(started_at)::date::text as day,
+                       COALESCE(SUM(input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) as reasoning_tokens,
+                       COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
+                       COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
+                       COUNT(*) as sessions,
+                       COALESCE(SUM(api_call_count), 0) as api_calls
+                FROM chat_sessions {where_sql}
+                GROUP BY 1 ORDER BY 1
+            """, params)
+            daily = [dict(r) for r in cur.fetchall()]
+
+            model_where = (
+                f"{where_sql} AND model IS NOT NULL"
+                if where_sql
+                else "WHERE model IS NOT NULL"
+            )
+            cur2 = conn.execute(f"""
+                SELECT model,
+                       COALESCE(SUM(input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
+                       COUNT(*) as sessions,
+                       COALESCE(SUM(api_call_count), 0) as api_calls
+                FROM chat_sessions {model_where}
+                GROUP BY model ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+            """, params)
+            by_model = [dict(r) for r in cur2.fetchall()]
+
+            cur3 = conn.execute(f"""
+                SELECT COALESCE(SUM(input_tokens), 0) as total_input,
+                       COALESCE(SUM(output_tokens), 0) as total_output,
+                       COALESCE(SUM(cache_read_tokens), 0) as total_cache_read,
+                       COALESCE(SUM(reasoning_tokens), 0) as total_reasoning,
+                       COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
+                       COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
+                       COUNT(*) as total_sessions,
+                       COALESCE(SUM(api_call_count), 0) as total_api_calls
+                FROM chat_sessions {where_sql}
+            """, params)
+            totals = dict(cur3.fetchone())
+
+        try:
+            db = SessionDB()
+            try:
+                insights_report = InsightsEngine(db).generate(days=days if days > 0 else 3650)
+                skills = insights_report.get("skills")
+            finally:
+                db.close()
+        except Exception:
+            skills = None
+        if not isinstance(skills, dict):
+            skills = {
+                "summary": {
+                    "total_skill_loads": 0,
+                    "total_skill_edits": 0,
+                    "total_skill_actions": 0,
+                    "distinct_skills_used": 0,
+                },
+                "top_skills": [],
+            }
+        return {
+            "daily": daily,
+            "by_model": by_model,
+            "totals": totals,
+            "period_days": days,
+            "skills": skills,
+            "source": "postgres",
+        }
+    except Exception:
+        _log.debug("analytics usage PG read failed, falling back to SQLite", exc_info=True)
+
     db = SessionDB()
     try:
-        cutoff = time.time() - (days * 86400)
+        cutoff = time.time() - (days * 86400) if days > 0 else 0
         cur = db._conn.execute("""
             SELECT date(started_at, 'unixepoch') as day,
                    SUM(input_tokens) as input_tokens,
@@ -7732,6 +8416,7 @@ async def get_usage_analytics(days: int = 30):
             "totals": totals,
             "period_days": days,
             "skills": skills,
+            "source": "sqlite",
         }
     finally:
         db.close()
@@ -8119,7 +8804,7 @@ def mount_spa(application: FastAPI):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
-    application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+    application.mount("/assets", ImmutableStaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str):
@@ -8131,7 +8816,13 @@ def mount_spa(application: FastAPI):
             and file_path.exists()
             and file_path.is_file()
         ):
-            return FileResponse(file_path)
+            headers = {}
+            if full_path.startswith(("fonts/", "ds-assets/")) or re.search(
+                r"\.[a-fA-F0-9]{8,}\.",
+                file_path.name,
+            ):
+                headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return FileResponse(file_path, headers=headers)
         return _serve_index()
 
 

@@ -31,6 +31,8 @@ import {
   formatPct,
 } from "@/pages/real-estate-hub/social-media-widgets";
 
+const EMPTY_SOCIAL_PLATFORMS: NonNullable<SocialSnapshot["platforms"]> = {};
+
 export function RealEstateSocialMediaPage() {
   const data = useRealEstateHubData();
   useHubHeader("Social Media", data);
@@ -103,8 +105,8 @@ export function RealEstateSocialMediaPage() {
   );
 
   const totals = snapshot?.totals;
-  const platforms = snapshot?.platforms || {};
-  const platformList = Object.entries(platforms);
+  const platforms = snapshot?.platforms ?? EMPTY_SOCIAL_PLATFORMS;
+  const platformList = useMemo(() => Object.entries(platforms), [platforms]);
 
   const avgEngagement = useMemo(() => {
     const vals = platformList
@@ -150,6 +152,20 @@ export function RealEstateSocialMediaPage() {
       .slice(0, 3);
     return scored.map((x) => x.row);
   }, [recentPosts]);
+  const topPerformerKeys = useMemo(
+    () => new Set(topPerformers.map((r) => `${r.platform}:${r.post_id}`)),
+    [topPerformers],
+  );
+
+  const orderedPosts = useMemo(() => {
+    if (platformFilter !== "all") return filteredPosts;
+    const pinned: SocialMetricRow[] = [];
+    const rest: SocialMetricRow[] = [];
+    for (const post of filteredPosts) {
+      (topPerformerKeys.has(`${post.platform}:${post.post_id}`) ? pinned : rest).push(post);
+    }
+    return [...pinned, ...rest];
+  }, [filteredPosts, platformFilter, topPerformerKeys]);
 
   const handleRefreshAll = useCallback(async () => {
     setRefreshing("all");
@@ -398,25 +414,14 @@ export function RealEstateSocialMediaPage() {
                       </span>
                     </header>
                     <div className="grid gap-4 items-start grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
-                      {(() => {
-                        const topKeys = new Set(
-                          platformFilter === "all"
-                            ? topPerformers.map((r) => `${r.platform}:${r.post_id}`)
-                            : [],
-                        );
-                        const ordered = [
-                          ...filteredPosts.filter((r) => topKeys.has(`${r.platform}:${r.post_id}`)),
-                          ...filteredPosts.filter((r) => !topKeys.has(`${r.platform}:${r.post_id}`)),
-                        ];
-                        return ordered.slice(0, postLimit).map((row) => (
-                          <RealVideoCard
-                            key={`${row.platform}:${row.post_id}`}
-                            row={row}
-                            onClick={() => setSelectedPost(row)}
-                            highlight={topKeys.has(`${row.platform}:${row.post_id}`)}
-                          />
-                        ));
-                      })()}
+                      {orderedPosts.slice(0, postLimit).map((row) => (
+                        <RealVideoCard
+                          key={`${row.platform}:${row.post_id}`}
+                          row={row}
+                          onClick={() => setSelectedPost(row)}
+                          highlight={topPerformerKeys.has(`${row.platform}:${row.post_id}`)}
+                        />
+                      ))}
                     </div>
                     {filteredPosts.length > postLimit && (
                       <div className="mt-2 flex flex-wrap justify-center gap-2 border-t border-border/40 pt-4">

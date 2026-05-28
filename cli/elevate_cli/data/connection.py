@@ -55,7 +55,19 @@ def _get_pool() -> ConnectionPool:
             uri,
             min_size=1,
             max_size=10,
-            kwargs={"row_factory": dict_row, "autocommit": False},
+            kwargs={
+                "row_factory": dict_row,
+                "autocommit": False,
+                # The embedded pgserver package can be relocated between
+                # Python runtimes. Parallel workers inherit the original
+                # install path and can fail on large dashboard scans; the app
+                # benefits more from predictable local reads than parallelism.
+                "options": (
+                    "-c max_parallel_workers_per_gather=0 "
+                    "-c max_parallel_maintenance_workers=0 "
+                    "-c max_parallel_workers=0"
+                ),
+            },
             open=True,
         )
         return _pool
@@ -349,6 +361,8 @@ def connect() -> Iterator[PgConnection]:
     """
     pool = _get_pool()
     with pool.connection() as raw:
+        with raw.cursor() as cur:
+            cur.execute("SET max_parallel_workers_per_gather = 0")
         conn = PgConnection(raw)
         try:
             _ensure_schema(conn)

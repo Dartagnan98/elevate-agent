@@ -37,6 +37,12 @@ except ImportError:
 ELEVATE_DIR = get_elevate_home().resolve()
 CRON_DIR = ELEVATE_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
+ADMIN_CALENDAR_SYNC_JOB_NAME = "Admin Calendar Sync"
+ADMIN_CALENDAR_SYNC_SCRIPT = "admin-calendar-sync.py"
+OPERATIONAL_MAINTENANCE_JOB_NAME = "Operational DB Maintenance"
+OPERATIONAL_MAINTENANCE_SCRIPT = "operational-maintenance.py"
+OPERATIONAL_FRESHNESS_JOB_NAME = "Account + DB Freshness Snapshot"
+OPERATIONAL_FRESHNESS_SCRIPT = "operational-freshness-snapshot.py"
 
 # In-process lock protecting load_jobs→modify→save_jobs cycles.
 # Required when tick() runs jobs in parallel threads — without this,
@@ -157,6 +163,132 @@ def ensure_dirs():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _secure_dir(CRON_DIR)
     _secure_dir(OUTPUT_DIR)
+
+
+_SYSTEM_SCRIPT_BODIES = {
+    ADMIN_CALENDAR_SYNC_SCRIPT: """from elevate_cli.events_sync import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
+    OPERATIONAL_MAINTENANCE_SCRIPT: """from elevate_cli.operational_maintenance import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
+    OPERATIONAL_FRESHNESS_SCRIPT: """from elevate_cli.operational_freshness import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
+}
+
+
+def _ensure_system_script(script_name: str) -> Path:
+    scripts_dir = ELEVATE_DIR / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    _secure_dir(scripts_dir)
+    script_path = scripts_dir / script_name
+    body = _SYSTEM_SCRIPT_BODIES[script_name]
+    if not script_path.exists() or script_path.read_text(encoding="utf-8") != body:
+        script_path.write_text(body, encoding="utf-8")
+        _secure_file(script_path)
+    return script_path
+
+
+def _ensure_system_job(
+    *,
+    name: str,
+    script: str,
+    schedule: str,
+    source: str,
+    prompt: str,
+) -> Dict[str, Any]:
+    """Idempotently register a repo-backed no-agent system cron job."""
+    _ensure_system_script(script)
+    desired_updates: Dict[str, Any] = {
+        "name": name,
+        "prompt": prompt,
+        "schedule": schedule,
+        "script": script,
+        "no_agent": True,
+        "deliver": "local",
+        "origin": {"type": "system", "source": source},
+    }
+    jobs = load_jobs()
+    for job in jobs:
+        if (job.get("name") or "").strip().lower() == name.lower():
+            updates = dict(desired_updates)
+            if job.get("state") == "paused":
+                updates.pop("schedule", None)
+            return update_job(job["id"], updates) or _normalize_job_record(job)
+
+    return create_job(
+        prompt=prompt,
+        schedule=schedule,
+        name=name,
+        deliver="local",
+        origin={"type": "system", "source": source},
+        script=script,
+        no_agent=True,
+    )
+
+
+def ensure_admin_calendar_sync_job() -> Dict[str, Any]:
+    """Idempotently register the Admin Google Calendar sync cron job."""
+    return _ensure_system_job(
+        name=ADMIN_CALENDAR_SYNC_JOB_NAME,
+        script=ADMIN_CALENDAR_SYNC_SCRIPT,
+        schedule="every 15m",
+        source="admin-calendar-sync",
+        prompt=(
+            "Run the Admin calendar sync. Pull upcoming Google Calendar events through "
+            "the connected calendar integration, match events to active deals when possible, "
+            "and upsert them into the Admin calendar event store. This is a no-agent system "
+            "job; report only sync changes, warnings, or failures."
+        ),
+    )
+
+
+def ensure_operational_maintenance_job() -> Dict[str, Any]:
+    """Idempotently register the operational DB queue maintenance job."""
+    return _ensure_system_job(
+        name=OPERATIONAL_MAINTENANCE_JOB_NAME,
+        script=OPERATIONAL_MAINTENANCE_SCRIPT,
+        schedule="every 15m",
+        source="operational-maintenance",
+        prompt=(
+            "Run operational DB maintenance. Seed default admin actions, fail stale admin "
+            "runs and agent handoffs, dispatch queued admin actions and handoffs, summarize "
+            "active deal health, and push pending CRM notes. This is a no-agent system job; "
+            "stay silent when nothing needs attention."
+        ),
+    )
+
+
+def ensure_operational_freshness_job() -> Dict[str, Any]:
+    """Idempotently register the account and DB freshness snapshot job."""
+    return _ensure_system_job(
+        name=OPERATIONAL_FRESHNESS_JOB_NAME,
+        script=OPERATIONAL_FRESHNESS_SCRIPT,
+        schedule="every 30m",
+        source="operational-freshness",
+        prompt=(
+            "Run the account and DB freshness snapshot. Check source connectors, launchd "
+            "sync services, cron failures, contacts, conversations, deals, admin queues, "
+            "CRM note queues, and calendar freshness. Save the snapshot and surface only "
+            "new or changed warnings. This is a no-agent system job."
+        ),
+    )
+
+
+def ensure_system_jobs() -> List[Dict[str, Any]]:
+    """Ensure repo-backed system cron jobs exist for the active Elevate home."""
+    return [
+        ensure_admin_calendar_sync_job(),
+        ensure_operational_maintenance_job(),
+        ensure_operational_freshness_job(),
+    ]
 
 
 # =============================================================================

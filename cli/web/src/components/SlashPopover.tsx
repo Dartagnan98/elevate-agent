@@ -653,10 +653,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     return (
       <div
         aria-activedescendant={activeItemId}
-        className={cn(
-          "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[20rem] overflow-y-auto rounded-md p-1.5",
-          "border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] text-[var(--chat-text)]",
-        )}
+        className="slash-popover"
         id={listboxId}
         role="listbox"
       >
@@ -669,18 +666,13 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           return (
             <div key={`${item.group}-${item.text}-${index}`}>
               {showGroup && (
-                <div className="px-2.5 pb-0.5 pt-1.5 text-[0.68rem] font-medium text-[var(--chat-muted)]">
+                <div className="slash-group">
                   {item.group}
                 </div>
               )}
               <button
                 aria-selected={active}
-                className={cn(
-                  "grid min-h-8 w-full grid-cols-[1.35rem_minmax(0,auto)_minmax(0,1fr)_auto] items-center gap-1.5 rounded-sm px-2.5 py-1 text-left transition-colors",
-                  active
-                    ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)]"
-                    : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]",
-                )}
+                className={cn("slash-row", active && "active")}
                 id={`slash-item-${index}`}
                 onClick={() =>
                   apply(item, {
@@ -691,17 +683,17 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
                 role="option"
                 type="button"
               >
-                <Icon className="h-3.5 w-3.5 justify-self-center text-current opacity-85" />
-                <span className="min-w-0 truncate text-[0.82rem] font-medium leading-5">
+                <Icon />
+                <span className="slash-name">
                   {item.display}
                 </span>
                 {item.meta && (
-                  <span className="min-w-0 truncate text-[0.72rem] leading-5 text-[var(--chat-muted)]">
+                  <span className="slash-desc">
                     {item.meta}
                   </span>
                 )}
                 {item.kind === "skill" && (
-                  <span className="rounded-sm border border-[var(--chat-border)] px-1.5 py-0.5 text-[0.62rem] leading-none text-[var(--chat-muted)]">
+                  <span className="slash-kind">
                     Personal
                   </span>
                 )}
@@ -710,7 +702,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           );
         })}
         {trigger?.mode === "mention" && trigger.query.length === 0 && (
-          <div className="px-2.5 pb-1.5 pt-1 text-[0.72rem] text-[var(--chat-muted)]">
+          <div className="px-2.5 pb-1.5 pt-1 text-[11.5px] text-[var(--fg-faint)]">
             Type to search for files, skills, agents, toolsets, or plugins.
           </div>
         )}

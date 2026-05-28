@@ -27,6 +27,81 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+const LEADS_SETUP_STORAGE_KEY = "elevate.leadsSetup.v1";
+const LEADS_SETUP_FRESH_MS = 60_000;
+const LEADS_SETUP_STORAGE_MAX_AGE_MS = 10 * 60_000;
+
+type CachedLeadsSetup = {
+  cachedAt: number;
+  setup: LeadsSetupSnapshot;
+};
+
+let cachedLeadsSetup: CachedLeadsSetup | null = null;
+let leadsSetupInflight: Promise<LeadsSetupSnapshot> | null = null;
+
+function normalizeCachedLeadsSetup(value: unknown): CachedLeadsSetup | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Partial<CachedLeadsSetup>;
+  if (!record.setup || typeof record.cachedAt !== "number") return null;
+  if (Date.now() - record.cachedAt > LEADS_SETUP_STORAGE_MAX_AGE_MS) return null;
+  return {
+    cachedAt: record.cachedAt,
+    setup: record.setup,
+  };
+}
+
+function readCachedLeadsSetup(): CachedLeadsSetup | null {
+  if (cachedLeadsSetup) return cachedLeadsSetup;
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(LEADS_SETUP_STORAGE_KEY);
+    if (!raw) return null;
+    const cached = normalizeCachedLeadsSetup(JSON.parse(raw));
+    if (!cached) {
+      window.localStorage.removeItem(LEADS_SETUP_STORAGE_KEY);
+      return null;
+    }
+    cachedLeadsSetup = cached;
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedLeadsSetup(setup: LeadsSetupSnapshot): LeadsSetupSnapshot {
+  const next = { cachedAt: Date.now(), setup };
+  cachedLeadsSetup = next;
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(LEADS_SETUP_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Best-effort only; the in-memory cache still prevents route flicker.
+      }
+    }, 0);
+  }
+  return setup;
+}
+
+async function loadLeadsSetup(force = false): Promise<LeadsSetupSnapshot> {
+  const cached = readCachedLeadsSetup();
+  if (!force && cached && Date.now() - cached.cachedAt < LEADS_SETUP_FRESH_MS) {
+    return cached.setup;
+  }
+  if (leadsSetupInflight) return leadsSetupInflight;
+  leadsSetupInflight = api
+    .getLeadsSetup({ refresh: force })
+    .then(writeCachedLeadsSetup)
+    .finally(() => {
+      leadsSetupInflight = null;
+    });
+  return leadsSetupInflight;
+}
+
+export async function preloadLeadsSetup(): Promise<void> {
+  await loadLeadsSetup().catch(() => undefined);
+}
+
 const DEFAULT_AUTO_REPLY_TEMPLATE =
   "Hey {{firstName}} — thanks for reaching out. What's the property address or area you're looking at?";
 
@@ -1700,16 +1775,21 @@ export function useLeadsSetup(): {
   setSetup: (next: LeadsSetupSnapshot) => void;
   refresh: () => Promise<void>;
 } {
-  const [setup, setSetup] = useState<LeadsSetupSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialCache = readCachedLeadsSetup();
+  const [setup, setSetupState] = useState<LeadsSetupSnapshot | null>(() => initialCache?.setup ?? null);
+  const [loading, setLoading] = useState(() => !initialCache);
   const [error, setError] = useState<string | null>(null);
 
+  const setSetup = useCallback((next: LeadsSetupSnapshot) => {
+    setSetupState(writeCachedLeadsSetup(next));
+  }, []);
+
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (!readCachedLeadsSetup()) setLoading(true);
     setError(null);
     try {
-      const snap = await api.getLeadsSetup();
-      setSetup(snap);
+      const snap = await loadLeadsSetup();
+      setSetupState(snap);
     } catch (err) {
       setError(errorMessage(err, "Could not load leads setup"));
     } finally {

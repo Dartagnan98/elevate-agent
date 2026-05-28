@@ -57,7 +57,10 @@ export const en: Translations = {
     footer: {
       org: "Elevation Real Estate HQ",
     },
-    activeSessionsLabel: "Active Sessions:",
+    agentActivityLabel: "Agent Activity:",
+    activeSessionsLabel: "Agent Activity:",
+    appOpenLabel: "App:",
+    appOpenValue: "Open",
     gatewayStatusLabel: "Gateway Status:",
     gatewayStrip: {
       failed: "Start failed",

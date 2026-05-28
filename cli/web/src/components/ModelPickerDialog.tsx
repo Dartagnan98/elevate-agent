@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { GatewayClient } from "@/lib/gatewayClient";
+import { cn } from "@/lib/utils";
 import { Check, Loader2, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -138,49 +139,49 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-[color-mix(in_srgb,var(--chat-bg)_82%,transparent)] p-4 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
       role="dialog"
       aria-modal="true"
       aria-labelledby="model-picker-title"
     >
-      <div className="relative flex max-h-[80vh] w-full max-w-3xl flex-col overflow-hidden rounded-md border border-border bg-card">
+      <div className="relative flex max-h-[80vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[0_24px_60px_-16px_rgba(0,0,0,0.72),0_1px_0_rgba(255,255,255,0.03)_inset]">
         <button
           type="button"
           onClick={onClose}
-          className="absolute right-3 top-3 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+          className="absolute right-3 top-3 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[7px] text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           aria-label="Close"
         >
           <X className="h-5 w-5" />
         </button>
 
-        <header className="border-b border-border p-5 pb-3">
+        <header className="border-b border-[var(--chat-border)] p-5 pb-3">
           <h2
             id="model-picker-title"
-            className="font-display text-base font-semibold tracking-normal normal-case"
+            className="text-[15px] font-semibold tracking-normal normal-case"
           >
             Switch Model
           </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
+          <p className="mt-1 text-[12px] text-[var(--chat-muted)]">
             current: {currentModel || "(unknown)"}
             {currentProviderSlug && ` · ${currentProviderSlug}`}
           </p>
         </header>
 
-        <div className="border-b border-border px-5 pb-2 pt-3">
+        <div className="border-b border-[var(--chat-border)] px-5 pb-2 pt-3">
           <div className="relative">
-            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--chat-muted)]" />
             <Input
               autoFocus
               placeholder="Filter providers and models…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              className="pl-7 h-8 text-sm"
+              className="h-8 rounded-[8px] border-[var(--chat-border)] bg-[var(--chat-surface-soft)] pl-8 text-sm text-[var(--chat-text)] placeholder:text-[var(--chat-muted)]"
             />
           </div>
         </div>
 
-        <div className="flex-1 min-h-0 grid grid-cols-[200px_1fr] overflow-hidden">
+        <div className="grid min-h-0 flex-1 grid-cols-[200px_1fr] overflow-hidden">
           <ProviderColumn
             loading={loading}
             error={error}
@@ -210,8 +211,8 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
           />
         </div>
 
-        <footer className="border-t border-border p-3 flex items-center justify-between gap-3 flex-wrap">
-          <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--chat-border)] p-3">
+          <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-[var(--chat-muted)]">
             <input
               type="checkbox"
               checked={persistGlobal}
@@ -221,7 +222,7 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
             Persist globally (otherwise this session only)
           </label>
 
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="ml-auto flex items-center gap-2">
             <Button variant="ghost" size="sm" onClick={onClose}>
               Cancel
             </Button>
@@ -257,17 +258,17 @@ function ProviderColumn({
   onSelect(slug: string): void;
 }) {
   return (
-    <div className="border-r border-border overflow-y-auto">
+    <div className="overflow-y-auto border-r border-[var(--chat-border)]">
       {loading && (
-        <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 p-4 text-xs text-[var(--chat-muted)]">
           <Loader2 className="h-3 w-3 animate-spin" /> loading…
         </div>
       )}
 
-      {error && <div className="p-4 text-xs text-destructive">{error}</div>}
+      {error && <div className="p-4 text-xs text-[var(--chat-danger)]">{error}</div>}
 
       {!loading && !error && providers.length === 0 && (
-        <div className="p-4 text-xs text-muted-foreground italic">
+        <div className="p-4 text-xs italic text-[var(--chat-muted)]">
           {query
             ? "no matches"
             : total === 0
@@ -283,18 +284,19 @@ function ProviderColumn({
             key={p.slug}
             type="button"
             onClick={() => onSelect(p.slug)}
-            className={`w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-start gap-2 ${
+            className={cn(
+              "flex w-full cursor-pointer items-start gap-2 px-3 py-2 text-left text-xs transition-colors",
               active
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-            }`}
+                ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+                : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+            )}
           >
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
                 <span className="font-medium truncate">{p.name}</span>
                 {p.is_current && <CurrentTag />}
               </div>
-              <div className="text-[0.65rem] text-muted-foreground/80 font-mono truncate">
+              <div className="truncate font-mono text-[11px] text-[var(--chat-muted)]">
                 {p.slug} · {p.total_models ?? p.models?.length ?? 0} models
               </div>
             </div>
@@ -331,7 +333,7 @@ function ModelColumn({
   if (!provider) {
     return (
       <div className="overflow-y-auto">
-        <div className="p-4 text-xs text-muted-foreground italic">
+        <div className="p-4 text-xs italic text-[var(--chat-muted)]">
           pick a provider →
         </div>
       </div>
@@ -341,13 +343,13 @@ function ModelColumn({
   return (
     <div className="overflow-y-auto">
       {provider.warning && (
-        <div className="p-3 text-xs text-destructive border-b border-border">
+        <div className="border-b border-[var(--chat-border)] p-3 text-xs text-[var(--chat-danger)]">
           {provider.warning}
         </div>
       )}
 
       {models.length === 0 ? (
-        <div className="p-4 text-xs text-muted-foreground italic">
+        <div className="p-4 text-xs italic text-[var(--chat-muted)]">
           {allModels.length
             ? "no models match your filter"
             : "no models listed for this provider"}
@@ -364,14 +366,15 @@ function ModelColumn({
               type="button"
               onClick={() => onSelect(m)}
               onDoubleClick={() => onConfirm(m)}
-              className={`w-full text-left px-3 py-1.5 text-xs font-mono transition-colors cursor-pointer flex items-center gap-2 ${
+              className={cn(
+                "flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left font-mono text-xs transition-colors",
                 active
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-              }`}
+                  ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+                  : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+              )}
             >
               <Check
-                className={`h-3 w-3 shrink-0 ${active ? "text-primary" : "text-transparent"}`}
+                className={cn("h-3 w-3 shrink-0", active ? "text-[var(--chat-accent)]" : "text-transparent")}
               />
               <span className="flex-1 truncate">{m}</span>
               {isCurrent && <CurrentTag />}
@@ -385,7 +388,7 @@ function ModelColumn({
 
 function CurrentTag() {
   return (
-    <span className="shrink-0 text-[0.68rem] font-medium tracking-normal text-primary/80">
+    <span className="shrink-0 text-[11px] font-medium tracking-normal text-[var(--chat-accent)]">
       current
     </span>
   );

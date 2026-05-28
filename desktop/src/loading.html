@@ -7,13 +7,13 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #1a1b1a;
-        --surface: #212321;
-        --border: #2a2c2a;
+        --bg: #0F0F0F;
+        --surface: #1A1A1A;
+        --border: #2A2A2A;
         --text: #ececec;
-        --muted: #8a8c8a;
-        --muted-strong: #b6b8b6;
-        --primary: #D97757;
+        --muted: #A0A0A0;
+        --muted-strong: #B0B0B0;
+        --primary: #8A8A8A;
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; }
@@ -23,8 +23,8 @@
         display: grid;
         place-items: center;
         background:
-          radial-gradient(circle at 22% 18%, rgba(217, 119, 87, 0.18) 0%, transparent 42%),
-          radial-gradient(circle at 78% 82%, rgba(217, 119, 87, 0.12) 0%, transparent 48%),
+          radial-gradient(circle at 22% 18%, rgba(176, 176, 176, 0.12) 0%, transparent 42%),
+          radial-gradient(circle at 78% 82%, rgba(176, 176, 176, 0.08) 0%, transparent 48%),
           var(--bg);
         color: var(--text);
         font-family: "Geist", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
@@ -39,9 +39,9 @@
         pointer-events: none;
         background:
           linear-gradient(120deg,
-            rgba(217, 119, 87, 0.08) 0%,
+            rgba(176, 176, 176, 0.06) 0%,
             transparent 35%,
-            rgba(217, 119, 87, 0.06) 70%,
+            rgba(176, 176, 176, 0.04) 70%,
             transparent 100%);
         background-size: 220% 220%;
         animation: aurora-drift 9s ease-in-out infinite;

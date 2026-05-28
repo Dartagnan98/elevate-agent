@@ -1,14 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronUp, LogOut, Settings, Sparkles, User } from "lucide-react";
+import {
+  ChevronUp,
+  Download,
+  Globe,
+  LogOut,
+  Moon,
+  RotateCw,
+  Settings,
+  Sparkles,
+  Sun,
+  User,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import type { LicenseStatusResponse } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
-import { ThemeSwitcher } from "@/components/ThemeSwitcher";
-import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { useSidebarStatus } from "@/hooks/useSidebarStatus";
+import { useSystemActions } from "@/contexts/useSystemActions";
+import { useI18n } from "@/i18n";
+import { useTheme } from "@/themes";
 
 export function SidebarUserPill() {
   const navigate = useNavigate();
+  const status = useSidebarStatus();
+  const { activeAction, isBusy, isRunning, pendingAction, runAction, updateStatus } =
+    useSystemActions();
+  const { locale, setLocale } = useI18n();
+  const { themeName, setTheme } = useTheme();
   const [license, setLicense] = useState<LicenseStatusResponse | null>(null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -25,11 +43,6 @@ export function SidebarUserPill() {
     return () => window.removeEventListener("elevate:auth-changed", handler);
   }, [load]);
 
-  // Re-poll license state when the user looks back at the window or the tab
-  // becomes visible again. The CLI gateway can clear ~/.elevate/license.json
-  // out from under us (refresh token rejected, explicit logout from another
-  // surface) and without this listener the pill would keep rendering a stale
-  // "signed in as foo@bar" until the next manual reload.
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") load();
@@ -71,83 +84,143 @@ export function SidebarUserPill() {
   const emailLabel = license?.authenticated
     ? license.email ?? "Signed in"
     : "Not signed in";
-
+  const nameLabel = license?.authenticated && license.email
+    ? license.email.split("@")[0]
+    : "Not signed in";
+  const initial = license?.authenticated && license.email
+    ? license.email[0]
+    : "?";
   const tierLabel = license?.authenticated
     ? (license.tier === "builder" ? "Builder" : "Pro")
-    : null;
+    : "Local";
+
+  const gatewayState = status?.gateway_state || (status?.gateway_running ? "running" : "stopped");
+  const gatewayRunning = gatewayState === "running" || status?.gateway_running;
+  const activeSessions = status?.active_sessions ?? 0;
+  const hasUpdate = Boolean(updateStatus?.available);
+  const updateBehind = updateStatus?.behind ?? 0;
+  const themeIsDark = themeName !== "light";
+  const themeLabel = themeIsDark ? "Dark" : "Light";
+  const localeLabel = locale === "zh" ? "中文" : "EN";
+  const restartBusy =
+    pendingAction === "restart" || (activeAction === "restart" && isRunning);
+  const updateBusy =
+    pendingAction === "update" || (activeAction === "update" && isRunning);
+
+  const runSystemAction = (action: "restart" | "update") => {
+    if (isBusy && !(action === "restart" ? restartBusy : updateBusy)) return;
+    void runAction(action);
+  };
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="user-pill-wrap">
       {open && (
         <div
-          className={cn(
-            "absolute bottom-full left-0 right-0 mb-1 rounded-md",
-            "border border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]",
-            "animate-in fade-in slide-in-from-bottom-2 duration-150",
-            "z-50 overflow-hidden",
-          )}
+          className="user-menu"
+          onClick={(event) => event.stopPropagation()}
+          role="menu"
         >
-          <div className="px-3.5 pb-1 pt-3">
-            <p className="truncate text-[0.78rem] font-medium text-[var(--sidebar-text-muted)]">
-              {emailLabel}
-            </p>
-          </div>
+          <div className="user-menu-email">{emailLabel}</div>
 
-          <div className="px-1.5 py-1">
+          <div className="user-menu-section">
             <button
               type="button"
+              className="user-menu-row"
+              role="menuitem"
               onClick={() => { navigate("/config"); setOpen(false); }}
-              className={cn(
-                "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.86rem]",
-                "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)]",
-              )}
             >
-              <Settings className="h-4 w-4 text-[var(--sidebar-icon)]" />
-              Settings
+              <Settings />
+              <span>Settings</span>
             </button>
-
             <button
               type="button"
+              className="user-menu-row"
+              role="menuitem"
               onClick={() => { navigate("/agent-onboarding?run=1"); setOpen(false); }}
-              className={cn(
-                "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.86rem]",
-                "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)]",
-              )}
             >
-              <Sparkles className="h-4 w-4 text-[var(--sidebar-icon)]" />
-              Run onboarding
+              <Sparkles />
+              <span>Run onboarding</span>
             </button>
-
             <button
               type="button"
+              className="user-menu-row"
+              role="menuitem"
               onClick={() => { navigate("/desktop-setup"); setOpen(false); }}
-              className={cn(
-                "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.86rem]",
-                "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)]",
-              )}
             >
-              <User className="h-4 w-4 text-[var(--sidebar-icon)]" />
-              Account
+              <User />
+              <span>Account</span>
             </button>
           </div>
 
-          <div className="flex items-center gap-2 border-t border-[var(--sidebar-border)] px-3.5 py-2">
-            <ThemeSwitcher dropUp />
-            <LanguageSwitcher />
+          <div className="user-menu-section">
+            <div className="user-menu-toggles">
+              <button
+                type="button"
+                className={cn("user-menu-toggle", themeIsDark && "active")}
+                onClick={() => setTheme(themeIsDark ? "light" : "dark")}
+              >
+                {themeIsDark ? <Moon /> : <Sun />}
+                <span>{themeLabel}</span>
+              </button>
+              <button
+                type="button"
+                className="user-menu-toggle"
+                onClick={() => setLocale(locale === "en" ? "zh" : "en")}
+              >
+                <Globe />
+                <span>{localeLabel}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="user-menu-section system">
+            <div className="user-menu-status">
+              <span className="dim">Gateway</span>
+              <span className={gatewayRunning ? "ok" : "warn"}>
+                {gatewayRunning ? "● running" : `● ${gatewayState}`}
+              </span>
+            </div>
+            <div className="user-menu-status">
+              <span className="dim">Active sessions</span>
+              <span>{activeSessions}</span>
+            </div>
+            <button
+              type="button"
+              className="user-menu-row"
+              disabled={isBusy && !restartBusy}
+              role="menuitem"
+              onClick={() => runSystemAction("restart")}
+            >
+              <RotateCw className={cn(restartBusy && "animate-spin")} />
+              <span>{restartBusy ? "Restarting gateway" : "Restart gateway"}</span>
+            </button>
+            <button
+              type="button"
+              className="user-menu-row"
+              disabled={isBusy && !updateBusy}
+              role="menuitem"
+              onClick={() => runSystemAction("update")}
+            >
+              <Download className={cn(updateBusy && "animate-pulse")} />
+              <span>{updateBusy ? "Updating Elevate" : "Update Elevate"}</span>
+              {hasUpdate && !updateBusy && (
+                <span className="user-menu-tag">
+                  {updateBehind > 0 ? updateBehind : "new"}
+                </span>
+              )}
+            </button>
           </div>
 
           {license?.authenticated && (
-            <div className="border-t border-[var(--sidebar-border)] px-1.5 py-1">
+            <div className="user-menu-section">
               <button
                 type="button"
+                className="user-menu-row danger"
+                role="menuitem"
                 onClick={handleSignOut}
-                className={cn(
-                  "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[0.86rem]",
-                  "text-[var(--sidebar-text)] transition-colors hover:bg-[var(--sidebar-row-hover)]",
-                )}
               >
-                <LogOut className="h-4 w-4 text-[var(--sidebar-icon)]" />
-                Sign out
+                <LogOut />
+                <span>Sign out</span>
               </button>
             </div>
           )}
@@ -156,35 +229,15 @@ export function SidebarUserPill() {
 
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left",
-          "transition-colors hover:bg-[var(--sidebar-row-hover)]",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
-          open && "bg-[var(--sidebar-row-hover)]",
-        )}
+        onClick={() => setOpen((value) => !value)}
+        className={cn("user-pill", open && "open")}
       >
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--sidebar-row)] text-[0.7rem] font-semibold uppercase text-[var(--sidebar-text-muted)]">
-          {license?.authenticated && license.email
-            ? license.email[0]
-            : "?"}
+        <div className="avatar">{initial}</div>
+        <div className="who">
+          <div className="name">{nameLabel}</div>
+          <div className="role">{tierLabel}</div>
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[0.82rem] font-medium leading-tight text-[var(--sidebar-text-strong)]">
-            {license?.authenticated && license.email
-              ? license.email.split("@")[0]
-              : "Not signed in"}
-          </p>
-          {tierLabel && (
-            <p className="text-[0.68rem] leading-tight text-[var(--sidebar-text-muted)]">
-              {tierLabel}
-            </p>
-          )}
-        </div>
-        <ChevronUp className={cn(
-          "h-3.5 w-3.5 shrink-0 text-[var(--sidebar-icon-muted)] transition-transform",
-          !open && "rotate-180",
-        )} />
+        <ChevronUp className={cn("user-chev", open && "open")} />
       </button>
     </div>
   );

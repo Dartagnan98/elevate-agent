@@ -972,15 +972,18 @@ def agent_handoff_summary(conn: sqlite3.Connection, *, limit: int = 8) -> dict[s
     counts = {row["status"]: int(row["count"] or 0) for row in status_rows}
     by_agent_rows = conn.execute(
         """
-        SELECT to_agent_id,
-               COUNT(*) AS total,
-               SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
-               SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
-               SUM(CASE WHEN status = 'waiting_human' THEN 1 ELSE 0 END) AS waiting_human,
-               SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-               SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-        FROM agent_handoffs
-        GROUP BY to_agent_id
+        SELECT *
+        FROM (
+            SELECT to_agent_id,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+                   SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                   SUM(CASE WHEN status = 'waiting_human' THEN 1 ELSE 0 END) AS waiting_human,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+            FROM agent_handoffs
+            GROUP BY to_agent_id
+        ) counts
         ORDER BY (queued + running + waiting_human) DESC, total DESC, to_agent_id ASC
         """
     ).fetchall()

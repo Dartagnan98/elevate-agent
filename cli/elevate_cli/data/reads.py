@@ -592,17 +592,10 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
               AND COALESCE(pipeline_status, '') NOT IN (
                 'dead', 'closed_seller', 'closed_buyer'
               )
-              AND (
-                heat_label IN ('hot', 'warm')
-                OR needs_follow_up = 1
-                OR buyer_search_active = 1
-                OR listing_active = 1
-                OR pipeline_status = 'follow_up'
-              )
             ORDER BY COALESCE(last_activity_at, updated_at) DESC
             LIMIT ?
             """,
-            (max(safe_limit * 8, 500),),
+            (max(safe_limit * 8, 5000),),
         ).fetchall()
         for contact_row in contact_rows:
             contact_id = str(contact_row["id"] or "")
@@ -684,7 +677,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                      COALESCE(c.last_inbound_at, c.last_outbound_at) DESC
             LIMIT ?
             """,
-            (safe_limit * 4,),
+            (max(safe_limit * 4, 5000),),
         ).fetchall()
 
         for row in rows:
@@ -987,6 +980,8 @@ def db_thread_context_response(
     person_name = ""
     lead_payload: dict[str, Any] | None = None
     activity_records: list[dict[str, Any]] = []
+    notes_records: list[dict[str, Any]] = []
+    tasks_records: list[dict[str, Any]] = []
     last_inbound_at: str | None = None
     last_outbound_at: str | None = None
 
@@ -1074,7 +1069,7 @@ def db_thread_context_response(
                         'note','merge','merge_conflict','pcs_activity',
                         'reply_attributed'
                       )
-                    ORDER BY ts DESC LIMIT 20
+                    ORDER BY ts DESC LIMIT 500
                     """,
                     (contact["id"],),
                 ).fetchall()
@@ -1085,18 +1080,54 @@ def db_thread_context_response(
                             payload = json.loads(ev["payload_json"])
                         except (TypeError, json.JSONDecodeError):
                             payload = {}
+                    legacy_type = payload.get("legacyType") or payload.get("legacy_type")
                     summary = (
                         payload.get("note")
+                        or payload.get("summary")
+                        or payload.get("text")
+                        or payload.get("title")
                         or payload.get("reason")
                         or payload.get("type")
+                        or legacy_type
                         or None
                     )
+                    title = (
+                        payload.get("title")
+                        or payload.get("subject")
+                        or legacy_type
+                        or summary
+                    )
+                    if legacy_type == "crm_task":
+                        tasks_records.append(
+                            {
+                                "id": ev["id"],
+                                "title": title or "Task",
+                                "summary": summary or "",
+                                "status": payload.get("status") or "open",
+                                "dueAt": payload.get("dueAt") or payload.get("due_at"),
+                                "timestamp": ev["ts"],
+                            }
+                        )
+                        continue
+                    if legacy_type == "crm_note":
+                        notes_records.append(
+                            {
+                                "id": ev["id"],
+                                "title": title or "Note",
+                                "summary": summary or "",
+                                "author": payload.get("author"),
+                                "timestamp": ev["ts"],
+                            }
+                        )
+                        continue
                     activity_records.append(
                         {
                             "id": ev["id"],
-                            "type": ev["kind"],
-                            "title": summary,
+                            "type": legacy_type or ev["kind"],
+                            "subtype": payload.get("subtype"),
+                            "title": title,
                             "summary": summary,
+                            "address": payload.get("address"),
                             "timestamp": ev["ts"],
                         }
                     )
@@ -1240,8 +1271,6 @@ def db_thread_context_response(
             pending_draft = _draft_from_task(source, record, state)
         break
 
-    notes_records: list[dict[str, Any]] = []
-    tasks_records: list[dict[str, Any]] = []
     # tail=True so the most-recent notes are surfaced even when the file
     # has >4000 lifetime events (Codex audit P2, 2026-05-05).
     for record in _read_jsonl_records(source_dir / "lead-events.jsonl", limit=4000, tail=True):

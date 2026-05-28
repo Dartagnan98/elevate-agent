@@ -10,7 +10,9 @@ import { Card } from "@/components/ui/card";
 import {
   api,
   type AgentHubAgent,
+  type AnalyticsResponse,
   type SessionMessage as StoredSessionMessage,
+  type WorkspaceGitStatus,
 } from "@/lib/api";
 import {
   GatewayClient,
@@ -28,9 +30,9 @@ import {
   ChevronDown,
   ChevronUp,
   Clipboard,
+  Clock,
   Command,
   CornerDownLeft,
-  Dot,
   ExternalLink,
   Eye,
   FileCode2,
@@ -42,6 +44,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Mic,
+  MoreHorizontal,
   PanelLeftOpen,
   Paperclip,
   Pin,
@@ -49,7 +52,6 @@ import {
   Search,
   Shield,
   ShieldAlert,
-  Sparkle,
   Sparkles,
   Square,
   SquareTerminal,
@@ -59,6 +61,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -72,6 +75,7 @@ import type {
   KeyboardEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
+  UIEvent as ReactUIEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
@@ -83,6 +87,8 @@ interface SessionInfo {
   model?: string;
   provider?: string;
 }
+
+type StartAnalyticsRange = "all" | "30d" | "7d";
 
 /** A selectable microphone input device. */
 interface MicDevice {
@@ -137,6 +143,7 @@ interface ChatMessageAttachment {
 
 interface ChatMessage {
   attachments?: ChatMessageAttachment[];
+  completedAt?: number;
   content: string;
   createdAt: number;
   id: string;
@@ -331,12 +338,38 @@ type PendingPrompt =
 function useCopyToClipboard() {
   const [copied, setCopied] = useState(false);
   const copy = useCallback((text: string) => {
-    navigator.clipboard.writeText(text).then(() => {
+    const write = () => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
-    }).catch(() => {});
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(write).catch(() => {
+        if (fallbackCopyText(text)) write();
+      });
+      return;
+    }
+    if (fallbackCopyText(text)) write();
   }, []);
   return { copied, copy };
+}
+
+function fallbackCopyText(text: string): boolean {
+  if (typeof document === "undefined") return false;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 const ARTIFACT_LIMIT = 32;
@@ -345,6 +378,59 @@ const PREVIEW_PANEL_MIN_WIDTH = 480;
 const PREVIEW_PANEL_CHAT_MIN_WIDTH = 420;
 
 const ARTIFACT_DISMISS_STORAGE_PREFIX = "elevate.chat.artifacts.dismissed.v1:";
+const MESSAGE_PIN_STORAGE_KEY = "elevate.chat.messagePins.v1";
+const PREVIEW_AUTO_OPEN_DISABLED_STORAGE_PREFIX =
+  "elevate.chat.previewAutoOpenDisabled.v1:";
+const WORKSPACE_STATUS_STORAGE_KEY = "elevate.chat.workspaceStatus.v1";
+const WORKSPACE_STATUS_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+
+function readCachedWorkspaceStatus(): WorkspaceGitStatus | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_STATUS_STORAGE_KEY);
+    if (!raw) return null;
+    const status = JSON.parse(raw) as WorkspaceGitStatus;
+    const checkedAtMs = Number(status.checked_at || 0) * 1000;
+    if (!checkedAtMs || Date.now() - checkedAtMs > WORKSPACE_STATUS_CACHE_MAX_AGE_MS) {
+      return null;
+    }
+    return status;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedWorkspaceStatus(status: WorkspaceGitStatus): void {
+  if (typeof window === "undefined" || !status.ok) return;
+  try {
+    window.localStorage.setItem(WORKSPACE_STATUS_STORAGE_KEY, JSON.stringify(status));
+  } catch {
+    // Non-critical cache for perceived-load speed only.
+  }
+}
+
+function readPinnedMessageIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(MESSAGE_PIN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writePinnedMessageId(messageId: string, pinned: boolean): void {
+  if (typeof window === "undefined") return;
+  const ids = readPinnedMessageIds();
+  if (pinned) ids.add(messageId);
+  else ids.delete(messageId);
+  try {
+    window.localStorage.setItem(MESSAGE_PIN_STORAGE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Pinning is a UI convenience; storage failure should not interrupt chat.
+  }
+}
 
 function readDismissedArtifactKeys(sessionId: string | null | undefined): Set<string> {
   if (typeof window === "undefined" || !sessionId) return new Set();
@@ -353,7 +439,9 @@ function readDismissedArtifactKeys(sessionId: string | null | undefined): Set<st
     if (!raw) return new Set();
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) return new Set(parsed.filter((entry): entry is string => typeof entry === "string"));
-  } catch {}
+  } catch {
+    // Ignore malformed local cache.
+  }
   return new Set();
 }
 
@@ -368,7 +456,38 @@ function writeDismissedArtifactKeys(sessionId: string | null | undefined, keys: 
       `${ARTIFACT_DISMISS_STORAGE_PREFIX}${sessionId}`,
       JSON.stringify(Array.from(keys).slice(-64)),
     );
-  } catch {}
+  } catch {
+    // Ignore storage quota/private-mode failures.
+  }
+}
+
+function readPreviewAutoOpenDisabled(sessionId: string | null | undefined): boolean {
+  if (typeof window === "undefined" || !sessionId) return false;
+  try {
+    return window.localStorage.getItem(
+      `${PREVIEW_AUTO_OPEN_DISABLED_STORAGE_PREFIX}${sessionId}`,
+    ) === "1";
+  } catch {
+    // Ignore storage/private-mode failures.
+  }
+  return false;
+}
+
+function writePreviewAutoOpenDisabled(
+  sessionId: string | null | undefined,
+  disabled: boolean,
+): void {
+  if (typeof window === "undefined" || !sessionId) return;
+  try {
+    const key = `${PREVIEW_AUTO_OPEN_DISABLED_STORAGE_PREFIX}${sessionId}`;
+    if (disabled) {
+      window.localStorage.setItem(key, "1");
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Preview close persistence is best-effort.
+  }
 }
 
 // Artifacts (PDFs, files, outputs) are captured live from tool.complete
@@ -393,7 +512,9 @@ function readSessionArtifacts(sessionId: string | null | undefined): ArtifactEnt
           typeof entry.key === "string" && typeof entry.title === "string",
       );
     }
-  } catch {}
+  } catch {
+    // Ignore malformed local cache.
+  }
   return [];
 }
 
@@ -411,7 +532,9 @@ function writeSessionArtifacts(
       `${ARTIFACT_STORAGE_PREFIX}${sessionId}`,
       JSON.stringify(artifacts.slice(-40)),
     );
-  } catch {}
+  } catch {
+    // Ignore storage quota/private-mode failures.
+  }
 }
 
 function clampPreviewPanelWidth(width: number): number {
@@ -429,7 +552,9 @@ function defaultPreviewPanelWidth(): number {
   try {
     const stored = localStorage.getItem("elevate-preview-width");
     if (stored) { const n = parseInt(stored, 10); if (Number.isFinite(n) && n > 0) return clampPreviewPanelWidth(n); }
-  } catch {}
+  } catch {
+    // Ignore malformed local storage.
+  }
   return clampPreviewPanelWidth(window.innerWidth * 0.5);
 }
 
@@ -543,10 +668,13 @@ const STATE_LABEL: Record<ConnectionState, string> = {
 
 const SESSION_MESSAGE_CACHE = new Map<string, ChatMessage[]>();
 const SESSION_MESSAGE_STORAGE_KEY = "elevate.chat.messageCache.v1";
+const ACTIVE_TURN_STORAGE_KEY = "elevate.chat.activeTurnCache.v1";
 const MAX_CACHED_TRANSCRIPTS = 24;
+const MAX_ACTIVE_TURN_SNAPSHOTS = 12;
 const MAX_STORED_TRANSCRIPT_MESSAGES = 160;
 const MAX_STORED_TRANSCRIPT_CHARS = 220_000;
 const MAX_STORED_MESSAGE_CHARS = 16_000;
+const ACTIVE_TURN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 let SHARED_CHAT_GATEWAY: GatewayClient | null = null;
 let SHARED_CHAT_GATEWAY_VERSION = 0;
 
@@ -556,6 +684,15 @@ interface StoredTranscriptCacheEntry {
 }
 
 type StoredTranscriptCache = Record<string, StoredTranscriptCacheEntry>;
+
+interface ActiveTurnSnapshot {
+  message: ChatMessage;
+  tools: ToolEntry[];
+  traces: ActivityTrace[];
+  updatedAt: number;
+}
+
+type ActiveTurnCache = Record<string, ActiveTurnSnapshot>;
 
 function getSharedChatGateway(version: number): GatewayClient {
   if (!SHARED_CHAT_GATEWAY || SHARED_CHAT_GATEWAY_VERSION !== version) {
@@ -764,6 +901,10 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     if (!shouldKeepTranscriptMessage(role, content) && !hasCachedActivity) return;
     normalized.push({
       content: collapseSkillInvocation(role, content),
+      completedAt:
+        typeof entry.completedAt === "number" && Number.isFinite(entry.completedAt)
+          ? timestampMillis(entry.completedAt, Date.now() - index)
+          : undefined,
       createdAt: timestampMillis(entry.createdAt, Date.now() - index),
       id: typeof entry.id === "string" && entry.id ? entry.id : id(`cached-${index}`),
       role,
@@ -822,6 +963,199 @@ function slimTracesForStorage(
   }));
 }
 
+function readActiveTurnCache(): ActiveTurnCache {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_TURN_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as ActiveTurnCache
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeActiveTurnSnapshot(raw: unknown): ActiveTurnSnapshot | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const entry = raw as Partial<ActiveTurnSnapshot>;
+  const updatedAt =
+    typeof entry.updatedAt === "number" && Number.isFinite(entry.updatedAt)
+      ? entry.updatedAt
+      : 0;
+  if (!updatedAt || Date.now() - updatedAt > ACTIVE_TURN_MAX_AGE_MS) return null;
+
+  const message = normalizeCachedTranscript([entry.message])?.[0];
+  if (!message || message.role !== "assistant") return null;
+
+  const messageId = message.id;
+  const tools = (Array.isArray(entry.tools) ? entry.tools : [])
+    .filter((tool): tool is ToolEntry =>
+      !!tool &&
+      typeof tool === "object" &&
+      typeof tool.name === "string" &&
+      typeof tool.tool_id === "string",
+    )
+    .slice(-TOOL_LIMIT)
+    .map((tool) => ({ ...tool, messageId: tool.messageId ?? messageId }));
+  const traces = (Array.isArray(entry.traces) ? entry.traces : [])
+    .filter((trace): trace is ActivityTrace =>
+      !!trace &&
+      typeof trace === "object" &&
+      typeof trace.id === "string" &&
+      typeof trace.text === "string" &&
+      (trace.kind === "reasoning" ||
+        trace.kind === "status" ||
+        trace.kind === "thinking"),
+    )
+    .slice(-80)
+    .map((trace) => ({ ...trace, messageId: trace.messageId ?? messageId }));
+
+  return {
+    message: {
+      ...message,
+      status: "streaming",
+      tools: tools.length ? tools : message.tools,
+      traces: traces.length ? traces : message.traces,
+    },
+    tools,
+    traces,
+    updatedAt,
+  };
+}
+
+function readActiveTurnSnapshot(sessionId: string | null | undefined): ActiveTurnSnapshot | null {
+  if (!sessionId) return null;
+  return normalizeActiveTurnSnapshot(readActiveTurnCache()[sessionId]);
+}
+
+function writeActiveTurnSnapshot(
+  sessionId: string | null | undefined,
+  message: ChatMessage,
+  tools: ToolEntry[],
+  traces: ActivityTrace[],
+): void {
+  if (typeof window === "undefined" || !sessionId || message.role !== "assistant") return;
+  const messageId = message.id;
+  const turnTools = tools
+    .filter((tool) => !tool.messageId || tool.messageId === messageId)
+    .map((tool) => ({ ...tool, messageId }));
+  const turnTraces = traces
+    .filter((trace) => !trace.messageId || trace.messageId === messageId)
+    .map((trace) => ({ ...trace, messageId }));
+  const snapshot: ActiveTurnSnapshot = {
+    message: {
+      ...message,
+      completedAt: undefined,
+      status: "streaming",
+      tools: slimToolsForStorage(turnTools),
+      traces: slimTracesForStorage(turnTraces),
+    },
+    tools: slimToolsForStorage(turnTools) ?? [],
+    traces: slimTracesForStorage(turnTraces) ?? [],
+    updatedAt: Date.now(),
+  };
+
+  const cache = readActiveTurnCache();
+  cache[sessionId] = snapshot;
+  const entries = Object.entries(cache)
+    .filter(([, entry]) => normalizeActiveTurnSnapshot(entry) !== null)
+    .sort(([, a], [, b]) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, MAX_ACTIVE_TURN_SNAPSHOTS);
+  try {
+    window.localStorage.setItem(
+      ACTIVE_TURN_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    // Active-turn restore is best-effort. The server replay remains canonical.
+  }
+}
+
+function clearActiveTurnSnapshot(sessionId: string | null | undefined): void {
+  if (typeof window === "undefined" || !sessionId) return;
+  const cache = readActiveTurnCache();
+  if (!(sessionId in cache)) return;
+  delete cache[sessionId];
+  try {
+    if (Object.keys(cache).length) {
+      window.localStorage.setItem(ACTIVE_TURN_STORAGE_KEY, JSON.stringify(cache));
+    } else {
+      window.localStorage.removeItem(ACTIVE_TURN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function activeAssistantMessage(messages: ChatMessage[], preferredId?: string | null): ChatMessage | null {
+  if (preferredId) {
+    const preferred = messages.find(
+      (message) =>
+        message.id === preferredId &&
+        message.role === "assistant" &&
+        message.status === "streaming",
+    );
+    if (preferred) return preferred;
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "assistant" && message.status === "streaming") {
+      return message;
+    }
+  }
+  return null;
+}
+
+function mergeActiveTurnSnapshot(
+  messages: ChatMessage[],
+  snapshot: ActiveTurnSnapshot | null,
+): ChatMessage[] {
+  if (!snapshot) return messages;
+  const active = snapshot.message;
+  const mergedActive: ChatMessage = {
+    ...active,
+    status: "streaming",
+    tools: snapshot.tools.length ? snapshot.tools : active.tools,
+    traces: snapshot.traces.length ? snapshot.traces : active.traces,
+  };
+
+  const exactIndex = messages.findIndex((message) => message.id === active.id);
+  if (exactIndex >= 0) {
+    const next = messages.slice();
+    const existing = next[exactIndex];
+    next[exactIndex] = {
+      ...existing,
+      ...mergedActive,
+      content: mergedActive.content || existing.content,
+      createdAt: Math.min(existing.createdAt, mergedActive.createdAt),
+      status: "streaming",
+      tools: mergedActive.tools ?? existing.tools,
+      traces: mergedActive.traces ?? existing.traces,
+    };
+    return next;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "assistant" || message.status !== "streaming") continue;
+    const next = messages.slice();
+    next[i] = {
+      ...message,
+      ...mergedActive,
+      content: mergedActive.content || message.content,
+      createdAt: Math.min(message.createdAt, mergedActive.createdAt),
+      status: "streaming",
+      tools: mergedActive.tools ?? message.tools,
+      traces: mergedActive.traces ?? message.traces,
+    };
+    return next;
+  }
+
+  return [...messages, mergedActive];
+}
+
 function trimTranscriptForStorage(messages: ChatMessage[]): ChatMessage[] {
   let used = 0;
   const trimmed: ChatMessage[] = [];
@@ -865,7 +1199,9 @@ function writeStoredTranscript(sessionId: string, messages: ChatMessage[]): void
     try {
       const smaller = Object.fromEntries(entries.slice(0, Math.max(4, Math.floor(entries.length / 2))));
       window.localStorage.setItem(SESSION_MESSAGE_STORAGE_KEY, JSON.stringify(smaller));
-    } catch {}
+    } catch {
+      // Cache persistence is best-effort.
+    }
   }
 }
 
@@ -985,6 +1321,7 @@ function mergeServerWithCache(
     const hasSnapshot =
       !!next.tools?.length ||
       !!next.traces?.length ||
+      typeof next.completedAt === "number" ||
       typeof next.tokenCount === "number";
     if (hasSnapshot) return next;
     if (
@@ -995,6 +1332,7 @@ function mergeServerWithCache(
     ) {
       return {
         ...next,
+        completedAt: match.completedAt,
         tools: match.tools,
         traces: match.traces,
         tokenCount: match.tokenCount,
@@ -1038,6 +1376,25 @@ function hasPendingTurn(messages: ChatMessage[]): boolean {
     if (msg.role === "user") return true;
   }
   return false;
+}
+
+function markStreamingTurnsInterrupted(
+  messages: ChatMessage[],
+  completedAt = Date.now(),
+): ChatMessage[] {
+  let changed = false;
+  const next = messages.map((message) => {
+    if (message.role !== "assistant" || message.status !== "streaming") {
+      return message;
+    }
+    changed = true;
+    return {
+      ...message,
+      completedAt: message.completedAt ?? completedAt,
+      status: "interrupted" as const,
+    };
+  });
+  return changed ? next : messages;
 }
 
 const QUEUE_STORAGE_KEY = "elevate.chat.queueCache.v1";
@@ -1102,7 +1459,9 @@ function writeQueue(sessionId: string | null | undefined, items: QueuedInput[]):
       QUEUE_STORAGE_KEY,
       JSON.stringify(Object.fromEntries(entries)),
     );
-  } catch {}
+  } catch {
+    // Queue persistence is best-effort.
+  }
 }
 
 
@@ -1223,26 +1582,13 @@ function detailsFor(tools: ToolEntry[]): string[] {
   return tools.map((tool) => `${tool.name}: ${toolDetail(tool)}`).filter(Boolean).slice(-4);
 }
 
-// The 15 "thinking verbs" the agent loop emits as transient heartbeats
-// (see ui-tui/src/content/verbs.ts and agent/display.py). They look fine on
-// the live rotating pill but should NEVER stack as permanent rows in the
-// activity panel.
 const ROTATING_VERBS = [
-  "analyzing",
-  "brainstorming",
-  "cogitating",
-  "computing",
-  "contemplating",
-  "deliberating",
-  "formulating",
-  "mulling",
-  "musing",
-  "pondering",
-  "processing",
+  "checking",
+  "planning",
+  "reading",
   "reasoning",
-  "reflecting",
-  "ruminating",
-  "synthesizing",
+  "reviewing",
+  "verifying",
 ];
 
 function isGenericActivityText(text: string): boolean {
@@ -1513,6 +1859,191 @@ function eventString(ev: GatewayEvent, key: string): string {
 function modelLabel(info: SessionInfo): string {
   const model = info.model || "model";
   return model.split("/").slice(-1)[0] || model;
+}
+
+function formatCompactNumber(value: number | null | undefined): string {
+  const n = Math.max(0, Number(value ?? 0));
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 10_000) return `${Math.round(n / 1_000)}K`;
+  return n.toLocaleString();
+}
+
+function formatPersonName(email: string | null | undefined): string {
+  if (!email) return "there";
+  const raw = email.split("@")[0]?.split(/[._-]/)[0] || "";
+  if (!raw) return "there";
+  if (raw.toLowerCase().startsWith("dartagnan")) return "Dartagnan";
+  return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+}
+
+function dayKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+const DAY_MS = 86_400_000;
+
+function parseAnalyticsDay(key: string): Date {
+  return new Date(`${key}T12:00:00`);
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatAnalyticsDay(key: string): string {
+  return parseAnalyticsDay(key).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatAnalyticsDayShort(key: string): string {
+  return parseAnalyticsDay(key).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function analyticsRangeLabel(range: StartAnalyticsRange): string {
+  if (range === "7d") return "Last 7 days";
+  if (range === "30d") return "Last 30 days";
+  return "All time";
+}
+
+function dailyTokenTotal(day: AnalyticsResponse["daily"][number]): number {
+  return Math.max(
+    0,
+    (day.input_tokens ?? 0) +
+      (day.output_tokens ?? 0) +
+      (day.cache_read_tokens ?? 0) +
+      (day.reasoning_tokens ?? 0),
+  );
+}
+
+function activeDayCount(analytics: AnalyticsResponse | null): number {
+  if (!analytics) return 0;
+  return analytics.daily.filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0).length;
+}
+
+function longestActivityStreak(analytics: AnalyticsResponse | null): number {
+  if (!analytics) return 0;
+  const active = new Set(
+    analytics.daily
+      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
+      .map((day) => day.day),
+  );
+  let best = 0;
+  let current = 0;
+  for (const day of analytics.daily) {
+    if (active.has(day.day)) {
+      current += 1;
+      best = Math.max(best, current);
+    } else {
+      current = 0;
+    }
+  }
+  return best;
+}
+
+function currentActivityStreak(analytics: AnalyticsResponse | null): number {
+  if (!analytics) return 0;
+  const active = new Set(
+    analytics.daily
+      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
+      .map((day) => day.day),
+  );
+  let count = 0;
+  const cursor = new Date();
+  for (let i = 0; i < 365; i += 1) {
+    const key = dayKey(cursor);
+    if (!active.has(key)) break;
+    count += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return count;
+}
+
+function favoriteModel(analytics: AnalyticsResponse | null): string {
+  const model = analytics?.by_model?.[0]?.model;
+  if (!model) return "pending";
+  return model.split("/").slice(-1)[0] || model;
+}
+
+function usageHeatmapDays(
+  analytics: AnalyticsResponse | null,
+  range: StartAnalyticsRange,
+): Array<{
+  apiCalls: number;
+  key: string;
+  level: number;
+  sessions: number;
+  tip: string;
+  tokens: number;
+}> {
+  const byDay = new Map(
+    (analytics?.daily ?? []).map((day) => [day.day, day]),
+  );
+  const maxTokens = Math.max(1, ...Array.from(byDay.values()).map(dailyTokenTotal));
+  const days: Array<{
+    apiCalls: number;
+    key: string;
+    level: number;
+    sessions: number;
+    tip: string;
+    tokens: number;
+  }> = [];
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const sortedDays = analytics?.daily ?? [];
+  let count = range === "7d" ? 7 : range === "30d" ? 30 : 30;
+  let cursor = addDays(today, -(count - 1));
+  if (range === "all" && sortedDays.length > 0) {
+    const first = parseAnalyticsDay(sortedDays[0].day);
+    const last = parseAnalyticsDay(sortedDays[sortedDays.length - 1].day);
+    const totalDays = Math.max(1, Math.round((last.getTime() - first.getTime()) / DAY_MS) + 1);
+    count = Math.min(91, totalDays);
+    cursor = addDays(last, -(count - 1));
+  }
+  const rangeText = analyticsRangeLabel(range).toLowerCase();
+  for (let i = 0; i < count; i += 1) {
+    const key = dayKey(cursor);
+    const entry = byDay.get(key);
+    const tokens = entry ? dailyTokenTotal(entry) : 0;
+    const sessions = entry?.sessions ?? 0;
+    const apiCalls = entry?.api_calls ?? 0;
+    const level = tokens === 0 ? 0 : Math.max(1, Math.min(5, Math.ceil((tokens / maxTokens) * 5)));
+    const tip = [
+      `${formatAnalyticsDay(key)} · ${rangeText}`,
+      `${formatCompactNumber(tokens)} tokens`,
+      `${formatCompactNumber(sessions)} sessions · ${formatCompactNumber(apiCalls)} calls`,
+    ].join("\n");
+    days.push({ apiCalls, key, level, sessions, tip, tokens });
+    cursor = addDays(cursor, 1);
+  }
+  return days;
+}
+
+function heatmapWindowLabel(
+  analytics: AnalyticsResponse | null,
+  range: StartAnalyticsRange,
+  days: Array<{ key: string }>,
+): string {
+  if (!analytics || days.length === 0) return `${analyticsRangeLabel(range)} · loading`;
+  const first = days[0].key;
+  const last = days[days.length - 1].key;
+  const visibleRange = `${formatAnalyticsDayShort(first)}-${formatAnalyticsDayShort(last)}`;
+  if (range !== "all") return `${analyticsRangeLabel(range)} · ${visibleRange}`;
+  const dataFirst = analytics.daily[0]?.day;
+  const dataLast = analytics.daily[analytics.daily.length - 1]?.day;
+  if (!dataFirst || !dataLast) return `All time · ${visibleRange}`;
+  if (dataFirst !== first) {
+    return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)} · heatmap recent ${days.length}d`;
+  }
+  return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)}`;
 }
 
 function normalizeUsage(raw: unknown): UsageInfo | null {
@@ -1892,6 +2423,7 @@ export default function ChatPage() {
   const resumeId = searchParams.get("resume");
   const newChatId = searchParams.get("new");
   const seedKey = searchParams.get("seed");
+  const draftChat = Boolean(newChatId && !resumeId && !seedKey);
   const seededRef = useRef(false);
   // Auto-resume gate. When the user lands on /chat with no ?resume= and no
   // ?new=, we look up the most-recent TUI session and redirect with
@@ -1915,11 +2447,13 @@ export default function ChatPage() {
   const stoppedAssistantIdsRef = useRef<Set<string>>(new Set());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const voiceBaseInputRef = useRef("");
+  const createSessionPromiseRef = useRef<Promise<string | null> | null>(null);
   // Bumped whenever the user cancels a transcription. A capture in flight
   // compares its epoch on completion and discards a stale result so a
   // late-arriving server response can't overwrite the composer or re-lock
@@ -1928,6 +2462,9 @@ export default function ChatPage() {
   const queueDispatchRef = useRef(false);
   const historyHydratedRef = useRef(false);
   const persistedSessionIdRef = useRef<string | null>(null);
+  const chatStickToBottomRef = useRef(true);
+  const pendingInitialBottomScrollRef = useRef(true);
+  const scrollSessionKeyRef = useRef<string | null>(null);
   // Live mirrors of tools/activityTrace so the message.complete handler
   // can snapshot the finished turn without a stale-closure read.
   const toolsRef = useRef<ToolEntry[]>([]);
@@ -1940,9 +2477,15 @@ export default function ChatPage() {
 
   const [info, setInfo] = useState<SessionInfo>({});
   const [usage, setUsage] = useState<UsageInfo | null>(null);
+  const [startAnalytics, setStartAnalytics] = useState<AnalyticsResponse | null>(null);
+  const [startAnalyticsLoading, setStartAnalyticsLoading] = useState(false);
+  const [startRange, setStartRange] = useState<StartAnalyticsRange>("all");
+  const [startView, setStartView] = useState<"overview" | "models">("overview");
+  const [userName, setUserName] = useState("there");
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
   const dismissedArtifactsRef = useRef<Set<string>>(new Set());
+  const previewAutoOpenDisabledRef = useRef(false);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
@@ -2004,6 +2547,23 @@ export default function ChatPage() {
       activeComposerAgents[0] ??
       DEFAULT_COMPOSER_AGENTS[0],
     [activeComposerAgents, selectedAgentId],
+  );
+
+  const handleEditMessage = useCallback((message: ChatMessage) => {
+    const text = message.content.trimEnd();
+    if (!text) return;
+    setInput(text);
+    setCaretIndex(text.length);
+    window.requestAnimationFrame(() => {
+      const inputEl = inputRef.current;
+      inputEl?.focus();
+      inputEl?.setSelectionRange(text.length, text.length);
+    });
+  }, []);
+
+  const artifactStateSessionId = useCallback(
+    () => persistedSessionIdRef.current ?? resumeId ?? sessionId,
+    [resumeId, sessionId],
   );
 
   // The agent lane is fixed for the life of a chat: it is applied on the
@@ -2070,11 +2630,56 @@ export default function ChatPage() {
   const updateAssistant = useCallback(
     (updater: (message: ChatMessage) => ChatMessage) => {
       const messageId = ensureAssistant();
-      setMessages((prev) =>
-        prev.map((m) => (m.id === messageId ? updater(m) : m)),
-      );
+      setMessages((prev) => {
+        const index = prev.findIndex((message) => message.id === messageId);
+        if (index === -1) return prev;
+        const current = prev[index];
+        const nextMessage = updater(current);
+        if (nextMessage === current) return prev;
+        const next = prev.slice();
+        next[index] = nextMessage;
+        return next;
+      });
     },
     [ensureAssistant],
+  );
+
+  const pendingAssistantDeltaRef = useRef("");
+  const assistantDeltaFlushTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const clearPendingAssistantDelta = useCallback(() => {
+    if (assistantDeltaFlushTimerRef.current) {
+      window.clearTimeout(assistantDeltaFlushTimerRef.current);
+      assistantDeltaFlushTimerRef.current = null;
+    }
+    pendingAssistantDeltaRef.current = "";
+  }, []);
+  const flushAssistantDelta = useCallback(() => {
+    if (assistantDeltaFlushTimerRef.current) {
+      window.clearTimeout(assistantDeltaFlushTimerRef.current);
+      assistantDeltaFlushTimerRef.current = null;
+    }
+    const delta = pendingAssistantDeltaRef.current;
+    if (!delta) return;
+    pendingAssistantDeltaRef.current = "";
+    updateAssistant((message) => ({
+      ...message,
+      content: message.content + delta,
+      status: "streaming",
+    }));
+  }, [updateAssistant]);
+
+  const enqueueAssistantDelta = useCallback(
+    (text: string) => {
+      pendingAssistantDeltaRef.current += text;
+      if (assistantDeltaFlushTimerRef.current) return;
+      assistantDeltaFlushTimerRef.current = window.setTimeout(flushAssistantDelta, 50);
+    },
+    [flushAssistantDelta],
+  );
+
+  useEffect(
+    () => () => clearPendingAssistantDelta(),
+    [clearPendingAssistantDelta],
   );
 
   const addArtifacts = useCallback((entries: ArtifactEntry[]) => {
@@ -2094,7 +2699,11 @@ export default function ChatPage() {
       return next.slice(-ARTIFACT_LIMIT);
     });
 
-    if (previewCandidate && !dismissedArtifactsRef.current.has(artifactDismissKey(previewCandidate))) {
+    if (
+      previewCandidate &&
+      !previewAutoOpenDisabledRef.current &&
+      !dismissedArtifactsRef.current.has(artifactDismissKey(previewCandidate))
+    ) {
       setPreviewArtifact(previewCandidate);
     }
   }, []);
@@ -2113,6 +2722,9 @@ export default function ChatPage() {
   }, [artifacts, sessionId]);
 
   const dismissPreviewArtifact = useCallback(() => {
+    const storageId = artifactStateSessionId();
+    previewAutoOpenDisabledRef.current = true;
+    writePreviewAutoOpenDisabled(storageId, true);
     setPreviewArtifact((current) => {
       if (current) {
         dismissedArtifactsRef.current.add(artifactDismissKey(current));
@@ -2122,13 +2734,13 @@ export default function ChatPage() {
         // read back under resumeId (the persisted id) and never match —
         // which is why the panel kept reopening on leave/return.
         writeDismissedArtifactKeys(
-          persistedSessionIdRef.current ?? sessionId,
+          storageId,
           dismissedArtifactsRef.current,
         );
       }
       return null;
     });
-  }, [sessionId]);
+  }, [artifactStateSessionId]);
 
   const hydrateArtifactsFromMessages = useCallback(
     (nextMessages: ChatMessage[]) => {
@@ -2139,17 +2751,20 @@ export default function ChatPage() {
 
   const openArtifactPreview = useCallback(
     (artifact: ArtifactEntry) => {
+      const storageId = artifactStateSessionId();
+      previewAutoOpenDisabledRef.current = false;
+      writePreviewAutoOpenDisabled(storageId, false);
       const dKey = artifactDismissKey(artifact);
       if (dismissedArtifactsRef.current.has(dKey)) {
         dismissedArtifactsRef.current.delete(dKey);
         writeDismissedArtifactKeys(
-          persistedSessionIdRef.current ?? sessionId,
+          storageId,
           dismissedArtifactsRef.current,
         );
       }
       setPreviewArtifact(artifact);
     },
-    [sessionId],
+    [artifactStateSessionId],
   );
 
   const startPreviewResize = useCallback(
@@ -2179,7 +2794,11 @@ export default function ChatPage() {
           ? parseInt(shell.style.getPropertyValue("--preview-panel-width") || String(startWidth), 10)
           : startWidth;
         setPreviewPanelWidth(clampPreviewPanelWidth(finalWidth));
-        try { localStorage.setItem("elevate-preview-width", String(clampPreviewPanelWidth(finalWidth))); } catch {}
+        try {
+          localStorage.setItem("elevate-preview-width", String(clampPreviewPanelWidth(finalWidth)));
+        } catch {
+          // Preview width persistence is best-effort.
+        }
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", stopResize);
         window.removeEventListener("pointercancel", stopResize);
@@ -2256,10 +2875,11 @@ export default function ChatPage() {
     // reattach). Reading under sessionId here would clobber the ref with an
     // empty set the moment the gateway connects — which is why a closed
     // preview reopened on leave/return. Read under the same key the write uses.
-    dismissedArtifactsRef.current = readDismissedArtifactKeys(
-      persistedSessionIdRef.current ?? sessionId,
-    );
-  }, [sessionId]);
+    const storageId = artifactStateSessionId();
+    dismissedArtifactsRef.current = readDismissedArtifactKeys(storageId);
+    previewAutoOpenDisabledRef.current =
+      readPreviewAutoOpenDisabled(storageId);
+  }, [artifactStateSessionId, sessionId]);
 
   useEffect(() => {
     const sync = () => {
@@ -2373,9 +2993,13 @@ export default function ChatPage() {
     };
   }, [mobilePanelOpen]);
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [messages, tools, pendingPrompt]);
+  useLayoutEffect(() => {
+    const key = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+    if (scrollSessionKeyRef.current === key) return;
+    scrollSessionKeyRef.current = key;
+    chatStickToBottomRef.current = true;
+    pendingInitialBottomScrollRef.current = true;
+  }, [newChatId, resumeId, seedKey]);
 
   useEffect(() => {
     toolsRef.current = tools;
@@ -2390,6 +3014,39 @@ export default function ChatPage() {
   }, [usage]);
 
   useEffect(() => {
+    let cancelled = false;
+    api
+      .getLicenseStatus()
+      .then((license) => {
+        if (!cancelled) setUserName(formatPersonName(license.email));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const days = startRange === "7d" ? 7 : startRange === "30d" ? 30 : 0;
+    setStartAnalyticsLoading(true);
+    api
+      .getAnalytics(days)
+      .then((analytics) => {
+        if (!cancelled) setStartAnalytics(analytics);
+      })
+      .catch(() => {
+        if (!cancelled) setStartAnalytics(null);
+      })
+      .finally(() => {
+        if (!cancelled) setStartAnalyticsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [startRange]);
+
+  useEffect(() => {
     const persisted = persistedSessionIdRef.current;
     if (persisted && messages.length) {
       rememberTranscript(
@@ -2398,6 +3055,19 @@ export default function ChatPage() {
       );
     }
   }, [activityTrace, messages, tools]);
+
+  useEffect(() => {
+    const persisted = persistedSessionIdRef.current;
+    if (!persisted) return;
+    const active = activeAssistantMessage(messages, currentAssistantRef.current);
+    if (active) {
+      writeActiveTurnSnapshot(persisted, active, tools, activityTrace);
+      return;
+    }
+    if (!busy) {
+      clearActiveTurnSnapshot(persisted);
+    }
+  }, [activityTrace, busy, messages, sessionId, tools]);
 
   useEffect(() => {
     const persisted = persistedSessionIdRef.current ?? sessionId;
@@ -2455,6 +3125,7 @@ export default function ChatPage() {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
 
+    clearPendingAssistantDelta();
     activeSessionRef.current = null;
     currentAssistantRef.current = null;
     historyHydratedRef.current = false;
@@ -2464,10 +3135,16 @@ export default function ChatPage() {
     setUsage(null);
     setArtifacts([]);
     setPreviewArtifact(null);
+    const activeTurnSnapshot = resumeId ? readActiveTurnSnapshot(resumeId) : null;
     dismissedArtifactsRef.current = readDismissedArtifactKeys(resumeId);
-    setTools([]);
+    previewAutoOpenDisabledRef.current =
+      readPreviewAutoOpenDisabled(resumeId);
+    if (activeTurnSnapshot) {
+      currentAssistantRef.current = activeTurnSnapshot.message.id;
+    }
+    setTools(activeTurnSnapshot?.tools ?? []);
     setSubagents([]);
-    setActivityTrace([]);
+    setActivityTrace(activeTurnSnapshot?.traces ?? []);
     lastToolActivityAtRef.current = 0;
     setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
     setPendingPrompt(null);
@@ -2475,7 +3152,7 @@ export default function ChatPage() {
     setBusy(false);
     setBanner(null);
     setResumeFallback(false);
-    setStatusText(resumeId ? "Loading chat..." : "Connecting...");
+    setStatusText(resumeId ? "Loading chat..." : draftChat ? "Ready" : "Connecting...");
 
     if (resumeId) {
       // Restore the artifacts captured during earlier turns of this
@@ -2486,11 +3163,12 @@ export default function ChatPage() {
       if (cachedArtifacts.length) setArtifacts(cachedArtifacts);
 
       const cached = restoreTranscript(resumeId);
-      if (cached) {
+      const restoredCached = mergeActiveTurnSnapshot(cached ?? [], activeTurnSnapshot);
+      if (restoredCached.length) {
         historyHydratedRef.current = true;
-        setMessages(cached);
-        hydrateArtifactsFromMessages(cached);
-        if (hasPendingTurn(cached)) {
+        setMessages(restoredCached);
+        hydrateArtifactsFromMessages(restoredCached);
+        if (activeTurnSnapshot || hasPendingTurn(restoredCached)) {
           setBusy(true);
           setStatusText("Resuming work...");
         } else {
@@ -2502,17 +3180,21 @@ export default function ChatPage() {
         .then((response) => {
           if (cancelled) return;
           const hydrated = normalizeStoredTranscript(response.messages);
+          const latestActiveSnapshot = readActiveTurnSnapshot(resumeId);
           historyHydratedRef.current = true;
           setMessages((prev) => {
             // Merge against the current UI state, not only the cache captured
             // before gateway replay. Otherwise a slow DB hydrate can erase the
             // in-flight assistant turn that session.resume just replayed.
-            const base = prev.length ? prev : cached;
-            const merged = mergeServerWithCache(hydrated, base);
+            const base = prev.length ? prev : restoredCached;
+            const merged = mergeActiveTurnSnapshot(
+              mergeServerWithCache(hydrated, base),
+              latestActiveSnapshot,
+            );
             rememberTranscript(response.session_id || resumeId, merged);
             rememberTranscript(resumeId, merged);
             hydrateArtifactsFromMessages(merged);
-            if (!hasPendingTurn(merged)) {
+            if (!latestActiveSnapshot && !hasPendingTurn(merged)) {
               // Cache heuristic flagged this as pending (last msg = user
               // with no assistant follow-up) so busy was set true above. The
               // merged transcript confirms no live-looking turn remains —
@@ -2528,7 +3210,7 @@ export default function ChatPage() {
           });
         })
         .catch((error: Error) => {
-          if (cancelled || cached) return;
+          if (cancelled || restoredCached.length) return;
           setBanner(`Could not load saved messages yet: ${error.message}`);
         });
     } else {
@@ -2538,7 +3220,14 @@ export default function ChatPage() {
 
     const accepts = (ev: GatewayEvent) => {
       const active = activeSessionRef.current;
-      return !active || !ev.session_id || ev.session_id === active;
+      const eventSessionId =
+        typeof ev.session_id === "string" && ev.session_id.trim()
+          ? ev.session_id
+          : null;
+      // A draft/new chat intentionally has no session yet. Treat that as
+      // "accept none" for session events, not "accept everything"; otherwise
+      // a still-streaming old chat can paint into the fresh view.
+      return Boolean(active && eventSessionId && eventSessionId === active);
     };
 
     const trackTool = (ev: GatewayEvent) => {
@@ -2791,7 +3480,6 @@ export default function ChatPage() {
       gw.on("message.start", (ev) => {
         if (!accepts(ev)) return;
         const at = eventMillis(ev);
-        currentAssistantRef.current = null;
         lastToolActivityAtRef.current = 0;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant(at);
@@ -2816,11 +3504,7 @@ export default function ChatPage() {
         const text = eventText(ev);
         if (!text) return;
         ensureAssistant(eventMillis(ev));
-        updateAssistant((message) => ({
-          ...message,
-          content: message.content + text,
-          status: "streaming",
-        }));
+        enqueueAssistantDelta(text);
       }),
     );
     unsubs.push(
@@ -2833,6 +3517,7 @@ export default function ChatPage() {
         const warning = eventString(ev, "warning");
         const messageId = currentAssistantRef.current ?? ensureAssistant(at);
         const stopForced = stoppedAssistantIdsRef.current.has(messageId);
+        flushAssistantDelta();
 
         // Snapshot the finished turn's tools + reasoning traces onto the
         // message so the activity digest survives a session resume. Any
@@ -2878,6 +3563,7 @@ export default function ChatPage() {
           return {
             ...message,
             content: finalContent,
+            completedAt: at,
             status:
               stopForced || status === "interrupted" ? "interrupted" : "complete",
             warning: warning || undefined,
@@ -2890,6 +3576,7 @@ export default function ChatPage() {
         if (text) {
           addArtifacts(artifactsFromText(text, "assistant", messageId));
         }
+        clearActiveTurnSnapshot(persistedSessionIdRef.current ?? ev.session_id);
         // The turn is over: its tools + reasoning are now snapshotted onto
         // the message above. Clear the live activity state so the side
         // Activity panel goes idle ("Ready") instead of leaving stale
@@ -3053,19 +3740,20 @@ export default function ChatPage() {
       }),
     );
     unsubs.push(
-	      gw.on("error", (ev) => {
-	        if (!accepts(ev)) return;
-	        const at = eventMillis(ev);
-	        const message = eventString(ev, "message") || "Gateway error";
-	        setBanner(message);
-	        appendMessage("system", message, { createdAt: at, status: "error" });
-	        setBusy(false);
-	        setQueuedInputs([]);
-	        setSubagents((prev) =>
-	          prev.map((subagent) =>
-	            subagent.status === "running"
-	              ? { ...subagent, completedAt: at, status: "error" }
-	              : subagent,
+      gw.on("error", (ev) => {
+        if (!accepts(ev)) return;
+        const at = eventMillis(ev);
+        const message = eventString(ev, "message") || "Gateway error";
+        setBanner(message);
+        appendMessage("system", message, { createdAt: at, status: "error" });
+        setBusy(false);
+        setQueuedInputs([]);
+        clearActiveTurnSnapshot(persistedSessionIdRef.current ?? ev.session_id);
+        setSubagents((prev) =>
+          prev.map((subagent) =>
+            subagent.status === "running"
+              ? { ...subagent, completedAt: at, status: "error" }
+              : subagent,
           ),
         );
         setStatusText("Error");
@@ -3075,6 +3763,10 @@ export default function ChatPage() {
     gw.connect()
       .then(async () => {
         if (cancelled) return;
+        if (draftChat) {
+          setStatusText("Ready");
+          return;
+        }
         let resumeWarning: string | null = null;
         let created: SessionCreateResponse | SessionResumeResponse;
 
@@ -3176,6 +3868,7 @@ export default function ChatPage() {
         // route to the right session.
         const resumed = created as SessionResumeResponse;
         if (
+          stillRunning &&
           Array.isArray(resumed.replay_events) &&
           resumed.replay_events.length > 0
         ) {
@@ -3254,6 +3947,11 @@ export default function ChatPage() {
           // resuming one. Clearing busy unconditionally here unlocks the
           // composer instead of leaving it stuck behind a permanent
           // "Resuming work" spinner the gateway will never finish.
+          currentAssistantRef.current = null;
+          setTools([]);
+          setActivityTrace([]);
+          setMessages((prev) => markStreamingTurnsInterrupted(prev));
+          clearActiveTurnSnapshot(persistedSessionIdRef.current ?? resumeId);
           setBusy(false);
           setStatusText("Ready");
         }
@@ -3266,6 +3964,9 @@ export default function ChatPage() {
 
     return () => {
       cancelled = true;
+      clearPendingAssistantDelta();
+      activeSessionRef.current = null;
+      currentAssistantRef.current = null;
       unsubs.forEach((unsub) => unsub());
       // Route/tab changes must detach from the live session, not close it.
       // Closing here tears down the in-memory gateway session while a turn may
@@ -3277,10 +3978,14 @@ export default function ChatPage() {
     addArtifacts,
     appendMessage,
     autoResumeDecided,
+    clearPendingAssistantDelta,
+    enqueueAssistantDelta,
     ensureAssistant,
+    flushAssistantDelta,
     gw,
     hydrateArtifactsFromMessages,
     newChatId,
+    draftChat,
     resumeId,
     updateAssistant,
   ]);
@@ -3495,14 +4200,68 @@ export default function ChatPage() {
     [uploadAttachments],
   );
 
+  const pinCreatedSessionInUrl = useCallback(() => {
+    const pinnedId = persistedSessionIdRef.current;
+    if (!pinnedId || resumeId) return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("new");
+        next.delete("seed");
+        next.set("resume", pinnedId);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [resumeId, setSearchParams]);
+
+  const createSessionForSend = useCallback(async (): Promise<string | null> => {
+    if (sessionId && state === "open") return sessionId;
+    if (createSessionPromiseRef.current) return createSessionPromiseRef.current;
+
+    const promise = (async () => {
+      try {
+        setStatusText("Starting chat...");
+        await gw.connect();
+        const created = await gw.request<SessionCreateResponse>("session.create", {
+          cols: 100,
+        });
+        activeSessionRef.current = created.session_id;
+        persistedSessionIdRef.current =
+          created.persisted_session_id ?? null;
+        setSessionId(created.session_id);
+        setInfo(created.info ?? {});
+        if (created.info?.credential_warning || created.info?.config_warning) {
+          setBanner(
+            created.info.credential_warning ?? created.info.config_warning ?? null,
+          );
+        }
+        setStatusText("Ready");
+        return created.session_id;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setBanner(`Could not start chat: ${message}`);
+        setStatusText("Connection failed");
+        return null;
+      }
+    })().finally(() => {
+      createSessionPromiseRef.current = null;
+    });
+
+    createSessionPromiseRef.current = promise;
+    return promise;
+  }, [gw, sessionId, state]);
+
   const submitGatewayPrompt = useCallback(
     async (
       text: string,
       routedText: string,
       agentId: string,
       status = "Sending...",
+      targetSessionId?: string,
     ) => {
-      if (!sessionId) return;
+      const effectiveSessionId = targetSessionId ?? sessionId;
+      if (!effectiveSessionId) return;
 
       const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
       const stillUploading = attachments.some((item) => item.status === "uploading");
@@ -3532,7 +4291,7 @@ export default function ChatPage() {
           if (!att.path) continue;
           try {
             await gw.request("file.attach", {
-              session_id: sessionId,
+              session_id: effectiveSessionId,
               path: att.path,
             });
           } catch (attachError) {
@@ -3542,7 +4301,7 @@ export default function ChatPage() {
         }
 
         const payload: Record<string, unknown> = {
-          session_id: sessionId,
+          session_id: effectiveSessionId,
           text: routedText,
         };
         if (routedText !== text) {
@@ -3643,17 +4402,38 @@ export default function ChatPage() {
     if (activeAssistantId) {
       stoppedAssistantIdsRef.current.add(activeAssistantId);
       currentAssistantRef.current = activeAssistantId;
-      setMessages((prev) =>
-        prev.map((message) =>
+      const stoppedAt = Date.now();
+      setMessages((prev) => {
+        const next = prev.map((message) =>
           message.id === activeAssistantId && message.status === "streaming"
-            ? { ...message, status: "interrupted" }
+            ? {
+                ...message,
+                completedAt: message.completedAt ?? stoppedAt,
+                status: "interrupted" as const,
+              }
             : message,
-        ),
-      );
+        );
+        const persisted = persistedSessionIdRef.current ?? sessionId;
+        if (persisted) {
+          rememberTranscript(persisted, attachLiveActivitySnapshots(next, [], []));
+        }
+        return next;
+      });
+    } else {
+      const stoppedAt = Date.now();
+      setMessages((prev) => {
+        const next = markStreamingTurnsInterrupted(prev, stoppedAt);
+        const persisted = persistedSessionIdRef.current ?? sessionId;
+        if (persisted && next !== prev) {
+          rememberTranscript(persisted, attachLiveActivitySnapshots(next, [], []));
+        }
+        return next;
+      });
     }
     setQueuedInputs([]);
     setTools([]);
     setActivityTrace([]);
+    clearActiveTurnSnapshot(persistedSessionIdRef.current ?? sessionId);
     setSubagents((prev) =>
       prev.map((subagent) =>
         subagent.status === "running"
@@ -3808,7 +4588,7 @@ export default function ChatPage() {
         if (historyArtifacts.length) {
           addArtifacts(historyArtifacts);
         }
-        setPreviewArtifact(previewTarget);
+        openArtifactPreview(previewTarget);
         appendMessage("user", trimmed);
         appendMessage(
           "assistant",
@@ -3820,7 +4600,11 @@ export default function ChatPage() {
       }
 
       if (trimmed.startsWith("/")) {
-        if (!sessionId || state !== "open") {
+        let targetSessionId = sessionId;
+        if (!targetSessionId && draftChat) {
+          targetSessionId = await createSessionForSend();
+        }
+        if (!targetSessionId || (state !== "open" && !draftChat)) {
           setInput(trimmed);
           setStatusText("Connecting...");
           return;
@@ -3834,14 +4618,20 @@ export default function ChatPage() {
           },
           command: trimmed,
           gw,
-          sessionId,
+          sessionId: targetSessionId,
         });
+        pinCreatedSessionInUrl();
         return;
       }
 
       const routedText = routePromptForAgent(trimmed);
+      let targetSessionId = sessionId;
 
-      if (!sessionId || state !== "open") {
+      if (!targetSessionId && draftChat) {
+        targetSessionId = await createSessionForSend();
+      }
+
+      if (!targetSessionId || (state !== "open" && !draftChat)) {
         const queued: QueuedInput = {
           agentId: selectedAgent.id,
           createdAt: Date.now(),
@@ -3869,9 +4659,16 @@ export default function ChatPage() {
         return;
       }
 
-      await submitGatewayPrompt(trimmed, routedText, selectedAgent.id);
+      await submitGatewayPrompt(
+        trimmed,
+        routedText,
+        selectedAgent.id,
+        "Sending...",
+        targetSessionId,
+      );
+      pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, busy, gw, hasReadyAttachment, messages, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, busy, createSessionForSend, draftChat, gw, hasReadyAttachment, messages, openArtifactPreview, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
 
   useEffect(() => {
@@ -3888,7 +4685,9 @@ export default function ChatPage() {
     seededRef.current = true;
     try {
       window.sessionStorage.removeItem(`elevate:chat-seed:${seedKey}`);
-    } catch {}
+    } catch {
+      // Seed cleanup is best-effort.
+    }
     void submitPrompt(raw);
   }, [busy, seedKey, sessionId, state, submitPrompt]);
 
@@ -4133,8 +4932,22 @@ export default function ChatPage() {
 
   const canSend =
     (!!input.trim() || hasReadyAttachment) &&
-    (state === "open" ? !!sessionId : state !== "error" && state !== "closed");
+    (state === "open" ? !!(sessionId || draftChat) : state !== "error" && state !== "closed");
   const canPickModel = state === "open" && !!sessionId;
+  const traceMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const trace of activityTrace) {
+      if (trace.messageId) ids.add(trace.messageId);
+    }
+    return ids;
+  }, [activityTrace]);
+  const toolMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const tool of tools) {
+      if (tool.messageId) ids.add(tool.messageId);
+    }
+    return ids;
+  }, [tools]);
   const visibleMessages = useMemo(
     () =>
       messages.filter((message) => {
@@ -4147,18 +4960,57 @@ export default function ChatPage() {
         // the model is actually reasoning — not just after it finishes.
         if (message.role !== "assistant") return false;
         if (message.status === "streaming") return true;
-        const hasActivity = activityTrace.some(
-          (trace) => trace.messageId === message.id,
-        );
-        if (hasActivity) return true;
-        const hasTools = tools.some((tool) => tool.messageId === message.id);
-        if (hasTools) return true;
+        if (traceMessageIds.has(message.id)) return true;
+        if (toolMessageIds.has(message.id)) return true;
         // Resumed turn: tools/traces live on the message snapshot, not
         // in the live state arrays.
         return Boolean(message.tools?.length || message.traces?.length);
       }),
-    [activityTrace, messages, tools],
+    [messages, toolMessageIds, traceMessageIds],
   );
+  const latestVisibleMessage = visibleMessages[visibleMessages.length - 1] ?? null;
+  const latestVisibleMessageId = latestVisibleMessage?.id ?? "";
+  const latestVisibleMessageContentLength = latestVisibleMessage?.content.length ?? 0;
+
+  const handleChatScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    chatStickToBottomRef.current = distanceFromBottom < 160;
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+
+    const force = pendingInitialBottomScrollRef.current;
+    if (!force && !chatStickToBottomRef.current) return;
+
+    const scrollToBottom = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+
+    scrollToBottom();
+    pendingInitialBottomScrollRef.current = false;
+
+    if (!force) return;
+
+    const frame = window.requestAnimationFrame(scrollToBottom);
+    const shortDelay = window.setTimeout(scrollToBottom, 0);
+    const layoutDelay = window.setTimeout(scrollToBottom, 80);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(shortDelay);
+      window.clearTimeout(layoutDelay);
+    };
+  }, [
+    activityTrace.length,
+    artifacts.length,
+    latestVisibleMessageContentLength,
+    latestVisibleMessageId,
+    pendingPrompt,
+    tools.length,
+    visibleMessages.length,
+  ]);
   const artifactsByMessage = useMemo(() => {
     const grouped = new Map<string, ArtifactEntry[]>();
     for (const artifact of artifacts) {
@@ -4198,6 +5050,99 @@ export default function ChatPage() {
     [resumeFallback, resumeId, visibleMessages],
   );
   const [folderLabel, setFolderLabel] = useState<string | undefined>(undefined);
+  const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceGitStatus | null>(() =>
+    readCachedWorkspaceStatus(),
+  );
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const previousWorkspaceBusyRef = useRef(false);
+
+  const refreshWorkspaceStatus = useCallback(
+    async (quiet = false, force = false) => {
+      setWorkspaceLoading(true);
+      try {
+        const status = await api.getWorkspaceGitStatus({
+          force,
+          sessionId: persistedSessionIdRef.current ?? resumeId ?? sessionId,
+          workingDirectory: info.cwd ?? null,
+        });
+        setWorkspaceStatus(status);
+        writeCachedWorkspaceStatus(status);
+        if (!quiet && status.error) {
+          setBanner(`Workspace status unavailable: ${status.error}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!quiet) setBanner(`Workspace status unavailable: ${message}`);
+      } finally {
+        setWorkspaceLoading(false);
+      }
+    },
+    [info.cwd, resumeId, sessionId],
+  );
+
+  useEffect(() => {
+    void refreshWorkspaceStatus(true);
+  }, [refreshWorkspaceStatus]);
+
+  useEffect(() => {
+    if (previousWorkspaceBusyRef.current && !busy) {
+      void refreshWorkspaceStatus(true);
+    }
+    previousWorkspaceBusyRef.current = busy;
+  }, [busy, refreshWorkspaceStatus]);
+
+  const openWorkspaceFolder = useCallback(async () => {
+    try {
+      const response = await api.openWorkspace(
+        workspaceStatus?.working_directory || info.cwd || workspaceStatus?.path,
+      );
+      setBanner(`Opened ${response.path}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setBanner(`Could not open workspace: ${message}`);
+    }
+  }, [info.cwd, workspaceStatus?.path, workspaceStatus?.working_directory]);
+
+  const openWorkspacePullRequest = useCallback(() => {
+    if (!workspaceStatus?.pr_url) {
+      setBanner("No pull request link is available for this branch.");
+      return;
+    }
+    window.open(workspaceStatus.pr_url, "_blank", "noopener,noreferrer");
+    setBanner("Opened pull request compare page.");
+  }, [workspaceStatus?.pr_url]);
+
+  const reviewWorkspaceChanges = useCallback(() => {
+    const repo = workspaceStatus?.repo_name || folderLabel || "this repo";
+    const workspace = workspaceStatus?.display_name || folderLabel || repo;
+    const path = workspaceStatus?.working_directory || info.cwd || workspaceStatus?.path || "";
+    const scope =
+      workspaceStatus?.diff_scope === "session"
+        ? "this chat's changes"
+        : "the current repo changes";
+    void submitPrompt(
+      [
+        `Review ${scope} in ${workspace} before I create a PR.`,
+        path ? `Working folder: ${path}` : "",
+        workspaceStatus?.repo_path ? `PR target repo: ${workspaceStatus.repo_path}` : "",
+        "Look for bugs, risky changes, missing tests, and anything that should be cleaned up before pushing.",
+        "Report findings only. Do not modify files unless I ask.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }, [
+    folderLabel,
+    info.cwd,
+    submitPrompt,
+    workspaceStatus?.diff_scope,
+    workspaceStatus?.display_name,
+    workspaceStatus?.path,
+    workspaceStatus?.repo_name,
+    workspaceStatus?.repo_path,
+    workspaceStatus?.working_directory,
+  ]);
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -4234,9 +5179,9 @@ export default function ChatPage() {
     setTitle(chatTitle);
     setBeforeTitle(
       folderLabel ? (
-        <span className="flex shrink-0 items-center gap-1.5 text-[0.92rem] leading-6 text-muted-foreground">
+        <span className="flex shrink-0 items-center gap-1.5 text-[13.5px] leading-6 text-[var(--fg-faint)]">
           <span>{folderLabel}</span>
-          <span className="opacity-60">/</span>
+          <span className="text-[var(--fg-dim)]">/</span>
         </span>
       ) : null,
     );
@@ -4249,7 +5194,7 @@ export default function ChatPage() {
             const rect = event.currentTarget.getBoundingClientRect();
             handleOpenChatMenu({ x: rect.left, y: rect.bottom + 4 });
           }}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--fg-faint)] transition-colors hover:bg-[color-mix(in_srgb,var(--fg)_6%,transparent)] hover:text-[var(--fg)]"
         >
           <ChevronDown className="h-4 w-4" />
         </button>
@@ -4351,7 +5296,7 @@ export default function ChatPage() {
           )}
         >
           <div
-            className="relative h-11 shrink-0 px-4 sm:px-6 lg:mt-2"
+            className="chat-top relative"
             style={{ WebkitAppRegion: "drag" } as CSSProperties}
           >
             {sidebarCollapsed && onShowSidebar ? (
@@ -4360,22 +5305,23 @@ export default function ChatPage() {
                 onClick={onShowSidebar}
                 aria-label="Show sidebar"
                 style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
-                className="absolute left-4 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)] sm:left-6"
+                className="icon-btn absolute left-[18px] top-1/2 -translate-y-1/2"
               >
                 <PanelLeftOpen className="h-3.5 w-3.5" />
               </button>
             ) : null}
             <div
-              className="flex h-full w-full min-w-0 items-center gap-2 sm:gap-3"
+              className="breadcrumb flex-1"
               style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
             >
+              <SquareTerminal className="shrink-0 text-[var(--fg-faint)]" />
               {folderLabel ? (
-                <span className="flex shrink-0 items-center gap-1.5 text-[0.92rem] leading-6 text-[var(--chat-muted)]">
-                  <span>{folderLabel}</span>
-                  <span className="opacity-60">/</span>
+                <span className="contents">
+                  <span className="crumb">{folderLabel}</span>
+                  <span className="sep">/</span>
                 </span>
               ) : null}
-              <h1 className="min-w-0 truncate text-[0.95rem] font-semibold leading-6 tracking-[-0.005em] text-[var(--chat-text)]">
+              <h1 className="here">
                 {chatTitle}
               </h1>
               {sessionId ? (
@@ -4386,18 +5332,37 @@ export default function ChatPage() {
                     const rect = event.currentTarget.getBoundingClientRect();
                     handleOpenChatMenu({ x: rect.left, y: rect.bottom + 4 });
                   }}
-                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+                  className="chev"
                 >
                   <ChevronDown className="h-3.5 w-3.5" />
                 </button>
               ) : null}
             </div>
+            <div className="toggle-rail">
+              <button
+                type="button"
+                className="icon-btn"
+                title="Toggle artifacts panel"
+                onClick={() => setMobilePanelOpen((value) => !value)}
+              >
+                <PanelLeftOpen className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2 scrollbar-none sm:px-6 sm:pt-3">
+          <div ref={chatScrollRef} className="chat-scroll" onScroll={handleChatScroll}>
             {visibleMessages.length === 0 ? (
-              <EmptyState state={state} />
+              <EmptyState
+                analytics={startAnalytics}
+                loading={startAnalyticsLoading}
+                onRangeChange={setStartRange}
+                onViewChange={setStartView}
+                range={startRange}
+                state={state}
+                userName={userName}
+                view={startView}
+              />
             ) : (
-              <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-5 pb-6">
+              <div className="chat-inner w-full">
                 {visibleMessages.map((message, index) => {
                   const isLatest = index === visibleMessages.length - 1;
                   const isAssistant = message.role === "assistant";
@@ -4412,12 +5377,13 @@ export default function ChatPage() {
                   const turnArtifacts = isAssistant ? artifactsByMessage.get(message.id) : undefined;
                   const isStreaming = isAssistant && message.status === "streaming" && isLatest;
                   return (
-                    <MessageRow
+                    <MemoMessageRow
                       key={message.id}
                       activityTrace={turnTraces}
                       artifacts={turnArtifacts ?? []}
                       busy={isStreaming && busy}
                       message={message}
+                      onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
                       tools={turnTools}
                       turnArtifacts={turnArtifacts}
@@ -4446,7 +5412,7 @@ export default function ChatPage() {
           </div>
 
           <form
-            className="relative bg-[linear-gradient(180deg,transparent,var(--chat-bg)_18%)] px-4 pb-5 pt-3 sm:px-6"
+            className="composer-wrap relative"
             onSubmit={onSubmit}
             onDragEnter={(event) => {
               if (!event.dataTransfer?.types?.includes("Files")) return;
@@ -4485,15 +5451,28 @@ export default function ChatPage() {
                 Drop to attach
               </div>
             )}
-            <div className="mx-auto w-full max-w-[52rem]">
-              <QueuedInputStrip
-                busy={busy}
-                onRemove={removeQueuedInput}
-                onSteer={steerQueuedInput}
-                queuedInputs={queuedInputs}
-              />
+            <div className="mx-auto w-full max-w-[var(--chat-layout-width)]">
+              {queuedInputs.length ? (
+                <QueuedInputStrip
+                  busy={busy}
+                  onRemove={removeQueuedInput}
+                  onSteer={steerQueuedInput}
+                  queuedInputs={queuedInputs}
+                />
+              ) : (
+                <MemoComposerStageBar
+                  folderLabel={folderLabel}
+                  info={info}
+                  loading={workspaceLoading}
+                  onOpenPullRequest={openWorkspacePullRequest}
+                  onOpenWorkspace={openWorkspaceFolder}
+                  onRefresh={() => void refreshWorkspaceStatus(false, true)}
+                  onReview={reviewWorkspaceChanges}
+                  status={workspaceStatus}
+                />
+              )}
 
-              <div className="relative rounded-xl bg-[var(--chat-surface-strong)] p-2 shadow-[inset_0_0_0_1px_var(--chat-border)] focus-within:shadow-[inset_0_0_0_1px_var(--chat-border)]">
+              <div className="composer relative">
                 <AttachmentChipStrip
                   attachments={attachments}
                   onRemove={removeAttachment}
@@ -4510,8 +5489,8 @@ export default function ChatPage() {
                   }}
                 />
 
-                <div className="flex items-center gap-1">
-                  <div className="relative min-h-7 flex-1">
+                <div className="flex min-w-0 flex-1 items-center gap-1">
+                  <div className="composer-input-wrap min-h-[22px]">
                   <ComposerRichInputLayer
                     input={input}
                     layerRef={richLayerRef}
@@ -4522,7 +5501,7 @@ export default function ChatPage() {
                     aria-controls="slash-popover-listbox"
                     aria-label="Message Elevate Agent"
                     className={cn(
-                      "relative z-10 block max-h-40 min-h-7 w-full resize-none bg-transparent px-2 py-1 text-sm leading-5 outline-none placeholder:text-[var(--chat-muted)]",
+                      "composer-input block",
                       "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
                       input
                         ? "text-transparent"
@@ -4580,12 +5559,12 @@ export default function ChatPage() {
                   <button
                     aria-label={busy ? "Interrupt response" : "Send message"}
                     className={cn(
-                      "flex h-7 shrink-0 items-center justify-center rounded-md transition-colors",
+                      "stop-btn",
                       busy
-                        ? "w-auto gap-1.5 border border-orange-400/45 bg-orange-500/15 px-2 text-orange-200 hover:bg-orange-500/25 hover:text-orange-100"
+                        ? "text-[var(--chat-warning)]"
                         : canSend
-                          ? "w-7 text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
-                          : "w-7 text-[var(--chat-muted)]",
+                          ? "text-[var(--chat-muted-strong)]"
+                          : "text-[var(--chat-muted)]",
                     )}
                     disabled={busy ? state !== "open" : !canSend}
                     onClick={busy ? interruptCurrentTurn : undefined}
@@ -4593,10 +5572,7 @@ export default function ChatPage() {
                     type={busy ? "button" : "submit"}
                   >
                     {busy ? (
-                      <>
-                        <Square className="h-3.5 w-3.5 fill-current" />
-                        <span className="text-[11px] font-medium leading-none">Stop</span>
-                      </>
+                      <Square className="fill-current" />
                     ) : (
                       <CornerDownLeft className="h-4 w-4 -translate-y-[1.5px]" />
                     )}
@@ -4643,7 +5619,7 @@ export default function ChatPage() {
             "hidden min-h-0 shrink-0 lg:flex",
             previewArtifact
               ? "flex-col pb-5 pl-0 pr-5 pt-2"
-              : "w-[18rem] flex-col self-start pr-5 pt-[3.25rem]",
+              : "w-[16.25rem] flex-col self-start pr-[18px] pt-[60px]",
           )}
           style={
             previewArtifact
@@ -4684,7 +5660,7 @@ export default function ChatPage() {
       {mobilePreviewPortal}
       {narrow && !mobilePanelOpen && !previewArtifact && (
         <button
-          className="fixed right-4 top-4 z-40 rounded-sm border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-1.5 text-xs font-medium text-[var(--chat-muted-strong)]"
+          className="fixed right-4 top-4 z-40 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-1.5 text-[12px] font-medium text-[var(--chat-muted-strong)] shadow-[0_12px_34px_-18px_rgba(0,0,0,0.7)]"
           onClick={() => setMobilePanelOpen(true)}
           type="button"
         >
@@ -4715,25 +5691,268 @@ export default function ChatPage() {
   );
 }
 
-function EmptyState({ state }: { state: ConnectionState }) {
+function EmptyState({
+  analytics,
+  loading,
+  onRangeChange,
+  onViewChange,
+  range,
+  state,
+  userName,
+  view,
+}: {
+  analytics: AnalyticsResponse | null;
+  loading: boolean;
+  onRangeChange: (range: StartAnalyticsRange) => void;
+  onViewChange: (view: "overview" | "models") => void;
+  range: StartAnalyticsRange;
+  state: ConnectionState;
+  userName: string;
+  view: "overview" | "models";
+}) {
+  const totalTokens =
+    (analytics?.totals.total_input ?? 0) +
+    (analytics?.totals.total_output ?? 0) +
+    (analytics?.totals.total_cache_read ?? 0) +
+    (analytics?.totals.total_reasoning ?? 0);
+  const mostActiveDay = (analytics?.daily ?? []).reduce<AnalyticsResponse["daily"][number] | null>(
+    (best, day) => {
+      const tokens = day.input_tokens + day.output_tokens + day.reasoning_tokens;
+      const bestTokens = best
+        ? best.input_tokens + best.output_tokens + best.reasoning_tokens
+        : -1;
+      return tokens > bestTokens ? day : best;
+    },
+    null,
+  );
+  const metrics = [
+    { label: "Sessions", value: formatCompactNumber(analytics?.totals.total_sessions) },
+    { label: "Calls", value: formatCompactNumber(analytics?.totals.total_api_calls) },
+    { label: "Total tokens", value: formatCompactNumber(totalTokens) },
+    { label: "Active days", value: formatCompactNumber(activeDayCount(analytics)) },
+    { label: "Current streak", value: `${currentActivityStreak(analytics)}d` },
+    { label: "Longest streak", value: `${longestActivityStreak(analytics)}d` },
+    {
+      label: "Peak day",
+      value: mostActiveDay
+        ? new Date(`${mostActiveDay.day}T12:00:00`).toLocaleDateString([], {
+            month: "short",
+            day: "numeric",
+          })
+        : "pending",
+    },
+    { label: "Favorite model", value: favoriteModel(analytics) },
+  ];
+  const heatmapDays = usageHeatmapDays(analytics, range);
+  const heatmapWindow = heatmapWindowLabel(analytics, range, heatmapDays);
+  const modelRows = analytics?.by_model?.slice(0, 6) ?? [];
+
   return (
-    <div className="mx-auto flex min-h-[34rem] max-w-xl flex-col items-center justify-center text-center">
-      <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-sm border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-accent)]">
-        {state === "connecting" ? (
-          <Loader2 className="h-5 w-5 animate-spin" />
-        ) : (
-          <Bot className="h-5 w-5" />
-        )}
+    <div className="chat-start">
+      <div className="chat-start-title">
+        <span className="chat-start-mark" aria-hidden="true">
+          {state === "connecting" ? (
+            <Loader2 className="h-5 w-5 animate-spin" />
+          ) : (
+            <Sparkles className="h-5 w-5" />
+          )}
+        </span>
+        <h2>{`What's up next, ${userName}?`}</h2>
       </div>
-      <h2 className="text-xl font-semibold text-[var(--chat-text)]">
-        Elevate Agent
-      </h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-[var(--chat-muted)]">
-        Executive Assistant is ready.
-      </p>
+      <section className="chat-start-card" aria-label="Usage overview">
+        <div className="chat-start-toolbar">
+          <div className="chat-start-tabs" role="tablist" aria-label="Start view">
+            {(["overview", "models"] as const).map((item) => (
+              <button
+                key={item}
+                aria-pressed={view === item}
+                className={cn("chat-start-tab", view === item && "active")}
+                onClick={() => onViewChange(item)}
+                type="button"
+              >
+                {item === "overview" ? "Overview" : "Models"}
+              </button>
+            ))}
+          </div>
+          <div className="chat-start-tabs compact" aria-label="Usage range">
+            {([
+              ["all", "All"],
+              ["30d", "30d"],
+              ["7d", "7d"],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                aria-pressed={range === key}
+                className={cn("chat-start-tab", range === key && "active")}
+                onClick={() => onRangeChange(key)}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {view === "overview" ? (
+          <>
+            <div className="chat-start-window">{heatmapWindow}</div>
+            <div className="chat-start-metrics">
+              {metrics.map((metric) => (
+                <div className="chat-start-metric" key={metric.label}>
+                  <span>{metric.label}</span>
+                  <strong>{loading ? "..." : metric.value}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="chat-start-heatmap" aria-label="Recent activity">
+              {heatmapDays.map((day) => (
+                <span
+                  aria-label={day.tip.replace(/\n/g, ", ")}
+                  className={`chat-start-heat heat-${day.level}`}
+                  data-tip={day.tip}
+                  key={day.key}
+                  tabIndex={0}
+                  title={day.tip}
+                />
+              ))}
+            </div>
+            <p className="chat-start-note">
+              {loading
+                ? "Loading activity"
+                : `${formatCompactNumber(totalTokens)} tokens in ${analyticsRangeLabel(range).toLowerCase()}.`}
+            </p>
+          </>
+        ) : (
+          <div className="chat-start-models">
+            {modelRows.length ? (
+              modelRows.map((model) => {
+                const tokens = model.input_tokens + model.output_tokens;
+                return (
+                  <div className="chat-start-model" key={model.model}>
+                    <span className="model-name">{model.model.split("/").slice(-1)[0] || model.model}</span>
+                    <span>{formatCompactNumber(tokens)} tokens</span>
+                    <span>{formatCompactNumber(model.sessions)} sessions</span>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="chat-start-empty-models">
+                {loading ? "Loading models" : "No model activity yet"}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
+
+function ComposerStageBar({
+  folderLabel,
+  info,
+  loading,
+  onOpenPullRequest,
+  onOpenWorkspace,
+  onRefresh,
+  onReview,
+  status,
+}: {
+  folderLabel?: string;
+  info: SessionInfo;
+  loading: boolean;
+  onOpenPullRequest(): void;
+  onOpenWorkspace(): void;
+  onRefresh(): void;
+  onReview(): void;
+  status: WorkspaceGitStatus | null;
+}) {
+  const cwdLabel = info.cwd
+    ?.replace(/\/+$/, "")
+    .split("/")
+    .filter(Boolean)
+    .pop();
+  const repo = status?.repo_name || folderLabel || cwdLabel || "workspace";
+  const workspace = status?.display_name || cwdLabel || repo;
+  const branch = status?.branch || (info.cwd ? "local" : "workspace");
+  const branchMeta = [
+    status?.ahead ? `↑${status.ahead}` : "",
+    status?.behind ? `↓${status.behind}` : "",
+  ].filter(Boolean).join(" ");
+  const changedFiles = status?.changed_files ?? 0;
+  const insertions = status?.insertions ?? 0;
+  const deletions = status?.deletions ?? 0;
+  const hasChanges = Boolean(status?.dirty || changedFiles);
+  const pathTitle = [
+    status?.working_directory || info.cwd || status?.path || repo,
+    status?.repo_path && status.repo_path !== (status.working_directory || info.cwd)
+      ? `PR target: ${status.repo_path}`
+      : "",
+  ].filter(Boolean).join("\n");
+  const branchTitle = [
+    status?.upstream ? `Upstream: ${status.upstream}` : "Refresh branch status",
+    status?.short_sha ? `Commit: ${status.short_sha}` : "",
+    status?.error ? `Error: ${status.error}` : "",
+  ].filter(Boolean).join("\n");
+  const diffTitle =
+    status?.diff_scope === "session"
+      ? "This chat's changes since it opened"
+      : "Current repo working tree changes";
+
+  return (
+    <div className="composer-stage">
+      <button className="stage-link workspace" type="button" onClick={onOpenWorkspace} title={pathTitle}>
+        <Folder aria-hidden="true" />
+        <span className="repo">{workspace}</span>
+      </button>
+      <button className="stage-link" type="button" onClick={onRefresh} title={branchTitle}>
+        <GitBranch aria-hidden="true" />
+        <span className="branch">{branch}</span>
+        {branchMeta ? <span className="branch-meta">{branchMeta}</span> : null}
+      </button>
+      <div className="stage-spacer" />
+      <button
+        className={cn("diff-stat", !hasChanges && "clean")}
+        disabled={loading && !status}
+        onClick={onReview}
+        title={hasChanges ? diffTitle : `${diffTitle}: clean`}
+        type="button"
+      >
+        {loading && !status ? (
+          <span>checking</span>
+        ) : hasChanges ? (
+          <>
+            <span className="add">+{insertions.toLocaleString()}</span>
+            <span className="del">-{deletions.toLocaleString()}</span>
+            <span className="files">{changedFiles.toLocaleString()} files</span>
+          </>
+        ) : (
+          <span>clean</span>
+        )}
+      </button>
+      <button
+        className="stage-action"
+        disabled={loading && !status}
+        onClick={onReview}
+        title="Ask Elevate to review these changes"
+        type="button"
+      >
+        <Eye aria-hidden="true" />
+        <span>Review</span>
+      </button>
+      <button
+        className="stage-action pr"
+        disabled={!status?.pr_url}
+        onClick={onOpenPullRequest}
+        title={status?.pr_url ? "Open GitHub compare page" : "PR link unavailable for this branch"}
+        type="button"
+      >
+        <ExternalLink aria-hidden="true" />
+        <span>Create PR</span>
+      </button>
+    </div>
+  );
+}
+
+const MemoComposerStageBar = memo(ComposerStageBar);
 
 function QueuedInputStrip({
   busy,
@@ -4749,61 +5968,37 @@ function QueuedInputStrip({
   if (!queuedInputs.length) return null;
 
   return (
-    <div className="mb-2 rounded-md bg-[var(--chat-surface-soft)] px-3 py-2">
-      <div className="mb-1.5 flex items-center justify-between gap-2 text-[0.68rem] text-[var(--chat-muted)]">
-        <span className="font-medium text-[var(--chat-muted-strong)]">
-          Queued follow-ups
-        </span>
-        <span>{queuedInputs.length}</span>
-      </div>
-      <div className="flex flex-col gap-1.5">
-        {queuedInputs.map((item) => (
-          <div
-            key={item.id}
-            className={cn(
-              "group flex items-start gap-2 py-0.5 text-xs",
-              item.status === "error"
-                ? "text-[var(--chat-danger)]"
-                : "text-[var(--chat-muted-strong)]",
-            )}
-          >
-            <span
-              className={cn(
-                "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-                item.status === "error"
-                  ? "bg-[var(--chat-danger)]"
-                  : "bg-[var(--chat-accent)]",
-              )}
-            />
-            <span className="min-w-0 flex-1 truncate">{item.text}</span>
-            <span className="shrink-0 text-[0.65rem] text-[var(--chat-muted)]">
-              {item.status === "error" ? "error" : nowLabel(item.createdAt)}
-            </span>
-            <div className="flex shrink-0 items-center gap-1">
-              {busy && item.status !== "error" ? (
-                <button
-                  type="button"
-                  onClick={() => onSteer(item.id)}
-                  title="Steer current turn with this message"
-                  className="rounded-full px-2 py-0.5 text-[0.65rem] font-medium text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-bg)] hover:text-[var(--chat-text)]"
-                >
-                  Steer
-                </button>
-              ) : null}
+    <>
+      {queuedInputs.map((item) => (
+        <div className="steer-bar" key={item.id} role="status">
+          <span className="steer-tag">
+            {item.status === "error" ? "ERROR" : "QUEUED"}
+          </span>
+          <span className="steer-text" title={item.text}>{item.text}</span>
+          <span className="steer-hint">
+            {item.status === "error" ? "not sent" : busy ? "waits for current turn" : nowLabel(item.createdAt)}
+          </span>
+          <div className="steer-actions">
+            <button
+              className="steer-btn cancel"
+              type="button"
+              onClick={() => onRemove(item.id)}
+            >
+              Cancel
+            </button>
+            {busy && item.status !== "error" ? (
               <button
+                className="steer-btn steer"
                 type="button"
-                onClick={() => onRemove(item.id)}
-                aria-label="Remove queued message"
-                title="Remove from queue"
-                className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-bg)] hover:text-[var(--chat-text)]"
+                onClick={() => onSteer(item.id)}
               >
-                <X className="h-3 w-3" />
+                Steer now
               </button>
-            </div>
+            ) : null}
           </div>
-        ))}
-      </div>
-    </div>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -4826,7 +6021,7 @@ function AttachmentChipStrip({
           return (
             <div
               key={item.id}
-              className="group relative h-16 w-16 overflow-hidden rounded-md border border-[var(--chat-border)] bg-[var(--chat-surface-soft)]"
+              className="group relative h-16 w-16 overflow-hidden rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface-soft)]"
               title={item.error || `${item.name} · ${formatAttachmentSize(item.size)}`}
             >
               <img
@@ -4851,7 +6046,7 @@ function AttachmentChipStrip({
                 type="button"
                 onClick={() => onRemove(item.id)}
                 aria-label={`Remove ${item.name}`}
-                className="absolute right-0.5 top-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-[var(--chat-bg)]/80 text-[var(--chat-muted)] transition-colors hover:text-[var(--chat-text)]"
+                className="absolute right-0.5 top-0.5 inline-flex h-4 w-4 items-center justify-center rounded-[5px] bg-[var(--chat-bg)]/80 text-[var(--chat-muted)] transition-colors hover:text-[var(--chat-text)]"
               >
                 <X className="h-2.5 w-2.5" />
               </button>
@@ -4863,10 +6058,10 @@ function AttachmentChipStrip({
           <div
             key={item.id}
             className={cn(
-              "group flex items-center gap-1.5 rounded-md px-2 py-1 text-[0.68rem]",
+              "group flex items-center gap-1.5 rounded-[7px] px-2 py-1 text-[0.68rem]",
               isError
                 ? "bg-[color-mix(in_srgb,var(--chat-danger)_14%,var(--chat-bg))] text-[var(--chat-danger)]"
-                : "bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
+                : "border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] text-[var(--chat-muted-strong)]",
             )}
             title={item.error || `${item.name} · ${formatAttachmentSize(item.size)}`}
           >
@@ -4879,7 +6074,7 @@ function AttachmentChipStrip({
               type="button"
               onClick={() => onRemove(item.id)}
               aria-label={`Remove ${item.name}`}
-              className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-bg)] hover:text-[var(--chat-text)]"
+              className="inline-flex h-4 w-4 items-center justify-center rounded-[5px] text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-bg)] hover:text-[var(--chat-text)]"
             >
               <X className="h-2.5 w-2.5" />
             </button>
@@ -4959,7 +6154,7 @@ function ComposerRichInputLayer({
   if (!input) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-0 max-h-40 overflow-hidden px-2 py-1 text-sm leading-5 text-[var(--chat-text)]">
+    <div className="input-mirror">
       <div
         ref={layerRef}
         className="whitespace-pre-wrap break-words"
@@ -4975,7 +6170,7 @@ function ComposerRichInputLayer({
           return (
             <span
               aria-label={segment.text}
-              className="font-medium text-[var(--chat-accent)]"
+              className="skill-token"
               key={`${index}-${segment.text}`}
             >
               {segment.text}
@@ -5000,7 +6195,7 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
 
   return (
     <span
-      className="inline-flex h-7 items-center gap-1.5 rounded-sm bg-[var(--chat-surface-soft)] px-2.5 text-[var(--chat-muted-strong)]"
+      className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[color-mix(in_srgb,var(--chat-text)_4%,transparent)] px-2.5 text-[var(--chat-muted-strong)]"
       title={`Context left: ${label}. ${detail}`}
     >
       <svg
@@ -5029,6 +6224,19 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
       </svg>
       <span className="text-[0.68rem]">{label}</span>
     </span>
+  );
+}
+
+const composerMenuSurfaceClass =
+  "absolute bottom-[calc(100%+6px)] left-0 z-30 overflow-hidden rounded-[10px] border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1 text-left shadow-[0_24px_60px_-16px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.03)_inset]";
+const composerMenuLabelClass =
+  "px-2.5 py-1.5 text-[11px] font-mono uppercase tracking-[0.08em] text-[var(--chat-muted)]";
+function composerMenuItemClass(active: boolean) {
+  return cn(
+    "flex w-full items-start gap-2 rounded-[6px] px-2.5 py-2 text-left text-[12.5px] transition-colors",
+    active
+      ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
+      : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
   );
 }
 
@@ -5084,17 +6292,17 @@ function ComposerActionBar({
   voiceTranscribing: boolean;
 }) {
   return (
-    <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[0.7rem] text-[var(--chat-muted)]">
-      <div className="flex min-w-0 items-center gap-3">
+    <div className="composer-foot">
+      <div className="flex min-w-0 items-center gap-1">
         {/* Only the agent picker row scrolls. The voice cluster stays a
             sibling OUTSIDE this overflow box — an upward-opening menu
             inside an overflow-x-auto container gets clipped to nothing
             (overflow-x:auto forces overflow-y to auto per CSS spec). */}
-        <div className="flex min-w-0 items-center gap-3 overflow-x-auto scrollbar-none">
+        <div className="flex min-w-0 items-center gap-1 overflow-x-auto scrollbar-none">
         <button
           type="button"
           onClick={onAttach}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]"
+          className="foot-btn icon-only"
           title="Attach files"
           aria-label="Attach files"
         >
@@ -5107,9 +6315,7 @@ function ComposerActionBar({
             onClick={onToggleAgentMenu}
             disabled={agentLocked}
             className={cn(
-              "inline-flex max-w-[12rem] items-center gap-1.5 text-[0.7rem]",
-              "text-[var(--chat-muted-strong)] transition-colors",
-              !agentLocked && "hover:text-[var(--chat-text)]",
+              "foot-btn max-w-[12rem]",
               agentMenuOpen && "text-[var(--chat-text)]",
               agentLocked && "cursor-default",
             )}
@@ -5129,7 +6335,7 @@ function ComposerActionBar({
             <>
               <div className="fixed inset-0 z-20" onClick={onToggleAgentMenu} />
               <div
-                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[18rem] overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1.5 text-left"
+                className={cn(composerMenuSurfaceClass, "w-[18rem]")}
                 onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onToggleAgentMenu(); } }}
                 role="menu"
               >
@@ -5139,16 +6345,11 @@ function ComposerActionBar({
                     type="button"
                     role="menuitem"
                     onClick={() => onSelectAgent(agent)}
-                    className={cn(
-                      "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
-                      selectedAgent.id === agent.id
-                        ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
-                        : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-                    )}
+                    className={composerMenuItemClass(selectedAgent.id === agent.id)}
                   >
                     <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-semibold">
+                      <span className="block truncate font-medium">
                         {agent.name}
                       </span>
                       <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
@@ -5172,14 +6373,14 @@ function ComposerActionBar({
             type="button"
             onClick={onTogglePermissionMenu}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[0.7rem] transition-colors",
-              "hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
+              "foot-btn",
               permissionMenuOpen && "text-[var(--chat-text)]",
+              permissionMode.id === "bypassPermissions" && "warn",
             )}
-            style={{ color: permissionMode.tone }}
             title={`Permission mode: ${permissionMode.label}`}
             aria-label="Choose permission mode"
           >
+            {permissionMode.id === "bypassPermissions" && <span className="pill-dot" />}
             <permissionMode.icon className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">{permissionMode.short}</span>
             <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />
@@ -5192,7 +6393,7 @@ function ComposerActionBar({
                 onClick={onTogglePermissionMenu}
               />
               <div
-                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[19rem] overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1.5 text-left"
+                className={cn(composerMenuSurfaceClass, "w-[19rem]")}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     event.preventDefault();
@@ -5201,7 +6402,7 @@ function ComposerActionBar({
                 }}
                 role="menu"
               >
-                <div className="px-2.5 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-[var(--chat-muted)]">
+                <div className={composerMenuLabelClass}>
                   Permission mode
                 </div>
                 {PERMISSION_MODES.map((mode) => (
@@ -5210,16 +6411,11 @@ function ComposerActionBar({
                     type="button"
                     role="menuitem"
                     onClick={() => onSelectPermissionMode(mode)}
-                    className={cn(
-                      "flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
-                      permissionMode.id === mode.id
-                        ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
-                        : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-                    )}
+                    className={composerMenuItemClass(permissionMode.id === mode.id)}
                   >
                     <mode.icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-semibold">
+                      <span className="block truncate font-medium">
                         {mode.label}
                       </span>
                       <span className="mt-0.5 line-clamp-2 text-[0.68rem] leading-4 text-[var(--chat-muted)]">
@@ -5238,10 +6434,8 @@ function ComposerActionBar({
             type="button"
             onClick={onToggleVoice}
             className={cn(
-              "inline-flex h-6 w-6 items-center justify-center rounded-sm transition-colors",
-              "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-              voiceListening &&
-                "bg-[var(--chat-accent-soft)] text-[var(--chat-accent)] hover:bg-[var(--chat-accent-soft)]",
+              "foot-btn icon-only",
+              voiceListening && "recording",
             )}
             title={
               voiceTranscribing
@@ -5263,11 +6457,7 @@ function ComposerActionBar({
           <button
             type="button"
             onClick={onToggleVoiceMenu}
-            className={cn(
-              "inline-flex h-6 w-4 items-center justify-center rounded-sm transition-colors",
-              "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-              voiceMenuOpen && "text-[var(--chat-text)]",
-            )}
+            className={cn("foot-btn icon-only !w-5", voiceMenuOpen && "text-[var(--chat-text)]")}
             title="Select microphone"
             aria-label="Select microphone"
           >
@@ -5278,7 +6468,7 @@ function ComposerActionBar({
             <>
               <div className="fixed inset-0 z-20" onClick={onToggleVoiceMenu} />
               <div
-                className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-[16rem] overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-1.5 text-left"
+                className={cn(composerMenuSurfaceClass, "w-[16rem]")}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     event.preventDefault();
@@ -5287,7 +6477,7 @@ function ComposerActionBar({
                 }}
                 role="menu"
               >
-                <div className="px-2.5 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-[var(--chat-muted)]">
+                <div className={composerMenuLabelClass}>
                   Microphone
                 </div>
                 {micDevices.length === 0 ? (
@@ -5301,15 +6491,10 @@ function ComposerActionBar({
                       type="button"
                       role="menuitem"
                       onClick={() => onSelectMic(device.deviceId)}
-                      className={cn(
-                        "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
-                        selectedMicId === device.deviceId
-                          ? "bg-[var(--chat-accent-soft)] text-[var(--chat-text)]"
-                          : "text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-soft)] hover:text-[var(--chat-text)]",
-                      )}
+                      className={composerMenuItemClass(selectedMicId === device.deviceId)}
                     >
                       <Mic className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate text-xs">
+                      <span className="min-w-0 flex-1 truncate">
                         {device.label}
                       </span>
                     </button>
@@ -5321,19 +6506,17 @@ function ComposerActionBar({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-2.5">
+      <div className="foot-spacer" />
+
+      <div className="flex shrink-0 items-center gap-1.5">
         <button
           type="button"
           onClick={onOpenModel}
           disabled={!canPickModel}
-          className={cn(
-            "text-[0.7rem] text-[var(--chat-muted-strong)] transition-colors",
-            "hover:text-[var(--chat-text)]",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
+          className="model-pill disabled:cursor-not-allowed disabled:opacity-50"
           title="Change model"
         >
-          {modelLabel(info)}
+          <span>{modelLabel(info)}</span>
         </button>
         <ContextRing usage={usage} />
       </div>
@@ -5346,6 +6529,7 @@ function MessageRow({
   artifacts,
   busy,
   message,
+  onEditMessage,
   onOpenArtifact,
   tools,
   turnArtifacts,
@@ -5354,12 +6538,40 @@ function MessageRow({
   artifacts: ArtifactEntry[];
   busy?: boolean;
   message: ChatMessage;
+  onEditMessage?(message: ChatMessage): void;
   onOpenArtifact(artifact: ArtifactEntry): void;
   tools?: ToolEntry[];
   turnArtifacts?: ArtifactEntry[];
 }) {
+  const { copied, copy } = useCopyToClipboard();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [pinned, setPinned] = useState(() => readPinnedMessageIds().has(message.id));
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
+
+  useEffect(() => {
+    setPinned(readPinnedMessageIds().has(message.id));
+  }, [message.id]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeIfOutside = (event: MouseEvent | PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeIfOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeIfOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
+
   if (
     message.role === "tool" ||
     (message.role !== "user" && isRawToolPayload(message.content))
@@ -5399,18 +6611,32 @@ function MessageRow({
       !!tools?.length ||
       !!activityTrace?.length ||
       typeof message.tokenCount === "number");
+  const copyText = [
+    message.content,
+    ...(message.attachments ?? []).map((attachment) => attachment.name),
+  ].filter(Boolean).join("\n");
+  const messageTime = nowLabel(message.completedAt ?? message.createdAt);
+  const latestArtifact = artifacts[artifacts.length - 1] ?? null;
+  const togglePinned = () => {
+    setPinned((current) => {
+      const next = !current;
+      writePinnedMessageId(message.id, next);
+      return next;
+    });
+  };
 
   return (
     <article
       className={cn(
         "group flex w-full text-left",
+        isUser && "justify-end",
         isAssistant && "pt-3 first:pt-0",
       )}
     >
       <div
         className={cn(
           "min-w-0 flex-1 max-w-[74ch]",
-          isUser && "flex flex-col items-start",
+          isUser && "flex flex-col items-end",
         )}
       >
         {showDigest ? (
@@ -5418,6 +6644,7 @@ function MessageRow({
             activityTrace={activityTrace ?? []}
             artifacts={turnArtifacts ?? []}
             busy={!!busy}
+            completedAt={message.completedAt}
             liveTokens={liveTokens}
             startedAt={message.createdAt}
             tokenCount={message.tokenCount}
@@ -5426,18 +6653,18 @@ function MessageRow({
         ) : null}
         <div
           className={cn(
-            "max-w-full text-sm leading-7",
+            "max-w-full",
             isUser
-              ? "inline-block rounded-md bg-[var(--chat-user)] px-3.5 py-2 text-[var(--chat-user-text)] shadow-sm"
+              ? "user-msg inline-block"
               : message.role === "system"
-                ? "rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_32%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] px-3 py-2 text-[var(--chat-text)]"
-                : "text-[var(--chat-text)]",
+                ? "rounded-[8px] border border-[color-mix(in_srgb,var(--chat-warning)_32%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] px-3 py-2 text-[14px] leading-[1.55] text-[var(--chat-text)]"
+                : "asst-msg",
             showDigest ? "mt-2" : null,
           )}
         >
           {message.role === "assistant" ? (
             message.content ? (
-              <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[var(--chat-surface-strong)] [&_code]:text-[var(--chat-text)] [&_pre]:border-[var(--chat-border-strong)] [&_pre]:bg-[var(--chat-surface-soft)]">
+              <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[color-mix(in_srgb,var(--fg)_5%,transparent)] [&_code]:text-[color-mix(in_srgb,var(--accent)_30%,var(--fg))] [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[color-mix(in_srgb,#000_18%,var(--bg-2))]">
                 <Markdown content={message.content} />
               </div>
             ) : null
@@ -5453,7 +6680,7 @@ function MessageRow({
                           href={att.previewUrl}
                           target="_blank"
                           rel="noreferrer"
-                          className="block overflow-hidden rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)]"
+                          className="block overflow-hidden rounded-[7px] border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)]"
                           title={`${att.name} · ${formatAttachmentSize(att.size)}`}
                         >
                           <img
@@ -5468,7 +6695,7 @@ function MessageRow({
                     return (
                       <span
                         key={`${message.id}-att-${idx}`}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-2 py-1 text-[0.7rem] text-[var(--chat-muted)]"
+                        className="inline-flex items-center gap-1.5 rounded-[7px] border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-2 py-1 text-[0.7rem] text-[var(--chat-muted)]"
                         title={`${att.name} · ${formatAttachmentSize(att.size)}`}
                       >
                         <Icon className="h-3 w-3 shrink-0" />
@@ -5503,10 +6730,111 @@ function MessageRow({
             </div>
           )}
         </div>
+        {isUser ? (
+          <div className="user-actions">
+            <button
+              className="icon-btn sm"
+              onClick={() => copy(copyText)}
+              title={copied ? "Copied" : "Copy"}
+              type="button"
+            >
+              {copied ? <CheckCircle2 /> : <Clipboard />}
+            </button>
+            <button
+              className="icon-btn sm"
+              disabled={!message.content.trim()}
+              onClick={() => onEditMessage?.(message)}
+              title="Edit"
+              type="button"
+            >
+              <FilePen />
+            </button>
+          </div>
+        ) : isAssistant && message.content ? (
+          <div className={cn("asst-actions", pinned && "pinned")}>
+            <button
+              className="icon-btn sm"
+              onClick={() => copy(copyText)}
+              title={copied ? "Copied" : "Copy"}
+              type="button"
+            >
+              {copied ? <CheckCircle2 /> : <Clipboard />}
+            </button>
+            <button
+              aria-pressed={pinned}
+              className={cn("icon-btn sm", pinned && "message-action-active")}
+              onClick={togglePinned}
+              title={pinned ? "Unpin" : "Pin"}
+              type="button"
+            >
+              <Pin />
+            </button>
+            <div className="message-action-wrap" ref={menuRef}>
+              <button
+                aria-expanded={menuOpen}
+                aria-haspopup="menu"
+                className={cn("icon-btn sm", menuOpen && "message-action-active")}
+                onClick={() => setMenuOpen((open) => !open)}
+                title="More"
+                type="button"
+              >
+                <MoreHorizontal />
+              </button>
+              {menuOpen && (
+                <div className="message-actions-menu" role="menu">
+                  <button
+                    onClick={() => {
+                      copy(copyText);
+                      setMenuOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Copy message
+                  </button>
+                  <button
+                    onClick={() => {
+                      togglePinned();
+                      setMenuOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {pinned ? "Unpin message" : "Pin message"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      copy(message.id);
+                      setMenuOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Copy message ID
+                  </button>
+                  <button
+                    disabled={!latestArtifact}
+                    onClick={() => {
+                      if (latestArtifact) onOpenArtifact(latestArtifact);
+                      setMenuOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Open latest artifact
+                  </button>
+                </div>
+              )}
+            </div>
+            <span className="time">{messageTime}</span>
+          </div>
+        ) : null}
       </div>
     </article>
   );
 }
+
+const MemoMessageRow = memo(MessageRow);
 
 /**
  * One row in the per-turn breakdown dropdown — either an individual tool
@@ -5519,6 +6847,10 @@ type BreakdownStep =
       at: number;
       name: string;
       context: string;
+      error?: string;
+      inline_diff?: string;
+      preview?: string;
+      summary?: string;
       status: ToolEntry["status"];
       count: number;
     }
@@ -5561,6 +6893,10 @@ function buildBreakdownSteps(
       at: tool.startedAt || 0,
       name: tool.name,
       context: tool.context ?? "",
+      error: tool.error,
+      inline_diff: tool.inline_diff,
+      preview: tool.preview,
+      summary: tool.summary,
       status: tool.status,
       count: 1,
     });
@@ -5594,6 +6930,10 @@ function buildBreakdownSteps(
       else if (step.status === "running" && prev.status !== "error") {
         prev.status = "running";
       }
+      prev.error = step.error ?? prev.error;
+      prev.inline_diff = step.inline_diff ?? prev.inline_diff;
+      prev.preview = step.preview ?? prev.preview;
+      prev.summary = step.summary ?? prev.summary;
       continue;
     }
     merged.push({ ...step });
@@ -5603,41 +6943,73 @@ function buildBreakdownSteps(
 
 /** A single tool/trace line inside the expanded breakdown. */
 function BreakdownRow({ step }: { step: BreakdownStep }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const toolBody =
+    step.type === "tool"
+      ? [
+          step.context && `context\n${step.context}`,
+          step.preview && `streaming\n${step.preview}`,
+          step.summary && `result\n${step.summary}`,
+          step.error && `error\n${step.error}`,
+          step.inline_diff && `diff\n${step.inline_diff}`,
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      : "";
+  const hasBody = step.type === "trace" ? Boolean(step.text) : Boolean(toolBody);
+  const open = userOpen ?? (step.type === "tool" && step.status === "error");
+
   if (step.type === "trace") {
-    // Reasoning/thinking is the agent narrating its work — show it in full,
-    // wrapping, so the user can actually read the thought instead of a
-    // one-line ellipsed sliver.
     return (
-      <div className="flex items-start gap-2 text-xs leading-5 text-[var(--chat-muted)]">
-        <Dot className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-70" />
-        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words italic opacity-90">
-          {step.text}
-        </span>
+      <div className={cn("reasoning reasoning-inline", open && "open")}>
+        <button
+          aria-expanded={open}
+          className="reasoning-head"
+          onClick={() => setUserOpen(!open)}
+          type="button"
+        >
+          <ChevronDown className="chev" />
+          <span>Thinking</span>
+          <span className="reasoning-preview">
+            · {truncatePreview(step.text, 140)}
+          </span>
+        </button>
+        {open && <div className="reasoning-body">{step.text}</div>}
       </div>
     );
   }
 
   const Icon = breakdownToolIcon(step.name);
   return (
-    <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted)]">
-      <Icon
-        className={cn(
-          "h-3.5 w-3.5 shrink-0",
-          step.status === "error" && "text-[var(--chat-danger)]",
-          step.status === "running" && "animate-pulse",
+    <div>
+      <button
+        aria-expanded={hasBody ? open : undefined}
+        className={cn("tool-link", open && "open")}
+        disabled={!hasBody}
+        onClick={() => setUserOpen(!open)}
+        type="button"
+      >
+        {hasBody ? <ChevronDown className="chev" /> : <span className="chev" />}
+        <Icon
+          className={cn(
+            "h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)]",
+            step.status === "error" && "text-[var(--chat-danger)]",
+            step.status === "running" && "animate-pulse",
+          )}
+        />
+        <span className="name">{step.name}</span>
+        {step.context && (
+          <span className="target">
+            · {truncatePreview(step.context)}
+          </span>
         )}
-      />
-      <span className="shrink-0 font-mono font-medium">{step.name}</span>
-      {step.context && (
-        <span className="min-w-0 flex-1 truncate font-mono opacity-80">
-          {truncatePreview(step.context)}
-        </span>
-      )}
-      {step.count > 1 && (
-        <span className="shrink-0 text-[0.62rem] opacity-70">
-          ×{step.count}
-        </span>
-      )}
+        {step.count > 1 && (
+          <span className="duration">
+            ×{step.count}
+          </span>
+        )}
+      </button>
+      {open && toolBody && <div className="tool-body">{toolBody}</div>}
     </div>
   );
 }
@@ -5646,7 +7018,7 @@ function BreakdownRow({ step }: { step: BreakdownStep }) {
 function MemorySaveRow({ tool }: { tool: ToolEntry }) {
   const preview = truncatePreview(tool.summary || tool.context, 64);
   return (
-    <div className="flex items-center gap-2 text-xs leading-5 text-[var(--chat-muted-strong)]">
+    <div className="flex items-center gap-2 rounded-[6px] px-1 py-0.5 text-[12.5px] leading-5 text-[var(--chat-muted-strong)]">
       <Brain className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)] opacity-90" />
       <span className="min-w-0 flex-1 truncate">
         Saved to memory{preview ? `: ${preview}` : ""}
@@ -5689,6 +7061,7 @@ function useRotatingVerb(busy: boolean): string {
 function ChatActivityDigest({
   activityTrace,
   busy,
+  completedAt,
   liveTokens,
   startedAt,
   tokenCount,
@@ -5697,6 +7070,7 @@ function ChatActivityDigest({
   activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
+  completedAt?: number;
   liveTokens?: number;
   startedAt?: number;
   tokenCount?: number;
@@ -5731,7 +7105,7 @@ function ChatActivityDigest({
   if (!show) return null;
 
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
-  const end = busy ? now : activityFinishedAt(tools);
+  const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
   const expanded = open ?? busy;
   const tokens = busy
@@ -5741,9 +7115,9 @@ function ChatActivityDigest({
       : 0;
 
   return (
-    <section className="pt-1 text-[var(--chat-muted)]">
+    <section className="pt-1 text-[var(--fg-muted)]">
       {memoryTools.length > 0 && (
-        <div className="mb-3 space-y-1.5">
+        <div className="mb-2.5 space-y-1">
           {memoryTools.map((tool) => (
             <MemorySaveRow key={tool.id} tool={tool} />
           ))}
@@ -5751,39 +7125,52 @@ function ChatActivityDigest({
       )}
 
       <button
-        className="flex items-center gap-2 text-sm text-[var(--chat-muted-strong)] transition-colors hover:text-[var(--chat-text)]"
+        className={cn("processing-bar max-w-full", expanded && "open")}
         onClick={() => setOpen(() => !expanded)}
         type="button"
       >
         {busy && (
-          <Sparkle className="h-4 w-4 shrink-0 animate-pulse fill-[var(--chat-accent)] text-[var(--chat-accent)]" />
+          <span className="processing-glow">
+            <Sparkles className="h-3.5 w-3.5" />
+          </span>
         )}
-        <span>
+        <span className="processing-label min-w-0 truncate">
           {busy
-            ? `${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)} · ${duration}`
+            ? `${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)}`
             : `Worked for ${duration}`}
-          {!busy && steps.length > 0 && ` · ${plural(steps.length, "step")}`}
-          {/* Always show the live counter while the turn is in flight so
-              the user sees something climbing immediately, even before the
-              first reasoning/output token actually arrives. */}
-          {busy
-            ? ` · ${tokens.toLocaleString()} tokens`
-            : tokens > 0
-              ? ` · ${tokens.toLocaleString()} tokens`
-              : ""}
+        </span>
+        <span className="processing-meta">
+          {busy && (
+            <>
+              <span className="dot-sep">·</span>
+              <span className="num">{duration}</span>
+            </>
+          )}
+          {!busy && steps.length > 0 && (
+            <>
+              <span className="dot-sep">·</span>
+              <span className="num">{plural(steps.length, "step")}</span>
+            </>
+          )}
+          {(busy || tokens > 0) && (
+            <>
+              <span className="dot-sep">·</span>
+              <span className="num">{tokens.toLocaleString()} tokens</span>
+            </>
+          )}
         </span>
         {(busy || steps.length > 0) && (
           <ChevronDown
             className={cn(
-              "h-3.5 w-3.5 transition-transform",
-              expanded && "rotate-180",
+              "processing-chev shrink-0",
+              expanded && "open rotate-180",
             )}
           />
         )}
       </button>
 
       {expanded && steps.length > 0 && (
-        <div className="mt-3 space-y-1.5">
+        <div className="processing-body mt-1.5 space-y-1">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} />
           ))}
@@ -5827,36 +7214,42 @@ function InlineArtifactCard({
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
 
   return (
-    <div className="max-w-[38rem] rounded-md bg-[var(--chat-surface)] p-3 shadow-[inset_0_0_0_1px_var(--chat-border)]">
-      <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--chat-surface-soft)] text-[var(--chat-accent)]">
-          <FileText className="h-4 w-4" />
-        </div>
+    <div className="max-w-[38rem] rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-2.5 py-2 shadow-[0_1px_0_rgba(255,255,255,0.025)_inset]">
+      <div className="flex items-center gap-2">
+        <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)]" />
         <button
           className="min-w-0 flex-1 text-left"
           onClick={() => onOpenArtifact(artifact)}
           type="button"
         >
-          <div className="truncate text-sm font-semibold text-[var(--chat-text)]">
+          <div className="truncate text-[12.5px] font-medium leading-5 text-[var(--chat-text)]">
             {artifact.title}
           </div>
-          <div className="truncate text-xs text-[var(--chat-muted)]">
+          <div className="truncate text-[11.5px] leading-4 text-[var(--chat-muted)]">
             {artifact.path || artifact.detail || artifact.source || "Artifact"}
           </div>
         </button>
         <button
-          className="rounded-sm border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          aria-label="Open artifact"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           onClick={() => onOpenArtifact(artifact)}
+          title="Open"
           type="button"
         >
-          Open
+          <ExternalLink className="h-3.5 w-3.5" />
         </button>
         <button
-          className="rounded-sm border border-[var(--chat-border-strong)] px-3 py-1 text-xs text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+          aria-label="Copy artifact"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
           onClick={() => copy(copyText)}
+          title={copied ? "Copied" : "Copy"}
           type="button"
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? (
+            <CheckCircle2 className="h-3.5 w-3.5" />
+          ) : (
+            <Clipboard className="h-3.5 w-3.5" />
+          )}
         </button>
       </div>
     </div>
@@ -5878,7 +7271,7 @@ function PendingPromptCard({
 }) {
   if (pendingPrompt.type === "approval") {
     return (
-      <Card className="border-[color-mix(in_srgb,var(--chat-warning)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] p-3 text-[var(--chat-text)]">
+      <Card className="rounded-[10px] border-[color-mix(in_srgb,var(--chat-warning)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] p-3 text-[var(--chat-text)] shadow-[0_1px_0_rgba(255,255,255,0.025)_inset]">
         <div className="flex items-start gap-3">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--chat-warning)]" />
           <div className="min-w-0 flex-1">
@@ -5887,7 +7280,7 @@ function PendingPromptCard({
               {pendingPrompt.description}
             </p>
             {pendingPrompt.command && (
-              <pre className="mt-2 max-h-28 overflow-auto rounded-lg bg-[var(--chat-surface-soft)] px-2 py-1.5 text-xs text-[var(--chat-muted-strong)]">
+              <pre className="mt-2 max-h-28 overflow-auto rounded-[8px] bg-[var(--chat-surface-soft)] px-2 py-1.5 text-xs text-[var(--chat-muted-strong)]">
                 {pendingPrompt.command}
               </pre>
             )}
@@ -5932,7 +7325,7 @@ function PendingPromptCard({
         : pendingPrompt.prompt || `Secret${pendingPrompt.envVar ? `: ${pendingPrompt.envVar}` : ""}`;
 
   return (
-    <Card className="border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-3 text-[var(--chat-text)]">
+    <Card className="rounded-[10px] border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-3 text-[var(--chat-text)] shadow-[0_1px_0_rgba(255,255,255,0.025)_inset]">
       <div className="mb-2 flex items-start justify-between gap-2">
         <div className="text-sm font-semibold">{title}</div>
         <button
@@ -5962,7 +7355,7 @@ function PendingPromptCard({
         >
           <input
             autoFocus
-            className="min-w-0 flex-1 rounded-lg border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-3 py-2 text-sm text-[var(--chat-text)] outline-none focus:ring-1 focus:ring-[var(--chat-accent)]"
+            className="min-w-0 flex-1 rounded-[8px] border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-3 py-2 text-sm text-[var(--chat-text)] outline-none focus:ring-1 focus:ring-[var(--chat-accent)]"
             onChange={(event) => setPromptValue(event.target.value)}
             type={pendingPrompt.type === "sudo" ? "password" : "text"}
             value={promptValue}
@@ -6041,9 +7434,9 @@ function ArtifactPreviewPane({
   };
 
   return (
-    <div className="@container flex h-full min-h-0 flex-col overflow-hidden rounded-md bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+    <div className="@container flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.04)_inset]">
       <header className="flex shrink-0 items-start gap-2 px-3 pb-3 pt-3 @[28rem]:gap-3 @[28rem]:px-4 @[28rem]:pt-4">
-        <div className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[var(--chat-surface-soft)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)] @[24rem]:flex">
+        <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] text-[var(--chat-accent)] @[24rem]:flex">
           <FileText className="h-4.5 w-4.5" />
         </div>
         <div className="min-w-0 flex-1">
@@ -6051,7 +7444,7 @@ function ArtifactPreviewPane({
             <h2 className="truncate text-[0.95rem] font-semibold leading-5">
               {artifact.title}
             </h2>
-            <span className="hidden shrink-0 rounded-sm bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[0.65rem] text-[var(--chat-muted)] @[22rem]:inline">
+            <span className="hidden shrink-0 rounded-[6px] bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[11px] text-[var(--chat-muted)] @[22rem]:inline">
               {fileExtension(pathForKind).replace(".", "").toUpperCase() || artifact.kind}
             </span>
           </div>
@@ -6062,7 +7455,7 @@ function ArtifactPreviewPane({
         <div className="flex shrink-0 items-center gap-1">
           <Button
             aria-label="Open preview externally"
-            className="hidden h-7 w-7 rounded-sm p-0 @[20rem]:inline-flex @[24rem]:h-8 @[24rem]:w-8"
+            className="hidden h-7 w-7 rounded-[7px] p-0 @[20rem]:inline-flex @[24rem]:h-8 @[24rem]:w-8"
             disabled={!blobUrl}
             onClick={openExternal}
             size="sm"
@@ -6074,7 +7467,7 @@ function ArtifactPreviewPane({
           </Button>
           <Button
             aria-label="Copy artifact path"
-            className="hidden h-7 w-7 rounded-sm p-0 @[20rem]:inline-flex @[24rem]:h-8 @[24rem]:w-8"
+            className="hidden h-7 w-7 rounded-[7px] p-0 @[20rem]:inline-flex @[24rem]:h-8 @[24rem]:w-8"
             onClick={() => copy(copyText)}
             size="sm"
             title={copied ? "Copied" : "Copy"}
@@ -6089,7 +7482,7 @@ function ArtifactPreviewPane({
           </Button>
           <Button
             aria-label={collapsed ? "Expand preview" : "Collapse preview"}
-            className="h-7 w-7 rounded-sm p-0 @[24rem]:h-8 @[24rem]:w-8"
+            className="h-7 w-7 rounded-[7px] p-0 @[24rem]:h-8 @[24rem]:w-8"
             onClick={() => setCollapsed((value) => !value)}
             size="sm"
             title={collapsed ? "Expand" : "Collapse"}
@@ -6104,7 +7497,7 @@ function ArtifactPreviewPane({
           </Button>
           <Button
             aria-label="Close preview"
-            className="h-7 w-7 rounded-sm p-0 @[24rem]:h-8 @[24rem]:w-8"
+            className="h-7 w-7 rounded-[7px] p-0 @[24rem]:h-8 @[24rem]:w-8"
             onClick={onClose}
             size="sm"
             type="button"
@@ -6119,9 +7512,9 @@ function ArtifactPreviewPane({
       <div className="min-h-0 flex-1 border-t border-[var(--chat-border)] bg-[var(--chat-surface-soft)]">
         {loading ? (
           <div className="flex h-full flex-col gap-3 p-6">
-            <div className="h-4 w-2/3 animate-pulse rounded-lg bg-[var(--chat-border)]" />
-            <div className="h-4 w-1/2 animate-pulse rounded-lg bg-[var(--chat-border)]" />
-            <div className="mt-2 flex-1 animate-pulse rounded-md bg-[var(--chat-border)]" />
+            <div className="h-4 w-2/3 animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
+            <div className="h-4 w-1/2 animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
+            <div className="mt-2 flex-1 animate-pulse rounded-[8px] bg-[var(--chat-border)]" />
           </div>
         ) : error && /\b404\b/.test(error) ? (
           // The file was referenced by a turn but is no longer on disk
@@ -6129,7 +7522,7 @@ function ArtifactPreviewPane({
           // overstates it — show a quiet "gone" state instead.
           <div className="flex h-full items-center justify-center p-6">
             <div className="max-w-sm text-center text-[var(--chat-muted)]">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md bg-[var(--chat-surface)] text-[var(--chat-muted)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-muted)]">
                 <FileText className="h-5 w-5" />
               </div>
               <div className="mt-3 text-sm font-semibold text-[var(--chat-muted-strong)]">
@@ -6143,7 +7536,7 @@ function ArtifactPreviewPane({
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center p-6">
-            <div className="max-w-sm rounded-md bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_34%,transparent)]">
+            <div className="max-w-sm rounded-[8px] border border-[color-mix(in_srgb,var(--chat-danger)_34%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)]">
               <div className="font-semibold">Could not preview this file</div>
               <div className="mt-1 break-words text-xs opacity-90">{error}</div>
             </div>
@@ -6183,7 +7576,7 @@ function ArtifactPreviewPane({
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <div className="max-w-sm text-center">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md bg-[var(--chat-surface)] text-[var(--chat-accent)] shadow-[inset_0_0_0_1px_var(--chat-border)]">
+              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-accent)]">
                 <FileText className="h-5 w-5" />
               </div>
               <div className="mt-3 text-sm font-semibold">
@@ -6224,6 +7617,7 @@ function ArtifactsSection({
   artifacts: ArtifactEntry[];
   onOpenArtifact(artifact: ArtifactEntry): void;
 }) {
+  const [filesOpen, setFilesOpen] = useState(false);
   const grouped = useMemo(() => {
     const byKey = new Map<string, { artifact: ArtifactEntry; count: number }>();
     for (const artifact of artifacts) {
@@ -6248,40 +7642,37 @@ function ArtifactsSection({
   const hasDuplicates = totalCount > uniqueCount;
 
   return (
-    <section className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2 px-1">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="text-[0.82rem] font-medium leading-5 text-[var(--chat-muted-strong)]">
-            Artifacts
-          </span>
-          {uniqueCount > 0 && (
-            <span
-              className="text-[0.66rem] text-[var(--chat-muted)]"
-              title={
-                hasDuplicates
-                  ? `${uniqueCount} unique · ${totalCount} total writes`
-                  : `${uniqueCount} file${uniqueCount === 1 ? "" : "s"}`
-              }
-            >
-              {uniqueCount}
-            </span>
-          )}
-        </div>
-        <Pin className="h-3.5 w-3.5 shrink-0 rotate-45 text-[var(--chat-muted)] opacity-70" />
-      </div>
+    <section className="ap-artifacts">
       {grouped.length === 0 ? (
         <PortalEmpty>Files and outputs will land here</PortalEmpty>
       ) : (
-        <div className="flex max-h-[36vh] flex-col gap-0.5 overflow-y-auto pr-0.5">
-          {grouped.map(({ artifact, count }) => (
-            <ArtifactCard
-              key={artifact.id}
-              artifact={artifact}
-              count={count}
-              onOpenArtifact={onOpenArtifact}
-            />
-          ))}
-        </div>
+        <>
+          <button
+            type="button"
+            className={cn("ap-toggle", filesOpen && "open")}
+            onClick={() => setFilesOpen((open) => !open)}
+            title={
+              hasDuplicates
+                ? `${uniqueCount} unique · ${totalCount} total writes`
+                : `${uniqueCount} file${uniqueCount === 1 ? "" : "s"}`
+            }
+          >
+            <ChevronDown className="ap-toggle-chev" />
+            <span>{uniqueCount} artifact{uniqueCount === 1 ? "" : "s"}</span>
+          </button>
+          {filesOpen && (
+            <div className="ap-files">
+              {grouped.map(({ artifact, count }) => (
+                <ArtifactCard
+                  key={artifact.id}
+                  artifact={artifact}
+                  count={count}
+                  onOpenArtifact={onOpenArtifact}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -6304,18 +7695,17 @@ function ArtifactCard({
   const canToggle = Boolean(artifact.content);
 
   return (
-    <div
-      className={cn(
-        "group rounded-md text-xs transition-colors hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
-        artifact.status === "error" &&
-          "bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]",
-      )}
-    >
-      <div className="flex items-center gap-2 px-1.5 py-1">
-        <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)]" />
-
+    <div>
+      <div
+        className={cn(
+          "ap-row file group",
+          artifact.status === "error" &&
+            "border border-[color-mix(in_srgb,var(--chat-danger)_35%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))]",
+        )}
+      >
+        <Icon />
         <button
-          className="min-w-0 flex-1 truncate text-left text-[0.82rem] leading-5 text-[var(--chat-text)]"
+          className="label border-0 bg-transparent p-0 text-left"
           onClick={() => {
             if (canPreview) {
               onOpenArtifact(artifact);
@@ -6328,18 +7718,18 @@ function ArtifactCard({
         >
           {artifact.title}
         </button>
-        {count > 1 && (
-          <span
-            className="shrink-0 text-[0.62rem] text-[var(--chat-muted)]"
-            aria-label={`${count} writes to this file`}
-          >
-            ×{count}
-          </span>
-        )}
+        <span
+          className="time"
+          aria-label={count > 1 ? `${count} writes to this file` : undefined}
+        >
+          {count > 1
+            ? `×${count}`
+            : artifact.detail?.split("·").pop()?.trim() || artifact.kind}
+        </span>
 
         <button
           aria-label="Copy artifact"
-          className="rounded-md p-1 text-[var(--chat-muted)] opacity-0 transition hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_60%,transparent)] hover:text-[var(--chat-text)] group-hover:opacity-70"
+          className="icon-btn sm opacity-0 group-hover:opacity-70"
           onClick={(event) => {
             event.stopPropagation();
             copy(copyText);
@@ -6355,7 +7745,7 @@ function ArtifactCard({
       </div>
 
       {open && artifact.content && (
-        <pre className="ml-7 mb-1 mr-1 max-h-48 overflow-auto rounded-md bg-[color-mix(in_srgb,var(--chat-surface-strong)_38%,transparent)] p-2 text-[0.68rem] leading-4 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
+        <pre className="ml-7 mb-1 mr-1 max-h-48 overflow-auto rounded-[7px] bg-[color-mix(in_srgb,var(--chat-surface-strong)_38%,transparent)] p-2 text-[11.5px] leading-4 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
           {artifact.content}
         </pre>
       )}
@@ -6363,40 +7753,19 @@ function ArtifactCard({
   );
 }
 
-function ProgressSummaryList({ summaries }: { summaries: ProgressSummary[] }) {
-  return (
-    <div className="space-y-1">
-      {summaries.map((summary) => (
-        <ProgressSummaryRow key={summary.id} summary={summary} />
-      ))}
-    </div>
-  );
-}
-
-// Funny single-word phrases that cycle on the live "current" pill while the
-// agent is busy. Replaces the stack of ruminating/mulling/Sending request
-// status rows. Kept short so the pill width doesn't jump around.
+// Short phrases that cycle on the live "current" pill while the agent is busy.
+// Keep them plain: this is status chrome, not personality copy.
 const ROTATING_PHRASES = [
-  "Ruminating",
-  "Mulling",
-  "Pondering",
-  "Cogitating",
-  "Brewing",
-  "Plotting",
-  "Scheming",
-  "Untangling",
-  "Wrangling",
-  "Tinkering",
-  "Stirring the pot",
-  "Doing the thing",
-  "Thinking thoughts",
-  "Vibing",
-  "Sleuthing",
-  "Conjuring",
-  "Marinating",
-  "Reticulating splines",
-  "Chasing the muse",
-  "Connecting dots",
+  "Reading",
+  "Checking",
+  "Planning",
+  "Running",
+  "Reviewing",
+  "Verifying",
+  "Updating",
+  "Connecting",
+  "Preparing",
+  "Processing",
 ];
 
 function RotatingPhrase() {
@@ -6415,87 +7784,6 @@ function RotatingPhrase() {
     return () => clearInterval(timer);
   }, []);
   return <span>{ROTATING_PHRASES[index]}…</span>;
-}
-
-function ProgressSummaryRow({ summary }: { summary: ProgressSummary }) {
-  const [open, setOpen] = useState(false);
-  const hasDetails = summary.details.length > 0;
-  const complete = summary.status === "done";
-  const failed = summary.status === "error";
-  const running = summary.status === "running";
-  const isLivePill = summary.id === "current" && running;
-
-  return (
-    <div className="text-[0.8rem] leading-5">
-      <button
-        aria-expanded={open}
-        className={cn(
-          "group flex w-full items-start gap-2.5 rounded-md px-1 py-1 text-left transition-colors",
-          hasDetails && "hover:bg-[color-mix(in_srgb,var(--chat-surface-strong)_45%,transparent)]",
-        )}
-        disabled={!hasDetails}
-        onClick={() => hasDetails && setOpen((value) => !value)}
-        type="button"
-      >
-        <span
-          className={cn(
-            "mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border",
-            failed
-              ? "border-[color-mix(in_srgb,var(--chat-danger)_70%,transparent)] text-[var(--chat-danger)]"
-              : complete
-                ? "border-[color-mix(in_srgb,var(--chat-muted-strong)_70%,transparent)] text-[var(--chat-muted-strong)]"
-                : running
-                  ? "border-[color-mix(in_srgb,var(--chat-muted-strong)_65%,transparent)] text-[var(--chat-muted-strong)]"
-                  : "border-[color-mix(in_srgb,var(--chat-muted)_72%,transparent)] text-transparent",
-          )}
-        >
-          {running ? (
-            <Loader2 className="h-2.5 w-2.5 animate-spin" />
-          ) : failed ? (
-            <AlertCircle className="h-2.5 w-2.5" />
-          ) : complete ? (
-            <CheckCircle2 className="h-2.5 w-2.5" />
-          ) : (
-            <span className="sr-only">Pending</span>
-          )}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div
-            className={cn(
-              "text-[0.8rem] font-medium leading-5",
-              summary.status === "pending"
-                ? "text-[var(--chat-muted)]"
-                : "text-[var(--chat-muted-strong)]",
-            )}
-          >
-            {isLivePill ? <RotatingPhrase /> : summary.label}
-          </div>
-          {summary.detail && (
-            <div className="mt-0.5 truncate text-[0.76rem] text-[var(--chat-muted)]">
-              {summary.detail}
-            </div>
-          )}
-        </div>
-        {hasDetails && (
-          <ChevronDown
-            className={cn(
-              "mt-0.5 h-3 w-3 shrink-0 text-[var(--chat-muted)] opacity-70 transition group-hover:opacity-100",
-              open && "rotate-180",
-            )}
-          />
-        )}
-      </button>
-      {open && hasDetails && (
-        <div className="ml-8 mt-1 space-y-1 pb-1 text-[0.74rem] leading-5 text-[var(--chat-muted)]">
-          {summary.details.map((detail, index) => (
-            <div key={`${summary.id}-${index}`} className="truncate">
-              {detail}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function ActivityPanel({
@@ -6525,15 +7813,15 @@ function ActivityPanel({
   const hasProgress = progress.length > 0;
 
   return (
-    <div className="flex max-h-full min-h-0 flex-col overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--chat-border)_72%,transparent)] bg-[color-mix(in_srgb,var(--chat-surface)_98%,var(--chat-bg))] p-3.5 normal-case">
+    <div className="ap-shell normal-case">
       {banner && (
-        <section className="mb-3 rounded-md bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-2.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--chat-danger)_35%,transparent)]">
-          <div className="flex items-start gap-2 text-[0.8rem] text-[var(--chat-danger)]">
+        <section className="m-2 rounded-[8px] border border-[color-mix(in_srgb,var(--chat-danger)_35%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-2.5">
+          <div className="flex items-start gap-2 text-[12.5px] text-[var(--chat-danger)]">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <div className="break-words">{banner}</div>
               <button
-                className="mt-2 rounded-sm bg-[color-mix(in_srgb,var(--chat-danger)_12%,var(--chat-bg))] px-2.5 py-1 text-[0.7rem] transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
+                className="mt-2 rounded-[6px] bg-[color-mix(in_srgb,var(--chat-danger)_12%,var(--chat-bg))] px-2.5 py-1 text-[11.5px] transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_15%,var(--chat-bg))]"
                 onClick={onReconnect}
                 type="button"
               >
@@ -6544,39 +7832,53 @@ function ActivityPanel({
         </section>
       )}
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-0.5">
-        <ArtifactsSection
-          artifacts={artifacts}
-          onOpenArtifact={onOpenArtifact}
-        />
-
-        {hasProgress && (
-          <section className="space-y-1.5 border-t border-[color-mix(in_srgb,var(--chat-border)_48%,transparent)] pt-3">
-            <div className="flex items-center gap-2 px-1">
-              <span
-                className={cn(
-                  "h-1.5 w-1.5 rounded-full",
-                  state === "open" ? "bg-[var(--chat-success)]" : "bg-[var(--chat-muted)]",
-                )}
-              />
-              <span className="text-[0.82rem] font-medium leading-5 text-[var(--chat-muted-strong)]">
-                Activity
-              </span>
-              <span className="ml-auto truncate text-[0.68rem] text-[var(--chat-muted)]">
-                {state === "open" ? "live" : STATE_LABEL[state]}
-              </span>
-            </div>
-            <ProgressSummaryList summaries={progress} />
-          </section>
-        )}
+      <div className="ap-head">
+        <div className="ap-title">
+          <span>Activity</span>
+          <span className="ap-live" title={state === "open" ? "Live" : STATE_LABEL[state]}>
+            <span className="ap-live-dot" />
+            {state === "open" ? "live" : STATE_LABEL[state]}
+          </span>
+        </div>
+        <div className="ap-meta">
+          <button className="icon-btn sm" title="Pin panel" type="button"><Pin /></button>
+          <button className="icon-btn sm" title="More" type="button"><ChevronDown /></button>
+        </div>
       </div>
+
+      {hasProgress && (
+        <div className="ap-feed">
+          {progress.map((summary) => {
+            const Icon =
+              summary.status === "error"
+                ? AlertCircle
+                : summary.status === "running"
+                  ? Loader2
+                  : summary.status === "done"
+                    ? CheckCircle2
+                    : Clock;
+            return (
+              <div className="ap-row" key={summary.id}>
+                <Icon className={cn(summary.status === "running" && "animate-spin")} />
+                <span className="label">{summary.id === "current" ? <RotatingPhrase /> : summary.label}</span>
+                <span className="time">{summary.status}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <ArtifactsSection
+        artifacts={artifacts}
+        onOpenArtifact={onOpenArtifact}
+      />
     </div>
   );
 }
 
 function PortalEmpty({ children }: { children: ReactNode }) {
   return (
-    <div className="px-1 py-2 text-[0.78rem] leading-5 text-[var(--chat-muted)]">
+    <div className="ap-empty">
       {children}
     </div>
   );

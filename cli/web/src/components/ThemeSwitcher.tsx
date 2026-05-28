@@ -52,8 +52,8 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         className={cn(
-          "inline-flex h-8 items-center gap-2 rounded-lg border border-border px-2.5 text-[0.82rem]",
-          "bg-card text-[var(--sidebar-text)] transition-colors hover:text-[var(--sidebar-text-active)]",
+          "inline-flex h-8 items-center gap-2 rounded-[7px] border border-[var(--sidebar-border)] px-2.5 text-[12.5px]",
+          "bg-[var(--sidebar-row)] text-[var(--sidebar-text)] transition-colors hover:border-[var(--sidebar-border-strong)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
         title={t.theme?.switchTheme ?? "Switch theme"}
@@ -76,11 +76,11 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
           className={cn(
             "absolute z-50 min-w-[240px]",
             dropUp ? "left-0 bottom-full mb-1" : "right-0 top-full mt-1",
-            "overflow-hidden rounded-md border border-border bg-card",
+            "overflow-hidden rounded-[10px] border border-[var(--sidebar-border-strong)] bg-[var(--chat-surface)] shadow-[0_24px_60px_-16px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.03)_inset]",
           )}
         >
-          <div className="border-b border-border px-3 py-2">
-            <Typography className="text-xs font-semibold normal-case text-muted-foreground">
+          <div className="border-b border-[var(--sidebar-border)] px-3 py-2">
+            <Typography className="text-[12px] font-medium normal-case text-[var(--sidebar-text-muted)]">
               {t.theme?.title ?? "Theme"}
             </Typography>
           </div>
@@ -100,9 +100,10 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
                   close();
                 }}
                 className={cn(
-                  "flex w-full items-center gap-3 px-3 py-2 text-left transition-colors cursor-pointer",
-                  "hover:bg-accent",
-                  isActive ? "text-foreground" : "text-muted-foreground",
+                  "mx-1 flex min-h-9 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-3 rounded-[7px] px-2.5 py-2 text-left transition-colors",
+                  isActive
+                    ? "bg-[var(--sidebar-row-active)] text-[var(--sidebar-text-active)]"
+                    : "text-[var(--sidebar-text-muted)] hover:bg-[var(--sidebar-row-hover)] hover:text-[var(--sidebar-text-active)]",
                 )}
               >
                 {preset ? (
@@ -118,7 +119,7 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
                     {th.label}
                   </Typography>
                   {th.description && (
-                    <Typography className="truncate text-xs normal-case tracking-normal text-muted-foreground">
+                    <Typography className="truncate text-[11.5px] normal-case tracking-normal text-[var(--sidebar-text-muted)]">
                       {th.description}
                     </Typography>
                   )}
@@ -126,7 +127,7 @@ export function ThemeSwitcher({ dropUp = false }: ThemeSwitcherProps) {
 
                 <Check
                   className={cn(
-                    "h-3.5 w-3.5 shrink-0 text-primary",
+                    "h-3.5 w-3.5 shrink-0 text-[var(--chat-accent)]",
                     isActive ? "opacity-100" : "opacity-0",
                   )}
                 />
@@ -146,7 +147,7 @@ function ThemeSwatch({ theme }: { theme: string }) {
   return (
     <div
       aria-hidden
-      className="flex h-5 w-10 shrink-0 overflow-hidden rounded-md border border-border"
+      className="flex h-5 w-10 shrink-0 overflow-hidden rounded-[6px] border border-[var(--sidebar-border)]"
     >
       <span className="flex-1" style={{ background: background.hex }} />
       <span className="flex-1" style={{ background: midground.hex }} />
@@ -159,7 +160,7 @@ function PlaceholderSwatch() {
   return (
     <div
       aria-hidden
-      className="h-5 w-10 shrink-0 rounded-md border border-dashed border-border"
+      className="h-5 w-10 shrink-0 rounded-[6px] border border-dashed border-[var(--sidebar-border)]"
     />
   );
 }

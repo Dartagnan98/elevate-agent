@@ -24,7 +24,7 @@ steps:
     description: QC each draft. No CTA pivot, no invented facts, no emojis unless template has them.
   - id: log_attempt
     tier: utility
-    description: Record attempt to outreach_db so outcome tracker can match the reply later.
+    description: Record attempt to the operational outreach store so outcome tracker can match the reply later.
 ---
 
 # Outreach skill
@@ -33,7 +33,18 @@ You run one of three lanes for the user's lead desk. Each lane has its own job. 
 
 ## Database & Service Routing
 
-Before reading code to learn where data lives or how the runtime starts, read `../real-estate-admin/ROUTING.md`. It is the shared standard for every Elevate agent: which SQLite store owns which data (operational.db = source of truth, memory_store.db = searchable recall, outreach.db = templates and lane configs, state.db = sessions), and which launchd services are already running and must never be started or stopped by the agent.
+Before reading code to learn where data lives or how the runtime starts, read `../real-estate-admin/ROUTING.md`. It is the shared standard for every Elevate agent: the operational store is the source of truth for admin, CRM, outreach templates, and lane configs; memory is recall; session/cache stores are not source-of-truth. Do not call `sqlite3` for current outreach/admin data.
+
+## Operational DB Write Contract
+
+Use backend tools/helpers first. Do not raw-write tables unless no tool exists. A lane run must update the operational database, not only report in chat:
+
+- Read targets from the source-inbox operational path, which is backed by `contacts`, `conversations`, source connector records, and the Postgres outreach tables.
+- Heat/scoring writes update `contacts.heat_score`, `contacts.heat_label`, `contacts.needs_follow_up`, `contacts.next_follow_up_at`, `contacts.ai_last_reviewed_at`, and `contacts.ai_review_run_id`; thread scoring updates `conversations.heat_score` and `conversations.heat_label` when the tool exposes it.
+- Drafts for approval write `task_type=message_draft`, `approval_required=true`, recipient/source/thread metadata, and draft text through the source-inbox draft tool. The durable approval queue is `outreach_send_queue` with pending approval status.
+- Template picks, attempt logs, and outcomes update `outreach_templates`, `outreach_draft_attempts`, `outreach_thread_meta`, and `outreach_inbound_seen` through `outreach_templates(...)` or outreach backend helpers.
+- Skipped, dead, blocked, or do-not-contact changes must update the backend/source-inbox profile or thread status so `/leads` and Today reflect them.
+- If a needed write tool is unavailable, say exactly which write could not be performed and which table/field would have changed.
 
 ## Inputs
 
@@ -119,7 +130,7 @@ outreach_templates(
 )
 ```
 
-Save the returned `attemptId` somewhere durable (note in the draft body metadata or in `data/outreach/attempts/`) so the outcome tracker can find it later.
+Keep the returned `attemptId` linked to the draft/queue metadata so the outcome tracker can find it later.
 
 ### 7. Wrap up
 
@@ -192,6 +203,7 @@ If a buyer lead touched the realtor's own listing, use disclosure-safe wording a
 
 ## Source Of Truth
 
-- Profiles and threads come from the source-inbox/SQLite read path.
+- Profiles and threads come from the source-inbox / operational read path.
+- Scoring, follow-up, draft, and attempt state must be written through the operational backend so the UI and future cron runs see it.
 - Skipped, dead, and blocked leads must be reflected immediately through the backend endpoints, not only in the chat summary.
 - Approved sends are separate from drafts. A draft in `/leads` is not a sent message.
