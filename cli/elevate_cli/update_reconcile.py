@@ -18,9 +18,12 @@ from typing import Any
 
 _REQUIRED_IMPORTS = (
     "croniter",
+    "fastapi",
+    "multipart",
     "openai",
     "psycopg",
     "psycopg_pool",
+    "uvicorn",
 )
 
 

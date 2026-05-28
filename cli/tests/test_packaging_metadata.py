@@ -15,6 +15,15 @@ def test_faster_whisper_is_not_a_base_dependency():
     assert any(dep.startswith("faster-whisper") for dep in voice_extra)
 
 
+def test_web_extra_contains_dashboard_upload_dependencies():
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    web_extra = data["project"]["optional-dependencies"]["web"]
+
+    assert any(dep.startswith("fastapi") for dep in web_extra)
+    assert any(dep.startswith("uvicorn") for dep in web_extra)
+    assert any(dep.startswith("python-multipart") for dep in web_extra)
+
+
 def test_manifest_includes_bundled_skills():
     manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
 
