@@ -165,6 +165,23 @@ class TestCmdUpdateBranchFallback:
         pull_cmds = [c for c in commands if "pull" in c]
         assert len(pull_cmds) == 0
 
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_update_reconciles_runtime_when_already_up_to_date(
+        self, mock_run, _mock_which, mock_args
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="main", verify_ok=True, commit_count="0"
+        )
+
+        cmd_update(mock_args)
+
+        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+        assert any("-m elevate_cli.update_reconcile" in c for c in commands)
+
+        pull_cmds = [c for c in commands if "pull" in c]
+        assert len(pull_cmds) == 0
+
     @patch("shutil.which")
     @patch("subprocess.run")
     def test_update_refreshes_repo_and_tui_node_dependencies(

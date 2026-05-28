@@ -14,7 +14,7 @@ Update to the latest version with a single command:
 elevate update
 ```
 
-This pulls the latest code, updates dependencies, and prompts you to configure any new options that were added since your last update.
+This pulls the latest code, updates dependencies, reconciles runtime defaults, and prompts you to configure any new options that were added since your last update.
 
 :::tip
 `elevate update` automatically detects new configuration options and prompts you to add them. If you skipped that prompt, you can manually run `elevate config check` to see missing options, then `elevate config migrate` to interactively add them.
@@ -24,10 +24,11 @@ This pulls the latest code, updates dependencies, and prompts you to configure a
 
 When you run `elevate update`, the following steps occur:
 
-1. **Git pull** — pulls the latest code from the `main` branch and updates submodules
-2. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies
-3. **Config migration** — detects new config options added since your version and prompts you to set them
-4. **Gateway auto-restart** — if the gateway service is running (systemd on Linux, launchd on macOS), it is **automatically restarted** after the update completes so the new code takes effect immediately
+1. **Git pull** — pulls the latest code from the `main` branch and preserves local dirty changes through an automatic stash/restore
+2. **Dependency install** — runs `uv pip install -e ".[all]"` for the gateway/runtime virtualenvs so cron, Admin, and gateway imports stay aligned
+3. **Runtime reconciliation** — applies operational DB migrations, seeds/updates default Admin actions, ensures bundled system cron jobs and prompts exist, and checks next-run calculation for enabled recurring crons
+4. **Config migration** — detects new config options added since your version and prompts you to set them
+5. **Gateway auto-restart** — if the gateway service is running (systemd on Linux, launchd on macOS), it refreshes the service definition, restarts the gateway, and checks the local gateway status endpoint
 
 Expected output looks like:
 
@@ -40,6 +41,8 @@ Already up to date.  (or: Updating abc1234..def5678)
 ✅ Dependencies updated
 🔍 Checking for new config options...
 ✅ Config is up to date  (or: Found 2 new options — running migration...)
+🔧 Reconciling runtime defaults...
+✅ Admin actions, system cron jobs, and next-run checks are OK
 🔄 Restarting gateway service...
 ✅ Gateway restarted
 ✅ Elevate updated successfully!

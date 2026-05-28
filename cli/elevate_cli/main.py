@@ -5721,6 +5721,113 @@ def _finalize_update_output(state):
             pass
 
 
+def _update_runtime_venv_dirs() -> list[Path]:
+    """Return repo virtualenvs that should be kept in sync by update."""
+    env_dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            env_dirs.append(resolved)
+
+    # The installed gateway service is generated around ``venv`` in normal
+    # installs, while developer checkouts often use ``.venv``.  Prefer the
+    # service runtime first so post-update seeds exercise the same interpreter
+    # the background gateway and cron scheduler will use.
+    for env_name in ("venv", ".venv"):
+        candidate = PROJECT_ROOT / env_name
+        if candidate.exists():
+            add(candidate)
+
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        candidate = Path(virtual_env)
+        if candidate.exists():
+            add(candidate)
+
+    if sys.prefix != sys.base_prefix:
+        current = Path(sys.prefix)
+        if current.exists():
+            add(current)
+
+    if not env_dirs:
+        add(PROJECT_ROOT / "venv")
+
+    return env_dirs
+
+
+def _venv_python_path(venv_dir: Path) -> Path:
+    return venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
+def _preferred_update_runtime_python() -> str:
+    """Return the Python interpreter that should own post-update reconciliation."""
+    for env_dir in _update_runtime_venv_dirs():
+        candidate = _venv_python_path(env_dir)
+        if candidate.exists():
+            return str(candidate)
+
+    return sys.executable
+
+
+def _run_update_reconciliation() -> bool:
+    """Seed runtime-owned state and verify core imports after an update.
+
+    This runs in a child process so it imports the newly-installed package and
+    uses the runtime Python environment rather than stale modules from the
+    updater process.
+    """
+    print()
+    print("→ Reconciling runtime defaults...")
+    python = _preferred_update_runtime_python()
+    try:
+        result = subprocess.run(
+            [python, "-m", "elevate_cli.update_reconcile"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  ⚠ Runtime reconciliation failed to start: {exc}")
+        return False
+
+    output = (getattr(result, "stdout", "") or "").strip()
+    if output:
+        for line in output.splitlines():
+            print(line)
+    error = (getattr(result, "stderr", "") or "").strip()
+    if result.returncode != 0:
+        print("  ⚠ Runtime reconciliation reported issues")
+        if error:
+            print(f"    {error.splitlines()[-1]}")
+        return False
+    if error:
+        logger.debug("Runtime reconciliation stderr: %s", error)
+    return True
+
+
+def _check_gateway_http_status() -> bool:
+    """Best-effort post-restart status check for the local gateway."""
+    try:
+        import json as _json
+        from urllib.request import urlopen
+
+        with urlopen("http://127.0.0.1:9120/api/status", timeout=1.0) as resp:
+            payload = _json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"  ⚠ Gateway HTTP health check unavailable: {exc}")
+        return False
+
+    state = payload.get("gateway_state") or payload.get("status") or "unknown"
+    telegram = ((payload.get("platforms") or {}).get("telegram") or {}).get("status")
+    detail = f", telegram {telegram}" if telegram else ""
+    print(f"  ✓ Gateway status: {state}{detail}")
+    return True
+
+
 def cmd_update(args):
     """Update Elevate to the latest version.
 
@@ -5875,7 +5982,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         commit_count = int(result.stdout.strip())
 
-        if commit_count == 0:
+        code_updated = commit_count > 0
+
+        if not code_updated:
             _invalidate_update_cache()
             # Restore stash and switch back to original branch if we moved
             if auto_stash_ref is not None:
@@ -5895,72 +6004,72 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     check=False,
                 )
             print("✓ Already up to date!")
-            return
+        else:
+            print(f"→ Found {commit_count} new commit(s)")
 
-        print(f"→ Found {commit_count} new commit(s)")
-
-        print("→ Pulling updates...")
-        update_succeeded = False
-        try:
-            pull_result = subprocess.run(
-                git_cmd + ["pull", "--ff-only", "origin", branch],
-                cwd=git_cwd,
-                capture_output=True,
-                text=True,
-            )
-            if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged (e.g. upstream
-                # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
-                print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
-                )
-                reset_result = subprocess.run(
-                    git_cmd + ["reset", "--hard", f"origin/{branch}"],
+            print("→ Pulling updates...")
+            update_succeeded = False
+            try:
+                pull_result = subprocess.run(
+                    git_cmd + ["pull", "--ff-only", "origin", branch],
                     cwd=git_cwd,
                     capture_output=True,
                     text=True,
                 )
-                if reset_result.returncode != 0:
-                    print(f"✗ Failed to reset to origin/{branch}.")
-                    if reset_result.stderr.strip():
-                        print(f"  {reset_result.stderr.strip()}")
+                if pull_result.returncode != 0:
+                    # ff-only failed — local and remote have diverged (e.g. upstream
+                    # force-pushed or rebase).  Since local changes are already
+                    # stashed, reset to match the remote exactly.
                     print(
-                        "  Try manually: git fetch origin && git reset --hard origin/main"
+                        "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
                     )
-                    sys.exit(1)
-            update_succeeded = True
-        finally:
-            if auto_stash_ref is not None:
-                # Don't attempt stash restore if the code update itself failed —
-                # working tree is in an unknown state.
-                if not update_succeeded:
-                    print(
-                        f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
+                    reset_result = subprocess.run(
+                        git_cmd + ["reset", "--hard", f"origin/{branch}"],
+                        cwd=git_cwd,
+                        capture_output=True,
+                        text=True,
                     )
-                    print(f"  Restore manually with: git stash apply")
-                else:
-                    _restore_stashed_changes(
-                        git_cmd,
-                        git_cwd,
-                        auto_stash_ref,
-                        prompt_user=prompt_for_restore,
-                        input_fn=gw_input_fn,
-                    )
+                    if reset_result.returncode != 0:
+                        print(f"✗ Failed to reset to origin/{branch}.")
+                        if reset_result.stderr.strip():
+                            print(f"  {reset_result.stderr.strip()}")
+                        print(
+                            "  Try manually: git fetch origin && git reset --hard origin/main"
+                        )
+                        sys.exit(1)
+                update_succeeded = True
+            finally:
+                if auto_stash_ref is not None:
+                    # Don't attempt stash restore if the code update itself failed —
+                    # working tree is in an unknown state.
+                    if not update_succeeded:
+                        print(
+                            f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
+                        )
+                        print(f"  Restore manually with: git stash apply")
+                    else:
+                        _restore_stashed_changes(
+                            git_cmd,
+                            git_cwd,
+                            auto_stash_ref,
+                            prompt_user=prompt_for_restore,
+                            input_fn=gw_input_fn,
+                        )
 
         _invalidate_update_cache()
 
         # Clear stale .pyc bytecode cache — prevents ImportError on gateway
         # restart when updated source references names that didn't exist in
         # the old bytecode (e.g. get_elevate_home added to elevate_constants).
-        removed = _clear_bytecode_cache(PROJECT_ROOT)
-        if removed:
-            print(
-                f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
-            )
+        if code_updated:
+            removed = _clear_bytecode_cache(PROJECT_ROOT)
+            if removed:
+                print(
+                    f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
+                )
 
         # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
+        if code_updated and is_fork and branch == "main":
             _sync_with_upstream_if_needed(git_cmd, git_cwd)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
@@ -5969,10 +6078,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print("→ Updating Python dependencies...")
         uv_bin = shutil.which("uv")
         if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-            _install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env
-            )
+            runtime_envs = _update_runtime_venv_dirs()
+            for env_dir in runtime_envs:
+                if not _venv_python_path(env_dir).exists():
+                    subprocess.run(
+                        [uv_bin, "venv", str(env_dir)],
+                        cwd=PROJECT_ROOT,
+                        check=True,
+                        capture_output=True,
+                    )
+                if len(runtime_envs) > 1:
+                    print(f"  → {env_dir.name}")
+                uv_env = {**os.environ, "VIRTUAL_ENV": str(env_dir)}
+                _install_python_dependencies_with_optional_fallback(
+                    [uv_bin, "pip"], env=uv_env
+                )
         else:
             # Use sys.executable to explicitly call the venv's pip module,
             # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
@@ -5998,7 +6118,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _build_web_ui(PROJECT_ROOT / "web")
 
         print()
-        print("✓ Code updated!")
+        if code_updated:
+            print("✓ Code updated!")
+        else:
+            print("✓ Code already current; refreshing runtime state.")
 
         # After git pull, source files on disk are newer than cached Python
         # modules in this process.  Reload elevate_constants so that any lazy
@@ -6147,6 +6270,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 print("Skipped. Run 'elevate config migrate' later to configure.")
         else:
             print("  ✓ Configuration is up to date")
+
+        _run_update_reconciliation()
 
         print()
         print("✓ Update complete!")
@@ -6379,6 +6504,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         launchd_restart,
                         get_launchd_label,
                         get_launchd_plist_path,
+                        refresh_launchd_plist_if_needed,
                     )
 
                     plist_path = get_launchd_plist_path()
@@ -6391,6 +6517,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         )
                         if check.returncode == 0:
                             try:
+                                refresh_launchd_plist_if_needed()
                                 launchd_restart()
                                 restarted_services.append(get_launchd_label())
                             except subprocess.CalledProcessError as e:
@@ -6426,6 +6553,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         print(
                             "    (or: elevate -p <profile> gateway run  for each profile)"
                         )
+                if restarted_services:
+                    _check_gateway_http_status()
 
             if not restarted_services and not killed_pids:
                 # No gateways were running — nothing to do
