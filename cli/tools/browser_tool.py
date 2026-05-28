@@ -281,16 +281,95 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     return raw
 
 
+# Cooldown so a failed visible-browser launch doesn't re-attempt (and re-block
+# on the launch wait) on every single browser call. monotonic seconds.
+_autoprovision_cooldown_until: float = 0.0
+
+
+def _ensure_managed_debug_browser() -> str:
+    """Transparently provide a real, logged-in Chrome over CDP in local mode.
+
+    This is what makes the browser "just work" on a fresh download: the first
+    time the agent browses, we clone the user's Chrome profile into a visible
+    debug window (logged into everything they are) and drive that instead of a
+    blank headless Chromium. Returns the raw managed CDP URL (e.g.
+    ``http://localhost:9222``), or "" to let the caller fall through.
+
+    Side-effecting (clones a profile / launches Chrome on first call), so this
+    is invoked ONLY from the session-creation chokepoint — never from the
+    pure ``_get_cdp_override`` / ``_is_local_mode`` / availability predicates,
+    which must stay launch-free for ``doctor`` and tool-registration paints.
+
+    Strict gates — we never hijack a deliberately-configured backend:
+      * Only in pure local mode (no cloud provider, not Camofox).
+      * Never when ``BROWSER_CDP_URL`` env or a non-managed ``browser.cdp_url``
+        points at the user's own endpoint (``/browser connect``).
+      * Never when the user ran ``elevate browser disable``.
+      * Not on Termux, and not on a headless Linux box (no display).
+
+    Self-healing: when the managed URL is already in config but the window
+    isn't up (Windows/Linux have no login keep-alive), ``ensure_debug_browser``
+    relaunches it. A failed launch trips a short cooldown so we don't block on
+    the launch wait every call.
+    """
+    global _autoprovision_cooldown_until
+    try:
+        if _is_camofox_mode() or _get_cloud_provider() is not None:
+            return ""
+        # Any explicit external endpoint -> not ours to manage.
+        if os.environ.get("BROWSER_CDP_URL", "").strip():
+            return ""
+        if _is_termux_environment():
+            return ""
+        if sys.platform.startswith("linux") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        ):
+            return ""
+        from elevate_cli import debug_browser as _db
+
+        # A configured cdp_url that isn't our managed window is the user's own
+        # endpoint — leave it alone.
+        raw_cfg = ""
+        try:
+            from elevate_cli.config import read_raw_config
+
+            bc = read_raw_config().get("browser", {})
+            if isinstance(bc, dict):
+                raw_cfg = str(bc.get("cdp_url", "") or "").strip()
+        except Exception:
+            raw_cfg = ""
+        if raw_cfg and raw_cfg != _db.CDP_URL:
+            return ""
+        if _db.auto_provision_disabled() or not _db.is_supported():
+            return ""
+
+        import time as _time
+
+        now = _time.monotonic()
+        if now < _autoprovision_cooldown_until:
+            return ""
+        url = _db.ensure_debug_browser()
+        if url:
+            return url
+        _autoprovision_cooldown_until = now + 30.0
+        return ""
+    except Exception:
+        return ""
+
+
 def _get_cdp_override() -> str:
-    """Return a normalized CDP URL override, or empty string.
+    """Return a normalized CDP URL override, or empty string. Pure / no launch.
 
-    Precedence is:
+    Precedence:
     1. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
-    2. ``browser.cdp_url`` in config.yaml (persistent config)
+    2. ``browser.cdp_url`` in config.yaml (persistent config; this is also where
+       the auto-provisioned visible browser records itself once it's up)
 
-    When either is set, we skip both Browserbase and the local headless
-    launcher and connect directly to the supplied Chrome DevTools Protocol
-    endpoint.
+    When either is set we skip Browserbase and the local headless launcher and
+    connect directly to the supplied CDP endpoint. The transparent
+    auto-provision of the visible browser is NOT done here — it happens at
+    session creation (see ``_ensure_managed_debug_browser``) so predicates and
+    availability checks never spawn a browser.
     """
     env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
     if env_override:
@@ -1687,7 +1766,22 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
 
     # Create session outside the lock (network call in cloud mode)
     cdp_override = _get_cdp_override()
-    if cdp_override and not force_local:
+
+    # Download-and-go path: in pure local mode, transparently bring up (or
+    # relaunch) the user's real, logged-in Chrome and drive it over CDP instead
+    # of a blank headless Chromium. This is the only place that may launch a
+    # browser — _ensure_managed_debug_browser no-ops for cloud/Camofox/external
+    # backends, on Termux, on headless Linux, or when the user disabled it, and
+    # self-heals a managed window that died since last session.
+    managed_cdp = ""
+    if not force_local:
+        managed_cdp = _ensure_managed_debug_browser()
+        if managed_cdp:
+            managed_cdp = _resolve_cdp_override(managed_cdp)
+
+    if managed_cdp and not force_local:
+        session_info = _create_cdp_session(task_id, managed_cdp)
+    elif cdp_override and not force_local:
         session_info = _create_cdp_session(task_id, cdp_override)
     elif force_local:
         session_info = _create_local_session(task_id)

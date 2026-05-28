@@ -18,6 +18,11 @@ def _reset_session_state(monkeypatch):
     monkeypatch.setattr(browser_tool, "_cloud_provider_resolved", False)
     monkeypatch.setattr(browser_tool, "_start_browser_cleanup_thread", lambda: None)
     monkeypatch.setattr(browser_tool, "_update_session_activity", lambda t: None)
+    # These tests isolate cloud→local fallback. The managed visible-browser
+    # auto-provision is a separate path (see test_browser_autoprovision.py) and
+    # would otherwise turn the "no provider" case into a CDP session on any dev
+    # box that has Chrome installed — keep it off here.
+    monkeypatch.setattr(browser_tool, "_ensure_managed_debug_browser", lambda: "")
 
 
 class TestCloudProviderRuntimeFallback:

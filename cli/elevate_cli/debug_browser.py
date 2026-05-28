@@ -15,7 +15,19 @@ Components, all owned by this module:
     live profile, and a profile cannot be open in two Chrome instances).
   - ``browser.cdp_url`` set in config so the browser tool uses CDP.
 
-macOS only — Chrome's profile layout and launchd are macOS-specific.
+Cross-platform (macOS, Windows, Linux). Chrome's profile layout and the
+keep-running mechanism differ per OS:
+  - Profile location: ``chrome_support_dir()`` resolves the per-OS path.
+  - Keep-alive across logins: launchd on macOS only. Windows/Linux rely on
+    on-demand launch via ``ensure_debug_browser()`` — the window comes up the
+    first time the agent needs it each session, which is enough for the
+    "download and it just works" path.
+
+Cookie carryover: the cloned profile keeps its encrypted Cookies DB plus
+``Local State`` (which holds the encryption key, OS-keystore-wrapped). Because
+the debug Chrome runs as the SAME OS user on the SAME machine, the keystore
+(Keychain on macOS, DPAPI on Windows, libsecret/kwallet or plaintext on Linux)
+decrypts the cloned cookies — so the agent is logged in everywhere the user is.
 """
 
 from __future__ import annotations
@@ -51,31 +63,100 @@ _PROFILE_EXCLUDES = [
 ]
 
 
-def is_supported() -> bool:
-    """The visible debug browser is macOS-only."""
+def _is_mac() -> bool:
     return sys.platform == "darwin"
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
+def is_supported() -> bool:
+    """The visible debug browser works wherever we can find Chrome.
+
+    macOS / Windows / Linux. The gate is "is Chrome installed", not OS —
+    profile cloning + CDP launch are portable; only the optional keep-alive
+    LaunchAgent is macOS-specific (and on-demand launch covers the rest).
+    """
+    if not (_is_mac() or _is_windows() or _is_linux()):
+        return False
+    return chrome_binary() is not None
+
+
+# Per-OS candidate locations for a Chromium-family binary. Chrome preferred,
+# then Chromium/Brave/Edge as fallbacks (all Chromium, all speak CDP).
+def _windows_chrome_candidates() -> list[Path]:
+    out: list[Path] = []
+    for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if not base:
+            continue
+        out += [
+            Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(base) / "Chromium" / "Application" / "chrome.exe",
+            Path(base) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+            Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        ]
+    return out
 
 
 def chrome_binary() -> Path | None:
     """Path to the Chrome executable, or None if Chrome is not installed."""
-    candidate = Path(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    )
-    if candidate.exists():
-        return candidate
-    found = shutil.which("google-chrome") or shutil.which("Google Chrome")
-    return Path(found) if found else None
+    if _is_mac():
+        for app in (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ):
+            if Path(app).exists():
+                return Path(app)
+    elif _is_windows():
+        for cand in _windows_chrome_candidates():
+            if cand.exists():
+                return cand
+    elif _is_linux():
+        for cand in (
+            "/opt/google/chrome/chrome",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/brave-browser",
+            "/usr/bin/microsoft-edge",
+        ):
+            if Path(cand).exists():
+                return Path(cand)
+    for name in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+        "brave-browser",
+        "microsoft-edge",
+    ):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
 
 
 def chrome_support_dir() -> Path:
-    """Chrome's Application Support directory (where profiles live)."""
-    return (
-        Path.home()
-        / "Library"
-        / "Application Support"
-        / "Google"
-        / "Chrome"
-    )
+    """Chrome's user-data directory (where profiles + Local State live)."""
+    if _is_mac():
+        return Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+    if _is_windows():
+        base = os.environ.get("LOCALAPPDATA") or str(
+            Path.home() / "AppData" / "Local"
+        )
+        return Path(base) / "Google" / "Chrome" / "User Data"
+    # Linux
+    return Path.home() / ".config" / "google-chrome"
 
 
 def debug_profile_dir() -> Path:
@@ -126,13 +207,45 @@ def cdp_is_up() -> bool:
         return False
 
 
+def _copy_profile_tree(src: Path, dst: Path) -> None:
+    """Portable recursive copy of a Chrome profile, skipping cache dirs.
+
+    Replaces the macOS-only ``rsync`` shell-out so the clone works on Windows
+    and Linux too. ``_PROFILE_EXCLUDES`` are matched as path prefixes relative
+    to ``src`` (same dirs rsync was excluding). Per-file errors are tolerated —
+    a locked cache file must not abort the whole clone.
+    """
+    excludes = tuple(e.rstrip("/").replace("/", os.sep) for e in _PROFILE_EXCLUDES)
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        rel = "" if rel == "." else rel
+        # Prune excluded subtrees in-place so os.walk doesn't descend them.
+        dirs[:] = [
+            d
+            for d in dirs
+            if not any(
+                (os.path.join(rel, d) if rel else d).startswith(ex) for ex in excludes
+            )
+        ]
+        target_root = dst / rel if rel else dst
+        target_root.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            try:
+                shutil.copy2(os.path.join(root, f), target_root / f)
+            except (OSError, shutil.Error):
+                # Locked/transient file (Cookies-journal, lock, etc.) — skip.
+                pass
+
+
 def clone_profile(profile_dir_name: str | None = None) -> Path:
     """Clone the user's active Chrome profile into the debug Chrome profile.
 
-    rsync ``<support>/<profile>`` -> ``<elevate_home>/chrome-debug/Default``,
-    excluding caches. macOS keeps the cookie-encryption key in the login
-    Keychain ("Chrome Safe Storage"), shared across profiles for the same
-    Chrome.app — so the cloned cookies decrypt fine in the debug Chrome.
+    Copies ``<support>/<profile>`` -> ``<elevate_home>/chrome-debug/Default``
+    and ``<support>/Local State`` -> ``<elevate_home>/chrome-debug/Local State``
+    (the latter holds the OS-keystore-wrapped cookie key), excluding caches.
+    Because the debug Chrome runs as the same OS user on the same machine, the
+    keystore decrypts the cloned cookies — so logins carry over on macOS
+    (Keychain), Windows (DPAPI) and Linux (libsecret/kwallet/plaintext).
     """
     profile_dir_name = profile_dir_name or detect_active_profile()
     src = chrome_support_dir() / profile_dir_name
@@ -140,17 +253,25 @@ def clone_profile(profile_dir_name: str | None = None) -> Path:
         raise FileNotFoundError(f"Chrome profile not found: {src}")
 
     dst = debug_profile_dir() / "Default"
-    dst.mkdir(parents=True, exist_ok=True)
 
     # Stop the debug Chrome so its profile dir is not being written mid-copy.
     stop_chrome()
     time.sleep(1.5)
 
-    cmd = ["rsync", "-a", "--delete"]
-    for exc in _PROFILE_EXCLUDES:
-        cmd += ["--exclude", exc]
-    cmd += [f"{src}/", f"{dst}/"]
-    subprocess.run(cmd, check=True, timeout=300)
+    # Fresh clone each time — drop the old copy so deletes propagate.
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    dst.mkdir(parents=True, exist_ok=True)
+    _copy_profile_tree(src, dst)
+
+    # Local State carries the encrypted cookie key + profile metadata. Without
+    # it the cloned Cookies DB cannot be decrypted.
+    local_state = chrome_support_dir() / "Local State"
+    if local_state.is_file():
+        try:
+            shutil.copy2(local_state, debug_profile_dir() / "Local State")
+        except (OSError, shutil.Error):
+            pass
 
     # Singleton lock files belong to the source instance — never carry over.
     for lock in debug_profile_dir().glob("Singleton*"):
@@ -163,6 +284,21 @@ def clone_profile(profile_dir_name: str | None = None) -> Path:
 
 def stop_chrome() -> None:
     """Kill any Chrome started by this module (matched by the debug port)."""
+    if _is_windows():
+        # No pkill on Windows. WMIC matches the debug-port flag in the command
+        # line so we only kill the debug instance, not the user's real Chrome.
+        subprocess.run(
+            [
+                "wmic",
+                "process",
+                "where",
+                f"CommandLine like '%remote-debugging-port={CDP_PORT}%'",
+                "delete",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        return
     subprocess.run(
         ["pkill", "-f", f"remote-debugging-port={CDP_PORT}"],
         check=False,
@@ -252,7 +388,15 @@ def generate_plist() -> bytes:
 
 
 def install_launch_agent() -> None:
-    """Write and bootstrap the debug-Chrome LaunchAgent."""
+    """Write and bootstrap the debug-Chrome LaunchAgent (macOS only).
+
+    On Windows/Linux this is a no-op: there's no launchd, and the on-demand
+    launch in ``ensure_debug_browser()`` brings the window up the first time
+    the agent needs it each session, which is enough for the download-and-go
+    path. (A future pass can add a Task Scheduler / systemd-user unit.)
+    """
+    if not _is_mac():
+        return
     path = launch_agent_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(generate_plist())
@@ -272,6 +416,8 @@ def install_launch_agent() -> None:
 
 
 def uninstall_launch_agent() -> None:
+    if not _is_mac():
+        return
     uid = os.getuid()
     subprocess.run(
         ["launchctl", "bootout", f"gui/{uid}/{LAUNCH_AGENT_LABEL}"],
@@ -329,16 +475,17 @@ def ensure_debug_browser() -> str | None:
     visible, logged-in Chrome — no manual ``elevate browser setup`` step, no
     stalling while the agent figures out it has no profile.
 
-    - Not macOS / no Chrome / user disabled it -> None (caller falls back to
-      the headless browser).
+    - No Chrome / unsupported OS / user disabled it -> None (caller falls back
+      to the headless browser).
     - CDP already up -> CDP_URL.
     - Debug profile already cloned -> launch the window, return CDP_URL.
     - No debug profile -> clone the user's Chrome profile, install the
-      LaunchAgent, wire config, launch, return CDP_URL.
+      keep-alive (macOS), wire config, launch, return CDP_URL.
 
     Any failure -> None, so the browser tool degrades to headless instead of
-    breaking. The one-time rsync clone on first use is unavoidable but only
-    happens once; the LaunchAgent keeps the window up afterwards.
+    breaking. The one-time profile clone on first use is unavoidable but only
+    happens once; on macOS the LaunchAgent keeps the window up afterwards, and
+    on Windows/Linux this same path re-launches it on demand next session.
     """
     try:
         if not is_supported() or chrome_binary() is None:
@@ -363,12 +510,10 @@ def setup() -> tuple[bool, str]:
 
     Returns (ok, message).
     """
-    if not is_supported():
-        return False, "Visible debug browser is only supported on macOS."
     if chrome_binary() is None:
         return False, (
-            "Google Chrome not found. Install Chrome, then re-run "
-            "'elevate browser setup'."
+            "Chrome not found. Install Google Chrome (or a Chromium-family "
+            "browser), then re-run 'elevate browser setup'."
         )
 
     profile = detect_active_profile()
