@@ -80,6 +80,48 @@ prompt_yes_no() {
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
+verify_dashboard_runtime_imports() {
+    local python_bin="$1"
+    "$python_bin" - <<'PY'
+import importlib
+import sys
+
+required_modules = ("fastapi", "uvicorn", "multipart", "elevate_cli.web_server")
+missing = []
+for module in required_modules:
+    try:
+        importlib.import_module(module)
+    except Exception as exc:
+        missing.append(f"{module}: {exc}")
+
+if missing:
+    print("\n".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+ensure_dashboard_runtime_dependencies() {
+    if verify_dashboard_runtime_imports "$SETUP_PYTHON" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Dashboard runtime dependencies verified"
+        return 0
+    fi
+
+    echo -e "${YELLOW}⚠${NC} Dashboard runtime dependencies are missing; installing web extra..."
+    $UV_CMD pip install --python "$SETUP_PYTHON" -e ".[web]" || {
+        echo -e "${RED}✗${NC} Dashboard runtime dependency install failed"
+        echo "    Re-run: cd $SCRIPT_DIR && uv pip install --python \"$SETUP_PYTHON\" -e '.[web]'"
+        exit 1
+    }
+
+    verify_dashboard_runtime_imports "$SETUP_PYTHON" || {
+        echo -e "${RED}✗${NC} Dashboard runtime is still missing required Python modules"
+        echo "    Re-run: cd $SCRIPT_DIR && uv pip install --python \"$SETUP_PYTHON\" -e '.[web]'"
+        exit 1
+    }
+
+    echo -e "${GREEN}✓${NC} Dashboard runtime dependencies verified"
+}
+
 get_elevate_home_dir() {
     echo "${ELEVATE_HOME:-$HOME/.elevate}"
 }
@@ -651,6 +693,7 @@ else
         echo -e "${YELLOW}⚠${NC} Extra install failed, falling back to base package..."
         $UV_CMD pip install --python "$SETUP_PYTHON" -e "."
     }
+    ensure_dashboard_runtime_dependencies
     echo -e "${GREEN}✓${NC} Dependencies installed"
 fi
 

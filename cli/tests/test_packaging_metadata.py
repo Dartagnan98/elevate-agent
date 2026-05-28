@@ -24,6 +24,23 @@ def test_web_extra_contains_dashboard_upload_dependencies():
     assert any(dep.startswith("python-multipart") for dep in web_extra)
 
 
+def test_download_installers_repair_dashboard_runtime_dependencies():
+    install_sh = (REPO_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    install_ps1 = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    setup_sh = (REPO_ROOT / "setup-elevate.sh").read_text(encoding="utf-8")
+
+    for script in (install_sh, setup_sh):
+        assert "ensure_dashboard_runtime_dependencies" in script
+        assert "verify_dashboard_runtime_imports" in script
+        assert '".[web]"' in script
+        assert "elevate_cli.web_server" in script
+
+    assert "Ensure-DashboardRuntimeDependencies" in install_ps1
+    assert "Test-DashboardRuntimeImports" in install_ps1
+    assert 'pip install -e ".[web]"' in install_ps1
+    assert "elevate_cli.web_server" in install_ps1
+
+
 def test_manifest_includes_bundled_skills():
     manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
 

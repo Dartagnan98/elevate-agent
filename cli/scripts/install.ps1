@@ -66,6 +66,49 @@ function Write-Err {
     Write-Host "✗ $Message" -ForegroundColor Red
 }
 
+function Get-DashboardRuntimePython {
+    if ($NoVenv) {
+        return "python"
+    }
+    return "$InstallDir\venv\Scripts\python.exe"
+}
+
+function Test-DashboardRuntimeImports {
+    param([string]$PythonExe)
+
+    try {
+        & $PythonExe -c "import importlib; [importlib.import_module(module) for module in ('fastapi', 'uvicorn', 'multipart', 'elevate_cli.web_server')]" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Ensure-DashboardRuntimeDependencies {
+    $pythonExe = Get-DashboardRuntimePython
+
+    if (Test-DashboardRuntimeImports $pythonExe) {
+        Write-Success "Dashboard runtime dependencies verified"
+        return
+    }
+
+    Write-Warn "Dashboard runtime dependencies are missing; installing web extra..."
+    & $UvCmd pip install -e ".[web]" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Dashboard runtime dependency install failed"
+        Write-Info "Re-run: cd $InstallDir\cli; uv pip install -e '.[web]'"
+        throw "Dashboard runtime dependency install failed"
+    }
+
+    if (-not (Test-DashboardRuntimeImports $pythonExe)) {
+        Write-Err "Dashboard runtime is still missing required Python modules"
+        Write-Info "Re-run: cd $InstallDir\cli; uv pip install -e '.[web]'"
+        throw "Dashboard runtime dependency verification failed"
+    }
+
+    Write-Success "Dashboard runtime dependencies verified"
+}
+
 # ============================================================================
 # Dependency checks
 # ============================================================================
@@ -553,14 +596,18 @@ function Install-Dependencies {
         $env:VIRTUAL_ENV = "$InstallDir\venv"
     }
 
-    # Install main package with all extras
-    try {
-        & $UvCmd pip install -e ".[all]" 2>&1 | Out-Null
-    } catch {
+    # Install main package with all extras; fall back to base when optional extras fail.
+    & $UvCmd pip install -e ".[all]" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Full install (.[all]) failed, trying base install..."
         & $UvCmd pip install -e "." | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Package installation failed"
+        }
     }
 
     Write-Success "Main package installed"
+    Ensure-DashboardRuntimeDependencies
 
     # Install optional submodules
     Write-Info "Installing tinker-atropos (RL training backend)..."

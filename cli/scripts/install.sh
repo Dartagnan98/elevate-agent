@@ -135,6 +135,59 @@ log_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+get_dashboard_runtime_python() {
+    if [ "$USE_VENV" = true ]; then
+        echo "$INSTALL_DIR/.venv/bin/python"
+    else
+        echo "$PYTHON_PATH"
+    fi
+}
+
+verify_dashboard_runtime_imports() {
+    local python_bin="$1"
+    "$python_bin" - <<'PY'
+import importlib
+import sys
+
+required_modules = ("fastapi", "uvicorn", "multipart", "elevate_cli.web_server")
+missing = []
+for module in required_modules:
+    try:
+        importlib.import_module(module)
+    except Exception as exc:
+        missing.append(f"{module}: {exc}")
+
+if missing:
+    print("\n".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+ensure_dashboard_runtime_dependencies() {
+    local python_bin
+    python_bin="$(get_dashboard_runtime_python)"
+
+    if verify_dashboard_runtime_imports "$python_bin" 2>/dev/null; then
+        log_success "Dashboard runtime dependencies verified"
+        return 0
+    fi
+
+    log_warn "Dashboard runtime dependencies are missing; installing web extra..."
+    if ! $UV_CMD pip install -e ".[web]"; then
+        log_error "Dashboard runtime dependency install failed."
+        log_info "Re-run: cd $INSTALL_DIR && uv pip install -e '.[web]'"
+        exit 1
+    fi
+
+    if ! verify_dashboard_runtime_imports "$python_bin"; then
+        log_error "Dashboard runtime is still missing required Python modules."
+        log_info "Re-run: cd $INSTALL_DIR && uv pip install -e '.[web]'"
+        exit 1
+    fi
+
+    log_success "Dashboard runtime dependencies verified"
+}
+
 download_file() {
     local url="$1"
     local output="$2"
@@ -1021,6 +1074,7 @@ install_deps() {
     fi
 
     log_success "Main package installed"
+    ensure_dashboard_runtime_dependencies
 
     # tinker-atropos (RL training) is optional — skip by default.
     # To enable RL tools: git submodule update --init tinker-atropos && uv pip install -e "./tinker-atropos"
