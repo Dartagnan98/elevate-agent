@@ -10,6 +10,7 @@ import {
   revokeLicensesForUser,
   updateUserPasswordHash,
 } from "@/lib/store";
+import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -26,6 +27,14 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+
+  // Throttle token-guessing attempts per IP (tokens are unguessable, but this
+  // is cheap defense-in-depth against churn).
+  const ip = clientIp(req);
+  const limited = await enforceLimits([
+    { key: `reset:ip:${ip}`, max: 20, windowSeconds: 3600 },
+  ]);
+  if (limited) return tooManyRequests(limited.retryAfter);
 
   const token_hash = crypto
     .createHash("sha256")

@@ -7,6 +7,7 @@ import {
   logAdminAction,
 } from "@/lib/store";
 import { mailerEnabled, passwordResetEmail, sendMail } from "@/lib/mailer";
+import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -24,6 +25,15 @@ export async function POST(req: NextRequest) {
   }
 
   const normalized = parsed.data.email.toLowerCase().trim();
+
+  // Throttle before lookup to prevent reset-email bombing / Mailjet abuse.
+  // A 429 leaks nothing about whether the email exists.
+  const limited = await enforceLimits([
+    { key: `forgot:ip:${clientIp(req)}`, max: 10, windowSeconds: 3600 },
+    { key: `forgot:email:${normalized}`, max: 3, windowSeconds: 3600 },
+  ]);
+  if (limited) return tooManyRequests(limited.retryAfter);
+
   const user = await findUserByEmail(normalized);
 
   // Always 200 so an attacker can't probe which emails are registered.

@@ -9,6 +9,7 @@ import {
   logAdminAction,
 } from "@/lib/store";
 import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
+import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -28,6 +29,13 @@ export async function POST(req: NextRequest) {
   }
   const { email, password, device_label } = parsed.data;
   const normalized = email.toLowerCase().trim();
+
+  // Throttle mass/automated account creation per IP.
+  const ip = clientIp(req);
+  const limited = await enforceLimits([
+    { key: `signup:ip:${ip}`, max: 5, windowSeconds: 3600 },
+  ]);
+  if (limited) return tooManyRequests(limited.retryAfter);
 
   const existing = await findUserByEmail(normalized);
   if (existing) {

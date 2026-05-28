@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import { createLoginCode, findUserByEmail, logAdminAction } from "@/lib/store";
 import { loginCodeEmail, mailerEnabled, sendMail } from "@/lib/mailer";
+import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,16 @@ export async function POST(req: NextRequest) {
   }
 
   const normalized = parsed.data.email.toLowerCase().trim();
+
+  // Throttle BEFORE the user lookup so this can't be used to email-bomb a
+  // victim's inbox or run up the Mailjet bill. A 429 here leaks nothing about
+  // whether the email exists (it's volume-based, not account-based).
+  const limited = await enforceLimits([
+    { key: `login-code-req:ip:${clientIp(req)}`, max: 10, windowSeconds: 900 },
+    { key: `login-code-req:email:${normalized}`, max: 3, windowSeconds: 900 },
+  ]);
+  if (limited) return tooManyRequests(limited.retryAfter);
+
   const user = await findUserByEmail(normalized);
 
   // Always 200 so an attacker can't probe which emails are registered.

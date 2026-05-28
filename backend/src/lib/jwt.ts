@@ -1,9 +1,27 @@
 import { SignJWT, jwtVerify } from "jose";
 import crypto from "node:crypto";
 
-const secret = new TextEncoder().encode(
-  process.env.JWT_SECRET || "dev-only-change-me-before-prod",
-);
+const DEV_FALLBACK_SECRET = "dev-only-change-me-before-prod";
+
+function resolveSecret(): string {
+  const fromEnv = process.env.JWT_SECRET;
+  // Fail hard in production: never sign tokens with the publicly-known dev
+  // fallback (anyone could forge admin tokens). Only allow it outside prod.
+  if (process.env.NODE_ENV === "production") {
+    if (!fromEnv || fromEnv === DEV_FALLBACK_SECRET) {
+      throw new Error(
+        "JWT_SECRET is not set (or is the dev fallback) in production. " +
+          "Set a strong, unique JWT_SECRET before starting the server.",
+      );
+    }
+    if (fromEnv.length < 32) {
+      throw new Error("JWT_SECRET must be at least 32 characters in production.");
+    }
+  }
+  return fromEnv || DEV_FALLBACK_SECRET;
+}
+
+const secret = new TextEncoder().encode(resolveSecret());
 
 const ISSUER = "elevate";
 const ACCESS_TTL_SECONDS = 60 * 60;               // 1 hour

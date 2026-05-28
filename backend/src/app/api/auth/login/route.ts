@@ -8,6 +8,7 @@ import {
   findUserByEmail,
 } from "@/lib/store";
 import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
+import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -21,6 +22,14 @@ export async function POST(req: NextRequest) {
   const parsed = Body.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "bad request" }, { status: 400 });
   const { email, password, device_label } = parsed.data;
+
+  // Throttle online brute-force / credential stuffing.
+  const ip = clientIp(req);
+  const limited = await enforceLimits([
+    { key: `login:ip:${ip}`, max: 10, windowSeconds: 900 },
+    { key: `login:email:${email.toLowerCase().trim()}`, max: 5, windowSeconds: 900 },
+  ]);
+  if (limited) return tooManyRequests(limited.retryAfter);
 
   const user = await findUserByEmail(email);
 

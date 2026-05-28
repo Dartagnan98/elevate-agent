@@ -11,6 +11,7 @@ import {
   incrementLoginCodeAttempts,
 } from "@/lib/store";
 import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
+import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -31,7 +32,17 @@ export async function POST(req: NextRequest) {
   }
   const { email, code, device_label } = parsed.data;
 
-  const user = await findUserByEmail(email.toLowerCase().trim());
+  // Throttle verification attempts per IP+email on top of the per-code cap,
+  // so an attacker can't churn many codes/guesses across the endpoint.
+  const ip = clientIp(req);
+  const normalized = email.toLowerCase().trim();
+  const limited = await enforceLimits([
+    { key: `login-code-verify:ip:${ip}`, max: 20, windowSeconds: 900 },
+    { key: `login-code-verify:email:${normalized}`, max: 10, windowSeconds: 900 },
+  ]);
+  if (limited) return tooManyRequests(limited.retryAfter);
+
+  const user = await findUserByEmail(normalized);
   // Uniform 401 so neither unknown emails nor missing codes are distinguishable.
   if (!user) {
     return NextResponse.json({ error: "invalid code" }, { status: 401 });
