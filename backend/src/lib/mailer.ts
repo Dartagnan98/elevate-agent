@@ -129,6 +129,26 @@ export function passwordResetEmail(opts: {
   return { subject, html };
 }
 
+export function loginCodeEmail(opts: {
+  code: string;
+  expiresInMinutes: number;
+}): { subject: string; html: string } {
+  const minutes = opts.expiresInMinutes;
+  const subject = `Your Elevate login code: ${opts.code}`;
+  const html = baseTemplate({
+    preheader: "Your one-time login code.",
+    body: `
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#1a1b1a;">Use this code to sign in to Elevate:</p>
+      <p style="margin:0 0 24px;">
+        <span style="display:inline-block;background:#f3f1ee;color:#1a1b1a;font-weight:700;font-size:30px;letter-spacing:8px;padding:14px 24px;border-radius:8px;font-family:monospace;">${escapeHtml(opts.code)}</span>
+      </p>
+      <p style="margin:0 0 8px;font-size:13px;color:#5a5c5a;">Code expires in ${minutes} minutes.</p>
+      <p style="margin:0;font-size:13px;color:#5a5c5a;">If you didn't try to sign in, you can ignore this email.</p>
+    `,
+  });
+  return { subject, html };
+}
+
 export function inviteEmail(opts: {
   inviteUrl: string;
   orgName: string;

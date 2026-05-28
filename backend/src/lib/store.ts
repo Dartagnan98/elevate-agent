@@ -973,3 +973,81 @@ export async function consumePasswordReset(id: string): Promise<void> {
     .eq("id", id);
   if (error) throw error;
 }
+
+// --- Passwordless email login codes ---
+
+export type LoginCode = {
+  id: string;
+  user_id: string;
+  code_hash: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  attempts: number;
+  ip_addr: string | null;
+  user_agent: string | null;
+};
+
+export async function createLoginCode(input: {
+  user_id: string;
+  code_hash: string;
+  expires_at: string;
+  ip_addr?: string | null;
+  user_agent?: string | null;
+}): Promise<LoginCode> {
+  const { data, error } = await supabase()
+    .from("login_codes")
+    .insert({
+      user_id: input.user_id,
+      code_hash: input.code_hash,
+      expires_at: input.expires_at,
+      ip_addr: input.ip_addr ?? null,
+      user_agent: input.user_agent ?? null,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data as LoginCode;
+}
+
+// Most recent un-consumed, un-expired code for a user, or null.
+export async function findActiveLoginCode(
+  userId: string,
+): Promise<LoginCode | null> {
+  const { data, error } = await supabase()
+    .from("login_codes")
+    .select("*")
+    .eq("user_id", userId)
+    .is("consumed_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as LoginCode) ?? null;
+}
+
+export async function incrementLoginCodeAttempts(id: string): Promise<number> {
+  // Read-modify-write: tiny per-code counter, no contention in practice.
+  const { data, error } = await supabase()
+    .from("login_codes")
+    .select("attempts")
+    .eq("id", id)
+    .single();
+  if (error) throw error;
+  const next = ((data as { attempts: number }).attempts ?? 0) + 1;
+  const { error: upErr } = await supabase()
+    .from("login_codes")
+    .update({ attempts: next })
+    .eq("id", id);
+  if (upErr) throw upErr;
+  return next;
+}
+
+export async function consumeLoginCode(id: string): Promise<void> {
+  const { error } = await supabase()
+    .from("login_codes")
+    .update({ consumed_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) throw error;
+}
