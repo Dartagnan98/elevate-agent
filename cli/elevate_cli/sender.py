@@ -35,6 +35,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from elevate_cli import outreach_db
@@ -243,7 +244,7 @@ def _send_agent_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     tool (messaging toolset). Returns (provider_message_id, info).
     """
     channel = row.get("channel") or ""
-    elevate_bin = shutil.which("elevate") or "/Users/dartagnanpatricio/.local/bin/elevate"
+    elevate_bin = shutil.which("elevate") or str(Path.home() / ".local" / "bin" / "elevate")
     if not elevate_bin or not os.path.exists(elevate_bin):
         raise SenderPermanentError("haiku-dispatch: elevate CLI not on PATH")
 

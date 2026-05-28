@@ -1726,7 +1726,7 @@ class HolographicMemoryProvider(MemoryProvider):
         """Import Plaud transcript JSONL into chunk-level local RAG."""
         if not self._store:
             return {"imported": 0, "chunks": 0}
-        archive_path = Path(path or "/Users/dartagnanpatricio/claudeclaw/artifacts/plaud-memory/plaud-transcripts-chronological.jsonl").expanduser()
+        archive_path = Path(path or "~/.elevate/imports/plaud-transcripts-chronological.jsonl").expanduser()
         if not archive_path.exists():
             return {"imported": 0, "chunks": 0, "error": f"not found: {archive_path}"}
         imported = 0

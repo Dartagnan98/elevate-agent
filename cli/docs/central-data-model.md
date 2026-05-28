@@ -1,7 +1,7 @@
 # Central Data Model — Design Doc
 
 **Status:** design only, no code written
-**Owner:** Dartagnan
+**Owner:** Product
 **Date:** 2026-05-05
 **Scope:** unify per-source JSONL inboxes + scattered SQLite DBs into one
 contact-centric central store, callable from both UI and AI cron.
@@ -685,7 +685,7 @@ survives.
 ```
 
 Single-realtor install — flat, no `agents/<slug>/` nesting. Nesting only on
-Dartagnan's dev box where multiple realtor sandboxes coexist.
+developer workstation where multiple realtor sandboxes coexist.
 
 `ELEVATE_HOME` env var overrides `~/.elevate/`. All paths derived from one
 `paths.py` module so nothing hardcodes a slug or absolute path.
@@ -737,7 +737,7 @@ follow-up release.
 
 - Cross-device sync/write-through — gated behind `--cloud-backup`
   config flag, ship later
-- Multi-agent isolation (`agents/<slug>/`) — Dartagnan's dev box uses
+- Multi-agent isolation (`agents/<slug>/`) — developer workstation uses
   `ELEVATE_HOME` to switch between the pilot realtor's and a future realtor's
   sandbox; production CLI is single-tenant
 - Manual merge UI — start with auto-merge only, ship merge UI when we

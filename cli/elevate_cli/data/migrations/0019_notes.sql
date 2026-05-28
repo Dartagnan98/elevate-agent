@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS notes (
     body                TEXT NOT NULL,
     author_kind         TEXT NOT NULL
                             CHECK (author_kind IN ('ai','operator','system')),
-    author_name         TEXT NOT NULL,         -- "review_contact" | "Dartagnan" | etc.
+    author_name         TEXT NOT NULL,         -- "review_contact" | "agent" | etc.
     source_event_id     TEXT,                  -- events.id if note was triggered by an event
     pinned              INTEGER NOT NULL DEFAULT 0
                             CHECK (pinned IN (0,1)),

@@ -50,12 +50,12 @@ def _propose(name="t", lane="new-outreach", body="hi", channel="any"):
 
 def _approve(template_id):
     with connect() as conn:
-        return approve_template(conn, template_id, actor="human:dartagnan")
+        return approve_template(conn, template_id, actor="human:test-admin")
 
 
 def _retire(template_id):
     with connect() as conn:
-        return retire_template(conn, template_id, actor="human:dartagnan")
+        return retire_template(conn, template_id, actor="human:test-admin")
 
 
 # ─── GET /api/admin/templates ──────────────────────────────────────────

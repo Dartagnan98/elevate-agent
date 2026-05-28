@@ -61,7 +61,7 @@ PACK_SPECS: tuple[PackSpec, ...] = (
         pack_id=ENTITLEMENT_CORE,
         label="Basic",
         entitlement=ENTITLEMENT_CORE,
-        description="Core Elevate runtime, local SQLite data, memory, model provider, messaging gateway, browser-use tools, and updates.",
+        description="Core Elevate runtime, local data stores, memory, model provider, messaging gateway, browser-use tools, and updates.",
         items=(
             PackItemSpec("user_profile", "profile", "User profile", "Your name, default assistant name, company, and timezone.", sort_order=10),
             PackItemSpec("model_provider", "model", "Model provider", "Default model/provider for chat, skills, and local agent runs.", ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"), sort_order=20),
@@ -69,7 +69,7 @@ PACK_SPECS: tuple[PackSpec, ...] = (
             PackItemSpec("messaging_gateway", "communication", "Messaging gateway", "Main Telegram or messaging lane for the Executive Assistant.", ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"), required=False, sort_order=40),
             PackItemSpec("browser_use_tools", "tools", "Browser-use tools", "Browser-use provider and notes for controlled web automation.", ("BROWSER_USE_PROVIDER", "BROWSER_USE_API_KEY"), required=False, sort_order=50),
             PackItemSpec("account_connectors", "accounts", "Account connectors", "Composio and local connectors for Gmail, Calendar, Drive, Docs, and browser workflows.", ("COMPOSIO_API_KEY", "GMAIL_CLIENT_ID", "GOOGLE_DRIVE_ACCOUNT"), required=False, sort_order=60),
-            PackItemSpec("local_databases", "storage", "Local SQLite databases", "State, operational, and memory SQLite stores created by the installer.", sort_order=70),
+            PackItemSpec("local_databases", "storage", "Local databases", "State DB plus embedded Postgres operational storage created by the installer.", sort_order=70),
             PackItemSpec("update_channel", "updates", "Update channel", "How this install receives release checks and one-command updates.", ("ELEVATE_UPDATE_CHANNEL", "ELEVATE_BACKEND_URL"), required=False, sort_order=80),
         ),
     ),
@@ -86,12 +86,12 @@ PACK_SPECS: tuple[PackSpec, ...] = (
             PackItemSpec("calendar", "accounts", "Calendar", "Appointments, showing dates, subject removal, completion, possession.", ("GOOGLE_CALENDAR_ACCOUNT", "OUTLOOK_CALENDAR_ACCOUNT"), sort_order=50),
             PackItemSpec("drive", "accounts", "Cloud storage", "Drive, Dropbox, OneDrive, or SharePoint transaction folders.", ("GOOGLE_DRIVE_ACCOUNT", "DROPBOX_ACCESS_TOKEN", "ONEDRIVE_ACCOUNT"), sort_order=60),
             PackItemSpec("crm", "accounts", "CRM / lead source", "Stable contact IDs, phones, emails, and pipeline stages.", ("CRM_API_KEY", "LOFTY_API_KEY", "FOLLOWUPBOSS_API_KEY", "SIERRA_API_KEY"), sort_order=70),
-            PackItemSpec("mls", "accounts", "MLS / board portal", "Matrix, Xposure, Paragon, Pillar9, or local MLS access.", ("MLS_LOGIN_URL", "MLS_USERNAME", "MATRIX_USERNAME", "XPOSURE_USERNAME"), sort_order=80),
+            PackItemSpec("mls", "accounts", "MLS / board portal", "Matrix, Xposure, Paragon, Pillar9, or local MLS access.", ("MLS_LOGIN_URL", "MLS_USERNAME", "MLS_PASSWORD", "MATRIX_USERNAME", "XPOSURE_USERNAME"), sort_order=80),
             PackItemSpec("forms_provider", "providers", "Forms provider", "WEBForms, TransactionDesk, brokerage forms, or local form library.", ("FORMS_LOGIN_URL", "WEBFORMS_USERNAME"), sort_order=90),
             PackItemSpec("signing_provider", "providers", "Signing provider", "DigiSign, DocuSign, Authentisign, or another e-sign provider.", ("SIGNING_LOGIN_URL", "DIGISIGN_USERNAME", "DOCUSIGN_ACCOUNT_ID"), sort_order=100),
-            PackItemSpec("compliance_platform", "providers", "Compliance platform", "SkySlope, Lone Wolf, dotloop, or brokerage admin portal.", ("COMPLIANCE_LOGIN_URL", "SKYSLOPE_USERNAME", "SKYSLOPE_API_KEY"), sort_order=110),
-            PackItemSpec("showing_platform", "providers", "Showing feedback", "ShowingTime, BrokerBay, Touchbase, or manual showing feedback.", ("SHOWING_LOGIN_URL", "SHOWINGTIME_USERNAME", "BROKERBAY_API_KEY"), sort_order=120),
-            PackItemSpec("browser_workflows", "providers", "Browser-use portal playbooks", "Login URLs, credential refs, and run notes for MLS, compliance, and showing portals.", ("BROWSER_USE_PROVIDER",), sort_order=125),
+            PackItemSpec("compliance_platform", "providers", "Compliance platform", "SkySlope, Lone Wolf, dotloop, or brokerage admin portal.", ("COMPLIANCE_LOGIN_URL", "COMPLIANCE_USERNAME", "COMPLIANCE_PASSWORD", "SKYSLOPE_LOGIN_URL", "SKYSLOPE_USERNAME", "SKYSLOPE_PASSWORD", "SKYSLOPE_PASS", "SKYSLOPE_API_KEY"), sort_order=110),
+            PackItemSpec("showing_platform", "providers", "Showing feedback", "ShowingTime, BrokerBay, Touchbase, or manual showing feedback.", ("SHOWING_LOGIN_URL", "SHOWING_USERNAME", "SHOWING_PASSWORD", "SHOWINGTIME_USERNAME", "SHOWINGTIME_PASSWORD", "BROKERBAY_API_KEY"), sort_order=120),
+            PackItemSpec("browser_workflows", "providers", "Browser-use portal playbooks", "Login URLs, credential refs, and run notes for MLS, compliance, and showing portals.", ("BROWSER_USE_PROVIDER", "MLS_LOGIN_URL", "MLS_USERNAME", "MLS_PASSWORD", "SKYSLOPE_LOGIN_URL", "SKYSLOPE_USERNAME", "SKYSLOPE_PASSWORD"), sort_order=125),
             PackItemSpec("photo_processing", "providers", "Photo processing", "Drive/Dropbox source plus Higgsfield, Nano Banana, or manual photo cleanup workflow.", ("PHOTO_SOURCE_ROOT", "HIGGSFIELD_API_KEY", "NANO_BANANA_API_KEY"), sort_order=127),
             PackItemSpec("regional_memory", "regional", "Regional admin memory", "Province docs, deposit rules, local property sources, and MLS quirks.", sort_order=140),
         ),
@@ -105,7 +105,7 @@ PACK_SPECS: tuple[PackSpec, ...] = (
             PackItemSpec("crm_source", "accounts", "CRM / lead database", "Where leads, profiles, conversations, and pipeline status come from.", ("CRM_API_KEY", "LOFTY_API_KEY", "FOLLOWUPBOSS_API_KEY", "SIERRA_API_KEY"), sort_order=10),
             PackItemSpec("message_sources", "accounts", "Message sources", "Email, SMS, Instagram, WhatsApp, or CRM messages that populate conversations.", ("GMAIL_CLIENT_ID", "TWILIO_ACCOUNT_SID", "META_ACCESS_TOKEN", "WHATSAPP_TOKEN"), sort_order=20),
             PackItemSpec("identity_verifiers", "matching", "Identity verifiers", "Phone and email rules used to match conversations to profiles safely.", sort_order=30),
-            PackItemSpec("buyer_search_sources", "buyer-search", "Buyer search sources", "Saved searches, MLS criteria, and local search providers.", ("MLS_LOGIN_URL", "MLS_USERNAME"), sort_order=40),
+            PackItemSpec("buyer_search_sources", "buyer-search", "Buyer search sources", "Saved searches, MLS criteria, and local search providers.", ("MLS_LOGIN_URL", "MLS_USERNAME", "MLS_PASSWORD"), sort_order=40),
             PackItemSpec("followup_rules", "automation", "Follow-up rules", "When to draft, skip, revive, or ask for human approval.", sort_order=50),
             PackItemSpec("admin_handoff", "handoff", "Admin handoff", "How qualified buyers/sellers are pushed to Admin workflows.", sort_order=60),
         ),
@@ -130,7 +130,7 @@ PACK_SPECS: tuple[PackSpec, ...] = (
         entitlement=ENTITLEMENT_REAL_ESTATE_CMA,
         description="CMA pricing workflow, MLS comparable research, report generation, and approval before client delivery.",
         items=(
-            PackItemSpec("mls_cma_source", "accounts", "MLS/CMA source", "MLS portal, Cloud CMA, or local comp source used for valuation.", ("MLS_LOGIN_URL", "MLS_USERNAME", "CLOUD_CMA_API_KEY"), sort_order=10),
+            PackItemSpec("mls_cma_source", "accounts", "MLS/CMA source", "MLS portal, Cloud CMA, or local comp source used for valuation.", ("MLS_LOGIN_URL", "MLS_USERNAME", "MLS_PASSWORD", "CLOUD_CMA_API_KEY"), sort_order=10),
             PackItemSpec("pricing_rules", "analysis", "Pricing rules", "Agent pricing preferences, adjustment notes, and local comp assumptions.", sort_order=20),
             PackItemSpec("report_template", "documents", "Report template", "CMA report style, disclaimers, agent branding, and export destination.", ("CMA_TEMPLATE_PATH", "CMA_OUTPUT_ROOT"), sort_order=30),
             PackItemSpec("approval_lane", "communication", "CMA approval lane", "Where the draft CMA goes before client delivery.", ("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL",), sort_order=40),
@@ -337,14 +337,17 @@ def _core_items_for_snapshot() -> dict[str, dict[str, Any]]:
         configured("account_connectors", "Configured connector env", value={"env": connector_env})
 
     state_db = home / "state.db"
-    operational_db = home / "data" / "operational.db"
-    if state_db.exists() and operational_db.exists():
+    pg_data = home / "pgdata"
+    legacy_operational_db = home / "data" / "operational.db"
+    if state_db.exists() and pg_data.exists():
         configured(
             "local_databases",
-            "SQLite",
+            "Local + embedded Postgres",
             value={
                 "stateDb": str(state_db),
-                "operationalDb": str(operational_db),
+                "pgDataDir": str(pg_data),
+                "legacyOperationalDb": str(legacy_operational_db),
+                "legacyOperationalDbExists": legacy_operational_db.exists(),
                 "memoryDb": str(memory_db),
                 "memoryDbExists": memory_db.exists(),
             },
@@ -548,7 +551,7 @@ def pack_onboarding_memory_summary(snapshot: Mapping[str, Any]) -> str:
     lines = [
         "# Pack onboarding memory",
         "",
-        "This file is generated from SQLite pack onboarding. SQLite operational.db remains the source of truth; use this as durable recall so agents do not ask for the same pack setup details again.",
+        "This file is generated from pack onboarding. Embedded Postgres is the operational source of truth; use this as durable recall so agents do not ask for the same pack setup details again.",
         "",
     ]
     packs = snapshot.get("packs") if isinstance(snapshot.get("packs"), list) else []

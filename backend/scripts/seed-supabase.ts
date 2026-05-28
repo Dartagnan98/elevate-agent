@@ -1,11 +1,11 @@
 /*
- * Seeds the elevate-hq Supabase project with the two real users.
+ * Seeds a Supabase project with optional demo users and bundled skills.
  *
  * Usage:
  *   SUPABASE_URL=... \
  *   SUPABASE_SERVICE_ROLE_KEY=... \
- *   OWNER_EMAIL=dartagnan@ctrlstrategies.com OWNER_PASSWORD=... \
- *   SKYLEIGH_EMAIL=skyleigh@... SKYLEIGH_PASSWORD=... \
+ *   OWNER_EMAIL=owner@example.com OWNER_PASSWORD=... \
+ *   AGENT_EMAIL=agent@example.com AGENT_PASSWORD=... \
  *   npx tsx scripts/seed-supabase.ts
  *
  * Idempotent: re-running upserts by email.
@@ -56,7 +56,7 @@ async function main() {
   if (!skillsOnly) {
     const users: SeedUser[] = [
       {
-        email: env("OWNER_EMAIL", "dartagnan@ctrlstrategies.com"),
+        email: env("OWNER_EMAIL", "owner@example.com"),
         password: env("OWNER_PASSWORD"),
         tier: "builder",
         status: "active",
@@ -70,8 +70,8 @@ async function main() {
         is_developer: true,
       },
       {
-        email: env("SKYLEIGH_EMAIL", "skyleigh.mccallum@exprealty.com"),
-        password: env("SKYLEIGH_PASSWORD"),
+        email: env("AGENT_EMAIL", "agent@example.com"),
+        password: env("AGENT_PASSWORD"),
         tier: "pro",
         status: "active",
         role: "user",

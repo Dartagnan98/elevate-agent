@@ -262,7 +262,7 @@ These are NOT new — bringing them forward so they're not lost:
 5. **Stale `statusText` pill** ("Steer delivered" lingers).
 6. **Steer-rejected UX** — no reason, no retry, no recovery.
 
-## Carry-over user blockers (still pending action by Dartagnan)
+## Carry-over user blockers (still pending product-owner action)
 
 1. **User runs `elevate auth`** to unblock Codex creds for the 3 cron
    jobs.

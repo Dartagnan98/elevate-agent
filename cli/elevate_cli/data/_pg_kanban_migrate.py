@@ -11,7 +11,7 @@ Destinations: ``kanban_tasks``, ``kanban_task_links``,
 ``kanban_task_comments``, ``kanban_task_events``, ``kanban_task_runs``,
 ``kanban_notify_subs`` in ``elevate_operational`` (PG).
 
-On Dartagnan's machine at cutover, the live ``kanban.db`` was an empty
+On early installs at cutover, the live ``kanban.db`` was an empty
 0-byte file (the gateway recreates it on init when missing). The
 migrator still handles populated DBs cleanly — if the file is empty, no
 schema, or zero rows in every source table, the sentinel is set and the

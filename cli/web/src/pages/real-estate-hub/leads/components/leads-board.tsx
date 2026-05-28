@@ -1064,7 +1064,7 @@ function ProfileDrawer({
               </div>
               <div className="lb-drawer-kv">
                 <span className="lb-drawer-kv-label mono">Owner</span>
-                <span className="lb-drawer-kv-val">Skyleigh McCallum</span>
+                <span className="lb-drawer-kv-val">Demo Agent</span>
               </div>
               <div className="lb-drawer-pills">
                 {profile.tags.map(t => (

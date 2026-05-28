@@ -4732,6 +4732,40 @@ def _admin_setup_runtime_env_values() -> Dict[str, str]:
     return env_values
 
 
+def _mirror_admin_setup_portal_env(items: List["_AdminSetupItemBody"]) -> None:
+    """Persist onboarding portal login fields into the runtime .env file.
+
+    The Admin wizard owns the browser playbook, but SkySlope/MLS scripts read
+    env vars. Mirroring non-empty values here keeps onboarding and runtime from
+    drifting without ever clearing an existing credential when the user leaves a
+    password box blank.
+    """
+    try:
+        from elevate_cli.portal_credentials import (
+            portal_env_updates_from_playbooks,
+            portal_playbooks_for_storage,
+        )
+    except Exception:
+        _log.exception("admin setup portal env mirror: helper import failed")
+        return
+
+    for item in items:
+        if item.key != "browser_workflows" or not isinstance(item.value, dict):
+            continue
+        playbooks = item.value.get("playbooks")
+        updates = portal_env_updates_from_playbooks(playbooks if isinstance(playbooks, dict) else {})
+        for key, value in updates.items():
+            save_env_value(key, value)
+        item.value["playbooks"] = portal_playbooks_for_storage(
+            playbooks if isinstance(playbooks, dict) else {}
+        )
+        if updates:
+            _log.info(
+                "admin setup portal env mirror: saved %s",
+                ", ".join(sorted(updates)),
+            )
+
+
 app.include_router(
     create_agent_hub_router(
         require_admin_setup_ready_for_launch=_require_admin_setup_ready_for_launch,
@@ -5030,6 +5064,7 @@ async def put_admin_setup_endpoint(body: _AdminSetupUpdateBody):
     try:
         from elevate_cli.data import connect, update_admin_setup
 
+        _mirror_admin_setup_portal_env(body.items)
         with connect() as conn:
             setup = update_admin_setup(
                 conn,

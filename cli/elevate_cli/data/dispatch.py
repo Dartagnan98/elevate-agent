@@ -11,7 +11,7 @@ Public surface:
 * :func:`list_conditional_docs`
 * :func:`upsert_conditional_doc`
 
-Architecture (per ``docs/plans/skyleigh-admin-hub-codex-review-B-dispatch.md``):
+Architecture (per the Admin Hub dispatch review plan):
 
 The dispatcher is a **producer** of action-run rows + cron jobs. It is NOT a
 second skill runner — skills run via ``cron.jobs.create_job(...)`` and the

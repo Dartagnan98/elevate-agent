@@ -1,4 +1,4 @@
-"""Local SQLite database bootstrap for Elevate installs."""
+"""Local database bootstrap for Elevate installs."""
 
 from __future__ import annotations
 
@@ -24,10 +24,11 @@ def _fail(name: str, path: Path, error: Exception) -> LocalDatabaseInitResult:
 
 
 def initialize_local_databases(*, include_memory: bool = True) -> list[LocalDatabaseInitResult]:
-    """Create and migrate the local SQLite stores used by a base install.
+    """Create and migrate the local stores used by a base install.
 
-    The operational store applies its numbered migrations on first connect.
-    The session and memory stores create their own schemas from their
+    The operational store is embedded Postgres and applies its numbered
+    migrations on first connect. The session and memory stores create their
+    own schemas from their
     constructors. This function makes that first-touch explicit for installers,
     doctors, and production smoke checks.
     """
@@ -36,9 +37,9 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
 
     try:
         from elevate_cli.data.connection import connect
-        from elevate_cli.data.paths import operational_db_path
+        from elevate_cli.data.pg_server import pg_data_dir
 
-        path = operational_db_path()
+        path = pg_data_dir()
         with connect() as conn:
             # Make a fresh install usable before any dashboard page is opened.
             # The migrations create the tables; these idempotent calls seed the
@@ -68,11 +69,11 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
         )
     except Exception as exc:  # pragma: no cover - surfaced in installer output
         try:
-            from elevate_cli.data.paths import operational_db_path
+            from elevate_cli.data.pg_server import pg_data_dir
 
-            path = operational_db_path()
+            path = pg_data_dir()
         except Exception:
-            path = Path("~/.elevate/data/operational.db").expanduser()
+            path = Path("~/.elevate/pgdata").expanduser()
         results.append(_fail("operational", path, exc))
 
     try:
@@ -110,19 +111,20 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
 
     try:
         from elevate_cli import outreach_db
+        from elevate_cli.data.pg_server import pg_data_dir
 
         seeded = outreach_db.seed_all_templates()
-        path = outreach_db.db_path()
+        path = pg_data_dir()
         inserted = len(seeded.get("inserted", []))
         skipped = len(seeded.get("skipped", []))
         results.append(_ok("outreach", path, f"{inserted} templates inserted; {skipped} already present"))
     except Exception as exc:  # pragma: no cover - surfaced in installer output
         try:
-            from elevate_cli import outreach_db
+            from elevate_cli.data.pg_server import pg_data_dir
 
-            path = outreach_db.db_path()
+            path = pg_data_dir()
         except Exception:
-            path = Path("~/.elevate/tools/data/outreach/outreach.db").expanduser()
+            path = Path("~/.elevate/pgdata").expanduser()
         results.append(_fail("outreach", path, exc))
 
     # Register the recurring connector-sync launchd jobs so a fresh install
@@ -165,7 +167,7 @@ def print_database_init_results(
     if quiet:
         return 1 if failures else 0
 
-    print("Elevate local SQLite databases")
+    print("Elevate local databases")
     for result in results:
         marker = "ok" if result.ok else "failed"
         print(f"- {result.name}: {marker} - {result.path}")

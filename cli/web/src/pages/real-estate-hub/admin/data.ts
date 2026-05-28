@@ -129,10 +129,10 @@ export const MOCK_SESSIONS: Session[] = [
 // ---------------------------------------------------------------------------
 
 export const MOCK_USER: MockUser = {
-  email: "dartagnan@ctrlstrategies.com",
-  name: "dartagnan",
+  email: "agent@example.com",
+  name: "Demo Agent",
   role: "Builder · Elevation HQ",
-  initial: "D",
+  initial: "A",
   gatewayState: "running",
   activeSessions: 2,
   theme: "dark",

@@ -1,19 +1,23 @@
-"""Filesystem layout for the central data store.
+"""Filesystem layout for legacy data-store side files.
 
 All paths resolve under ``ELEVATE_HOME`` (default ``~/.elevate``). The
 ``ELEVATE_HOME`` env var is the single override knob — tests and Docker
 profiles set it to redirect the whole tree.
 
-Layout::
+    Layout::
 
     $ELEVATE_HOME/
         data/
-            operational.db          # central SQLite store (Sprint 1+)
-            operational.db-wal      # WAL sidecar
-            operational.db-shm      # SHM sidecar
+            operational.db          # legacy SQLite store, if present
+            operational.db-wal      # legacy WAL sidecar
+            operational.db-shm      # legacy SHM sidecar
             payloads/               # spillover for events.payload_json > 16KB
             backups/                # pre-migration snapshots, retention 30 days
             parity/                 # shadow-read parity diff dumps (Sprint 2)
+
+    The live operational store is embedded Postgres under
+    ``$ELEVATE_HOME/pgdata``; this module remains for migration backups,
+    payload spillover, and parity artifacts.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ def data_root() -> Path:
 
 
 def operational_db_path() -> Path:
-    """Path to ``operational.db``. Parent dir is created if missing."""
+    """Path to the legacy ``operational.db`` file, if one exists."""
     return data_root() / "operational.db"
 
 

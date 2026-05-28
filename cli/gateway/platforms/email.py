@@ -81,8 +81,8 @@ def _send_imap_id(imap: "imaplib.IMAP4") -> None:
         imap.xatom(
             "ID",
             f'("name" "elevate-agent" "version" "{_elevate_version}" '
-            '"vendor" "Ctrl Strategies" '
-            '"support-email" "support@ctrlstrategies.com")',
+            '"vendor" "Elevation" '
+            '"support-email" "support@example.com")',
         )
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal
         logger.debug("[Email] IMAP ID command not accepted: %s", e)

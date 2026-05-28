@@ -123,7 +123,7 @@ def test_human_resolves_conflict_with_merge():
             conn,
             conflict["id"],
             resolution=f"merged_into:{a['id']}",
-            actor="human:dartagnan",
+            actor="human:test-admin",
         )
         assert result["resolution"] == f"merged_into:{a['id']}"
         # b should be gone.
@@ -251,11 +251,11 @@ def test_template_propose_then_human_approve():
             )
         # Human approves.
         approved = data.approve_template(
-            conn, proposed["id"], actor="human:dartagnan",
+            conn, proposed["id"], actor="human:test-admin",
             seed_event_contact_id=c["id"],
         )
         assert approved["status"] == "live"
-        assert approved["approvedBy"] == "human:dartagnan"
+        assert approved["approvedBy"] == "human:test-admin"
 
 
 def test_template_edit_bumps_version_and_supersedes():

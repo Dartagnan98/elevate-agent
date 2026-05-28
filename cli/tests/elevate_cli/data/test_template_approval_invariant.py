@@ -84,7 +84,7 @@ def test_raw_insert_proposed_with_approved_at_fails_check():
                     approved_at, approved_by, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, 'any', 0, 'proposed',
                           0, 0, 0, 1, 'ai_oneoff',
-                          ?, 'human:dartagnan', ?, ?)
+                          ?, 'human:test-admin', ?, ?)
                 """,
                 (new_id(), "new-outreach", "approved while proposed",
                  "premature approval", now, now, now),
@@ -143,12 +143,12 @@ def test_approve_template_accepts_human_actor():
             actor="agent:claude",
         )
         approved = data.approve_template(
-            conn, proposed["id"], actor="human:dartagnan",
+            conn, proposed["id"], actor="human:test-admin",
         )
         assert approved["status"] == "live"
         assert approved["active"] == 1
         assert approved["approvedAt"] is not None
-        assert approved["approvedBy"] == "human:dartagnan"
+        assert approved["approvedBy"] == "human:test-admin"
 
 
 def test_edit_template_also_requires_human_actor():

@@ -18,6 +18,10 @@ from typing import Any, Iterable, Mapping
 
 from elevate_constants import get_elevate_home
 from elevate_cli.data._util import now_iso
+from elevate_cli.portal_credentials import (
+    portal_playbook_ready,
+    resolve_admin_portal_env,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -577,14 +581,7 @@ def _item_has_browser_workflow_contract(item: Mapping[str, Any]) -> bool:
         return False
     for key in BROWSER_WORKFLOW_REQUIRED_KEYS:
         playbook = playbooks.get(key)
-        if not isinstance(playbook, Mapping):
-            return False
-        provider = str(playbook.get("provider") or "").strip()
-        has_access_hint = any(
-            str(playbook.get(field) or "").strip()
-            for field in ("loginUrl", "credentialRef", "notes")
-        )
-        if not provider or not has_access_hint:
+        if not portal_playbook_ready(playbook if isinstance(playbook, Mapping) else None):
             return False
     return True
 
@@ -643,8 +640,8 @@ def _item_readiness(item: Mapping[str, Any]) -> dict[str, Any]:
             detail = f"{label} has a saved value but still needs a live connector signal."
         elif key == "browser_workflows":
             state = "incomplete_browser_playbook"
-            action = "Add provider, login URL or credential reference, and browser-use notes for MLS, compliance, and showing."
-            detail = "Browser-use portal playbooks are incomplete."
+            action = "Add provider, login URL, username, and password or credential reference for MLS, compliance, and showing."
+            detail = "Browser-use portal playbooks are missing login credentials."
         elif status in READY_STATUSES:
             state = "incomplete_setup"
             action = "Review this setup item and add the missing required details."
@@ -933,7 +930,7 @@ def admin_setup_memory_summary(snapshot: Mapping[str, Any]) -> str:
     lines = [
         "# Admin onboarding memory",
         "",
-        "This file is generated from SQLite Admin setup. SQLite operational.db remains the source of truth; use this as durable recall so agents do not ask the realtor for the same setup details again.",
+        "This file is generated from Admin setup. Embedded Postgres is the operational source of truth; use this as durable recall so agents do not ask the realtor for the same setup details again.",
         "",
         "## Realtor profile",
         f"- Name: {_redact_memory_text(profile.get('realtorLegalName')) or 'unknown'}",
@@ -1155,6 +1152,7 @@ def sync_admin_setup_runtime(
     items_by_key = {item["key"]: item for item in snapshot["items"]}
     connectors = _source_connectors_by_id(source_connectors)
     composio_toolkits = _account_toolkits(composio_accounts)
+    portal_env = resolve_admin_portal_env(env_values)
     checked_at = now_iso()
     updates: list[dict[str, Any]] = []
 
@@ -1166,11 +1164,12 @@ def sync_admin_setup_runtime(
         signals: list[str] | None = None,
         details: Mapping[str, Any] | None = None,
         notes: str | None = None,
+        value_override: Mapping[str, Any] | None = None,
     ) -> None:
         item = items_by_key.get(key)
         if not item:
             return
-        value = item.get("value")
+        value = value_override if value_override is not None else item.get("value")
         if not isinstance(value, dict):
             value = {}
         verification = dict(value.get("verification") or {})
@@ -1287,20 +1286,19 @@ def sync_admin_setup_runtime(
             details={"env": "CRM_API_KEY/LOFTY_API_KEY"},
         )
 
-    if _env_value(
-        env_values,
-        "MLS_USERNAME",
-        "MLS_USER",
-        "MLS_API_KEY",
-        "MATRIX_USERNAME",
-        "XPOSURE_USERNAME",
-        "PARAGON_USERNAME",
-    ):
+    mls_api = _env_value(env_values, "MLS_API_KEY", "MATRIX_API_KEY", "XPOSURE_API_KEY")
+    mls_portal = portal_env.get("mls") or {}
+    if mls_api or (mls_portal.get("hasLoginEmail") and mls_portal.get("hasLoginPassword")):
         mark(
             "mls",
             status="configured",
             provider=profile.get("mlsProvider") or "MLS",
-            signals=["MLS credential configured"],
+            signals=["MLS login credential configured" if not mls_api else "MLS API credential configured"],
+            details={
+                "usernameEnv": mls_portal.get("loginEmailEnv"),
+                "passwordEnv": mls_portal.get("loginPasswordEnv"),
+                "apiEnv": "MLS_API_KEY" if mls_api else None,
+            },
         )
 
     forms_connector = connectors.get("forms-signing")
@@ -1320,20 +1318,94 @@ def sync_admin_setup_runtime(
             details={"sourceId": "forms-signing", "state": forms_connector.get("state")},
         )
 
-    if _env_value(env_values, "SKYSLOPE_API_KEY", "SKYSLOPE_USERNAME", "LONEWOLF_API_KEY"):
+    compliance_api = _env_value(env_values, "SKYSLOPE_API_KEY", "LONEWOLF_API_KEY")
+    compliance_portal = portal_env.get("compliance") or {}
+    if compliance_api or (
+        compliance_portal.get("hasLoginEmail") and compliance_portal.get("hasLoginPassword")
+    ):
         mark(
             "compliance_platform",
             status="configured",
             provider=profile.get("complianceProvider") or "Compliance",
-            signals=["Compliance platform credential configured"],
+            signals=[
+                "Compliance portal login credential configured"
+                if not compliance_api
+                else "Compliance platform API credential configured"
+            ],
+            details={
+                "usernameEnv": compliance_portal.get("loginEmailEnv"),
+                "passwordEnv": compliance_portal.get("loginPasswordEnv"),
+                "apiEnv": "SKYSLOPE_API_KEY/LONEWOLF_API_KEY" if compliance_api else None,
+            },
         )
 
-    if _env_value(env_values, "SHOWINGTIME_USERNAME", "SHOWINGTIME_API_KEY", "BROKERBAY_API_KEY"):
+    showing_api = _env_value(env_values, "SHOWINGTIME_API_KEY", "BROKERBAY_API_KEY")
+    showing_portal = portal_env.get("showing") or {}
+    if showing_api or (
+        showing_portal.get("hasLoginEmail") and showing_portal.get("hasLoginPassword")
+    ):
         mark(
             "showing_platform",
             status="configured",
             provider=profile.get("showingProvider") or "Showing platform",
-            signals=["Showing platform credential configured"],
+            signals=[
+                "Showing portal login credential configured"
+                if not showing_api
+                else "Showing platform API credential configured"
+            ],
+            details={
+                "usernameEnv": showing_portal.get("loginEmailEnv"),
+                "passwordEnv": showing_portal.get("loginPasswordEnv"),
+                "apiEnv": "SHOWINGTIME_API_KEY/BROKERBAY_API_KEY" if showing_api else None,
+            },
+        )
+
+    browser_item = items_by_key.get("browser_workflows")
+    browser_value = browser_item.get("value") if isinstance(browser_item, Mapping) else None
+    browser_value = dict(browser_value) if isinstance(browser_value, Mapping) else {}
+    playbooks = browser_value.get("playbooks")
+    playbooks = dict(playbooks) if isinstance(playbooks, Mapping) else {}
+    provider_fallbacks = {
+        "mls": profile.get("mlsProvider") or "MLS",
+        "compliance": profile.get("complianceProvider") or "Compliance",
+        "showing": profile.get("showingProvider") or "Showing platform",
+    }
+    env_completed_portals: list[str] = []
+    credential_refs: dict[str, str] = {}
+    for portal_key in BROWSER_WORKFLOW_REQUIRED_KEYS:
+        env_portal = portal_env.get(portal_key) or {}
+        existing = playbooks.get(portal_key)
+        existing = dict(existing) if isinstance(existing, Mapping) else {}
+        if not str(existing.get("provider") or "").strip():
+            existing["provider"] = provider_fallbacks[portal_key]
+        if not str(existing.get("loginUrl") or "").strip() and env_portal.get("loginUrl"):
+            existing["loginUrl"] = env_portal["loginUrl"]
+        if not str(existing.get("loginEmail") or "").strip() and env_portal.get("loginEmail"):
+            existing["loginEmail"] = env_portal["loginEmail"]
+        if not str(existing.get("credentialRef") or "").strip() and env_portal.get("loginPasswordEnv"):
+            existing["credentialRef"] = f"env:{env_portal['loginPasswordEnv']}"
+        if portal_playbook_ready(existing):
+            env_completed_portals.append(portal_key)
+            credential_ref = str(existing.get("credentialRef") or "").strip()
+            if credential_ref:
+                credential_refs[portal_key] = credential_ref
+        playbooks[portal_key] = existing
+    merged_browser_value = {
+        **browser_value,
+        "mode": browser_value.get("mode") or "browser-use",
+        "playbooks": playbooks,
+    }
+    if len(env_completed_portals) == len(BROWSER_WORKFLOW_REQUIRED_KEYS):
+        mark(
+            "browser_workflows",
+            status="configured",
+            provider="browser-use",
+            signals=["Portal login credentials configured for all Admin browser workflows"],
+            details={
+                "portals": env_completed_portals,
+                "credentialRefs": credential_refs,
+            },
+            value_override=merged_browser_value,
         )
 
     guide_counts = _guide_counts(province_guide)

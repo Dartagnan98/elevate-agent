@@ -13,7 +13,7 @@ Three locations, two repos. Don't conflate them:
 | Location | What it is | Owns |
 |---|---|---|
 | `Dartagnan98/elevate-agent` at `~/elevate/` | **Agent shell** — generic across clients. The repo this doc lives in. | `AdminKanbanBoard` UI, FastAPI server (`web_server.py`), cron (`cli/cron/`), CRM source connectors, generic skills (`cli/skills/`), the SQLite store + `/api/admin/*` REST + dispatcher + registry **schema** that this plan adds. |
-| `Dartagnan98/client-tools` at `~/client-tools/` | **pilot realtor client bundle** — per-tenant content. | All 47 client skills under `.claude/skills/` (`marketing` router + `marketing-mailjet/buffer/render/copy/log/inputs`, `cma` router + 7 sub-skills, `mlc` router + 7 sub-skills, `digisign`, `webforms`, `seller-update-*`, `outreach-*`, `property-lookup`, etc.). Master sheet, BC knowledge, blank forms, mcp-digisign. |
+| `client-tools` at `~/client-tools/` | **pilot realtor client bundle** — per-tenant content. | Client skills under `.claude/skills/` (`marketing` router + `marketing-mailjet/buffer/render/copy/log/inputs`, `cma` router + sub-skills, `mlc` router + sub-skills, `digisign`, `webforms`, `seller-update-*`, `outreach-*`, `property-lookup`, etc.). Master sheet, regional knowledge, blank forms, mcp-digisign. |
 | `~/.elevate/` | **Runtime install dir** (state, not code) | Materialized skill bundle at `skills/real-estate-admin/`, working dir `tmp/client-tools/data/marketing/runs/<run>/`, the new `data/operational.db` SQLite store, `cron/jobs.json`, sessions, auth. |
 
 When this plan says "already implemented" — verify which repo. The marketing
@@ -240,7 +240,7 @@ send. (Stage numbers in the registry must match the 10-stage UI model;
 
 ---
 
-## 5. Open decisions (need Dartagnan's call)
+## 5. Open decisions (need product owner call)
 
 | # | Decision | Why it matters |
 |---|---|---|

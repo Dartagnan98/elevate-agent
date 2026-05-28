@@ -1,7 +1,7 @@
 # Source-natural keys
 
 **Status:** locked — change only with a numbered DB migration
-**Owner:** Dartagnan
+**Owner:** Product
 **Companion to:** [central-data-model.md](./central-data-model.md), [central-data-model-v1-plan.md](./central-data-model-v1-plan.md)
 
 Pin the upstream id we use to dedupe each connector's records on

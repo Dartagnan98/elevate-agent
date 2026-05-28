@@ -88,7 +88,7 @@ const REAL_ESTATE_WORKFLOWS = [
       "property-lookup",
       "quickbooks",
       "relisting",
-      "skyleigh-vault",
+      "agent-vault",
     ],
   },
   {

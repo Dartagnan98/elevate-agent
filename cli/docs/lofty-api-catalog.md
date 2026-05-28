@@ -335,7 +335,7 @@ WorkingLeadV2: leadId, firstName, lastName, email, phone, createdAt
 PlanTaskResponseV2: id, content, taskType (CALL/EMAIL/TEXT), status (PENDING/FINISHED/OVERDUE), dueAt, createdAt, assignedTo, creatorId
 ```
 
-Status: ❌. Skyleigh isn't on Sales Agents AFAIK — verify before pulling.
+Status: ❌. pilot realtor isn't on Sales Agents AFAIK — verify before pulling.
 
 ---
 
@@ -553,7 +553,7 @@ WebhookResponse: subscribeId, teamId, listId (event-category id),
 vendorId, callbackUrl, limit (rate, max 5000/30min)
 ```
 
-Status: ❌. **If we're hosted at `app.ctrlstrategies.com`, register a
+Status: ❌. **If we're hosted at `api.elevationrealestatehq.com`, register a
 webhook and stop polling.** Currently we sync the entire lead list every
 cron tick.
 
@@ -591,7 +591,7 @@ Elevate without spinning our own SMS/email rail through Lofty.
 | 14 | **P3** | §23 System logs | extend `events` with `kind='system_log'` rows | Audit trail. |
 | 15 | **P3** | §24 Webhooks | replace cron poll with push | Real-time sync. Requires public callback URL. |
 | 16 | **P3** | §10 Manual logs | extend `events` with `kind='manual_log'` rows | Team-specific touchpoints. |
-| 17 | optional | §12 Sales Agents | n/a | Only if Skyleigh adopts Lofty's AI dialer. |
+| 17 | optional | §12 Sales Agents | n/a | Only if pilot realtor adopts Lofty's AI dialer. |
 | 18 | optional | §19 Org, §20 Routing | n/a | Admin-side, low value. |
 
 ---

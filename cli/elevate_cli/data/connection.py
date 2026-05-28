@@ -104,7 +104,7 @@ def _ensure_schema(conn: "PgConnection") -> None:
         from elevate_cli.data import _pg_response_migrate
         _pg_response_migrate.maybe_migrate_response_store(conn)
         # Kanban board (~/.elevate/kanban.db) SQLite → PG. Usually a
-        # no-op on Dartagnan's machine (empty kanban.db at cutover) but
+        # no-op on installs with an empty kanban.db at cutover, but
         # the migrator handles populated boards on other installs.
         from elevate_cli.data import _pg_kanban_migrate
         _pg_kanban_migrate.maybe_migrate_kanban_store(conn)

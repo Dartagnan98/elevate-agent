@@ -188,8 +188,8 @@ function DealCard({ deal, onOpen }: { deal: Deal; onOpen?: (deal: Deal) => void 
         <span className="ab-deal-next-text">{deal.next}</span>
       </div>
       <div className="ab-deal-foot">
-        <span className="ab-deal-owner" title={deal.owner || "Skyleigh M."}>
-          {deal.ownerInitial || "S"}
+        <span className="ab-deal-owner" title={deal.owner || "Demo Agent"}>
+          {deal.ownerInitial || "A"}
         </span>
         <span className="ab-deal-time">{deal.daysInStage || "3d"} in stage</span>
         {deal.blocked && <span className="ab-deal-flag">Blocked</span>}

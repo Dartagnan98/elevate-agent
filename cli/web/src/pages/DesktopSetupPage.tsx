@@ -104,9 +104,15 @@ const PACK_CREDENTIAL_FIELDS: Record<string, Array<{ key: string; label: string;
     { key: "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", label: "Admin Telegram bot token", password: true },
     { key: "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", label: "Admin Telegram chat or topic ID" },
     { key: "MLS_LOGIN_URL", label: "MLS login URL" },
-    { key: "MLS_USERNAME", label: "MLS username or credential ref" },
-    { key: "SKYSLOPE_USERNAME", label: "Compliance username or credential ref" },
-    { key: "SHOWINGTIME_USERNAME", label: "Showing platform username or credential ref" },
+    { key: "MLS_USERNAME", label: "MLS username" },
+    { key: "MLS_PASSWORD", label: "MLS password", password: true },
+    { key: "COMPLIANCE_LOGIN_URL", label: "Compliance login URL" },
+    { key: "SKYSLOPE_LOGIN_URL", label: "SkySlope login URL" },
+    { key: "SKYSLOPE_USERNAME", label: "SkySlope username" },
+    { key: "SKYSLOPE_PASSWORD", label: "SkySlope password", password: true },
+    { key: "SHOWING_LOGIN_URL", label: "Showing platform login URL" },
+    { key: "SHOWINGTIME_USERNAME", label: "ShowingTime username" },
+    { key: "SHOWINGTIME_PASSWORD", label: "ShowingTime password", password: true },
     { key: "PHOTO_SOURCE_ROOT", label: "Photo source folder" },
   ],
   real_estate_sales: [
@@ -390,6 +396,21 @@ function PackUnlockOnboarding({
       });
       for (const [key, value] of Object.entries(envValues)) {
         if (!value.trim()) continue;
+        await api.setEnvVar(key, value.trim());
+      }
+      const derivedEnvValues: Record<string, string | undefined> = {
+        COMPLIANCE_LOGIN_URL: envValues.SKYSLOPE_LOGIN_URL || envValues.COMPLIANCE_LOGIN_URL,
+        SKYSLOPE_LOGIN_URL: envValues.SKYSLOPE_LOGIN_URL || envValues.COMPLIANCE_LOGIN_URL,
+        COMPLIANCE_USERNAME: envValues.SKYSLOPE_USERNAME,
+        COMPLIANCE_PASSWORD: envValues.SKYSLOPE_PASSWORD,
+        SKYSLOPE_USER: envValues.SKYSLOPE_USERNAME,
+        SKYSLOPE_PASS: envValues.SKYSLOPE_PASSWORD,
+        SHOWINGTIME_LOGIN_URL: envValues.SHOWING_LOGIN_URL,
+        SHOWING_USERNAME: envValues.SHOWINGTIME_USERNAME,
+        SHOWING_PASSWORD: envValues.SHOWINGTIME_PASSWORD,
+      };
+      for (const [key, value] of Object.entries(derivedEnvValues)) {
+        if (!value?.trim()) continue;
         await api.setEnvVar(key, value.trim());
       }
       await api.updatePackOnboarding(selectedPack.packId, { items: itemUpdates });

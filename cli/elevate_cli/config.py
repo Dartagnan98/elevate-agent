@@ -226,7 +226,7 @@ def recommended_update_command_for_method(method: str) -> str:
     if method == "homebrew":
         return "brew upgrade elevate"
     if method == "docker":
-        return "docker pull ctrlstrategies/elevate:latest"
+        return "docker pull elevation/elevate:latest"
     if method == "pip":
         import shutil
         uv = shutil.which("uv")

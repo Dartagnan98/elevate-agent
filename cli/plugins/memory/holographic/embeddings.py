@@ -28,7 +28,6 @@ def _load_env_file_if_needed(var_name: str) -> None:
         return
     candidates = [
         os.path.expanduser("~/.elevate/.env"),
-        "/Users/dartagnanpatricio/claudeclaw/.env",
     ]
     for path in candidates:
         try:

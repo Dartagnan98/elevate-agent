@@ -359,7 +359,7 @@ For pilot realtor eXp:
 **Verification:**
 
 ```bash
-cd /Users/dartagnanpatricio/elevate/cli
+cd ~/elevate/cli
 .venv/bin/python -m pytest tests/elevate_cli/data/test_data_module_isolation.py -q
 ```
 
@@ -612,7 +612,7 @@ def test_append_event(tmp_path: Path):
 **Verification:**
 
 ```bash
-cd /Users/dartagnanpatricio/elevate/cli
+cd ~/elevate/cli
 .venv/bin/python -m pytest tests/elevate_cli/harness/test_store.py tests/elevate_cli/harness/test_redaction.py -q
 ```
 
@@ -1118,7 +1118,7 @@ Add:
 ### Backend targeted tests
 
 ```bash
-cd /Users/dartagnanpatricio/elevate/cli
+cd ~/elevate/cli
 .venv/bin/python -m pytest tests/elevate_cli/harness -q
 .venv/bin/python -m pytest tests/elevate_cli/test_harness_endpoints.py -q
 ```
@@ -1225,7 +1225,7 @@ For each province:
 Output folder:
 
 ```text
-/Users/dartagnanpatricio/.elevate/knowledge/client/admin/exp-agent-centre/all-provinces-raw/<province>/
+~/.elevate/knowledge/client/admin/exp-agent-centre/all-provinces-raw/<province>/
 ```
 
 ---

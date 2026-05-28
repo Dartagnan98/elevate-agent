@@ -1873,7 +1873,6 @@ function formatPersonName(email: string | null | undefined): string {
   if (!email) return "there";
   const raw = email.split("@")[0]?.split(/[._-]/)[0] || "";
   if (!raw) return "there";
-  if (raw.toLowerCase().startsWith("dartagnan")) return "Dartagnan";
   return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
 }
 

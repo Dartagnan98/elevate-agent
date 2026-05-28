@@ -50,4 +50,4 @@ xattr -dr com.apple.quarantine /Applications/Elevate.app
 
 Then launch Elevate normally.
 
-**App will not open at all** — text Dartagnan a screenshot of what you see.
+**App will not open at all** — send your Elevate support contact a screenshot of what you see.

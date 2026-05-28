@@ -127,7 +127,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
 
 
 def default_exp_agent_centre_root() -> Path:
-    return get_elevate_home() / "knowledge" / "skyleigh" / "admin" / "exp-agent-centre"
+    return get_elevate_home() / "knowledge" / "real-estate" / "admin" / "exp-agent-centre"
 
 
 def _decode_json(value: str | None) -> Any:

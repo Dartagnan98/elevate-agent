@@ -152,6 +152,141 @@ def test_admin_setup_complete_requires_browser_workflow_contract():
             complete_admin_setup(conn)
 
 
+def test_admin_setup_browser_workflows_require_login_secret():
+    """Portal notes/usernames are not enough to mark login automation ready."""
+    with connect() as conn:
+        setup = get_admin_setup(conn)
+        update_admin_setup(
+            conn,
+            profile={
+                "realtorLegalName": "Test Realtor",
+                "brokerageName": "Test Brokerage",
+                "province": "BC",
+                "approvalChannel": "telegram:test",
+                "regionalMemory": {"notes": "Test regional memory"},
+            },
+            items=[
+                {
+                    "key": item["key"],
+                    "status": "manual" if item["key"] == "fintrac_workflow" else "configured",
+                    "provider": "typed-only",
+                    "value": {
+                        "mode": "browser-use",
+                        "notes": "MFA is sometimes required.",
+                        "playbooks": {
+                            "mls": {
+                                "provider": "Matrix",
+                                "loginUrl": "https://mls.example",
+                                "loginEmail": "agent@example.test",
+                                "notes": "Use saved profile.",
+                            },
+                            "compliance": {
+                                "provider": "SkySlope",
+                                "loginUrl": "https://skyslope.example",
+                                "loginEmail": "agent@example.test",
+                                "notes": "Use saved profile.",
+                            },
+                            "showing": {
+                                "provider": "ShowingTime",
+                                "loginUrl": "https://showing.example",
+                                "loginEmail": "agent@example.test",
+                                "notes": "Use saved profile.",
+                            },
+                        },
+                    }
+                    if item["key"] == "browser_workflows"
+                    else None,
+                }
+                for item in setup["items"]
+                if item["required"]
+            ],
+        )
+        unverified = get_admin_setup(conn)
+        assert unverified["missingRequiredKeys"] == ["browser_workflows"]
+        readiness = {item["key"]: item for item in unverified["readiness"]}
+        assert readiness["browser_workflows"]["action"].startswith("Add provider")
+        with pytest.raises(ValueError):
+            complete_admin_setup(conn)
+
+
+def test_admin_setup_runtime_sync_builds_browser_playbook_from_env_credentials():
+    with connect() as conn:
+        setup = sync_admin_setup_runtime(
+            conn,
+            env_values={
+                "MLS_LOGIN_URL": "https://mls.example",
+                "MLS_USERNAME": "mls-user",
+                "MLS_PASSWORD": "mls-secret",
+                "SKYSLOPE_LOGIN_URL": "https://skyslope.example",
+                "SKYSLOPE_USERNAME": "sky-user",
+                "SKYSLOPE_PASSWORD": "sky-secret",
+                "SHOWINGTIME_LOGIN_URL": "https://showing.example",
+                "SHOWINGTIME_USERNAME": "show-user",
+                "SHOWINGTIME_PASSWORD": "show-secret",
+            },
+        )
+
+    by_key = {item["key"]: item for item in setup["items"]}
+    assert by_key["mls"]["status"] == "configured"
+    assert by_key["compliance_platform"]["status"] == "configured"
+    assert by_key["showing_platform"]["status"] == "configured"
+    assert by_key["browser_workflows"]["status"] == "configured"
+    playbooks = by_key["browser_workflows"]["value"]["playbooks"]
+    assert playbooks["compliance"]["credentialRef"] == "env:SKYSLOPE_PASSWORD"
+    assert "sky-secret" not in str(by_key["browser_workflows"]["value"])
+
+
+def test_admin_setup_endpoint_mirrors_skyslope_portal_credentials_to_env():
+    from elevate_cli.config import get_env_value
+    from elevate_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
+
+    c = TestClient(app, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
+    resp = c.put(
+        "/api/admin/setup",
+        json={
+            "items": [
+                {
+                    "key": "browser_workflows",
+                    "status": "configured",
+                    "provider": "browser-use",
+                    "value": {
+                        "mode": "browser-use",
+                        "playbooks": {
+                            "mls": {
+                                "provider": "Matrix",
+                                "loginUrl": "https://mls.example",
+                                "loginEmail": "mls-user",
+                                "loginPassword": "mls-secret",
+                            },
+                            "compliance": {
+                                "provider": "SkySlope",
+                                "loginUrl": "https://skyslope.example",
+                                "loginEmail": "sky-user",
+                                "loginPassword": "sky-secret",
+                            },
+                            "showing": {
+                                "provider": "ShowingTime",
+                                "loginUrl": "https://showing.example",
+                                "loginEmail": "show-user",
+                                "loginPassword": "show-secret",
+                            },
+                        },
+                    },
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert get_env_value("SKYSLOPE_USERNAME") == "sky-user"
+    assert get_env_value("SKYSLOPE_USER") == "sky-user"
+    assert get_env_value("SKYSLOPE_PASSWORD") == "sky-secret"
+    assert get_env_value("SKYSLOPE_PASS") == "sky-secret"
+    browser_item = next(item for item in resp.json()["items"] if item["key"] == "browser_workflows")
+    playbooks = browser_item["value"]["playbooks"]
+    assert playbooks["compliance"]["credentialRef"] == "env:SKYSLOPE_PASSWORD"
+    assert "sky-secret" not in str(browser_item["value"])
+
+
 def test_admin_setup_runtime_sync_marks_real_connector_signals():
     with connect() as conn:
         setup = sync_admin_setup_runtime(
@@ -211,7 +346,7 @@ def test_admin_setup_writes_sanitized_agent_memory_snapshot():
     assert path.exists()
     content = path.read_text(encoding="utf-8")
     assert "Admin onboarding memory" in content
-    assert "SQLite operational.db remains the source of truth" in content
+    assert "Embedded Postgres is the operational source of truth" in content
     assert "Matrix" in content
     assert "SkySlope" in content
     assert "ShowingTime" in content

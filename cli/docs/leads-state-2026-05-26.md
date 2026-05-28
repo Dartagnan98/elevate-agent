@@ -80,7 +80,7 @@ Two parallel status taxonomies (`pending_approval` and `draft_pending_approval`)
 
 ### 1.5 identity_conflicts (12 total, 0 resolved)
 
-All 12 are unresolved. **Schema bug surfaced**: 6 of the 12 rows have `kind='phone'` but `value` is an email address (`ashley.b.fields@icloud.com`, `curtisdujoy@icloud.com`, `morganluvshockey@gmail.com`, `patriciodartagnan@gmail.com`, `enclave.media@icloud.com`, `+18666692373`). Source is `apple_contacts_backfill._record_phone_collision` — it always writes `kind='phone'` regardless of whether the handle was an email or a phone number. (`apple_contacts_backfill.py:169-181`).
+All 12 are unresolved. **Schema bug surfaced**: 6 of the 12 rows have `kind='phone'` but `value` is an email address (`[redacted-email]`, `[redacted-email]`, `[redacted-email]`, `[redacted-email]`, `[redacted-email]`, `[redacted-phone]`). Source is `apple_contacts_backfill._record_phone_collision` — it always writes `kind='phone'` regardless of whether the handle was an email or a phone number. (`apple_contacts_backfill.py:169-181`).
 
 ### 1.6 Per-source breakdown
 
@@ -218,7 +218,7 @@ From `~/.elevate/cron/jobs.json` (10 jobs):
 | Seller Update | weekdays 16:00 | LLM prompt | **never run** | **disabled** |
 | Market Stats Watcher | weekly Mon 07:00 | LLM prompt | **never run** | **disabled** |
 
-Wrapper scripts live at `~/.elevate/scripts/` and shell into `/Users/dartagnanpatricio/elevate-premium/scripts/outreach/` (separate `elevate-premium` repo).
+Wrapper scripts live at `~/.elevate/scripts/` and shell into `~/elevate-premium/scripts/outreach/` (separate `elevate-premium` repo).
 
 ### 2.2 Per-source connector paths
 

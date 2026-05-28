@@ -58,12 +58,12 @@ curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/
 
 The installer downloads Elevate, creates the Python environment, links the
 `elevate` command, syncs base bundled skills, creates `~/.elevate`, and
-initializes the local SQLite stores:
+initializes the local stores:
 
 - `~/.elevate/state.db` for sessions, messages, usage, and chat history.
-- `~/.elevate/data/operational.db` for leads, profiles, deal files, admin
-  action runs, phase gates, handoffs, tasks, and workflow state.
-- `~/.elevate/memory_store.db` for memory, graph recall, and embedding metadata.
+- `~/.elevate/pgdata` for embedded Postgres operational data: leads, profiles,
+  deal files, admin action runs, phase gates, handoffs, tasks, workflow state,
+  memory, graph recall, and embedding metadata.
 
 Git is optional for normal installs. If Git is available, the installer uses a
 checkout. If Git is not available, it downloads the source archive and keeps

@@ -1,4 +1,4 @@
--- Seed: Dartagnan (owner, builder tier, all entitlements) + Skyleigh (pro, real-estate)
+-- Seed: demo owner (builder tier, all entitlements) + demo real-estate agent
 -- bcrypt hashes are generated separately and inserted by the seed script.
 -- This file is intentionally minimal; the real seed runs from a Node script
 -- that hashes passwords with the same bcryptjs lib the runtime uses.

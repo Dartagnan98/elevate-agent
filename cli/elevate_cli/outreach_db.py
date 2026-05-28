@@ -161,7 +161,7 @@ def _maybe_seed_templates(conn) -> None:
     EXISTS`` / additive-column / unique-index dance here. What this
     function preserves is the seed-once behaviour: any fresh install
     (and the cutover from the empty 0-byte sqlite file on
-    Dartagnan's box) needs the SEED_TEMPLATES set inserted into the
+    an existing install) needs the SEED_TEMPLATES set inserted into the
     new PG tables so the agent has lanes to draft against. ``INSERT OR
     IGNORE INTO templates`` keeps user-edited templates intact — only
     new (lane, name) pairs get inserted.

@@ -128,32 +128,44 @@ export function splitAdminSetupList(value: string): string[] {
     .filter(Boolean);
 }
 
+function credentialRefOrPassword(value: string): { credentialRef?: string; loginPassword?: string } {
+  const trimmed = value.trim();
+  if (!trimmed) return {};
+  if (/^(env|credential|secret|op|1password):/i.test(trimmed)) {
+    return { credentialRef: trimmed };
+  }
+  return { loginPassword: value };
+}
+
 export function adminSetupPayloadFromDraft(draft: AdminSetupDraft) {
   const browserPlaybooks = {
     mls: {
       provider: draft.mlsProvider.trim(),
       loginUrl: draft.mlsLoginUrl.trim(),
       loginEmail: draft.mlsLoginEmail.trim(),
-      loginPassword: draft.mlsLoginPassword,
+      ...credentialRefOrPassword(draft.mlsLoginPassword),
       notes: draft.browserWorkflowNotes.trim(),
     },
     compliance: {
       provider: draft.complianceProvider.trim(),
       loginUrl: draft.complianceLoginUrl.trim(),
       loginEmail: draft.complianceLoginEmail.trim(),
-      loginPassword: draft.complianceLoginPassword,
+      ...credentialRefOrPassword(draft.complianceLoginPassword),
       notes: draft.browserWorkflowNotes.trim(),
     },
     showing: {
       provider: draft.showingProvider.trim(),
       loginUrl: draft.showingLoginUrl.trim(),
       loginEmail: draft.showingLoginEmail.trim(),
-      loginPassword: draft.showingLoginPassword,
+      ...credentialRefOrPassword(draft.showingLoginPassword),
       notes: draft.browserWorkflowNotes.trim(),
     },
   };
   const browserWorkflowReady = Object.values(browserPlaybooks).every(
-    (playbook) => playbook.provider && (playbook.loginUrl || playbook.loginEmail || playbook.loginPassword || playbook.notes),
+    (playbook) =>
+      playbook.provider &&
+      playbook.loginUrl &&
+      (playbook.credentialRef || (playbook.loginEmail && playbook.loginPassword)),
   );
   const items = [
     {

@@ -1,7 +1,7 @@
 -- 0001_init.sql
 -- Initial schema for $ELEVATE_HOME/data/operational.db
 --
--- Owner: Dartagnan
+-- Owner: local Elevate install
 -- Source-of-truth contracts:
 --   docs/central-data-model.md
 --   docs/source-keys.md

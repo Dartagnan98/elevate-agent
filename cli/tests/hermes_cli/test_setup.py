@@ -284,10 +284,10 @@ def test_setup_admin_saves_realtor_profile_to_sqlite(tmp_path, monkeypatch):
         return default
 
     prompt_values = {
-        "Licensed / legal realtor name": "Skyleigh Smith",
-        "Public license name": "Skyleigh Smith",
+        "Licensed / legal realtor name": "Sample Realtor",
+        "Public license name": "Sample Realtor",
         "Brokerage name": "Elevation Real Estate HQ",
-        "Team / PREC name (optional)": "Skyleigh Real Estate",
+        "Team / PREC name (optional)": "Sample Real Estate",
         "Primary market / service area": "Kamloops",
         "Board memberships (comma-separated, optional)": "AOIR, BCREA",
         "Email provider": "Gmail",
@@ -337,7 +337,7 @@ def test_setup_admin_saves_realtor_profile_to_sqlite(tmp_path, monkeypatch):
     memory_path = tmp_path / "memories" / "ADMIN_ONBOARDING.md"
     assert memory_path.exists()
     memory_text = memory_path.read_text()
-    assert "Skyleigh Smith" in memory_text
+    assert "Sample Realtor" in memory_text
     assert "BC / Kamloops" in memory_text
 
 

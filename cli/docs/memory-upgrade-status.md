@@ -55,7 +55,7 @@ Imported Plaud archive into local chunk recall:
 
 - Documents: `114`
 - Chunks: `3345`
-- Source: `/Users/dartagnanpatricio/claudeclaw/artifacts/plaud-memory/plaud-transcripts-chronological.jsonl`
+- Source: `~/.elevate/imports/plaud-transcripts-chronological.jsonl`
 
 Chunk search has FTS fallback, so it still works when semantic chunk embeddings are unavailable.
 

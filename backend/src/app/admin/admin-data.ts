@@ -134,21 +134,21 @@ export const ADMIN_BUYER_PIPELINE: PipelinePhase[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_DEALS: Deal[] = [
-  { id: "d1",  phase: "pre-cma",    addr: "BETA REVIEW Mock Listing 202601",                    line2: "123 Mockingbird Lane, Vancouver, BC",              badge: "Pre-CMA",                 progress: "0/3", next: "Pre-CMA Google Form filled" },
-  { id: "d2",  phase: "pre-cma",    addr: "BETA MOCK Skyleigh Listing — 610 G…",      line2: "610 Gleneagles Drive, Kamloops, BC",               badge: "Pre-CMA",                 progress: "0/3", next: "Pre-CMA Google Form filled" },
-  { id: "d3",  phase: "live",       addr: "B11-7155 Dallas Drive, Kamloops, BC",                 line2: "B11-7155 Dallas Drive, Kamloops, BC",              badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent",       price: "$349,900", mls: "10378689", blocked: true, primary: true },
-  { id: "d4",  phase: "live",       addr: "1232 Ellis Street # 1403, Kelowna, B…",         line2: "1232 Ellis Street # 1403, Kelowna, BC V1Y",       badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
-  { id: "d5",  phase: "live",       addr: "1127 Columbia Street, Kamloops, BC…",            line2: "1127 Columbia Street, Kamloops, BC V2C",           badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
-  { id: "d6",  phase: "live",       addr: "17-750 Fortune Drive, Kamloops, BC",                  line2: "17-750 Fortune Drive, Kamloops, BC",               badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent" },
-  { id: "d7",  phase: "live",       addr: "703-525 Nicola Street, Kamloops, BC",                 line2: "703-525 Nicola Street, Kamloops, BC",              badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent" },
-  { id: "d8",  phase: "live",       addr: "1872 Red Tail Crescent, Kamloops, BC",                line2: "1872 Red Tail Crescent, Kamloops, BC",             badge: "Listing Live / Marketing", progress: "1/5", next: "Lofty text blast sent" },
-  { id: "d9",  phase: "live",       addr: "1836 Greenfield Avenue # 43, Kamlo…",           line2: "1836 Greenfield Avenue # 43, Kamloops, BC",        badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
-  { id: "d10", phase: "conditions", addr: "Lot 3 Eagle Ridge Place, Powell Riv…",          line2: "Lot 3 Eagle Ridge Place, Powell River, BC",        badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
-  { id: "d11", phase: "conditions", addr: "460 Nicola St # 801, Kamloops, BC V…",          line2: "460 Nicola St # 801, Kamloops, BC V2C",           badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
-  { id: "d12", phase: "conditions", addr: "1616 Hillcrest Avenue, Kamloops, B…",           line2: "1616 Hillcrest Avenue, Kamloops, BC V2B",          badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
-  { id: "d13", phase: "conditions", addr: "610 GLENEAGLES Drive, Kamloops, BC",                  line2: "610 GLENEAGLES Drive, Kamloops, BC",               badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
-  { id: "d14", phase: "conditions", addr: "815 Nicolani Drive, Kamloops, BC",                    line2: "815 Nicolani Drive, Kamloops, BC",                 badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
-  { id: "d15", phase: "conditions", addr: "1121 Burgess Way, Kamloops, BC V1S",                  line2: "1121 Burgess Way, Kamloops, BC V1S",               badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
+  { id: "d1",  phase: "pre-cma",    addr: "Demo Listing 202601",                         line2: "123 Sample Lane, Vancouver, BC",                   badge: "Pre-CMA",                 progress: "0/3", next: "Pre-CMA Google Form filled" },
+  { id: "d2",  phase: "pre-cma",    addr: "Demo Listing 202602",                         line2: "610 Sample Drive, Kelowna, BC",                    badge: "Pre-CMA",                 progress: "0/3", next: "Pre-CMA Google Form filled" },
+  { id: "d3",  phase: "live",       addr: "11-7155 Sample Drive, Kamloops, BC",           line2: "11-7155 Sample Drive, Kamloops, BC",               badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent",       price: "$349,900", mls: "DEMO10378689", blocked: true, primary: true },
+  { id: "d4",  phase: "live",       addr: "1232 Harbour Street #1403, Kelowna, BC",       line2: "1232 Harbour Street #1403, Kelowna, BC",           badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
+  { id: "d5",  phase: "live",       addr: "1127 Cedar Street, Kamloops, BC",              line2: "1127 Cedar Street, Kamloops, BC",                  badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
+  { id: "d6",  phase: "live",       addr: "17-750 Ridge Drive, Kamloops, BC",             line2: "17-750 Ridge Drive, Kamloops, BC",                 badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent" },
+  { id: "d7",  phase: "live",       addr: "703-525 Market Street, Kamloops, BC",          line2: "703-525 Market Street, Kamloops, BC",              badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent" },
+  { id: "d8",  phase: "live",       addr: "1872 Valley Crescent, Kamloops, BC",           line2: "1872 Valley Crescent, Kamloops, BC",               badge: "Listing Live / Marketing", progress: "1/5", next: "Lofty text blast sent" },
+  { id: "d9",  phase: "live",       addr: "1836 Greenway Avenue #43, Kamloops, BC",       line2: "1836 Greenway Avenue #43, Kamloops, BC",           badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
+  { id: "d10", phase: "conditions", addr: "Lot 3 Ridge Place, Powell River, BC",          line2: "Lot 3 Ridge Place, Powell River, BC",              badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
+  { id: "d11", phase: "conditions", addr: "460 Market St #801, Kamloops, BC",             line2: "460 Market St #801, Kamloops, BC",                 badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
+  { id: "d12", phase: "conditions", addr: "1616 Hillcrest Avenue, Kamloops, BC",          line2: "1616 Hillcrest Avenue, Kamloops, BC",              badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
+  { id: "d13", phase: "conditions", addr: "610 Sample Drive, Kamloops, BC",               line2: "610 Sample Drive, Kamloops, BC",                   badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
+  { id: "d14", phase: "conditions", addr: "815 Demo Drive, Kamloops, BC",                 line2: "815 Demo Drive, Kamloops, BC",                     badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
+  { id: "d15", phase: "conditions", addr: "1121 Builder Way, Kamloops, BC",               line2: "1121 Builder Way, Kamloops, BC",                   badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ export const ADMIN_DEALS: Deal[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_DEALS: BuyerDeal[] = [
-  { id: "b1", side: "buyer", phase: "tours",  addr: "Priya Devi — buyer track",     line2: "Looking: Brock area, $550–650K, 2BR+",   badge: "Tours",        progress: "2/4", next: "Showing notes for 1872 Red Tail Cres" },
+  { id: "b1", side: "buyer", phase: "tours",  addr: "Priya Devi — buyer track",     line2: "Looking: Brock area, $550–650K, 2BR+",   badge: "Tours",        progress: "2/4", next: "Showing notes for 1872 Valley Cres" },
   { id: "b2", side: "buyer", phase: "search", addr: "Marcus Greene — buyer track",   line2: "Looking: Sahali/Aberdeen, $700K+, 3BR",       badge: "Search Setup", progress: "1/3", next: "MLS criteria saved" },
   { id: "b3", side: "buyer", phase: "intake", addr: "Sam & Rosie — buyer track",     line2: "Couple, first-time buyers, $400–500K",   badge: "Intake",       progress: "0/2", next: "Profile + budget conversation" },
   { id: "b4", side: "buyer", phase: "offer",  addr: "Linda Hayworth — buyer track",  line2: "Repeat client, $850K range",                   badge: "Offer Prep",   progress: "3/4", next: "Comps pulled, awaiting client sign-off", blocked: true },
@@ -170,7 +170,7 @@ export const ADMIN_ACTIONS: AdminAction[] = [
   { id: "ar1", kind: "review", title: "Admin review: Hot Leads Watcher",        desc: "Run the outreach skill in monitor mode. Scan every connected source (Lofty CRM, Apple Messages, Gmail, SMS, social via Composio) for hot signals since the last run: inbound replies, viewing requests, repeat opens, CRM stage moves, listing alerts. Re-score heat across the inbox and surface the top 10 hottest leads. For any lead with a brand-new inbound message that needs a reply, draft a same-channel response and queue it for approval. Do not send.", schedule: "0 8 * * *" },
   { id: "ar2", kind: "review", title: "Admin review: Social Content Engine",    desc: "Run the social-content-engine skill (weekly content engine for the connected real estate agent). Steps: 1. Pull last-30-day post metrics from every connected social platform (Instagram, TikTok, YouTube, Facebook, LinkedIn) using the bundled native fetchers. 2. Aggregate + rank with scripts/aggregate.py. 3. Research current real-estate content trends in the agent’s market via the last30days skill. 4. Read inbox + CRM signals with scripts/read_signals.py to ground ideas in real client questions. 5. Generate 5–10…", next: "unknown" },
   { id: "ar3", kind: "review", title: "Admin review: Gmail Doc Router",         desc: "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevate deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.", next: "16d ago" },
-  { id: "ar4", kind: "resume", title: "Admin workflow: https://webforms.realtorlink.ca/ User: skyleigh.mccallum@gma…", desc: "https://webforms.realtorlink.ca/ User: skyleigh.mccallum@gma…", session: "tui · 13h ago" },
+  { id: "ar4", kind: "resume", title: "Admin workflow: WEBForms transaction setup", desc: "Open WEBForms, authenticate with the configured account, and create the transaction shell.", session: "tui · 13h ago" },
   { id: "ar5", kind: "resume", title: "Admin workflow: Go into webforms and create a transaction", desc: "Go into webforms and create a transaction", session: "tui · 11h ago" },
   { id: "ar6", kind: "resume", title: "Admin workflow: Go into webforms and create a transaction", desc: "Go into webforms and create a transaction", session: "tui · 13h ago" },
   { id: "ar7", kind: "resume", title: "Admin workflow: Go into webforms and create a transaction", desc: "Go into webforms and create a transaction", session: "tui · 14h ago" },
@@ -194,7 +194,7 @@ export const ADMIN_AUTOMATIONS: AdminAutomation[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_WORK: WorkItem[] = [
-  { id: "aw1", title: "https://webforms.realtorlink.ca/ User: skyleigh.mccallum@gma…",              session: "tui · 13h ago · 1 messages",   tools: 8 },
+  { id: "aw1", title: "WEBForms transaction setup",                                                  session: "tui · 13h ago · 1 messages",   tools: 8 },
   { id: "aw2", title: "Go into webforms and create a transaction",                                        session: "tui · 11h ago · 418 messages", tools: 202 },
   { id: "aw3", title: "Go into webforms and create a transaction",                                        session: "tui · 13h ago · 23 messages",  tools: 18 },
   { id: "aw4", title: "Go into webforms and create a transaction",                                        session: "tui · 14h ago · 2 messages",   tools: 8 },
@@ -207,11 +207,11 @@ export const ADMIN_WORK: WorkItem[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_SHOWINGS: Showing[] = [
-  { id: "sh1", time: "Today · 4:30 PM",    address: "1232 Ellis Street # 1403, Kelowna",  client: "Marcus G.",         kind: "showing" },
-  { id: "sh2", time: "Tomorrow · 10:00 AM", address: "B11-7155 Dallas Drive, Kamloops",     client: "Priya + Dev Patel", kind: "showing" },
-  { id: "sh3", time: "Tomorrow · 2:15 PM",  address: "17-750 Fortune Drive, Kamloops",      client: "Linda Hayworth",    kind: "showing" },
-  { id: "sh4", time: "Wed · 11:00 AM",      address: "1872 Red Tail Crescent, Kamloops",    client: "Sam & Rosie",       kind: "open-house" },
-  { id: "sh5", time: "Thu · 5:00 PM",       address: "1127 Columbia Street, Kamloops",      client: "James Okafor",      kind: "showing" },
+  { id: "sh1", time: "Today · 4:30 PM",    address: "1232 Harbour Street #1403, Kelowna", client: "Marcus G.",         kind: "showing" },
+  { id: "sh2", time: "Tomorrow · 10:00 AM", address: "11-7155 Sample Drive, Kamloops",     client: "Priya + Dev Patel", kind: "showing" },
+  { id: "sh3", time: "Tomorrow · 2:15 PM",  address: "17-750 Ridge Drive, Kamloops",       client: "Linda Hayworth",    kind: "showing" },
+  { id: "sh4", time: "Wed · 11:00 AM",      address: "1872 Valley Crescent, Kamloops",     client: "Sam & Rosie",       kind: "open-house" },
+  { id: "sh5", time: "Thu · 5:00 PM",       address: "1127 Cedar Street, Kamloops",        client: "James Okafor",      kind: "showing" },
 ];
 
 // ---------------------------------------------------------------------------

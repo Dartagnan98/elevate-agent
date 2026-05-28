@@ -35,7 +35,7 @@ def _approve(conn, *, lane="new-outreach", name, channel="any"):
         origin="ai_oneoff", actor="agent:claude",
     )
     return data.approve_template(
-        conn, proposed["id"], actor="human:dartagnan",
+        conn, proposed["id"], actor="human:test-admin",
     )
 
 

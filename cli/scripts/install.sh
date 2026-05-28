@@ -1264,7 +1264,7 @@ SOUL_EOF
 }
 
 initialize_local_databases() {
-    log_info "Initializing local SQLite databases..."
+    log_info "Initializing local databases..."
 
     cd "$INSTALL_DIR"
     if [ "$USE_VENV" = true ]; then
@@ -1276,7 +1276,7 @@ initialize_local_databases() {
     fi
 
     if "${DB_INIT_CMD[@]}"; then
-        log_success "Local SQLite databases ready"
+        log_success "Local databases ready"
     else
         log_warn "Local database initialization had issues"
         "${DB_DETAIL_CMD[@]}" || true

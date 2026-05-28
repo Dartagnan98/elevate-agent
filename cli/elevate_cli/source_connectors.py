@@ -2943,8 +2943,8 @@ def build_source_inbox_response(
         # preserve change landed (c6ba97cae) — at that point drafts were
         # always at the bottom because the file was rewritten from scratch.
         # Now the opposite is true: tail=True reads only follow-up
-        # tombstones and silently drops every message_draft. For Skyleigh's
-        # Lofty workspace that meant 182 pending drafts → 0 in the inbox.
+        # tombstones and silently drops every message_draft. In a large Lofty
+        # workspace this previously meant 182 pending drafts -> 0 in the inbox.
         # Bump the limit so a head-scan still picks them all up even after
         # several sync cycles.
         for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
@@ -3153,8 +3153,8 @@ def _collect_drafts_for_db_inbox(
         # preserve change landed (c6ba97cae) — at that point drafts were
         # always at the bottom because the file was rewritten from scratch.
         # Now the opposite is true: tail=True reads only follow-up
-        # tombstones and silently drops every message_draft. For Skyleigh's
-        # Lofty workspace that meant 182 pending drafts → 0 in the inbox.
+        # tombstones and silently drops every message_draft. In a large Lofty
+        # workspace this previously meant 182 pending drafts -> 0 in the inbox.
         # Bump the limit so a head-scan still picks them all up even after
         # several sync cycles.
         for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
@@ -3306,17 +3306,17 @@ def _collect_drafts_for_db_inbox(
 
 
 # Tags that mark a CRM contact as a private-client-search buyer. The PCS
-# pipeline writes `xposure-pcs`; the others are operator/Lofty-native tags
-# Skyleigh already uses to group buyers by saved search. Matched
-# case-insensitively against the contact's `tags` array.
+# pipeline writes `xposure-pcs`; the others are common operator/CRM-native
+# tags used to group buyers by saved search. Matched case-insensitively against
+# the contact's `tags` array.
 _PCS_BUYER_TAGS = {
     "xposure-pcs",
     "private-search",
     "mls-buyer",
     "pcs-hot-lead",
     "#pcs",
-    "skyleigh pcs",
-    "skyleigh-pcs",
+    "agent pcs",
+    "agent-pcs",
 }
 
 
@@ -3326,7 +3326,7 @@ def _is_pcs_tag(tag: str) -> bool:
         return False
     if t in _PCS_BUYER_TAGS:
         return True
-    # `pcs` as a token covers xposure-pcs / pcs-hot-lead / skyleigh pcs / #pcs
+    # `pcs` as a token covers xposure-pcs / pcs-hot-lead / agent pcs / #pcs
     # without catching unrelated tags (no other tag contains the substring).
     return "pcs" in t or t == "private-search" or t == "mls-buyer"
 
@@ -3561,7 +3561,7 @@ def build_thread_context_response(
         # the row whose contact_id/id matches this thread. The prior
         # `_read_jsonl_records(limit=2000)` silently dropped any contact past
         # row 2000, breaking the Lead Score / Stage / Tags panel for hot
-        # leads on CRMs with >2000 contacts (Skyleigh's Lofty hit this at
+        # leads on CRMs with >2000 contacts (one Lofty workspace hit this at
         # 2474 contacts — every hot lead appended after row 2000 returned
         # `lead: null` in the drawer). Streaming a single-row pluck is O(n)
         # but unbounded by file size and uses constant memory.

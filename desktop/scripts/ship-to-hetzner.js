@@ -9,7 +9,7 @@
 //   3. Done. Running apps poll the feed every 2hr (or on next launch).
 //
 // Requirements:
-//   - SSH key auth set up for root@5.78.46.234 (already is — Dartagnan uses it)
+//   - SSH key auth set up for root@5.78.46.234
 //   - rsync installed locally (default on macOS)
 
 const fs = require("node:fs");
@@ -76,5 +76,5 @@ if (chown.status !== 0) {
   console.error("[ship] chown failed — may need to fix permissions manually");
 }
 
-console.log("\n[ship] live at https://app.ctrlstrategies.com/updates/");
+console.log("\n[ship] live at https://api.elevationrealestatehq.com/updates/");
 console.log("[ship] running apps will pick up the update within ~2hr (or on next launch).");

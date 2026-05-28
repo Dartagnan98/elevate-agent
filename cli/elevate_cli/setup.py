@@ -2054,6 +2054,7 @@ def setup_admin(config: dict, quick: bool = False):
             update_admin_setup,
         )
         from elevate_cli.data.province_guides import PROVINCE_LABELS
+        from elevate_cli.portal_credentials import portal_playbook_ready
     except Exception as exc:
         print_error(f"Admin setup is not available: {exc}")
         return
@@ -2257,11 +2258,7 @@ def setup_admin(config: dict, quick: bool = False):
     identity_ready = bool(realtor_name and brokerage_name)
     jurisdiction_ready = bool(province and market)
     browser_has_full_contract = all(
-        str(playbook.get("provider") or "").strip()
-        and any(
-            str(playbook.get(field) or "").strip()
-            for field in ("loginUrl", "credentialRef", "notes")
-        )
+        portal_playbook_ready(playbook)
         for playbook in next_playbooks.values()
     )
 

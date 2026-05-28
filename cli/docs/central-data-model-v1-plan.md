@@ -1,7 +1,7 @@
 # Central Data Model — V1 Execution Plan
 
 **Status:** plan only, no code written
-**Owner:** Dartagnan
+**Owner:** Product
 **Date:** 2026-05-05
 **Companion to:** [central-data-model.md](./central-data-model.md)
 
