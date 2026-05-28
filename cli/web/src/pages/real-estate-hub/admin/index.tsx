@@ -220,6 +220,7 @@ type AdminCard = {
   client: string;
   contactInitials: string;
   property?: string;
+  top25Note?: string;
   nextLabel?: string;
   nextDate?: string;
   daysOut?: number;
@@ -236,7 +237,7 @@ const ADMIN_SIDE_LABELS: Record<AdminSide, { title: string; description: string 
   },
   buyer: {
     title: "Buyer Admin",
-    description: "Walkthrough through one-week follow-up",
+    description: "Offer prep through one-week follow-up",
   },
 };
 
@@ -727,7 +728,10 @@ function adminPhaseAutomation(side: AdminSide, stage: AdminStageNumber): AdminPh
 }
 
 function visibleAdminStages(side: AdminSide): AdminStageNumber[] {
-  return ADMIN_STAGE_NUMBERS.filter((stage) => !(side === "listing" && stage === 5));
+  return ADMIN_STAGE_NUMBERS.filter((stage) => {
+    if (side === "listing") return stage !== 5;
+    return stage >= 4;
+  });
 }
 
 function adminNextStage(card: AdminCard): AdminStageNumber | null {
@@ -874,6 +878,11 @@ function adminCardFromDeal(deal: AdminDeal): AdminCard {
   const stage = toAdminStage(deal.currentStage);
   const stageLabel = adminStageLabel(side, stage);
   const property = deal.listingAddress || (deal.province ? `${deal.province} deal` : undefined);
+  const top25Note =
+    adminStringValue(deal.extraToggles?.top25Note) ??
+    adminStringValue(deal.extraToggles?.lookingFor) ??
+    adminStringValue(deal.extraToggles?.buyerCriteria) ??
+    adminStringValue(deal.extraToggles?.profileCriteriaSummary);
   return {
     id: deal.id,
     side,
@@ -881,6 +890,7 @@ function adminCardFromDeal(deal: AdminDeal): AdminCard {
     client: deal.title || "Untitled deal",
     contactInitials: initialsFromTitle(deal.title || "Admin deal"),
     property,
+    top25Note,
     nextLabel: stageLabel.title,
     pinnedTop25: deal.extraToggles?.pinnedTop25 === true || deal.extraToggles?.top25 === true,
     completedByStage: completedStagesFromDeal(deal, side),
@@ -2891,6 +2901,12 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
       {card.property && (
         <div className="mt-1 truncate text-[12px] text-muted-foreground">
           {card.property}
+        </div>
+      )}
+      {card.pinnedTop25 && card.top25Note && (
+        <div className="mt-2 rounded-sm border border-warning/25 bg-warning/5 px-2 py-1.5 text-[11.5px] leading-snug text-foreground/90">
+          <span className="font-mono-ui text-[9.5px] uppercase tracking-wider text-warning mr-1.5">Looking</span>
+          {card.top25Note}
         </div>
       )}
       {card.nextLabel && (

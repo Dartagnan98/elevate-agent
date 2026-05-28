@@ -98,6 +98,21 @@ function formatPrice(n: number | null | undefined): string | undefined {
   return `$${n}`;
 }
 
+function stringToggle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function top25Note(d: AdminDeal): string | undefined {
+  return (
+    stringToggle(d.extraToggles?.top25Note) ??
+    stringToggle(d.extraToggles?.lookingFor) ??
+    stringToggle(d.extraToggles?.buyerCriteria) ??
+    stringToggle(d.extraToggles?.profileCriteriaSummary)
+  );
+}
+
 function clampStage(n: number): number {
   if (n < 0) return 0;
   if (n > 10) return 10;
@@ -113,6 +128,7 @@ export function adminDealToDeal(d: AdminDeal): Deal {
   const line2 = (d.listingAddress || d.title || "").trim() || (d.province ? `${d.province} deal` : "—");
   const price = formatPrice(d.listPrice);
   const pinned = d.extraToggles?.pinnedTop25 === true || d.extraToggles?.top25 === true;
+  const note = top25Note(d);
   return {
     id: d.id,
     phase,
@@ -123,6 +139,7 @@ export function adminDealToDeal(d: AdminDeal): Deal {
     price,
     mls: d.mlsNumber ?? undefined,
     primary: pinned,
+    top25Note: note,
   };
 }
 
@@ -132,14 +149,17 @@ export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
   const badge = BUYER_STAGE_BADGE[stage] ?? "Intake";
   const next = BUYER_STAGE_NEXT[stage] ?? "—";
   const title = d.title || "Buyer";
+  const note = top25Note(d);
   return {
     id: d.id,
     side: "buyer",
     phase,
     addr: `${title} — buyer track`,
-    line2: d.listingAddress || (d.province ? `Looking: ${d.province}` : "—"),
+    line2: note ? `Looking: ${note}` : d.listingAddress || (d.province ? `Looking: ${d.province}` : "—"),
     badge,
     progress: "0/3",
     next,
+    primary: d.extraToggles?.pinnedTop25 === true || d.extraToggles?.top25 === true,
+    top25Note: note,
   };
 }

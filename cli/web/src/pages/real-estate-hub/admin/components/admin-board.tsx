@@ -176,6 +176,7 @@ interface Deal {
   daysInStage?: string;
   blocked?: boolean;
   primary?: boolean;
+  top25Note?: string;
   price?: string;
   mls?: string;
   side?: string;
@@ -314,6 +315,12 @@ function Top25Deals({
                   {d.blocked && <span className="ab-top25-card-flag">&bull;</span>}
                 </div>
                 <div className="ab-top25-card-badge mono">{d.badge}</div>
+                {d.primary && d.top25Note && (
+                  <div className="ab-top25-card-note">
+                    <span className="ab-top25-card-note-label mono">Looking</span>
+                    <span className="ab-top25-card-note-text">{d.top25Note}</span>
+                  </div>
+                )}
                 <div className="ab-top25-card-foot">
                   {d.price && <span className="ab-top25-card-price mono">{d.price}</span>}
                   {d.progress && <span className="ab-top25-card-progress mono">{d.progress}</span>}

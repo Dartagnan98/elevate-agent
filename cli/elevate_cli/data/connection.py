@@ -118,10 +118,16 @@ def _ensure_schema(conn: "PgConnection") -> None:
 
 
 def _reset_schema_cache() -> None:
-    """Test helper — drop the "schema is up to date" cache."""
-    global _schema_ready
+    """Test helper — drop cached schema, pool, and embedded server state."""
+    global _pool, _schema_ready
     with _schema_lock:
         _schema_ready = False
+    with _pool_lock:
+        pool = _pool
+        _pool = None
+    if pool is not None:
+        pool.close()
+    pg_server._reset_server_for_tests()
 
 
 # ─── Placeholder translation ───────────────────────────────────────────

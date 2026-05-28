@@ -27,6 +27,7 @@ export type Deal = {
   mls?: string;
   blocked?: boolean;
   primary?: boolean;
+  top25Note?: string;
 };
 
 export type BuyerDeal = {
@@ -39,6 +40,8 @@ export type BuyerDeal = {
   progress: string;
   next: string;
   blocked?: boolean;
+  primary?: boolean;
+  top25Note?: string;
 };
 
 export type AdminAction = {

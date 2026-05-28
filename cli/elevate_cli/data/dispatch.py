@@ -74,6 +74,7 @@ _ADMIN_DEAL_MATCHER_SKILL = "real-estate-admin/deal-matcher"
 _ADMIN_WORKER_SKILL_REFS = {
     "admin-agent": _ADMIN_ORCHESTRATOR_SKILL,
     "admin-result-writer": _ADMIN_RESULT_WRITER_SKILL,
+    "buyer-cps": "real-estate-admin/webforms",
     "deal-matcher": _ADMIN_DEAL_MATCHER_SKILL,
     "closing-admin": "real-estate-admin/closing-admin",
     "listing-build": "real-estate-admin/listing-build",
@@ -214,6 +215,16 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "side": "listing",
         "to_stage": 9,
         "priority": 70,
+    },
+    {
+        "name": "Buyer S4 Prepare CPS draft",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/webforms",
+        "skill_args": {"mode": "draft", "sendPolicy": "draft_only"},
+        "side": "buyer",
+        "to_stage": 4,
+        "priority": 90,
+        "approval_required": True,
     },
 )
 
@@ -482,9 +493,10 @@ def ensure_default_admin_actions(conn: sqlite3.Connection) -> dict[str, Any]:
         if found:
             expected_approval = bool(spec.get("approval_required", False))
             expected_skill_args = dict(spec.get("skill_args") or {})
+            expected_skill = _canonical_admin_skill_ref(str(spec.get("skill") or ""))
             needs_update = (
                 found["trigger"] != spec["trigger"]
-                or found["skill"] != spec["skill"]
+                or found["skill"] != expected_skill
                 or found["skillArgs"] != expected_skill_args
                 or found["side"] != spec.get("side")
                 or found["toStage"] != spec.get("to_stage")

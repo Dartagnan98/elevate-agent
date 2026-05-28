@@ -896,6 +896,31 @@
   text-transform: uppercase;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.ab-top25-card-note {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--status-warn) 25%, transparent);
+  background: color-mix(in srgb, var(--status-warn) 5%, transparent);
+  border-radius: 3px;
+  padding: 5px 6px;
+}
+.ab-top25-card-note-label {
+  flex-shrink: 0;
+  font: 600 8.5px/1 "Geist Mono", monospace;
+  color: var(--status-warn);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ab-top25-card-note-text {
+  min-width: 0;
+  color: var(--fg);
+  font: 500 11px/1.25 "Geist", sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ab-top25-card-foot {
   display: flex; align-items: baseline; gap: 8px;
   margin-top: 2px;

@@ -137,4 +137,15 @@ def _atexit_stop() -> None:
         pass
 
 
-__all__ = ["get_server", "get_uri", "ensure_database", "pg_data_dir"]
+def _reset_server_for_tests() -> None:
+    """Stop and forget the embedded server so tests can swap ELEVATE_HOME."""
+    _atexit_stop()
+
+
+__all__ = [
+    "get_server",
+    "get_uri",
+    "ensure_database",
+    "pg_data_dir",
+    "_reset_server_for_tests",
+]

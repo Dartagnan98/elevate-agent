@@ -131,7 +131,7 @@ def test_create_action_returns_normalized_row(client):
     body = resp.json()
     assert body["name"] == "Listed → marketing/just_listed"
     assert body["trigger"] == "stage_entry"
-    assert body["skill"] == "marketing"
+    assert body["skill"] == "real-estate-admin/marketing"
     assert body["side"] == "listing"
     assert body["toStage"] == 5
     assert body["skillArgs"] == {"phase": "just_listed"}
@@ -265,7 +265,7 @@ def test_move_deal_stage_creates_action_run_via_hook():
     assert run["status"] == "running"
     assert run["cronJobId"]
     assert run["startedAt"]
-    assert run["skill"] == "marketing"
+    assert run["skill"] == "real-estate-admin/marketing"
     assert run["registryName"] == "just_listed entry"
     assert run["payload"]["toStage"] == 5
     assert run["payload"]["registryName"] == "just_listed entry"
@@ -481,7 +481,7 @@ def test_approval_required_action_does_not_spawn_cron_job(client):
     assert len(runs) == 1
     assert runs[0]["cronJobId"] is None
     assert runs[0]["status"] == "waiting_human"
-    assert runs[0]["humanPrompt"]["skill"] == "marketing"
+    assert runs[0]["humanPrompt"]["skill"] == "real-estate-admin/marketing"
     assert runs[0]["payload"]["registryName"] == "approval gated entry"
 
     approved = client.post(f"/api/admin/action-runs/{runs[0]['id']}/approve", json={"approved": True})
@@ -489,7 +489,7 @@ def test_approval_required_action_does_not_spawn_cron_job(client):
     body = approved.json()
     assert body["status"] == "running"
     assert body["cronJobId"]
-    assert body["skill"] == "marketing"
+    assert body["skill"] == "real-estate-admin/marketing"
     assert body["registryName"] == "approval gated entry"
 
 
@@ -498,14 +498,28 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert first.status_code == 200, first.text
     body = first.json()
     created_skills = {item["skill"] for item in body["created"]}
-    assert {"mlc", "photo-cleanup", "listing-build", "offer-review", "subject-removal", "closing-admin"}.issubset(created_skills)
+    assert {
+        "real-estate-admin/mlc",
+        "real-estate-admin/photo-cleanup",
+        "real-estate-admin/listing-build",
+        "real-estate-admin/offer-review",
+        "real-estate-admin/subject-removal",
+        "real-estate-admin/closing-admin",
+        "real-estate-admin/webforms",
+    }.issubset(created_skills)
     created_names = {item["name"]: item for item in body["created"]}
     assert created_names["S1 Collect listing info for MLC"]["skillArgs"] == {"mode": "intake"}
     assert created_names["S2 Prepare MLC package"]["skillArgs"] == {"mode": "documents"}
+    buyer_cps = created_names["Buyer S4 Prepare CPS draft"]
+    assert buyer_cps["skill"] == "real-estate-admin/webforms"
+    assert buyer_cps["side"] == "buyer"
+    assert buyer_cps["toStage"] == 4
+    assert buyer_cps["approvalRequired"] is True
+    assert buyer_cps["skillArgs"] == {"mode": "draft", "sendPolicy": "draft_only"}
     assert "gmail-doc-router" not in created_skills
     assert "seller-update" not in created_skills
     assert body["updated"] == []
-    assert all(item["approvalRequired"] is False for item in body["created"])
+    assert all(item["approvalRequired"] is False for item in body["created"] if item["name"] != "Buyer S4 Prepare CPS draft")
 
     second = client.post("/api/admin/actions/defaults")
     assert second.status_code == 200, second.text
@@ -558,11 +572,16 @@ def test_run_result_accepts_per_run_service_token_without_session(client):
     assert job["agent"] == "admin"
     assert job["origin"]["agent"] == "admin"
     assert job["origin"]["telegram_lane"] == "admin-agent"
-    assert job["skills"] == ["admin-agent", "deal-matcher", "marketing", "admin-result-writer"]
+    assert job["skills"] == [
+        "real-estate-admin/admin-agent",
+        "real-estate-admin/deal-matcher",
+        "real-estate-admin/marketing",
+        "real-estate-admin/admin-result-writer",
+    ]
     assert "Admin agent orchestration" in job["prompt"]
     assert "Admin Telegram handoff" in job["prompt"]
     assert f"POST http://127.0.0.1:9119/api/deals/{deal['id']}/runs/{run['id']}/result" in job["prompt"]
-    assert "Report SQLite changes only after the result callback succeeds" in job["prompt"]
+    assert "Report operational database changes only after the result callback succeeds" in job["prompt"]
     match = re.search(r"X-Elevate-Run-Token: (\S+)", job["prompt"])
     assert match, job["prompt"]
 
@@ -644,7 +663,7 @@ def test_dispatched_run_prompt_injects_deal_flow_and_province_memory(tmp_path):
 
     job = next(job for job in load_jobs() if job["id"] == run["cronJobId"])
     prompt = job["prompt"]
-    assert "Injected source-of-truth context from SQLite" in prompt
+    assert "Injected source-of-truth context from the operational data store" in prompt
     assert "browserWorkflows" in prompt
     assert "photoProcessing" in prompt
     assert "SkySlope" in prompt
