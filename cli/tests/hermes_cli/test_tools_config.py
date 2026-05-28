@@ -343,10 +343,10 @@ def test_save_platform_tools_still_preserves_mcp_with_platform_default_present()
     assert "terminal" not in saved
 
 
-def test_browser_category_is_local_first_no_browser_use_cloud(monkeypatch):
-    """Browser Use cloud (and its Nous-managed entry) were removed — Elevate is
-    local-first. Even logged into Nous, the browser picker offers only local
-    backends and never the cloud Browser Use provider."""
+def test_browser_category_is_local_first_direct_browser_use_cloud_removed(monkeypatch):
+    """Local-first: the direct, self-billed Browser Use cloud entry (the one
+    that prompted for BROWSER_USE_API_KEY) is gone. The managed Nous-gateway
+    entry is KEPT, and is still shown to signed-in Nous subscribers."""
     monkeypatch.setattr("elevate_cli.tools_config.managed_nous_tools_enabled", lambda: True)
     config = {"model": {"provider": "nous"}}
 
@@ -357,12 +357,20 @@ def test_browser_category_is_local_first_no_browser_use_cloud(monkeypatch):
 
     providers = _visible_providers(TOOL_CATEGORIES["browser"], config)
 
-    names = [p["name"] for p in providers]
+    # Local is the recommended default, listed first.
     assert providers[0]["name"] == "Local Browser"
-    assert not any("Browser Use" in n or "Nous Subscription" in n for n in names)
-    assert not any(
-        p.get("browser_provider") == "browser-use" for p in providers
-    )
+
+    # The managed Nous subscription entry is kept (and visible when logged in).
+    assert any(p["name"].startswith("Nous Subscription") for p in providers)
+
+    # No direct-key Browser Use entry: nothing prompts for BROWSER_USE_API_KEY.
+    for p in providers:
+        keys = [ev.get("key") for ev in p.get("env_vars", [])]
+        assert "BROWSER_USE_API_KEY" not in keys
+    # The only browser-use-backed entry is the managed (no-env-var) one.
+    bu_entries = [p for p in providers if p.get("browser_provider") == "browser-use"]
+    assert all(p.get("managed_nous_feature") == "browser" for p in bu_entries)
+    assert all(not p.get("env_vars") for p in bu_entries)
 
 
 def test_visible_providers_hide_nous_subscription_when_feature_flag_is_off(monkeypatch):

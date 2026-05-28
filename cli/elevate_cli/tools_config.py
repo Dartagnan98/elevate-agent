@@ -354,6 +354,18 @@ TOOL_CATEGORIES = {
                 "browser_provider": "local",
             },
             {
+                # Managed Nous gateway only — the direct, self-billed
+                # BROWSER_USE_API_KEY cloud was removed (local-first). This row
+                # is shown only to signed-in Nous subscribers via _visible_providers.
+                "name": "Nous Subscription (Browser Use cloud)",
+                "badge": "subscription",
+                "tag": "Managed Browser Use billed to your Nous subscription",
+                "env_vars": [],
+                "browser_provider": "browser-use",
+                "requires_nous_auth": True,
+                "managed_nous_feature": "browser",
+            },
+            {
                 "name": "Camofox",
                 "badge": "free · local",
                 "tag": "Anti-detection browser (Firefox/Camoufox)",
@@ -1324,9 +1336,22 @@ def _visible_providers(cat: dict, config: dict) -> list[dict]:
         visible.extend(_plugin_web_search_providers())
 
     # Mirror image_gen for cloud browser backends. No-op for category
-    # names that don't match the plugin-driven shape.
+    # names that don't match the plugin-driven shape. Dedupe against static
+    # entries by ``browser_provider``: providers that already have a static
+    # picker row (e.g. browser-use, whose managed Nous row lives in
+    # TOOL_CATEGORIES and is feature-flag filtered above) must NOT be
+    # re-injected from their get_setup_schema — that would duplicate the row
+    # AND bypass the managed-feature / nous-auth gates applied in the loop.
     if cat.get("name") == "Browser Automation":
-        visible.extend(_plugin_browser_providers())
+        static_browser_providers = {
+            p.get("browser_provider")
+            for p in cat.get("providers", [])
+            if p.get("browser_provider")
+        }
+        for row in _plugin_browser_providers():
+            if row.get("browser_provider") in static_browser_providers:
+                continue
+            visible.append(row)
 
     return visible
 

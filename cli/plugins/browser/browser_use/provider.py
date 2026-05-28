@@ -126,21 +126,12 @@ class BrowserUseBrowserProvider(BrowserProvider):
     # ------------------------------------------------------------------
 
     def _get_config_or_none(self) -> Optional[Dict[str, Any]]:
-        # Import here to avoid a hard dependency at module-import time —
-        # managed_tool_gateway pulls in the Nous auth stack which can be
-        # heavy and is not needed for direct-API-key users.
+        # Elevate keeps ONLY the managed Nous-gateway path for Browser Use; the
+        # direct self-billed BROWSER_USE_API_KEY cloud was removed (local mode
+        # is the default for everyone else). So a stray BROWSER_USE_API_KEY in
+        # the environment is intentionally ignored here — this provider is
+        # available only when the managed Nous tool gateway is configured.
         from tools.managed_tool_gateway import resolve_managed_tool_gateway
-        from tools.tool_backend_helpers import prefers_gateway
-
-        # Direct API key wins unless the user has explicitly opted into the
-        # managed Nous gateway via ``tool_gateway.browser: gateway``.
-        api_key = os.environ.get("BROWSER_USE_API_KEY")
-        if api_key and not prefers_gateway("browser"):
-            return {
-                "api_key": api_key,
-                "base_url": _BASE_URL,
-                "managed_mode": False,
-            }
 
         managed = resolve_managed_tool_gateway("browser-use")
         if managed is None:
@@ -158,13 +149,13 @@ class BrowserUseBrowserProvider(BrowserProvider):
         config = self._get_config_or_none()
         if config is None:
             message = (
-                "Browser Use requires a direct BROWSER_USE_API_KEY credential."
+                "Browser Use is available only through the managed Nous tool "
+                "gateway in Elevate. Either it isn't configured, or you're not "
+                "signed into a Nous subscription. (Direct BROWSER_USE_API_KEY "
+                "cloud was removed — local mode is the default.)"
             )
-            if managed_nous_tools_enabled():
-                message = (
-                    "Browser Use requires either a direct BROWSER_USE_API_KEY "
-                    "credential or a managed Browser Use gateway configuration."
-                )
+            # managed_nous_tools_enabled retained for parity / future messaging.
+            managed_nous_tools_enabled()
             raise ValueError(message)
         return config
 
@@ -295,16 +286,15 @@ class BrowserUseBrowserProvider(BrowserProvider):
             )
 
     def get_setup_schema(self) -> Dict[str, Any]:
+        # Managed Nous gateway only — the direct, self-billed
+        # BROWSER_USE_API_KEY cloud was removed in Elevate (local-first). No
+        # API-key prompt: this activates via a Nous subscription, not a key.
         return {
-            "name": "Browser Use",
-            "badge": "paid",
-            "tag": "Cloud browser with remote execution",
-            "env_vars": [
-                {
-                    "key": "BROWSER_USE_API_KEY",
-                    "prompt": "Browser Use API key",
-                    "url": "https://browser-use.com",
-                },
-            ],
+            "name": "Nous Subscription (Browser Use cloud)",
+            "badge": "subscription",
+            "tag": "Managed Browser Use billed to your Nous subscription",
+            "env_vars": [],
+            "requires_nous_auth": True,
+            "managed_nous_feature": "browser",
             "post_setup": "agent_browser",
         }
