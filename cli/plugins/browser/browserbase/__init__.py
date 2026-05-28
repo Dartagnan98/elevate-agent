@@ -1,15 +1,19 @@
-"""Browserbase cloud browser plugin — bundled, auto-loaded.
+"""Browserbase cloud browser plugin — DISABLED in Elevate.
 
-Mirrors the ``plugins/web/<vendor>/`` and ``plugins/image_gen/openai/``
-layout: ``provider.py`` holds the provider class; ``__init__.py::register``
-instantiates and registers it via the plugin context.
+Elevate is local-first: the browser tool uses the open-source ``agent-browser``
+engine on the user's own machine (and, on desktops, their real logged-in Chrome
+via the visible-browser auto-provision). Browserbase is a paid remote cloud
+browser inherited from the upstream Nous ``hermes-agent`` fork; it was never
+used here and only added another cloud option to the picker.
+
+We leave ``provider.py`` in place (so upstream merges stay clean) but do NOT
+register it — the registry simply falls through to local mode. To re-enable,
+restore the ``register`` body that instantiated ``BrowserbaseBrowserProvider``.
 """
 
 from __future__ import annotations
 
-from plugins.browser.browserbase.provider import BrowserbaseBrowserProvider
-
 
 def register(ctx) -> None:
-    """Register the Browserbase provider with the plugin context."""
-    ctx.register_browser_provider(BrowserbaseBrowserProvider())
+    """Intentionally a no-op. Browserbase is disabled in Elevate (local-first)."""
+    return None

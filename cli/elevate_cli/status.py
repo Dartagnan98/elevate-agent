@@ -138,9 +138,9 @@ def show_status(args):
         "MiniMax-CN": "MINIMAX_CN_API_KEY",
         "Firecrawl": "FIRECRAWL_API_KEY",
         "Tavily": "TAVILY_API_KEY",
-        # Browser Use cloud removed — Elevate is local-first (agent-browser +
-        # the user's logged-in Chrome). No browser API key is used.
-        "Browserbase": "BROWSERBASE_API_KEY",  # Optional — direct credentials only
+        # Cloud browsers removed — Elevate is local-first (agent-browser + the
+        # user's logged-in Chrome). No browser API key (Browser Use cloud and
+        # Browserbase both dropped).
         "FAL": "FAL_KEY",
         "ElevenLabs": "ELEVENLABS_API_KEY",
         "GitHub": "GITHUB_TOKEN",
