@@ -133,15 +133,16 @@ const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 type AdminSide = "listing" | "buyer";
 type AdminStageNumber = (typeof ADMIN_STAGE_NUMBERS)[number];
 
+// Provinces/territories we service. Nova Scotia, Northwest Territories, and
+// Nunavut are intentionally excluded — not serviced (NS is reference-only;
+// NT/NU have no imported guide data). Single source for all three province
+// pickers (onboarding, admin setup, per-deal override).
 const CANADIAN_PROVINCES: Array<{ code: string; label: string }> = [
   { code: "AB", label: "Alberta" },
   { code: "BC", label: "British Columbia" },
   { code: "MB", label: "Manitoba" },
   { code: "NB", label: "New Brunswick" },
   { code: "NL", label: "Newfoundland and Labrador" },
-  { code: "NS", label: "Nova Scotia" },
-  { code: "NT", label: "Northwest Territories" },
-  { code: "NU", label: "Nunavut" },
   { code: "ON", label: "Ontario" },
   { code: "PEI", label: "Prince Edward Island" },
   { code: "QC", label: "Quebec" },
