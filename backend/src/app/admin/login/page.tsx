@@ -1,11 +1,58 @@
 "use client";
 
-import Link from "next/link";
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Button, ErrorBanner, Input, Label } from "@/components/ui";
 
 type Mode = "password" | "code";
+
+// Styles mirror the Electron desktop login (desktop/src/login.html) exactly so
+// the web sign-in matches the app: #0F0F0F canvas, #1A1A1A card, #2A2A2A
+// borders, #8A8A8A primary button, #ECECEC / #A0A0A0 text.
+const STYLES = `
+.el-login * { box-sizing: border-box; }
+.el-login {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 48px 32px;
+  background: #0F0F0F; color: #ECECEC;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.el-login .card {
+  width: 380px; background: #1A1A1A; border: 1px solid #2A2A2A;
+  border-radius: 12px; padding: 32px 28px;
+}
+.el-login .brand { display: flex; align-items: center; gap: 10px; margin: 0 0 4px; }
+.el-login .brand-dot { width: 10px; height: 10px; border-radius: 3px; background: #8A8A8A; }
+.el-login .brand-name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.el-login h1 { margin: 16px 0 6px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+.el-login .subtitle { margin: 0 0 24px; font-size: 13px; color: #A0A0A0; line-height: 1.4; }
+.el-login form { display: flex; flex-direction: column; gap: 12px; }
+.el-login label { font-size: 12px; color: #A0A0A0; margin-bottom: -8px; }
+.el-login input[type=email], .el-login input[type=password], .el-login input[type=text] {
+  background: #0F0F0F; border: 1px solid #2A2A2A; border-radius: 6px; color: #ECECEC;
+  padding: 10px 12px; font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s;
+}
+.el-login input:focus { border-color: #B0B0B0; }
+.el-login input.code { letter-spacing: 0.3em; font-size: 18px; text-align: center; }
+.el-login button.primary {
+  background: #8A8A8A; color: #0F0F0F; border: 0; border-radius: 6px; padding: 11px 14px;
+  font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px; font-family: inherit; transition: background 0.15s;
+}
+.el-login button.primary:hover:not(:disabled) { background: #B0B0B0; }
+.el-login button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
+.el-login .row-links { display: flex; justify-content: space-between; margin-top: 14px; font-size: 12px; }
+.el-login a, .el-login .linkbtn {
+  color: #B0B0B0; text-decoration: none; cursor: pointer; background: none; border: 0;
+  font-size: 12px; font-family: inherit; padding: 0;
+}
+.el-login a:hover, .el-login .linkbtn:hover { text-decoration: underline; }
+.el-login .status { min-height: 18px; font-size: 12px; margin-top: 8px; line-height: 1.4; }
+.el-login .status.error { color: #E07570; }
+.el-login .status.info { color: #A0A0A0; }
+.el-login .divider { border-top: 1px solid #2A2A2A; margin: 20px 0 16px; }
+.el-login .alt-action { font-size: 12px; color: #A0A0A0; text-align: center; }
+`;
 
 function LoginInner() {
   const router = useRouter();
@@ -17,11 +64,9 @@ function LoginInner() {
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [codeSent, setCodeSent] = useState(false);
-  const [info, setInfo] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ text: string; kind: "error" | "info" } | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Shared: store tokens and redirect (same for password + code login).
   function finishLogin(data: { access_token: string; refresh_token: string }) {
     localStorage.setItem("elevate_access", data.access_token);
     localStorage.setItem("elevate_refresh", data.refresh_token);
@@ -31,37 +76,35 @@ function LoginInner() {
 
   function switchMode(m: Mode) {
     setMode(m);
-    setErr(null);
-    setInfo(null);
+    setStatus(null);
     setCode("");
     setCodeSent(false);
   }
 
   async function submitPassword(e: React.FormEvent) {
     e.preventDefault();
-    setErr(null);
+    setStatus({ text: "Signing in...", kind: "info" });
     setLoading(true);
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password, device_label: "admin-web" }),
+        body: JSON.stringify({ email, password, device_label: "web" }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "login failed");
+      if (!res.ok) throw new Error(data.error || "Could not sign in.");
+      setStatus({ text: "Welcome back. Loading...", kind: "info" });
       finishLogin(data);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : "login failed");
-    } finally {
+      setStatus({ text: e instanceof Error ? e.message : "Could not sign in.", kind: "error" });
       setLoading(false);
     }
   }
 
   async function requestCode(e: React.FormEvent) {
     e.preventDefault();
-    setErr(null);
-    setInfo(null);
     setLoading(true);
+    setStatus({ text: "Sending code...", kind: "info" });
     try {
       const res = await fetch("/api/auth/login-code/request", {
         method: "POST",
@@ -69,12 +112,11 @@ function LoginInner() {
         body: JSON.stringify({ email }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "could not send code");
-      // Always-OK response (no enumeration). Move to the verify step regardless.
+      if (!res.ok) throw new Error(data.error || "Could not send code.");
       setCodeSent(true);
-      setInfo("If that email has an account, a 6-digit code is on its way. It expires in 10 minutes.");
+      setStatus({ text: "If that email has an account, a 6-digit code is on its way (expires in 10 min).", kind: "info" });
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : "could not send code");
+      setStatus({ text: e instanceof Error ? e.message : "Could not send code.", kind: "error" });
     } finally {
       setLoading(false);
     }
@@ -82,241 +124,108 @@ function LoginInner() {
 
   async function verifyCode(e: React.FormEvent) {
     e.preventDefault();
-    setErr(null);
     setLoading(true);
+    setStatus({ text: "Verifying...", kind: "info" });
     try {
       const res = await fetch("/api/auth/login-code/verify", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, code, device_label: "admin-web" }),
+        body: JSON.stringify({ email, code, device_label: "web" }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "invalid code");
+      if (!res.ok) throw new Error(data.error || "Invalid code.");
+      setStatus({ text: "Welcome back. Loading...", kind: "info" });
       finishLogin(data);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : "invalid code");
-    } finally {
+      setStatus({ text: e instanceof Error ? e.message : "Invalid code.", kind: "error" });
       setLoading(false);
     }
   }
 
-  return (
-    <main
-      style={{
-        minHeight: "100vh",
-        display: "grid",
-        placeItems: "center",
-        padding: 16,
-        background:
-          "radial-gradient(circle at 20% 0%, rgba(217, 119, 87, 0.06), transparent 50%), radial-gradient(circle at 80% 100%, rgba(122, 158, 135, 0.04), transparent 50%), var(--bg)",
-      }}
-    >
-      <div
-        className="fade-in"
-        style={{
-          width: "100%",
-          maxWidth: 380,
-          background: "var(--bg-elev)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--r-xl)",
-          padding: "32px 28px",
-          boxShadow: "var(--shadow-lg)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
-          <svg width="32" height="32" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-            <rect width="28" height="28" rx="7" fill="var(--accent)" />
-            <path d="M9 9h10v2.5h-7.5v3h6V17h-6v3H19V22.5H9V9z" fill="#fff" />
-          </svg>
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.01em" }}>Elevate HQ</div>
-            <div
-              style={{
-                fontSize: 10,
-                color: "var(--text-dim)",
-                fontFamily: "var(--font-mono)",
-                textTransform: "uppercase",
-                letterSpacing: "0.08em",
-              }}
-            >
-              control panel
-            </div>
-          </div>
-        </div>
+  const subtitle =
+    mode === "password"
+      ? "Use your Elevation Real Estate HQ account."
+      : codeSent
+        ? "Enter the 6-digit code we emailed you."
+        : "We'll email you a one-time sign-in code.";
 
-        <h1 style={{ margin: "0 0 4px", fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>
-          Sign in
-        </h1>
-        <p style={{ margin: "0 0 24px", color: "var(--text-dim)", fontSize: 13 }}>
-          {mode === "password"
-            ? "Manage users, organizations, and entitlements."
-            : codeSent
-              ? "Enter the 6-digit code we emailed you."
-              : "We'll email you a one-time sign-in code."}
-        </p>
+  const signupHref = `/signup${next !== "/admin/users" ? `?next=${encodeURIComponent(next)}` : ""}`;
+
+  return (
+    <div className="el-login">
+      <style dangerouslySetInnerHTML={{ __html: STYLES }} />
+      <div className="card">
+        <div className="brand">
+          <div className="brand-dot" />
+          <div className="brand-name">Elevate</div>
+        </div>
+        <h1>Sign in</h1>
+        <p className="subtitle">{subtitle}</p>
 
         {mode === "password" && (
-          <form onSubmit={submitPassword} style={{ display: "grid", gap: 14 }}>
-            <div>
-              <Label>Email</Label>
-              <Input
-                type="email"
-                placeholder="you@company.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoFocus
-                autoComplete="email"
-              />
-            </div>
-            <div>
-              <Label>Password</Label>
-              <Input
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                autoComplete="current-password"
-              />
-            </div>
-            <Button variant="primary" type="submit" loading={loading} style={{ width: "100%", marginTop: 4 }}>
-              {loading ? "Signing in" : "Sign in"}
-            </Button>
-            {err && <ErrorBanner>{err}</ErrorBanner>}
+          <form onSubmit={submitPassword}>
+            <label htmlFor="email">Email</label>
+            <input id="email" type="email" autoComplete="email" autoFocus required
+              value={email} onChange={(e) => setEmail(e.target.value)} />
+            <label htmlFor="password">Password</label>
+            <input id="password" type="password" autoComplete="current-password" required
+              value={password} onChange={(e) => setPassword(e.target.value)} />
+            <button className="primary" type="submit" disabled={loading}>
+              {loading ? "Signing in..." : "Sign in"}
+            </button>
+            {status && <div className={`status ${status.kind}`}>{status.text}</div>}
           </form>
         )}
 
         {mode === "code" && !codeSent && (
-          <form onSubmit={requestCode} style={{ display: "grid", gap: 14 }}>
-            <div>
-              <Label>Email</Label>
-              <Input
-                type="email"
-                placeholder="you@company.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoFocus
-                autoComplete="email"
-              />
-            </div>
-            <Button variant="primary" type="submit" loading={loading} style={{ width: "100%", marginTop: 4 }}>
-              {loading ? "Sending code" : "Email me a code"}
-            </Button>
-            {err && <ErrorBanner>{err}</ErrorBanner>}
+          <form onSubmit={requestCode}>
+            <label htmlFor="email">Email</label>
+            <input id="email" type="email" autoComplete="email" autoFocus required
+              value={email} onChange={(e) => setEmail(e.target.value)} />
+            <button className="primary" type="submit" disabled={loading}>
+              {loading ? "Sending code..." : "Email me a code"}
+            </button>
+            {status && <div className={`status ${status.kind}`}>{status.text}</div>}
           </form>
         )}
 
         {mode === "code" && codeSent && (
-          <form onSubmit={verifyCode} style={{ display: "grid", gap: 14 }}>
-            {info && (
-              <div
-                style={{
-                  fontSize: 12.5,
-                  color: "var(--text-muted)",
-                  background: "var(--bg)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--r-md)",
-                  padding: "10px 12px",
-                  lineHeight: 1.45,
-                }}
-              >
-                {info}
-              </div>
-            )}
-            <div>
-              <Label>6-digit code</Label>
-              <Input
-                type="text"
-                inputMode="numeric"
-                pattern="\d{6}"
-                maxLength={6}
-                placeholder="123456"
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                required
-                autoFocus
-                autoComplete="one-time-code"
-                style={{ letterSpacing: "0.3em", fontFamily: "var(--font-mono)", fontSize: 18 }}
-              />
-            </div>
-            <Button variant="primary" type="submit" loading={loading} style={{ width: "100%", marginTop: 4 }}>
-              {loading ? "Verifying" : "Verify & sign in"}
-            </Button>
-            {err && <ErrorBanner>{err}</ErrorBanner>}
-            <button
-              type="button"
-              onClick={() => {
-                setCodeSent(false);
-                setCode("");
-                setErr(null);
-                setInfo(null);
-              }}
-              style={{
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                fontSize: 12.5,
-                cursor: "pointer",
-                padding: 0,
-                justifySelf: "center",
-              }}
-            >
-              Use a different email or resend
+          <form onSubmit={verifyCode}>
+            <label htmlFor="code">6-digit code</label>
+            <input id="code" type="text" inputMode="numeric" autoComplete="one-time-code"
+              className="code" maxLength={6} placeholder="123456" autoFocus required
+              value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} />
+            <button className="primary" type="submit" disabled={loading}>
+              {loading ? "Verifying..." : "Verify & sign in"}
             </button>
+            {status && <div className={`status ${status.kind}`}>{status.text}</div>}
+            <div className="alt-action" style={{ marginTop: 10 }}>
+              <button type="button" className="linkbtn" onClick={() => { setCodeSent(false); setCode(""); setStatus(null); }}>
+                Use a different email or resend
+              </button>
+            </div>
           </form>
         )}
 
-        <div
-          style={{
-            marginTop: 20,
-            paddingTop: 18,
-            borderTop: "1px solid var(--border)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-            fontSize: 13,
-            flexWrap: "wrap",
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => switchMode(mode === "password" ? "code" : "password")}
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--accent)",
-              textDecoration: "none",
-              fontWeight: 500,
-              fontSize: 13,
-              cursor: "pointer",
-              padding: 0,
-            }}
-          >
-            {mode === "password" ? "Sign in with an email code" : "Use password instead"}
-          </button>
-          <span style={{ color: "var(--text-dim)" }}>
-            New here?{" "}
-            <Link
-              href={`/signup${next !== "/admin/users" ? `?next=${encodeURIComponent(next)}` : ""}`}
-              style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 500 }}
-            >
-              Create an account
-            </Link>
-          </span>
+        <div className="row-links">
+          {mode === "password" ? (
+            <>
+              <a href="/forgot">Forgot password?</a>
+              <a href={signupHref}>Create account</a>
+            </>
+          ) : (
+            <a href={signupHref}>Create account</a>
+          )}
         </div>
 
-        {mode === "password" && (
-          <div style={{ marginTop: 12, fontSize: 13 }}>
-            <Link href="/forgot" style={{ color: "var(--text-muted)", textDecoration: "none" }}>
-              Forgot password?
-            </Link>
-          </div>
-        )}
+        <div className="divider" />
+        <div className="alt-action">
+          <button type="button" className="linkbtn" onClick={() => switchMode(mode === "password" ? "code" : "password")}>
+            {mode === "password" ? "Sign in with a code instead" : "Use password instead"}
+          </button>
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
 
