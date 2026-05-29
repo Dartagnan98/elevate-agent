@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  BarChart3,
+  BookOpen,
   ChevronUp,
   Download,
+  FileText,
   Globe,
+  KeyRound,
   LogOut,
   Moon,
   RotateCw,
@@ -149,6 +153,46 @@ export function SidebarUserPill() {
             >
               <User />
               <span>Account</span>
+            </button>
+          </div>
+
+          {/* Tools — moved here from the sidebar's Tools section. */}
+          <div className="user-menu-section">
+            <button
+              type="button"
+              className="user-menu-row"
+              role="menuitem"
+              onClick={() => { navigate("/analytics"); setOpen(false); }}
+            >
+              <BarChart3 />
+              <span>Analytics</span>
+            </button>
+            <button
+              type="button"
+              className="user-menu-row"
+              role="menuitem"
+              onClick={() => { navigate("/logs"); setOpen(false); }}
+            >
+              <FileText />
+              <span>Logs</span>
+            </button>
+            <button
+              type="button"
+              className="user-menu-row"
+              role="menuitem"
+              onClick={() => { navigate("/env"); setOpen(false); }}
+            >
+              <KeyRound />
+              <span>Keys</span>
+            </button>
+            <button
+              type="button"
+              className="user-menu-row"
+              role="menuitem"
+              onClick={() => { navigate("/docs"); setOpen(false); }}
+            >
+              <BookOpen />
+              <span>Documentation</span>
             </button>
           </div>
 

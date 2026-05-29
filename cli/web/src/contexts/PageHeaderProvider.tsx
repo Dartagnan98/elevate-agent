@@ -80,7 +80,10 @@ export function PageHeaderProvider({
               className={cn(
                 "flex h-full w-full min-w-0 items-center gap-4",
                 isChatRoute ? "py-1.5 px-4 sm:px-6" : "py-3 pr-5 sm:pr-10",
-                !isChatRoute && (sidebarCollapsed ? "pl-20" : "pl-5 sm:pl-10"),
+                // When collapsed the header sits at the window's left edge, so
+                // it must clear the macOS traffic lights (~78px). pl-20 (80px)
+                // left it touching them; pl-28 (112px) gives clean separation.
+                !isChatRoute && (sidebarCollapsed ? "pl-28" : "pl-5 sm:pl-10"),
               )}
             >
               {sidebarCollapsed && onShowSidebar && (

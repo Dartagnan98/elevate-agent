@@ -1124,7 +1124,8 @@ async function copyToClipboard(value: string): Promise<void> {
 
 function DesktopSidebar({
   embeddedChat,
-  navItems,
+  // navItems no longer rendered in the sidebar (Tools moved to the profile
+  // menu); the prop stays on the type/caller but is unused here.
   onNavigate,
   onPreloadRoute,
   onToggleSidebar,
@@ -1402,8 +1403,6 @@ function DesktopSidebar({
     }
     return ids;
   }, [latestCronSessionByJobId]);
-  const systemPaths = new Set(["/analytics", "/logs", "/env", "/docs"]);
-  const toolNavItems = navItems.filter((item) => systemPaths.has(item.path));
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
   const realEstateNavItems: NavItem[] = [];
   if (realEstateDashboard) {
@@ -1596,10 +1595,6 @@ function DesktopSidebar({
     ? sessions.find((session) => session.id === sessionArchive.pendingId)
     : null;
 
-  const navLabel = (item: NavItem) =>
-    item.labelKey
-      ? ((t.app.nav as Record<string, string>)[item.labelKey] ?? item.label)
-      : item.label;
 
   return (
     <div className="sidebar normal-case font-sans text-[14px] tracking-normal text-[var(--sidebar-text)]">
@@ -1827,30 +1822,8 @@ function DesktopSidebar({
           onOpenSession={openSession}
         />
 
-        {toolNavItems.length > 0 && (
-          <div className="mt-3">
-            <SidebarSectionLabel
-              collapsed={collapsedSections.tools}
-              onToggle={() => toggleSection("tools")}
-            >
-              Tools
-            </SidebarSectionLabel>
-            {!collapsedSections.tools && (
-              <div className="space-y-0.5">
-                {toolNavItems.map((item) => (
-                  <SidebarAction
-                    key={item.path}
-                    icon={item.icon}
-                    label={navLabel(item)}
-                    path={item.path}
-                    onNavigate={go}
-                    onPreload={onPreloadRoute}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Tools (Analytics, Logs, Keys, Documentation) moved into the profile
+            menu (SidebarUserPill) per request — no longer a sidebar section. */}
 
       </div>
 

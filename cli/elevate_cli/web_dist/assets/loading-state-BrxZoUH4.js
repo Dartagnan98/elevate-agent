@@ -1,0 +1,1 @@
+import{j as e}from"./vendor-react-hYjLGG_g.js";import{L as t}from"./vendor-icons-BEMaiokM.js";function s(){return e.jsx("div",{className:"flex min-h-[42vh] items-center justify-center",children:e.jsx(t,{className:"h-6 w-6 animate-spin text-primary"})})}export{s as L};
