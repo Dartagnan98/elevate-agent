@@ -15,6 +15,14 @@
     "appId": "com.elevationrealestate.elevate",
     "productName": "Elevate",
     "artifactName": "Elevate-${version}-${os}-${arch}.${ext}",
+    "protocols": [
+      {
+        "name": "Elevate",
+        "schemes": [
+          "elevate"
+        ]
+      }
+    ],
     "files": [
       "src/**/*",
       "package.json"

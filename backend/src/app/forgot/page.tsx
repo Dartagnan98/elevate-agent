@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { AuthShell } from "@/components/auth-shell";
 
 type ForgotResponse = {
@@ -8,7 +9,11 @@ type ForgotResponse = {
   dev_only?: { reset_url: string; token: string; expires_at: string };
 };
 
-export default function ForgotPage() {
+function ForgotInner() {
+  const params = useSearchParams();
+  // Started from inside the Elevate desktop app — the reset link should bounce
+  // back to the app, and we shouldn't offer "back to the HQ sign-in" here.
+  const fromApp = params.get("app") === "1";
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -24,7 +29,7 @@ export default function ForgotPage() {
       const res = await fetch("/api/auth/forgot", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, app: fromApp }),
       });
       const data: ForgotResponse = await res.json();
       if (!res.ok) throw new Error("request failed");
@@ -45,7 +50,14 @@ export default function ForgotPage() {
   }
 
   return (
-    <AuthShell title="Reset your password" subtitle="Enter your email and we'll send you a reset link.">
+    <AuthShell
+      title="Reset your password"
+      subtitle={
+        fromApp
+          ? "Enter your email and we'll send you a reset link. Open it, set a new password, then return to the Elevate app to sign in."
+          : "Enter your email and we'll send you a reset link."
+      }
+    >
       {!sent ? (
         <form onSubmit={submit}>
           <label htmlFor="email">Email</label>
@@ -60,6 +72,7 @@ export default function ForgotPage() {
         <div>
           <div className="notice">
             If that email is registered, a reset link is on its way. Check your inbox.
+            {fromApp && " Open the link, choose a new password, then head back to the Elevate app to sign in."}
           </div>
           {resetUrl && (
             <div className="devbox">
@@ -80,8 +93,20 @@ export default function ForgotPage() {
 
       <div className="divider" />
       <div className="footer">
-        <a href="/admin/login">Back to sign in</a>
+        {fromApp ? (
+          <span style={{ color: "var(--text-dim)" }}>Return to the Elevate app to sign in.</span>
+        ) : (
+          <a href="/admin/login">Back to sign in</a>
+        )}
       </div>
     </AuthShell>
+  );
+}
+
+export default function ForgotPage() {
+  return (
+    <Suspense fallback={null}>
+      <ForgotInner />
+    </Suspense>
   );
 }

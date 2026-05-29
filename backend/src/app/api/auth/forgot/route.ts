@@ -14,6 +14,10 @@ export const runtime = "nodejs";
 
 const Body = z.object({
   email: z.string().email(),
+  // True when the reset was started from inside the Elevate desktop app — the
+  // reset link then carries ?app=1 so the success page sends the user back to
+  // the app instead of the HQ backend admin.
+  app: z.boolean().optional(),
 });
 
 // Returns `{ ok: true }` either way to prevent email-enumeration. When Mailjet
@@ -64,7 +68,7 @@ export async function POST(req: NextRequest) {
     payload: { ip, ua },
   });
 
-  const reset_url = `${publicBaseUrl()}/reset?token=${token}`;
+  const reset_url = `${publicBaseUrl()}/reset?token=${token}${parsed.data.app ? "&app=1" : ""}`;
 
   // Try to email it. If Mailjet isn't configured (or the send fails), fall
   // back to surfacing the link in the response so an admin can deliver it

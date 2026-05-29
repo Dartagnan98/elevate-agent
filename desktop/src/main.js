@@ -960,7 +960,7 @@ ipcMain.handle("auth:logout", async () => {
 // compromised renderer can't open arbitrary URLs.
 ipcMain.handle("auth:open-external", async (_event, target) => {
   const paths = {
-    forgot: "/forgot",
+    forgot: "/forgot?app=1",
     signup: "/signup",
     link: "/link",
     account: "/account",
@@ -1135,6 +1135,19 @@ ipcMain.handle("updater:check", async () => {
     return { ok: true, version: result && result.updateInfo ? result.updateInfo.version : null };
   } catch (err) {
     return { ok: false, message: err && err.message ? err.message : String(err) };
+  }
+});
+
+// Register the elevate:// scheme so the web auth flow (a password reset
+// completed in the browser) can bounce the user back into the app. The reset
+// success page links to elevate://signin; macOS fires `open-url` on the running
+// instance, and we just focus the dashboard (which shows the in-app login).
+app.setAsDefaultProtocolClient("elevate");
+app.on("open-url", (event) => {
+  event.preventDefault();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    openLoginWindow();
   }
 });
 

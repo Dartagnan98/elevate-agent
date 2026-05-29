@@ -8,6 +8,9 @@ function ResetInner() {
   const router = useRouter();
   const params = useSearchParams();
   const token = params.get("token") || "";
+  // Reset started from inside the Elevate desktop app — send the user back to
+  // the app afterward instead of into the HQ backend admin.
+  const fromApp = params.get("app") === "1";
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -35,7 +38,9 @@ function ResetInner() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "reset failed");
       setDone(data.email);
-      setTimeout(() => router.push("/admin/login"), 2500);
+      // Backend admins continue to the HQ sign-in. App users are NOT pushed
+      // into the backend — they go back to the Elevate app to sign in.
+      if (!fromApp) setTimeout(() => router.push("/admin/login"), 2500);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "reset failed");
     } finally {
@@ -46,9 +51,23 @@ function ResetInner() {
   return (
     <AuthShell title="Choose a new password" subtitle="All your other sessions will be signed out.">
       {done ? (
-        <div className="notice">
-          Password updated for <strong>{done}</strong>. Redirecting to sign in.
-        </div>
+        fromApp ? (
+          <div>
+            <div className="notice">
+              Password updated for <strong>{done}</strong>. Head back to the Elevate app
+              and sign in with your new password.
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <a href="elevate://signin">
+                <button type="button" className="primary">Open the Elevate app</button>
+              </a>
+            </div>
+          </div>
+        ) : (
+          <div className="notice">
+            Password updated for <strong>{done}</strong>. Redirecting to sign in.
+          </div>
+        )
       ) : (
         <form onSubmit={submit}>
           <label htmlFor="pw">New password</label>
@@ -66,7 +85,11 @@ function ResetInner() {
 
       <div className="divider" />
       <div className="footer">
-        <a href="/admin/login">Back to sign in</a>
+        {fromApp ? (
+          <span style={{ color: "var(--text-dim)" }}>Return to the Elevate app to sign in.</span>
+        ) : (
+          <a href="/admin/login">Back to sign in</a>
+        )}
       </div>
     </AuthShell>
   );
