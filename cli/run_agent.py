@@ -4783,14 +4783,28 @@ class AIAgent:
         if _pmode == "plan":
             prompt_parts.append(
                 "# Plan mode (read-only)\n\n"
-                "Plan mode is active. You may ONLY use read-only tools "
-                "(reading files, searching, web lookups). Every tool that "
-                "edits files, runs commands, sends messages, or otherwise "
-                "changes state is blocked by the runtime. Do not attempt "
-                "them. Research thoroughly, then deliver a concrete written "
-                "plan of the steps you would take. End by telling the user "
-                "they can switch the permission mode (composer picker or "
-                "Settings) to let you execute it."
+                "Plan mode is active. The RUNTIME enforces read-only: every "
+                "state-changing tool (file writes/edits, mutating shell "
+                "commands, message/email sends, sub-agent delegation, "
+                "computer-use, browser actions, memory writes) is blocked and "
+                "returns an error. This is not a suggestion you can talk your "
+                "way around — the block happens below you. Do not waste turns "
+                "attempting blocked actions.\n\n"
+                "You CAN and SHOULD research thoroughly: read files, search "
+                "the codebase, fetch/search the web, and run read-only shell "
+                "commands (ls, cat, grep, find, git status/log/diff, head, "
+                "tail, wc). Inspect enough to be specific and correct.\n\n"
+                "Then deliver ONE concrete plan, not a vague outline:\n"
+                "1. A short statement of the goal and your understanding.\n"
+                "2. Numbered, ordered steps. For each: the exact files/paths "
+                "touched, the change, and why.\n"
+                "3. Risks, edge cases, and how each step will be verified.\n"
+                "4. Anything you could not confirm in read-only mode (call it "
+                "out explicitly rather than guessing).\n\n"
+                "End by telling the user: approve to execute by leaving plan "
+                "mode — type /run (or switch the permission picker / Settings "
+                "to default), then re-send or say 'go' and you'll carry out "
+                "the plan."
             )
 
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
@@ -8372,6 +8386,19 @@ class AIAgent:
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        # Plan mode (read-only): block state-changing tools at the runtime, not
+        # just via the system prompt. This is the concurrent execution path;
+        # the sequential path has the mirror gate. Read-only tools, read-only
+        # shell, and memory/skill reads pass through (plan_mode_block returns
+        # None); everything else is refused with a guidance message.
+        try:
+            from tools.approval import plan_mode_block as _plan_mode_block
+            _plan_msg = _plan_mode_block(function_name, function_args)
+        except Exception:
+            _plan_msg = None
+        if _plan_msg is not None:
+            return json.dumps({"error": _plan_msg}, ensure_ascii=False)
+
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
             return _todo_tool(
@@ -8822,6 +8849,17 @@ class AIAgent:
                 )
             except Exception:
                 pass
+
+            # Plan mode (read-only): mirror of the concurrent-path gate. When
+            # the session is in plan mode, block state-changing tools at the
+            # runtime (read-only tools/shell/memory-reads return None and pass
+            # through). Reuses the existing block-message-as-result path below.
+            if _block_msg is None:
+                try:
+                    from tools.approval import plan_mode_block as _plan_mode_block
+                    _block_msg = _plan_mode_block(function_name, function_args)
+                except Exception:
+                    pass
 
             if _block_msg is not None:
                 # Tool blocked by plugin policy — skip counter resets.

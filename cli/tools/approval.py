@@ -609,6 +609,7 @@ def clear_session(session_key: str) -> None:
     with _lock:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
+        _session_permission_mode.pop(session_key, None)
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
@@ -629,6 +630,174 @@ def is_session_yolo_enabled(session_key: str) -> bool:
 def is_current_session_yolo_enabled() -> bool:
     """Return True when the active approval session has YOLO bypass enabled."""
     return is_session_yolo_enabled(get_current_session_key(default=""))
+
+
+# ---------------------------------------------------------------------------
+# Permission mode (Claude-style): default | acceptEdits | plan | bypassPermissions
+# ---------------------------------------------------------------------------
+# `plan` is the security-relevant mode: a read-only session where the runtime
+# BLOCKS every state-changing tool (file writes, mutating shell commands,
+# message sends, sub-agent delegation, computer-use, browser actions) so the
+# agent can only research and produce a written plan. The user "approves" by
+# leaving plan mode (the /run command or the Settings picker), which flips the
+# session back to `default` and lets the agent execute.
+#
+# Modes are session-scoped (set via /plan, /run, --plan, or the desktop
+# picker) and fall back to the config default `approvals.permission_mode`.
+# This is the function run_agent imports to drive the plan-mode system prompt
+# AND the runtime tool gate; before it existed the import silently failed and
+# plan mode was a no-op.
+_VALID_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions"}
+)
+_session_permission_mode: dict[str, str] = {}
+_config_pmode_cache: Optional[str] = None
+
+# Tools that are read-only / side-effect-free and therefore allowed in plan
+# mode. Default-DENY: anything not in this set (and not a read-only terminal
+# command or a memory/skill READ) is blocked. New/unknown tools are blocked by
+# default — the safe posture for a "read-only" guarantee.
+PLAN_MODE_READ_ONLY_TOOLS = frozenset({
+    "read_file", "search_files",            # file / code inspection
+    "web_search", "web_extract", "web_fetch",  # web research
+    "vision_analyze",                       # image analysis, no state change
+    "session_search", "skill_view", "skills_list",  # session / skill inspection
+    "ha_get_state", "ha_list_entities", "ha_list_services",  # home-assistant reads
+    "todo", "clarify",                      # planning + asking the user
+})
+_PLAN_MEMORY_READ_ACTIONS = frozenset(
+    {"get", "search", "recall", "list", "view", "read", "show"}
+)
+_PLAN_SKILL_READ_ACTIONS = frozenset({"view", "list", "search", "show", "read"})
+
+# Shell verbs/operators that mutate state — block in plan mode even though the
+# `terminal` tool is otherwise allowed for read-only inspection (ls, cat, grep,
+# git status/log/diff, find, ps, head, tail, wc, which). Conservative denylist;
+# when in doubt the command is treated as mutating. The existing hardline +
+# dangerous-command floor still runs underneath, so this only needs to catch
+# ordinary mutations.
+_PLAN_MUTATING_SHELL = re.compile(
+    r"""(?:^|\s|&&|\|\||;|`|\()(?:
+        rm|rmdir|mv|cp|install|ln|mkdir|touch|tee|truncate|dd|shred|xargs|
+        chmod|chown|chgrp|chflags|
+        sed\s+-i|perl\s+-i|awk\s+-i|
+        kill|pkill|killall|
+        sudo|su|
+        launchctl|systemctl|service|crontab|defaults\s+write|
+        mount|umount|diskutil|
+        npm|pnpm|yarn|pip|pip3|poetry|brew|apt|apt-get|gem|cargo|
+        docker|kubectl|terraform|
+        curl|wget|nc|ncat|ssh|scp|sftp|rsync|
+        go\s+(?:install|build|run|get)|
+        git\s+(?:commit|push|add|reset|clean|checkout|merge|rebase|stash|rm|mv|tag|apply|restore|init|fetch|pull|cherry-pick)
+    )(?:\s|$)""",
+    re.VERBOSE,
+)
+# find/xargs mutation flags (-delete, -exec ...).
+_PLAN_MUTATING_FLAGS = re.compile(r"(?:^|\s)-(?:delete|exec|execdir)\b")
+# Redirect that writes a real file (allow 2>/dev/null, >/dev/null, 2>&1).
+_PLAN_WRITE_REDIRECT = re.compile(r">\s*(?!/dev/null\b|&)")
+
+
+def set_session_permission_mode(session_key: str, mode: str) -> str:
+    """Set the permission mode for one session. Returns the normalized mode."""
+    mode = (mode or "default").strip()
+    if mode not in _VALID_PERMISSION_MODES:
+        mode = "default"
+    if session_key:
+        with _lock:
+            _session_permission_mode[session_key] = mode
+    return mode
+
+
+def _config_permission_mode() -> str:
+    """Config default `approvals.permission_mode`, cached for the process.
+
+    Cached so the runtime gate (runs on every tool call) never pays a config
+    file read; a session-scoped /plan or /run override bypasses this entirely.
+    """
+    global _config_pmode_cache
+    if _config_pmode_cache is None:
+        try:
+            mode = (_get_approval_config().get("permission_mode") or "default").strip()
+        except Exception:
+            mode = "default"
+        _config_pmode_cache = mode if mode in _VALID_PERMISSION_MODES else "default"
+    return _config_pmode_cache
+
+
+def get_session_permission_mode(session_key: str) -> str:
+    """Return the session's permission mode, falling back to the config default."""
+    if session_key:
+        with _lock:
+            mode = _session_permission_mode.get(session_key)
+        if mode:
+            return mode
+    return _config_permission_mode()
+
+
+def get_permission_mode() -> str:
+    """Permission mode for the *current* approval session (contextvar-scoped)."""
+    return get_session_permission_mode(get_current_session_key(default=""))
+
+
+def _is_plan_safe_terminal(command: str) -> bool:
+    """True when a shell command is read-only enough to allow in plan mode."""
+    if not command or not command.strip():
+        return True
+    norm = _normalize_command_for_detection(command)
+    if detect_hardline_command(norm)[0]:
+        return False
+    if detect_dangerous_command(norm)[0]:
+        return False
+    if _PLAN_WRITE_REDIRECT.search(norm):
+        return False
+    if _PLAN_MUTATING_FLAGS.search(norm):
+        return False
+    if _PLAN_MUTATING_SHELL.search(norm):
+        return False
+    return True
+
+
+def _plan_block_message(what: str) -> str:
+    return (
+        f"BLOCKED (plan mode): {what} is a state-changing action and plan mode "
+        "is read-only. Keep researching with read-only tools and finish your "
+        "written plan. When it's ready, tell the user to approve it — they "
+        "leave plan mode (the /run command or the permission picker) and you "
+        "execute it then."
+    )
+
+
+def plan_mode_block(function_name: str, function_args) -> Optional[str]:
+    """Return a block message when a tool call is disallowed in plan mode.
+
+    Returns None when plan mode is off OR the call is read-only (allowed).
+    Default-deny: any tool not explicitly known read-only is blocked.
+    """
+    if get_permission_mode() != "plan":
+        return None
+    name = function_name or ""
+    args = function_args if isinstance(function_args, dict) else {}
+
+    if name in PLAN_MODE_READ_ONLY_TOOLS:
+        return None
+    if name == "terminal":
+        cmd = args.get("command") or args.get("cmd") or args.get("script") or ""
+        if isinstance(cmd, str) and _is_plan_safe_terminal(cmd):
+            return None
+        return _plan_block_message("running a shell command that may change state")
+    if name == "memory":
+        if str(args.get("action") or "").lower() in _PLAN_MEMORY_READ_ACTIONS:
+            return None
+        return _plan_block_message("a memory write")
+    if name == "skill_manage":
+        if str(args.get("action") or "").lower() in _PLAN_SKILL_READ_ACTIONS:
+            return None
+        return _plan_block_message("a skill change")
+    # Unknown / explicitly-mutating tool (write_file, patch, browser_*,
+    # computer, delegate_task, send_*, …): block by default.
+    return _plan_block_message(f"the '{name}' tool")
 
 
 def is_approved(session_key: str, pattern_key: str) -> bool:
@@ -1075,8 +1244,16 @@ def check_all_command_guards(command: str, env_type: str,
 
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
+    # `bypassPermissions` permission mode is the Claude-style equivalent of
+    # yolo and bypasses approvals the same way (the hardline + sudo-stdin
+    # floors above still apply — they run before this).
     approval_mode = _get_approval_mode()
-    if is_truthy_value(os.getenv("ELEVATE_YOLO_MODE")) or is_current_session_yolo_enabled() or approval_mode == "off":
+    if (
+        is_truthy_value(os.getenv("ELEVATE_YOLO_MODE"))
+        or is_current_session_yolo_enabled()
+        or approval_mode == "off"
+        or get_permission_mode() == "bypassPermissions"
+    ):
         return {"approved": True, "message": None}
 
     is_cli = env_var_enabled("ELEVATE_INTERACTIVE")

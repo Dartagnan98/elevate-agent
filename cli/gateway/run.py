@@ -4893,11 +4893,19 @@ class GatewayRunner:
             # /fast and /reasoning are config-only and take effect next
             # message, so they fall through to the catch-all busy response
             # below — users should wait and set them between turns.
-            if _cmd_def_inner and _cmd_def_inner.name in ("yolo", "verbose"):
+            if _cmd_def_inner and _cmd_def_inner.name in ("yolo", "verbose", "plan", "run"):
                 if _cmd_def_inner.name == "yolo":
                     return await self._handle_yolo_command(event)
                 if _cmd_def_inner.name == "verbose":
                     return await self._handle_verbose_command(event)
+                # /plan and /run flip the session permission mode, which the
+                # runtime tool gate reads live on the next tool call — so they
+                # take effect mid-turn (e.g. /plan to stop further edits, /run
+                # to approve and let the in-flight turn keep executing).
+                if _cmd_def_inner.name == "plan":
+                    return await self._handle_plan_command(event)
+                if _cmd_def_inner.name == "run":
+                    return await self._handle_run_command(event)
 
             # Gateway-handled info/control commands with dedicated
             # running-agent handlers.
@@ -5113,6 +5121,12 @@ class GatewayRunner:
 
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
+
+        if canonical == "plan":
+            return await self._handle_plan_command(event)
+
+        if canonical == "run":
+            return await self._handle_run_command(event)
 
         if canonical == "model":
             return await self._handle_model_command(event)
@@ -8757,6 +8771,34 @@ class GatewayRunner:
         else:
             enable_session_yolo(session_key)
             return "⚡ YOLO mode **ON** for this session — all commands auto-approved. Use with caution."
+
+    async def _handle_plan_command(self, event: MessageEvent) -> str:
+        """Handle /plan — enter read-only plan mode for this session."""
+        from tools.approval import set_session_permission_mode
+        session_key = self._session_key_for_source(event.source)
+        set_session_permission_mode(session_key, "plan")
+        return (
+            "🧭 Plan mode **ON** for this session — read-only. I'll research "
+            "and write a concrete plan; the runtime blocks edits, commands, "
+            "sends, and delegation until you approve. Type **/run** to approve "
+            "and execute."
+        )
+
+    async def _handle_run_command(self, event: MessageEvent) -> str:
+        """Handle /run — leave plan mode (approve the plan) for this session."""
+        from tools.approval import (
+            get_session_permission_mode,
+            set_session_permission_mode,
+        )
+        session_key = self._session_key_for_source(event.source)
+        was_plan = get_session_permission_mode(session_key) == "plan"
+        set_session_permission_mode(session_key, "default")
+        if was_plan:
+            return (
+                "✅ Plan approved — plan mode **OFF**. Send 'go' (or re-send "
+                "your request) and I'll execute the plan."
+            )
+        return "✅ Permission mode set to **default** for this session."
 
     async def _handle_verbose_command(self, event: MessageEvent) -> str:
         """Handle /verbose command — cycle tool progress display mode.
