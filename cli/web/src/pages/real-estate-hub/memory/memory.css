@@ -115,7 +115,7 @@
 .mem-badge { font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.04em; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg-faint); text-transform: uppercase; }
 .mem-badge.on { color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 45%, transparent); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
 
-.mem-graph-card .mem-card-body { padding: 12px; height: 600px; }
+.mem-graph-card .mem-card-body { padding: 12px; height: 720px; }
 .mem-constellation-host { height: 100%; min-height: 24rem; }
 @media (max-width: 760px) { .mem-graph-card .mem-card-body { height: 440px; } }
 
@@ -192,7 +192,7 @@
 .memory-constellation-node.is-linked .memory-constellation-core,
 .memory-constellation-node.is-pinned .memory-constellation-core { filter: drop-shadow(0 0 7px color-mix(in srgb, #D8DBE2 26%, transparent)); }
 .memory-constellation-node.is-muted .memory-constellation-halo,
-.memory-constellation-node.is-muted .memory-constellation-ring { opacity: 0.1; }
+.memory-constellation-node.is-muted .memory-constellation-ring { opacity: 0.45; }
 .memory-constellation-node.is-active .memory-constellation-halo,
 .memory-constellation-node:focus-visible .memory-constellation-halo { animation: memory-halo-breathe 1.8s cubic-bezier(0.25,1,0.5,1) infinite; }
 .memory-constellation-node:focus-visible .memory-constellation-core { filter: drop-shadow(0 0 8px color-mix(in srgb, #D8DBE2 42%, transparent)); }

@@ -214,9 +214,9 @@ export function MemoryConstellation({
       // specks. Bump the base + minimum so every node is a clearly visible dot
       // (the design's mock data was fat/high-degree and didn't hit this floor).
       const r = clamp(
-        (compact ? 5 : 7) + Math.sqrt(d) * (compact ? 1.8 : 3) + Math.sqrt(Number.isFinite(node.weight) ? node.weight : 1) * 0.8,
-        compact ? 5 : 10,
-        compact ? 14 : 26,
+        (compact ? 5 : 9) + Math.sqrt(d) * (compact ? 1.8 : 3.2) + Math.sqrt(Number.isFinite(node.weight) ? node.weight : 1) * 0.9,
+        compact ? 5 : 13,
+        compact ? 14 : 30,
       );
       const a = rand01(`${node.id}:a`) * Math.PI * 2;
       const pullIn = clamp(1 - Math.min(w, 16) / 40, 0.55, 1);
@@ -241,14 +241,9 @@ export function MemoryConstellation({
       .map(([kind, total]) => ({ kind, name: NODE_TONE[kind].label, total }))
       .slice(0, compact ? 5 : 9);
 
-    let hulls: Array<{ key: string; kind: NodeKind; ids: string[] }> = [];
-    if (!compact && n <= 90) {
-      const cm = new Map<string, string[]>();
-      for (const m of meta.values()) cm.set(m.cluster, [...(cm.get(m.cluster) ?? []), m.node.id]);
-      hulls = [...cm.entries()]
-        .filter(([, ids]) => ids.length >= 3)
-        .map(([key, ids]) => ({ key, kind: meta.get(ids[0])!.kind, ids }));
-    }
+    // No cluster hulls — they draw faint polygons around groups that read as
+    // shapes/connections that aren't real. Show only real nodes + real edges.
+    const hulls: Array<{ key: string; kind: NodeKind; ids: string[] }> = [];
 
     return { meta, seeds, ranked, edges: simEdges, hulls, groups, order: [...meta.keys()], R };
   }, [compact, edges, nodes]);
@@ -364,7 +359,7 @@ export function MemoryConstellation({
           va.y -= uy * rep;
           vb.x += ux * rep;
           vb.y += uy * rep;
-          const minD = ra + metaArr[j].r + 18;
+          const minD = ra + metaArr[j].r + 44;
           if (dist < minD) {
             const push = (minD - dist) * 0.22 * Math.max(alpha, 0.12);
             va.x -= ux * push;
@@ -420,7 +415,7 @@ export function MemoryConstellation({
       // ── web mesh: connect each node to its nearest neighbours (frozen once settled) ──
       frameRef.current += 1;
       const meshLive = sim.alpha > 0.05 || meshPairsRef.current.length === 0;
-      if (meshLive && frameRef.current % 6 === 0) {
+      if (meshLive && frameRef.current % 6 === 0 && meshPoolRef.current.length > 0) {
         const K = 10;
         const MAXD = 400;
         const seen = new Set<string>();
@@ -622,7 +617,7 @@ export function MemoryConstellation({
     "--memory-panel": "color-mix(in srgb, var(--midground-base) 6%, var(--background-base))",
     "--memory-panel-strong": "color-mix(in srgb, var(--midground-base) 10%, var(--background-base))",
     "--memory-grid": "color-mix(in srgb, var(--midground-base) 8%, transparent)",
-    "--memory-edge": "color-mix(in srgb, var(--midground-base) 26%, transparent)",
+    "--memory-edge": "color-mix(in srgb, var(--midground-base) 42%, transparent)",
     "--memory-edge-soft": "color-mix(in srgb, var(--midground-base) 12%, transparent)",
     "--memory-edge-active": "color-mix(in srgb, #D8DBE2 80%, var(--midground-base))",
     // Node tones are the design prototype's exact cool-silver palette — a
@@ -664,8 +659,11 @@ export function MemoryConstellation({
     "--memory-node-general-halo": "color-mix(in srgb, var(--midground-base) 16%, transparent)",
   } as CSSProperties;
 
-  const side = 2 * (base.R + 60);
-  const meshMax = Math.min(base.order.length * 10, 3000);
+  const side = 2 * (base.R + 30);
+  // No proximity mesh: the graph shows ONLY the real nodes and their real
+  // edges (the actual relationships), not a decorative nearest-neighbour web
+  // that implies connections that don't exist. (meshMax 0 → no mesh lines.)
+  const meshMax = 0;
   const meshLines = useMemo(
     () =>
       Array.from({ length: meshMax }).map((_, i) => (
@@ -767,10 +765,10 @@ export function MemoryConstellation({
                     prominent && "memory-constellation-edge-flow",
                     connected && "memory-constellation-edge-active",
                   )}
-                  opacity={dormant ? 0.04 : connected ? 0.95 : edge.visual ? 0.1 : 0.3}
+                  opacity={dormant ? 0.26 : connected ? 0.95 : edge.visual ? 0.12 : 0.55}
                   stroke={connected ? "var(--memory-edge-active)" : edge.visual ? "var(--memory-edge-soft)" : "var(--memory-edge)"}
                   strokeLinecap="round"
-                  strokeWidth={connected ? 1.9 : edge.visual ? 0.6 : 0.8}
+                  strokeWidth={connected ? 1.9 : edge.visual ? 0.6 : 1.1}
                   style={{ "--memory-edge-delay": `${index * 30}ms` } as CSSProperties}
                 />
                 {connected && !edge.visual && (
@@ -791,7 +789,10 @@ export function MemoryConstellation({
         </g>
 
         <g>
-          {base.ranked.map((m) => {
+          {/* Paint lowest-weight first so the highest-degree nodes (entities,
+              the meaningful ones) render LAST = on top — visible above leaf
+              nodes and the node the cursor actually lands on when hovering. */}
+          {base.ranked.slice().reverse().map((m) => {
             const { node, r, degree, tone } = m;
             const active = activeNodeId === node.id;
             const connected = activeConnections.has(node.id);
@@ -799,7 +800,7 @@ export function MemoryConstellation({
             const muted = Boolean(activeNodeId && !connected);
             const label = labelFor(node);
             const showLabel = active || linked;
-            const opacity = Math.min(0.98, 0.6 + Math.min(m.weight, 12) * 0.034);
+            const opacity = Math.min(0.98, 0.8 + Math.min(m.weight, 12) * 0.018);
             return (
               <g
                 key={node.id}
@@ -843,7 +844,7 @@ export function MemoryConstellation({
                   cx="0"
                   cy="0"
                   fill={tone.fill}
-                  opacity={muted ? 0.35 : opacity}
+                  opacity={muted ? 0.62 : opacity}
                   r={active ? r + 1.5 : r}
                   stroke={tone.accent}
                   strokeWidth={active ? 2 : 1}

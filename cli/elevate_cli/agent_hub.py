@@ -928,7 +928,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         LEFT JOIN memory_chunk_entities ce ON ce.entity_id = e.entity_id
         GROUP BY e.entity_id, e.name
         ORDER BY (COUNT(DISTINCT fe.fact_id) + COUNT(DISTINCT ce.chunk_id)) DESC, e.name ASC
-        LIMIT 90
+        LIMIT 24
         """
     ).fetchall()
     fact_rows = conn.execute(
@@ -937,7 +937,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         FROM memory_facts
         WHERE COALESCE(status, 'active') = 'active'
         ORDER BY updated_at DESC, fact_id DESC
-        LIMIT 60
+        LIMIT 18
         """
     ).fetchall()
     chunk_rows = conn.execute(
@@ -946,7 +946,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         FROM memory_chunks c
         JOIN memory_documents d ON d.document_id = c.document_id
         ORDER BY c.updated_at DESC, c.chunk_id DESC
-        LIMIT 80
+        LIMIT 16
         """
     ).fetchall()
     doc_rows = conn.execute(
@@ -956,7 +956,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         LEFT JOIN memory_chunks c ON c.document_id = d.document_id
         GROUP BY d.document_id, d.title, d.source_type, d.source_uri
         ORDER BY d.updated_at DESC, d.document_id DESC
-        LIMIT 36
+        LIMIT 10
         """
     ).fetchall()
     community_rows = conn.execute(
@@ -964,7 +964,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
         SELECT community_id, name, summary, tags, entity_names, fact_ids_json, chunk_ids_json, weight
         FROM memory_community_reports
         ORDER BY updated_at DESC, weight DESC
-        LIMIT 24
+        LIMIT 10
         """
     ).fetchall()
 
@@ -1044,7 +1044,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
             SELECT a.asset_id, a.document_id, a.asset_type, a.locator, a.summary
             FROM memory_modal_assets a
             ORDER BY a.updated_at DESC, a.asset_id DESC
-            LIMIT 18
+            LIMIT 12
             """
         ).fetchall()
         for row in asset_rows:
@@ -1071,7 +1071,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
             FROM memory_fact_entities
             WHERE entity_id IN ({placeholders_entities})
               AND fact_id IN ({placeholders_facts})
-            LIMIT 400
+            LIMIT 80
             """,
             [*entity_ids, *fact_ids],
         ).fetchall()
@@ -1087,7 +1087,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
             FROM memory_chunk_entities
             WHERE entity_id IN ({placeholders_entities})
               AND chunk_id IN ({placeholders_chunks})
-            LIMIT 400
+            LIMIT 80
             """,
             [*entity_ids, *chunk_ids],
         ).fetchall()
@@ -1103,7 +1103,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
             WHERE source_entity_id IN ({placeholders_entities})
                OR target_entity_id IN ({placeholders_entities})
             ORDER BY weight DESC, updated_at DESC
-            LIMIT 400
+            LIMIT 80
             """,
             [*entity_ids, *entity_ids],
         ).fetchall()
@@ -1135,7 +1135,7 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
                 if target in seen_nodes:
                     _add_edge(edges, seen_edges, community_id, target, "summarizes_entity")
 
-    return {"nodes": nodes[:320], "edges": edges[:640]}
+    return {"nodes": nodes[:90], "edges": edges[:180]}
 
 
 def _agent_summaries(
