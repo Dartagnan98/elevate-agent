@@ -8,6 +8,7 @@ import {
   createLicense,
   createUser,
   effectiveAccess,
+  findActiveUser,
   findInvitationByTokenHash,
   findUserByEmail,
   getMembership,
@@ -58,6 +59,15 @@ export async function POST(req: NextRequest) {
   }
 
   await acceptInvitation(inv.id, user.id);
+
+  // Mint a license only for an ACTIVE subscription — same gate as /auth/login
+  // and /auth/login-code/verify. A newly created invitee is `active` by default;
+  // this blocks an EXISTING lapsed user from re-accepting a pending invite to
+  // mint a fresh license and bypass the paywall.
+  const active = await findActiveUser(user.id);
+  if (!active) {
+    return NextResponse.json({ error: "no active subscription" }, { status: 402 });
+  }
 
   const access_info = await effectiveAccess(user.id);
   const refresh = generateRefreshToken();

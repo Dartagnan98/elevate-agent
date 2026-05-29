@@ -33,10 +33,13 @@ export async function POST(req: NextRequest) {
 
   // Throttle before lookup to prevent reset-email bombing / Mailjet abuse.
   // A 429 leaks nothing about whether the email exists.
-  const limited = await enforceLimits([
-    { key: `forgot:ip:${clientIp(req)}`, max: 10, windowSeconds: 3600 },
-    { key: `forgot:email:${normalized}`, max: 3, windowSeconds: 3600 },
-  ]);
+  const limited = await enforceLimits(
+    [
+      { key: `forgot:ip:${clientIp(req)}`, max: 10, windowSeconds: 3600 },
+      { key: `forgot:email:${normalized}`, max: 3, windowSeconds: 3600 },
+    ],
+    { failClosed: true },
+  );
   if (limited) return tooManyRequests(limited.retryAfter);
 
   const user = await findUserByEmail(normalized);
@@ -92,8 +95,15 @@ export async function POST(req: NextRequest) {
     console.error("[auth/forgot] mailer failed:", result.error);
   }
 
-  return NextResponse.json({
-    ok: true,
-    dev_only: { reset_url, token, expires_at },
-  });
+  // Only surface the reset link/token to the caller in non-production. In
+  // production NEVER return it — it's a working password-reset token for anyone
+  // who knows the email, and its presence/absence would leak email-enumeration.
+  // Production returns the same bare {ok:true} as the no-user path.
+  if (process.env.NODE_ENV !== "production") {
+    return NextResponse.json({
+      ok: true,
+      dev_only: { reset_url, token, expires_at },
+    });
+  }
+  return NextResponse.json({ ok: true });
 }

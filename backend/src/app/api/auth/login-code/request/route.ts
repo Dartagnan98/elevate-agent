@@ -34,10 +34,13 @@ export async function POST(req: NextRequest) {
   // Throttle BEFORE the user lookup so this can't be used to email-bomb a
   // victim's inbox or run up the Mailjet bill. A 429 here leaks nothing about
   // whether the email exists (it's volume-based, not account-based).
-  const limited = await enforceLimits([
-    { key: `login-code-req:ip:${clientIp(req)}`, max: 10, windowSeconds: 900 },
-    { key: `login-code-req:email:${normalized}`, max: 3, windowSeconds: 900 },
-  ]);
+  const limited = await enforceLimits(
+    [
+      { key: `login-code-req:ip:${clientIp(req)}`, max: 10, windowSeconds: 900 },
+      { key: `login-code-req:email:${normalized}`, max: 3, windowSeconds: 900 },
+    ],
+    { failClosed: true },
+  );
   if (limited) return tooManyRequests(limited.retryAfter);
 
   const user = await findUserByEmail(normalized);
@@ -83,8 +86,13 @@ export async function POST(req: NextRequest) {
     console.error("[auth/login-code/request] mailer failed:", result.error);
   }
 
-  // Mailer off or send failed — fall back to surfacing the code so an
-  // operator can deliver it. Never reaches the client in production once
-  // Mailjet is configured + a verified sender is set.
-  return NextResponse.json({ ok: true, dev_only: { code } });
+  // Mailer off or send failed. Only surface the code to the caller in
+  // non-production (operator dev convenience). In production NEVER return it —
+  // doing so would hand a working login code to anyone who knows the email AND
+  // leak email-enumeration (registered emails would get `dev_only`, unknown
+  // ones wouldn't). Production returns the same bare {ok:true} as every path.
+  if (process.env.NODE_ENV !== "production") {
+    return NextResponse.json({ ok: true, dev_only: { code } });
+  }
+  return NextResponse.json({ ok: true });
 }

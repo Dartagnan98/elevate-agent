@@ -33,7 +33,16 @@ export async function rateLimit(
   key: string,
   max: number,
   windowSeconds: number,
+  failClosed = false,
 ): Promise<RateLimitResult> {
+  // On limiter error: fail-OPEN for auth (availability > strict enforcement so a
+  // DB hiccup can't lock everyone out of login) but fail-CLOSED for the
+  // email-sending routes (failClosed=true) so a DB blip can't be turned into an
+  // unbounded Mailjet bill / inbox-bombing.
+  const onError = (): RateLimitResult =>
+    failClosed
+      ? { allowed: false, remaining: 0, retryAfter: Math.min(windowSeconds, 60) }
+      : { allowed: true, remaining: max, retryAfter: 0 };
   try {
     const { data, error } = await supabase().rpc("check_rate_limit", {
       p_key: key,
@@ -42,7 +51,7 @@ export async function rateLimit(
     });
     if (error) {
       console.error("[rate-limit] rpc error:", error.message);
-      return { allowed: true, remaining: max, retryAfter: 0 };
+      return onError();
     }
     const row = Array.isArray(data) ? data[0] : data;
     return {
@@ -52,7 +61,7 @@ export async function rateLimit(
     };
   } catch (e) {
     console.error("[rate-limit] exception:", e);
-    return { allowed: true, remaining: max, retryAfter: 0 };
+    return onError();
   }
 }
 
@@ -73,9 +82,10 @@ export function tooManyRequests(retryAfter: number): NextResponse {
  */
 export async function enforceLimits(
   buckets: Array<{ key: string; max: number; windowSeconds: number }>,
+  opts: { failClosed?: boolean } = {},
 ): Promise<RateLimitResult | null> {
   for (const b of buckets) {
-    const r = await rateLimit(b.key, b.max, b.windowSeconds);
+    const r = await rateLimit(b.key, b.max, b.windowSeconds, opts.failClosed);
     if (!r.allowed) return r;
   }
   return null;
