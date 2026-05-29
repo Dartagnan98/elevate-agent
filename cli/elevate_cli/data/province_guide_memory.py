@@ -13,6 +13,7 @@ repeat run refreshes content in place rather than duplicating it.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from typing import Any
 
@@ -33,6 +34,47 @@ def _open_store() -> Any:
     from plugins.memory.holographic.store import MemoryStore
 
     return MemoryStore()
+
+
+_SOURCE_URI_PROVINCE_RE = re.compile(r"province-guide/([^/]+)/")
+
+
+def _evict_other_provinces(store: Any, keep_province: str) -> int:
+    """Remove province_guide documents for every province EXCEPT keep_province.
+
+    Most realtors operate in a single province; recall must never leak another
+    province's forms/guides, and switching province must purge the old one
+    rather than leave it searchable. Best-effort; returns docs removed.
+    Loops in bounded passes since document_status caps at 200 rows per call.
+    """
+    keep = (keep_province or "").strip().upper()
+    if not keep:
+        return 0
+    removed = 0
+    for _ in range(10):  # bounded; each pass clears up to 200 stale docs
+        try:
+            status = store.document_status(source_type=SOURCE_TYPE, limit=200)
+        except Exception:  # noqa: BLE001 - eviction is best-effort
+            break
+        pass_removed = 0
+        for doc in status.get("documents", []) or []:
+            uri = str(doc.get("source_uri") or "")
+            prov = str((doc.get("metadata") or {}).get("province") or "").strip().upper()
+            if not prov:
+                match = _SOURCE_URI_PROVINCE_RE.search(uri)
+                prov = match.group(1).upper() if match else ""
+            if prov and prov != keep and uri:
+                try:
+                    store.delete_document(source_uri=uri)
+                    removed += 1
+                    pass_removed += 1
+                except Exception:  # noqa: BLE001
+                    pass
+        if pass_removed == 0:
+            break
+    if removed:
+        _log.info("province guide eviction: removed %d non-%s documents", removed, keep)
+    return removed
 
 
 def sync_province_guide_to_memory(
@@ -65,6 +107,7 @@ def sync_province_guide_to_memory(
     store = store or _open_store()
     documents = 0
     chunks = 0
+    evicted = 0
     try:
         for kind, row in records:
             content = str(row.get("content") or "").strip()
@@ -87,6 +130,9 @@ def sync_province_guide_to_memory(
             )
             documents += 1
             chunks += int(result.get("chunks") or 0)
+        # After loading the active province, purge every other province's
+        # guide docs so recall is scoped to ONLY this province (no leakage).
+        evicted = _evict_other_provinces(store, province)
     finally:
         if own_store:
             close = getattr(store, "close", None)
@@ -106,5 +152,6 @@ def sync_province_guide_to_memory(
         "province": province,
         "documents": documents,
         "chunks": chunks,
+        "evicted": evicted,
         "sourceType": SOURCE_TYPE,
     }
