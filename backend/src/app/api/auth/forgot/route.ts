@@ -8,6 +8,7 @@ import {
 } from "@/lib/store";
 import { mailerEnabled, passwordResetEmail, sendMail } from "@/lib/mailer";
 import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
+import { publicBaseUrl } from "@/lib/base-url";
 
 export const runtime = "nodejs";
 
@@ -63,8 +64,7 @@ export async function POST(req: NextRequest) {
     payload: { ip, ua },
   });
 
-  const origin = new URL(req.url).origin;
-  const reset_url = `${origin}/reset?token=${token}`;
+  const reset_url = `${publicBaseUrl()}/reset?token=${token}`;
 
   // Try to email it. If Mailjet isn't configured (or the send fails), fall
   // back to surfacing the link in the response so an admin can deliver it

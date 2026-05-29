@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin-guard";
 import { inviteEmail, mailerEnabled, sendMail } from "@/lib/mailer";
+import { publicBaseUrl } from "@/lib/base-url";
 import {
   addMembership,
   createInvitation,
@@ -70,8 +71,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     payload: { invitation_id: invitation.id, email, role, org_id: orgId },
   });
 
-  const origin = req.nextUrl.origin;
-  const accept_url = `${origin}/invite/${token}`;
+  const accept_url = `${publicBaseUrl()}/invite/${token}`;
 
   // Email the invitee the accept link. Best-effort: the accept_url is still
   // returned so the admin can copy/share it if mail is disabled or fails.
