@@ -3214,8 +3214,19 @@ function AdminCardStageSection({
   const phase = adminPhaseAutomation(card.side, stage);
   const items = adminStageChecklist(card.side, stage);
   const completed = card.completedByStage?.[stage] ?? {};
-  const done = items.reduce((n, item) => n + (completed[item.id] ? 1 : 0), 0);
-  const total = items.length;
+  // The province's required documents for this stage (from its transaction
+  // guide) become checkable requirements so the stage checklist matches the
+  // province — this is what differs between BC / ON / AB / etc. Stable id
+  // "doc:<code>" so toggle state persists alongside the base checklist.
+  const docItems = (documents ?? []).map((doc) => ({
+    id: `doc:${doc.code}`,
+    label: `${doc.code} — ${doc.name}`,
+    condition: doc.condition ?? null,
+  }));
+  const baseDone = items.reduce((n, item) => n + (completed[item.id] ? 1 : 0), 0);
+  const docsDone = docItems.reduce((n, item) => n + (completed[item.id] ? 1 : 0), 0);
+  const done = baseDone + docsDone;
+  const total = items.length + docItems.length;
   const allDone = total > 0 && done === total;
 
   return (
@@ -3321,29 +3332,47 @@ function AdminCardStageSection({
               })}
             </ul>
           )}
-          {documents && documents.length > 0 && (
+          {docItems.length > 0 && (
             <div className="mt-3 border-t border-border pt-2.5">
               <div className="font-mono-ui mb-1.5 text-[0.6rem] uppercase tracking-wider text-muted-foreground">
-                Province documents · {documents.length}
+                Province required documents · {docsDone}/{docItems.length}
               </div>
-              <ul className="flex flex-col gap-1">
-                {documents.map((doc) => (
-                  <li
-                    key={`${doc.source}-${doc.code}`}
-                    className="flex items-start gap-2 text-[0.78rem] leading-snug"
-                  >
-                    <FileText className="mt-[1px] h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <span className="font-medium text-foreground">{doc.code}</span>
-                      <span className="text-muted-foreground"> · {doc.name}</span>
-                      {doc.condition && (
-                        <span className="font-mono-ui ml-1 text-[0.62rem] uppercase tracking-wider text-warning">
-                          if {doc.condition.field}={doc.condition.value}
+              <ul className="flex flex-col gap-1.5">
+                {docItems.map((docItem) => {
+                  const isDone = !!completed[docItem.id];
+                  return (
+                    <li key={docItem.id}>
+                      <button
+                        type="button"
+                        onClick={() => onToggleItem(docItem.id, !isDone)}
+                        className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      >
+                        {isDone ? (
+                          <CheckSquare className="mt-[1px] h-4 w-4 shrink-0 text-primary" />
+                        ) : (
+                          <SquareIcon className="mt-[1px] h-4 w-4 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0">
+                          <span
+                            className={cn(
+                              "text-[0.82rem] leading-snug",
+                              isDone
+                                ? "text-muted-foreground line-through decoration-muted-foreground/50"
+                                : "text-foreground",
+                            )}
+                          >
+                            {docItem.label}
+                          </span>
+                          {docItem.condition && (
+                            <span className="font-mono-ui ml-1 text-[0.62rem] uppercase tracking-wider text-warning">
+                              if {docItem.condition.field}={docItem.condition.value}
+                            </span>
+                          )}
                         </span>
-                      )}
-                    </div>
-                  </li>
-                ))}
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
