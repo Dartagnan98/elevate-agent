@@ -118,12 +118,13 @@ export function passwordResetEmail(opts: {
   const html = baseTemplate({
     preheader: "Use the link below to set a new password.",
     body: `
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#ECECEC;">Someone requested a password reset for your Elevate account. If that was you, set a new password using the button below.</p>
-      <p style="margin:0 0 24px;">
-        <a href="${escapeAttr(opts.resetUrl)}" style="display:inline-block;background:#8A8A8A;color:#0F0F0F;font-weight:600;font-size:15px;padding:12px 22px;border-radius:6px;text-decoration:none;">Reset password</a>
-      </p>
-      <p style="margin:0 0 8px;font-size:13px;color:#A0A0A0;">Link expires in ${minutes} minutes.</p>
-      <p style="margin:0;font-size:13px;color:#A0A0A0;">If you didn't request this, you can ignore this email — your password won't change.</p>
+      <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;color:#FFFFFF;">Reset your password</h1>
+      <p style="margin:0 0 26px;font-size:15px;line-height:1.6;color:#C8C8C8;">Someone requested a password reset for your account. If that was you, tap the button below to set a new one.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#FFFFFF" style="border-radius:8px;">
+        <a href="${escapeAttr(opts.resetUrl)}" style="display:inline-block;background:#FFFFFF;color:#0A0A0A;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Reset password</a>
+      </td></tr></table>
+      <p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:#8C8C8C;">This link expires in ${minutes} minutes.</p>
+      <p style="margin:0;font-size:13px;line-height:1.5;color:#8C8C8C;">If you didn't request this, you can ignore this email — your password won't change.</p>
     `,
   });
   return { subject, html };
@@ -136,14 +137,15 @@ export function loginCodeEmail(opts: {
   const minutes = opts.expiresInMinutes;
   const subject = `Your Elevate login code: ${opts.code}`;
   const html = baseTemplate({
-    preheader: "Your one-time login code.",
+    preheader: `Your one-time login code is ${opts.code}.`,
     body: `
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#ECECEC;">Use this code to sign in to Elevate:</p>
-      <p style="margin:0 0 24px;">
-        <span style="display:inline-block;background:#0F0F0F;color:#ECECEC;border:1px solid #2A2A2A;font-weight:700;font-size:30px;letter-spacing:8px;padding:14px 24px;border-radius:8px;font-family:monospace;">${escapeHtml(opts.code)}</span>
-      </p>
-      <p style="margin:0 0 8px;font-size:13px;color:#A0A0A0;">Code expires in ${minutes} minutes.</p>
-      <p style="margin:0;font-size:13px;color:#A0A0A0;">If you didn't try to sign in, you can ignore this email.</p>
+      <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;color:#FFFFFF;">Your sign-in code</h1>
+      <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#C8C8C8;">Enter this code to finish signing in:</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:0 0 24px;"><tr><td align="center" bgcolor="#0E0E0E" style="background:#0E0E0E;border:1px solid #2C2C2C;border-radius:10px;padding:20px;">
+        <span style="font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace;font-weight:700;font-size:34px;letter-spacing:10px;color:#FFFFFF;">${escapeHtml(opts.code)}</span>
+      </td></tr></table>
+      <p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:#8C8C8C;">This code expires in ${minutes} minutes.</p>
+      <p style="margin:0;font-size:13px;line-height:1.5;color:#8C8C8C;">If you didn't try to sign in, you can ignore this email.</p>
     `,
   });
   return { subject, html };
@@ -159,11 +161,12 @@ export function inviteEmail(opts: {
   const html = baseTemplate({
     preheader: `Join ${escapeHtml(opts.orgName)} on Elevate.`,
     body: `
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#1a1b1a;">${inviter}invited you to join <strong>${escapeHtml(opts.orgName)}</strong> on Elevate.</p>
-      <p style="margin:0 0 24px;">
-        <a href="${escapeAttr(opts.inviteUrl)}" style="display:inline-block;background:#d97757;color:#fff;font-weight:600;font-size:15px;padding:12px 22px;border-radius:6px;text-decoration:none;">Accept invitation</a>
-      </p>
-      <p style="margin:0;font-size:13px;color:#5a5c5a;">If you weren't expecting this, you can ignore the email.</p>
+      <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;color:#FFFFFF;">You've been invited</h1>
+      <p style="margin:0 0 26px;font-size:15px;line-height:1.6;color:#C8C8C8;">${inviter}invited you to join <strong style="color:#FFFFFF;">${escapeHtml(opts.orgName)}</strong> on Elevate Real Estate HQ.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#FFFFFF" style="border-radius:8px;">
+        <a href="${escapeAttr(opts.inviteUrl)}" style="display:inline-block;background:#FFFFFF;color:#0A0A0A;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Accept invitation</a>
+      </td></tr></table>
+      <p style="margin:0;font-size:13px;line-height:1.5;color:#8C8C8C;">If you weren't expecting this, you can ignore the email.</p>
     `,
   });
   return { subject, html };
@@ -174,22 +177,36 @@ function baseTemplate(opts: { preheader: string; body: string }): string {
   // card, #2A2A2A borders, #ECECEC text, #8A8A8A brand mark). bgcolor attrs +
   // color-scheme hints help clients honor the dark background; some still force
   // their own light/dark, which is unavoidable in HTML email.
+  const logo = "https://api.elevationrealestatehq.com/elevateos-wordmark-dark.png";
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark light"><title>Elevate</title></head>
-<body style="margin:0;padding:0;background:#0F0F0F;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,sans-serif;">
-<span style="display:none;font-size:1px;color:#0F0F0F;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(opts.preheader)}</span>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#0F0F0F" style="background:#0F0F0F;">
-  <tr><td align="center" style="padding:40px 20px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" bgcolor="#1A1A1A" style="max-width:520px;background:#1A1A1A;border-radius:12px;border:1px solid #2A2A2A;">
-      <tr><td style="padding:28px 32px 8px;">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:#8A8A8A;vertical-align:middle;margin-right:9px;"></span><span style="font-size:16px;font-weight:600;letter-spacing:-0.01em;color:#ECECEC;vertical-align:middle;">Elevate</span>
+<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark light"><title>Elevate Real Estate HQ</title></head>
+<body style="margin:0;padding:0;background:#0A0A0A;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+<span style="display:none;font-size:1px;color:#0A0A0A;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(opts.preheader)}</span>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#0A0A0A" style="background:#0A0A0A;">
+  <tr><td align="center" style="padding:44px 20px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;width:100%;">
+      <!-- logo above the card -->
+      <tr><td align="center" style="padding:0 0 22px;">
+        <img src="${logo}" width="150" alt="Elevate Real Estate HQ" style="display:block;height:26px;width:auto;border:0;outline:none;text-decoration:none;" />
       </td></tr>
-      <tr><td style="padding:12px 32px 32px;">
-        ${opts.body}
+      <!-- card -->
+      <tr><td bgcolor="#161616" style="background:#161616;border-radius:14px;border:1px solid #262626;box-shadow:0 18px 40px rgba(0,0,0,0.45);">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+          <tr><td style="padding:34px 38px 30px;">
+            ${opts.body}
+          </td></tr>
+          <tr><td style="padding:20px 38px;border-top:1px solid #262626;">
+            <p style="margin:0;font-size:12px;line-height:1.6;color:#7C7C7C;">
+              Sent by <span style="color:#A8A8A8;">Elevate Real Estate HQ</span> ·
+              <a href="https://elevationrealestatehq.com" style="color:#A8A8A8;text-decoration:none;">elevationrealestatehq.com</a><br/>
+              This is an automated security message — please don't reply.
+            </p>
+          </td></tr>
+        </table>
       </td></tr>
-      <tr><td style="padding:0 32px 24px;border-top:1px solid #2A2A2A;">
-        <p style="margin:18px 0 0;font-size:12px;color:#8A8A8A;">Elevation Real Estate HQ · <a href="https://elevationrealestatehq.com" style="color:#8A8A8A;text-decoration:underline;">elevationrealestatehq.com</a></p>
+      <tr><td align="center" style="padding:20px 0 0;">
+        <p style="margin:0;font-size:11px;color:#5A5A5A;">© Elevate Real Estate HQ</p>
       </td></tr>
     </table>
   </td></tr>
