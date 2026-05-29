@@ -44,7 +44,7 @@ export function mailerEnabled(): boolean {
 export async function sendMail(args: SendArgs): Promise<MailResult> {
   const auth = basicAuthHeader();
   const from = process.env.MAIL_FROM;
-  const fromName = process.env.MAIL_FROM_NAME || "Elevate";
+  const fromName = process.env.MAIL_FROM_NAME || "Elevation Real Estate HQ";
   const replyTo = args.replyTo || process.env.MAIL_REPLY_TO;
 
   if (!auth || !from) {
@@ -114,7 +114,7 @@ export function passwordResetEmail(opts: {
   expiresInMinutes: number;
 }): { subject: string; html: string } {
   const minutes = opts.expiresInMinutes;
-  const subject = "Reset your Elevate password";
+  const subject = "Reset your password";
   const html = baseTemplate({
     preheader: "Use the link below to set a new password.",
     body: `
@@ -135,7 +135,7 @@ export function loginCodeEmail(opts: {
   expiresInMinutes: number;
 }): { subject: string; html: string } {
   const minutes = opts.expiresInMinutes;
-  const subject = `Your Elevate login code: ${opts.code}`;
+  const subject = `Your login code: ${opts.code}`;
   const html = baseTemplate({
     preheader: `Your one-time login code is ${opts.code}.`,
     body: `
@@ -156,13 +156,13 @@ export function inviteEmail(opts: {
   orgName: string;
   inviterName?: string;
 }): { subject: string; html: string } {
-  const subject = `You've been invited to ${opts.orgName} on Elevate`;
+  const subject = `You've been invited to ${opts.orgName} on Elevation Real Estate HQ`;
   const inviter = opts.inviterName ? `${escapeHtml(opts.inviterName)} ` : "";
   const html = baseTemplate({
-    preheader: `Join ${escapeHtml(opts.orgName)} on Elevate.`,
+    preheader: `Join ${escapeHtml(opts.orgName)} on Elevation Real Estate HQ.`,
     body: `
       <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;color:#FFFFFF;">You've been invited</h1>
-      <p style="margin:0 0 26px;font-size:15px;line-height:1.6;color:#C8C8C8;">${inviter}invited you to join <strong style="color:#FFFFFF;">${escapeHtml(opts.orgName)}</strong> on Elevate Real Estate HQ.</p>
+      <p style="margin:0 0 26px;font-size:15px;line-height:1.6;color:#C8C8C8;">${inviter}invited you to join <strong style="color:#FFFFFF;">${escapeHtml(opts.orgName)}</strong> on Elevation Real Estate HQ.</p>
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#D97757" style="border-radius:8px;">
         <a href="${escapeAttr(opts.inviteUrl)}" style="display:inline-block;background:#D97757;color:#FFFFFF;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Accept invitation</a>
       </td></tr></table>
@@ -180,7 +180,7 @@ function baseTemplate(opts: { preheader: string; body: string }): string {
   const logo = "https://api.elevationrealestatehq.com/elevateos-wordmark-dark.png";
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark light"><title>Elevate Real Estate HQ</title></head>
+<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark light"><title>Elevation Real Estate HQ</title></head>
 <body style="margin:0;padding:0;background:#0A0A0A;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
 <span style="display:none;font-size:1px;color:#0A0A0A;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(opts.preheader)}</span>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#0A0A0A" style="background:#0A0A0A;">
@@ -188,7 +188,7 @@ function baseTemplate(opts: { preheader: string; body: string }): string {
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;width:100%;">
       <!-- logo above the card -->
       <tr><td align="center" style="padding:0 0 22px;">
-        <img src="${logo}" width="150" alt="Elevate Real Estate HQ" style="display:block;height:26px;width:auto;border:0;outline:none;text-decoration:none;" />
+        <img src="${logo}" width="150" alt="Elevation Real Estate HQ" style="display:block;height:26px;width:auto;border:0;outline:none;text-decoration:none;" />
       </td></tr>
       <!-- card -->
       <tr><td bgcolor="#161616" style="background:#161616;border-radius:14px;border:1px solid #262626;box-shadow:0 18px 40px rgba(0,0,0,0.45);">
@@ -198,7 +198,7 @@ function baseTemplate(opts: { preheader: string; body: string }): string {
           </td></tr>
           <tr><td style="padding:20px 38px;border-top:1px solid #262626;">
             <p style="margin:0;font-size:12px;line-height:1.6;color:#7C7C7C;">
-              Sent by <span style="color:#A8A8A8;">Elevate Real Estate HQ</span> ·
+              Sent by <span style="color:#A8A8A8;">Elevation Real Estate HQ</span> ·
               <a href="https://elevationrealestatehq.com" style="color:#A8A8A8;text-decoration:none;">elevationrealestatehq.com</a><br/>
               This is an automated security message — please don't reply.
             </p>
@@ -206,7 +206,7 @@ function baseTemplate(opts: { preheader: string; body: string }): string {
         </table>
       </td></tr>
       <tr><td align="center" style="padding:20px 0 0;">
-        <p style="margin:0;font-size:11px;color:#5A5A5A;">© Elevate Real Estate HQ</p>
+        <p style="margin:0;font-size:11px;color:#5A5A5A;">© Elevation Real Estate HQ</p>
       </td></tr>
     </table>
   </td></tr>
