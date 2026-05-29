@@ -650,14 +650,32 @@ export default function App() {
           if (accessVersion === 0) {
             markStartup("license:ready", status.authenticated ? "authenticated" : "signed-out");
           }
+          // Valid response => our session token is current; clear the reload guard.
+          try { sessionStorage.removeItem("elevate:token-reload-at"); } catch { /* ignore */ }
           setLicenseStatus(status);
         }
       })
-      .catch(() => {
-        if (!cancelled) {
-          if (accessVersion === 0) markStartup("license:error");
-          setLicenseStatus({ authenticated: false } as LicenseStatusResponse);
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        // A 401 here means the dashboard rotated its in-memory session token
+        // (it restarts once at startup to enable embedded chat) AFTER this
+        // renderer loaded — so the injected token is stale. Reload once to pull
+        // a fresh token instead of showing a false "signed out" screen. Guarded
+        // by an 8s window so a genuinely unreachable backend can't reload-loop.
+        if (msg.includes("401")) {
+          try {
+            const KEY = "elevate:token-reload-at";
+            const last = Number(sessionStorage.getItem(KEY) || "0");
+            if (Date.now() - last > 8000) {
+              sessionStorage.setItem(KEY, String(Date.now()));
+              window.location.reload();
+              return;
+            }
+          } catch { /* ignore */ }
         }
+        if (accessVersion === 0) markStartup("license:error");
+        setLicenseStatus({ authenticated: false } as LicenseStatusResponse);
       })
       .finally(() => {
         if (!cancelled) setLicenseChecked(true);
