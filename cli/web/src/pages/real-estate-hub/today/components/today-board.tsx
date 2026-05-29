@@ -885,30 +885,8 @@ export function TodayBoard(props: TodayBoardProps) {
   const sub = props.greetingSub ?? `Today at a glance · ${fmtTodayDate()}`;
   return (
     <main className="admin-board td-board" data-screen-label="01 Today">
-      <header className="ab-hero td-hero">
-        <div className="ab-hero-left">
-          <div className="ab-hero-icon-wrap" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" width="16" height="16"><path d="M3 12l9-9 9 9" /><path d="M5 10v10h14V10" /></svg>
-          </div>
-          <div className="ab-hero-title-block">
-            <div className="ab-hero-eyebrow mono">Operations</div>
-            <h1 className="ab-hero-title">Today</h1>
-          </div>
-        </div>
-        <div className="ab-hero-right">
-          <span className="ab-live">
-            <span className="ab-live-dot" />
-            Local gateway online
-          </span>
-          {props.loading && <span className="ab-live mono">loading…</span>}
-          {props.error && <span className="ab-live mono" style={{ color: "var(--status-warn)" }}>{props.error}</span>}
-          <button type="button" className="ab-pill" onClick={props.onRefresh}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" width="12" height="12"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg>
-            Refresh
-          </button>
-        </div>
-      </header>
-
+      {/* No in-page hero — the title "Today" lives in the app breadcrumb
+          header (like Memory and the other pages), no icon/eyebrow/status. */}
       <div className="td-board-body">
         <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} />
         <PipelineVelocity stages={props.pipeline} />

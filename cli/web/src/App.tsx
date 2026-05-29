@@ -220,11 +220,25 @@ function scheduleRouteWarmup(paths: string[]): () => void {
 }
 
 function RootRedirect() {
-  return <Navigate to="/today" replace />;
+  // Start each launch on a fresh chat (mirrors the "New chat" button's
+  // ?new=&seed= params) when embedded chat is available; else fall back to /today.
+  const seed = useMemo(() => Date.now(), []);
+  return (
+    <Navigate
+      to={isDashboardEmbeddedChatEnabled() ? `/chat?new=${seed}&seed=${seed}` : "/today"}
+      replace
+    />
+  );
 }
 
 function CoreRootRedirect() {
-  return <Navigate to={isDashboardEmbeddedChatEnabled() ? "/chat" : "/hub"} replace />;
+  const seed = useMemo(() => Date.now(), []);
+  return (
+    <Navigate
+      to={isDashboardEmbeddedChatEnabled() ? `/chat?new=${seed}&seed=${seed}` : "/hub"}
+      replace
+    />
+  );
 }
 
 // Soft first-run gate. A customer whose agent setup isn't complete is routed to
