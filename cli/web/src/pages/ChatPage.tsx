@@ -900,6 +900,12 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       status: "complete" as const,
       title: m.tool_name,
     };
+    // Surface the persisted per-turn token count on the assistant turn so the
+    // usage badge rebuilds from the saved record (survives cache wipe / fresh
+    // install), not just from the live streaming snapshot.
+    if (m.role === "assistant" && typeof m.token_count === "number") {
+      chat.tokenCount = m.token_count;
+    }
     if (m.role === "assistant" && pendingTools.length) {
       chat.tools = pendingTools.map((t) => ({ ...t, messageId }));
       pendingTools = [];

@@ -51,7 +51,9 @@ let overlayWindow = null;
 let overlayWatcher = null;
 let backendProcess = null;
 let updateToastWindow = null;
-let loginWindow = null;
+// Deep link (elevate://…) captured before the main window exists, replayed
+// once startup finishes. macOS can fire open-url before app.whenReady().
+let pendingDeepLink = null;
 
 // The computer-use tool touches this file on every action. The desktop app
 // polls its mtime and shows the screen-edge glow while it is fresh, so the
@@ -68,6 +70,31 @@ const startupEvents = [];
 let startupSummaryLogged = false;
 
 app.setName("Elevate");
+
+// Single-instance lock. A second launch (Finder double-open, or an elevate://
+// link that macOS/Windows tries to open in a fresh process) must hand off to
+// the already-running app rather than spin up a duplicate window + a second
+// backend on the next port. The primary instance receives the second one's
+// argv via `second-instance` and replays any deep link from it.
+const isPrimaryInstance = app.requestSingleInstanceLock();
+if (!isPrimaryInstance) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    app.focus({ steal: true });
+    // Windows/Linux deliver elevate:// URLs as an argv entry (macOS uses the
+    // open-url event instead). Replay it through the shared handler.
+    const deepLink = argv.find(
+      (a) => typeof a === "string" && a.startsWith("elevate://"),
+    );
+    if (deepLink) handleDeepLink(deepLink);
+  });
+}
 
 function markStartup(name, detail = "") {
   const ms = Date.now() - startupStartedAt;
@@ -929,13 +956,10 @@ ipcMain.handle("desktop:install", async () => runInstaller());
 ipcMain.handle("auth:login", async (_event, payload) => {
   const result = await performLogin(payload || {});
   if (result.ok) {
-    // Close the floating login window (if this came from one) and reload the
-    // dashboard so the chat WebSocket reopens and picks up the new license.
+    // Reload the dashboard so the chat WebSocket reopens and picks up the new
+    // license. The login screen is the in-app <LoginCard /> — there's no
+    // separate native login window to close.
     setTimeout(() => {
-      if (loginWindow && !loginWindow.isDestroyed()) {
-        loginWindow.close();
-        loginWindow = null;
-      }
       if (mainWindow && !mainWindow.isDestroyed()) {
         loadAppPath(START_PATH);
       }
@@ -1152,24 +1176,45 @@ ipcMain.handle("updater:check", async () => {
 // success page links to elevate://signin; macOS fires `open-url` on the running
 // instance, and we just focus the dashboard (which shows the in-app login).
 app.setAsDefaultProtocolClient("elevate");
-app.on("open-url", (event) => {
-  event.preventDefault();
+
+// Bounce the user back into the app after a browser auth flow (e.g. a password
+// reset completing on the HQ site links to elevate://signin). If the window
+// isn't up yet (cold start triggered by the link itself), stash the URL and
+// replay it once startDesktop() has created the window.
+function handleDeepLink(url) {
+  if (!url) return;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    pendingDeepLink = url;
+    return;
+  }
   // steal:true brings Elevate to the foreground over the browser the user
   // clicked the link from — window.focus() alone won't activate a backgrounded
   // macOS app.
   app.focus({ steal: true });
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-    openLoginWindow();
-  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  openLoginWindow();
+}
+
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  handleDeepLink(url);
 });
 
 app.whenReady().then(async () => {
+  // Secondary instance already handed off to the primary and is quitting.
+  if (!isPrimaryInstance) return;
   markStartup("electron:ready");
   await startDesktop();
   kickoffUpdates();
+  // A deep link that launched the app fires open-url before the window exists;
+  // replay it now that startDesktop() has created mainWindow.
+  if (pendingDeepLink) {
+    const url = pendingDeepLink;
+    pendingDeepLink = null;
+    handleDeepLink(url);
+  }
 });
 
 app.on("activate", () => {

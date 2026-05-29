@@ -2110,6 +2110,8 @@ export interface SessionMessage {
   tool_name?: string;
   tool_call_id?: string;
   timestamp?: number;
+  /** Per-turn output tokens, persisted on the assistant message (may be null). */
+  token_count?: number | null;
 }
 
 export interface SessionMessagesResponse {

@@ -3425,6 +3425,7 @@ class AIAgent:
                     tool_calls=tool_calls_data,
                     tool_call_id=msg.get("tool_call_id"),
                     finish_reason=msg.get("finish_reason"),
+                    token_count=msg.get("token_count") if role == "assistant" else None,
                     reasoning=msg.get("reasoning") if role == "assistant" else None,
                     reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
@@ -5422,6 +5423,11 @@ class AIAgent:
         self._codex_streamed_text_parts: list = []
         for attempt in range(max_stream_retries + 1):
             collected_output_items: list = []
+            # Captured off the terminal stream event so the codex/ChatGPT backend's
+            # token usage survives the get_final_response()=None recovery path —
+            # otherwise token accounting is silently lost (chat_sessions totals,
+            # turn_usage, and analytics all stay 0).
+            _final_usage = None
 
             def _recover_none_output_final_response(exc: Exception):
                 if not isinstance(exc, TypeError) or "'NoneType' object is not iterable" not in str(exc):
@@ -5447,7 +5453,7 @@ class AIAgent:
                     model=api_kwargs.get("model"),
                     output=output_items,
                     output_text=assembled,
-                    usage=None,
+                    usage=_final_usage,
                 )
 
             try:
@@ -5487,18 +5493,24 @@ class AIAgent:
                             done_item = getattr(event, "item", None)
                             if done_item is not None:
                                 collected_output_items.append(done_item)
-                        # Log non-completed terminal events for diagnostics
-                        elif event_type in ("response.incomplete", "response.failed"):
+                        # Capture token usage off the terminal event (completed
+                        # AND the non-completed ones) so accounting survives the
+                        # output=None recovery path; still log the non-completed.
+                        elif event_type in ("response.completed", "response.incomplete", "response.failed"):
                             resp_obj = getattr(event, "response", None)
-                            status = getattr(resp_obj, "status", None) if resp_obj else None
-                            incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
-                            logger.warning(
-                                "Codex Responses stream received terminal event %s "
-                                "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
-                                event_type, status, incomplete_details,
-                                sum(len(p) for p in self._codex_streamed_text_parts),
-                                self._client_log_context(),
-                            )
+                            _ev_usage = getattr(resp_obj, "usage", None) if resp_obj else None
+                            if _ev_usage is not None:
+                                _final_usage = _ev_usage
+                            if event_type != "response.completed":
+                                status = getattr(resp_obj, "status", None) if resp_obj else None
+                                incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
+                                logger.warning(
+                                    "Codex Responses stream received terminal event %s "
+                                    "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
+                                    event_type, status, incomplete_details,
+                                    sum(len(p) for p in self._codex_streamed_text_parts),
+                                    self._client_log_context(),
+                                )
                     try:
                         final_response = stream.get_final_response()
                     except TypeError as exc:
@@ -5536,6 +5548,13 @@ class AIAgent:
                                 "Codex stream: synthesized output from %d text deltas (%d chars)",
                                 len(self._codex_streamed_text_parts), len(assembled),
                             )
+                    # Attach usage captured from the terminal event if the SDK's
+                    # final response didn't carry it (codex backend path).
+                    if getattr(final_response, "usage", None) is None and _final_usage is not None:
+                        try:
+                            final_response.usage = _final_usage
+                        except Exception:
+                            pass
                     return final_response
             except TypeError as exc:
                 recovered_response = _recover_none_output_final_response(exc)
@@ -7821,6 +7840,14 @@ class AIAgent:
             "reasoning": reasoning_text,
             "finish_reason": finish_reason,
         }
+
+        # Per-turn output tokens for this response, set from the usage block in
+        # the run loop. Persisted on the message so the chat shows a per-turn
+        # token badge that survives restarts / cache wipes (read path already
+        # selects token_count; the UI maps it in normalizeStoredTranscript).
+        _resp_out = getattr(self, "_last_response_output_tokens", None)
+        if isinstance(_resp_out, int) and _resp_out > 0:
+            msg["token_count"] = _resp_out
 
         if hasattr(assistant_message, "reasoning_content"):
             raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
@@ -10207,7 +10234,14 @@ class AIAgent:
                         response = self._interruptible_api_call(api_kwargs)
                     
                     api_duration = time.time() - api_start_time
-                    
+
+                    # Reset the per-response output-token tally. The usage block
+                    # below sets it from this call's completion tokens; the
+                    # assistant-message builder stamps it onto the message dict so
+                    # the per-turn token badge persists (and survives cache wipes).
+                    # Left None when the provider returns no usage → no stamp.
+                    self._last_response_output_tokens = None
+
                     # Stop thinking spinner silently -- the response box or tool
                     # execution messages that follow are more informative.
                     if thinking_spinner:
@@ -10666,6 +10700,10 @@ class AIAgent:
                         prompt_tokens = canonical_usage.prompt_tokens
                         completion_tokens = canonical_usage.output_tokens
                         total_tokens = canonical_usage.total_tokens
+                        # Remember this call's output tokens so the assistant
+                        # message built later this iteration carries a per-turn
+                        # token_count (persisted + shown in the chat usage badge).
+                        self._last_response_output_tokens = completion_tokens
                         usage_dict = {
                             "prompt_tokens": prompt_tokens,
                             "completion_tokens": completion_tokens,
