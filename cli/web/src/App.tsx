@@ -231,6 +231,50 @@ function CoreRootRedirect() {
   return <Navigate to={isDashboardEmbeddedChatEnabled() ? "/chat" : "/hub"} replace />;
 }
 
+// Soft first-run gate. A customer whose agent setup isn't complete is routed to
+// the onboarding wizard ONCE per app session when they land (desktop opens
+// /hub directly, browser lands on /chat — this catches both since it lives in
+// the authenticated shell, not the index route). It never traps them: they can
+// navigate away freely, the sessionStorage flag stops it re-firing, and a
+// returning/configured customer (setup complete) is never redirected. A failed
+// status check is swallowed so the app is never blocked.
+function OnboardingGate() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const checkedRef = useRef(false);
+
+  useEffect(() => {
+    if (checkedRef.current) return;
+    checkedRef.current = true;
+    if (typeof window === "undefined") return;
+    if (window.sessionStorage.getItem("elevate:onboarding-routed") === "1") return;
+    // Already on onboarding (e.g. opened from the sidebar) — mark done, no nav.
+    if (location.pathname.startsWith("/agent-onboarding")) {
+      window.sessionStorage.setItem("elevate:onboarding-routed", "1");
+      return;
+    }
+    let cancelled = false;
+    api
+      .getAgentSetup()
+      .then((snap) => {
+        if (cancelled) return;
+        window.sessionStorage.setItem("elevate:onboarding-routed", "1");
+        const complete = Boolean(snap && (snap.complete || snap.completedAt));
+        if (!complete) {
+          navigate("/agent-onboarding?run=1", { replace: true });
+        }
+      })
+      .catch(() => {
+        // Never block the app on a status-check failure; let them land normally.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, location.pathname]);
+
+  return null;
+}
+
 function AccessLoadingPage() {
   return <RouteBundleFallback />;
 }
@@ -831,6 +875,7 @@ export default function App() {
       className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-background-base font-sans normal-case text-midground antialiased"
     >
       <SelectionSwitcher />
+      <OnboardingGate />
       <Backdrop />
       <PluginSlot name="backdrop" />
 
