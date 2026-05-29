@@ -330,6 +330,24 @@ export function LoginCard({ onAuthChange }: Props) {
             </p>
           )}
 
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                const base = (backendUrl.trim() || "https://api.elevationrealestatehq.com").replace(/\/$/, "");
+                const url = `${base}/forgot`;
+                // Desktop exposes openExternal; browser falls back to window.open.
+                const ext = (window as unknown as { elevateDesktop?: { auth?: { openExternal?: (u: string) => void } } })
+                  .elevateDesktop?.auth?.openExternal;
+                if (ext) ext(url);
+                else window.open(url, "_blank", "noopener");
+              }}
+              className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+            >
+              Forgot password?
+            </button>
+          </div>
+
           <Button
             type="submit"
             className="w-full"
