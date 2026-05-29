@@ -55,6 +55,8 @@ export default function OrgDetail() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"owner" | "admin" | "member">("member");
   const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteSentTo, setInviteSentTo] = useState<string | null>(null);
+  const [inviteEmailed, setInviteEmailed] = useState(false);
   const [copied, setCopied] = useState(false);
 
   function token() {
@@ -132,17 +134,27 @@ export default function OrgDetail() {
     e.preventDefault();
     setBusy(true);
     setInviteLink(null);
+    setInviteSentTo(null);
+    setInviteEmailed(false);
     setCopied(false);
+    const addr = inviteEmail.trim();
     try {
       const res = await authedFetch(`/api/admin/orgs/${orgId}/members`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+        body: JSON.stringify({ email: addr, role: inviteRole }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "invite failed");
       setInviteEmail("");
-      if (data.accept_url) setInviteLink(data.accept_url);
+      // `added` => existing user joined directly (no email). Otherwise an
+      // invitation was created and emailed; keep accept_url only as a backup
+      // for the rare case the email send failed.
+      if (!data.added) {
+        setInviteSentTo(data.invitation?.email || addr);
+        setInviteEmailed(data.emailed === true);
+        if (data.accept_url) setInviteLink(data.accept_url);
+      }
       await load();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "invite failed");
@@ -329,44 +341,73 @@ export default function OrgDetail() {
             </Button>
           </form>
 
-          {inviteLink && (
+          {inviteSentTo && (
             <div
               style={{
                 marginBottom: 12,
                 padding: 12,
                 background: "var(--bg-input-solid)",
                 border: "1px solid var(--border)",
-                borderLeft: "3px solid var(--sage)",
+                borderLeft: `3px solid ${inviteEmailed ? "var(--sage)" : "var(--amber)"}`,
                 borderRadius: "var(--r-md)",
               }}
             >
-              <Label>Share this link</Label>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <code
-                  style={{
-                    fontSize: 12,
-                    fontFamily: "var(--font-mono)",
-                    color: "var(--text)",
-                    wordBreak: "break-all",
-                    flex: 1,
-                    minWidth: 200,
-                  }}
-                >
-                  {inviteLink}
-                </code>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard.writeText(inviteLink);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1500);
-                  }}
-                >
-                  {copied ? "Copied" : "Copy"}
-                </Button>
-              </div>
+              {inviteEmailed ? (
+                <>
+                  <Label>Invitation emailed</Label>
+                  <div style={{ fontSize: 13, color: "var(--text)" }}>
+                    Sent to <strong>{inviteSentTo}</strong>. They&apos;ll get a link to accept and set a password.
+                  </div>
+                  {inviteLink && (
+                    <div style={{ marginTop: 8 }}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(inviteLink);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 1500);
+                        }}
+                      >
+                        {copied ? "Copied" : "Copy backup link"}
+                      </Button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Label>Couldn&apos;t email the invite — share this link</Label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <code
+                      style={{
+                        fontSize: 12,
+                        fontFamily: "var(--font-mono)",
+                        color: "var(--text)",
+                        wordBreak: "break-all",
+                        flex: 1,
+                        minWidth: 200,
+                      }}
+                    >
+                      {inviteLink}
+                    </code>
+                    {inviteLink && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(inviteLink);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 1500);
+                        }}
+                      >
+                        {copied ? "Copied" : "Copy"}
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
