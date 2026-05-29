@@ -334,13 +334,22 @@ function resolveElevateLauncher() {
     );
     const bundledCli = path.join(process.resourcesPath, "cli");
     if (fileExists(bundledPython) && fileExists(bundledCli)) {
+      // The agent works out of a dedicated user folder (~/Elevation), NOT its
+      // own read-only bundled code. Imports still resolve via PYTHONPATH.
+      const userWorkspace = path.join(os.homedir(), "Elevation");
+      try {
+        fs.mkdirSync(userWorkspace, { recursive: true });
+      } catch (e) {
+        /* best-effort */
+      }
       return {
         command: bundledPython,
         args: ["-m", "elevate_cli.main", ...dashboardArgs],
-        cwd: bundledCli,
+        cwd: userWorkspace,
         extraEnv: {
           PYTHONPATH: bundledCli,
           PYTHONNOUSERSITE: "1",
+          ELEVATE_WORKSPACE: userWorkspace,
         },
       };
     }

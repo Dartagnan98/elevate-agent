@@ -37,6 +37,39 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
+def _init_workspace_root() -> Path:
+    """The user folder the agent works out of and that the workspace panel
+    opens / shows status for.
+
+    Defaults to PROJECT_ROOT (a dev checkout, which is itself a git repo). The
+    desktop app sets ELEVATE_WORKSPACE to a dedicated folder (e.g. ~/Elevation)
+    so the packaged agent never treats its own read-only bundled code as the
+    workspace. We git-init the folder so the workspace panel / Review / Create
+    PR work instead of throwing a raw git error on a plain directory.
+    """
+    raw = os.environ.get("ELEVATE_WORKSPACE", "").strip()
+    if not raw:
+        return PROJECT_ROOT
+    try:
+        root = Path(raw).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / ".git").exists():
+            subprocess.run(
+                ["git", "init"],
+                cwd=str(root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+            )
+        return root
+    except Exception:
+        return PROJECT_ROOT
+
+
+WORKSPACE_ROOT = _init_workspace_root()
+
 from elevate_cli import __version__, __release_date__
 from elevate_cli.config import (
     DEFAULT_CONFIG,
@@ -971,7 +1004,7 @@ async def get_status():
     payload = {
         "version": __version__,
         "release_date": __release_date__,
-        "project_root": str(PROJECT_ROOT),
+        "project_root": str(WORKSPACE_ROOT),
         "elevate_home": str(get_elevate_home()),
         "config_path": str(get_config_path()),
         "env_path": str(get_env_path()),
@@ -2196,24 +2229,18 @@ def _github_compare_url(repo_url: str | None, branch: str | None, upstream: str 
 
 
 def _resolve_workspace_repo_dir() -> Path | None:
-    local_root = _git_value(PROJECT_ROOT, "rev-parse", "--show-toplevel")
+    local_root = _git_value(WORKSPACE_ROOT, "rev-parse", "--show-toplevel")
     if local_root:
         return Path(local_root).resolve()
-    try:
-        from elevate_cli.banner import _resolve_repo_dir
-
-        repo_dir = _resolve_repo_dir()
-        return Path(repo_dir).resolve() if repo_dir else None
-    except Exception:
-        return PROJECT_ROOT
+    return WORKSPACE_ROOT
 
 
 def _workspace_display_dir(repo_dir: Path, working_directory: str | None = None) -> Path:
     fallback = repo_dir
     try:
-        project_root = PROJECT_ROOT.resolve()
-        project_root.relative_to(repo_dir.resolve())
-        fallback = project_root
+        workspace_root = WORKSPACE_ROOT.resolve()
+        workspace_root.relative_to(repo_dir.resolve())
+        fallback = workspace_root
     except Exception:
         fallback = repo_dir
 
