@@ -3541,6 +3541,8 @@ function AdminDealContextSection({
   const priorRuns = context?.priorRuns ?? [];
   const flow = context?.dealFlow ?? null;
   const gate = flow?.gate ?? null;
+  const provinceGuide = context?.provinceGuide ?? null;
+  const conditionalDocs = context?.conditionalDocs ?? [];
   const pendingHumanRuns = priorRuns.filter((run) => run.status === "waiting_human");
   const resolvePendingRun = async (run: AdminActionRun, approved: boolean) => {
     if (busy || approvalBusyRun) return;
@@ -3612,6 +3614,84 @@ function AdminDealContextSection({
 
       {context && deal && (
         <div className="mt-3 space-y-3">
+          {provinceGuide && (
+            <div className="rounded-sm border border-border bg-background px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <div className="min-w-0">
+                    <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+                      Province playbook
+                    </div>
+                    <div className="mt-0.5 truncate text-[0.86rem] font-medium text-foreground">
+                      {provinceGuide.provinceLabel}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  <Badge variant="outline">{provinceGuide.coverage.forms} forms</Badge>
+                  <Badge variant="outline">{provinceGuide.coverage.referencePages} guides</Badge>
+                  <Badge variant="outline">{provinceGuide.coverage.checklists} checklists</Badge>
+                  {provinceGuide.coverage.hasTransactionGuide && (
+                    <Badge variant="success">transaction guide</Badge>
+                  )}
+                </div>
+              </div>
+              {provinceGuide.pages.length > 0 && (
+                <div className="mt-2">
+                  <div className="font-mono-ui mb-1 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                    Transaction guides
+                  </div>
+                  <ul className="flex flex-col gap-1">
+                    {provinceGuide.pages.slice(0, 6).map((page) => (
+                      <li
+                        key={page.slug}
+                        className="flex items-start gap-2 text-[0.78rem] leading-snug"
+                      >
+                        <FileText className="mt-[1px] h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        {page.sourceUrl ? (
+                          <a
+                            href={page.sourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="min-w-0 text-foreground underline decoration-muted-foreground/40 underline-offset-2 hover:decoration-foreground"
+                          >
+                            {page.title}
+                          </a>
+                        ) : (
+                          <span className="min-w-0 text-foreground">{page.title}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {conditionalDocs.length > 0 && (
+                <div className="mt-2 border-t border-border pt-2">
+                  <div className="font-mono-ui mb-1 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
+                    Conditional documents
+                  </div>
+                  <ul className="flex flex-col gap-1">
+                    {conditionalDocs.slice(0, 6).map((doc) => (
+                      <li
+                        key={doc.id}
+                        className="flex items-start gap-2 text-[0.78rem] leading-snug"
+                      >
+                        <FileText className="mt-[1px] h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <span className="font-medium text-foreground">{doc.docCode}</span>
+                          <span className="text-muted-foreground"> · {doc.docName}</span>
+                          <span className="font-mono-ui ml-1 text-[0.62rem] uppercase tracking-wider text-warning">
+                            if {doc.fieldKey}={doc.fieldValue}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
           {gate && (
             <div className="rounded-sm border border-border bg-background px-3 py-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
