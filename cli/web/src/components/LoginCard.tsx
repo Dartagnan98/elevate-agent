@@ -75,22 +75,32 @@ export function LoginCard({ onAuthChange }: Props) {
   }, [loadStatus]);
 
   // Shared success path for both password and code sign-in.
+  //
+  // Sign-in now returns BEFORE skill packs are downloaded (activate is called
+  // with skip_skill_sync). We flip straight to "success" and let the user into
+  // the app immediately, then sync packs in the BACKGROUND — a full pack
+  // download used to block the "Signing in..." button for several seconds.
+  // When the background sync lands we re-fire auth-changed + reload status so
+  // any newly-unlocked tabs appear without a manual reload.
   const completeActivation = async (result: LicenseActivateResponse) => {
     setActivationResult(result);
-    if (result.skill_count > 0) {
-      setPhase("success");
-    } else {
-      setPhase("syncing");
-      try {
-        await api.syncLicenseSkills();
-      } catch {
-        // skill sync is best-effort
-      }
-      setPhase("success");
-    }
+    setPhase("success");
     onAuthChange?.(true, result.packs);
     window.dispatchEvent(new Event("elevate:auth-changed"));
     await loadStatus();
+
+    if (result.skill_count <= 0) {
+      void api
+        .syncLicenseSkills()
+        .then(() => {
+          window.dispatchEvent(new Event("elevate:auth-changed"));
+          return loadStatus();
+        })
+        .catch(() => {
+          // Background skill sync is best-effort; the 60s license refresh and
+          // focus re-check will pick packs up if this transient-fails.
+        });
+    }
   };
 
   const showAuthError = (err: unknown, invalidMsg: string) => {
@@ -119,7 +129,9 @@ export function LoginCard({ onAuthChange }: Props) {
     setPhase("signing_in");
     setError(null);
     try {
-      const result = await api.activateLicense(email.trim(), password);
+      // Skip the inline skill-pack download so sign-in returns fast; packs
+      // sync in the background (completeActivation).
+      const result = await api.activateLicense(email.trim(), password, undefined, true);
       await completeActivation(result);
     } catch (err: unknown) {
       showAuthError(err, "Invalid email or password.");
@@ -164,7 +176,7 @@ export function LoginCard({ onAuthChange }: Props) {
     setPhase("signing_in");
     setError(null);
     try {
-      const result = await api.activateWithCode(email.trim(), code.trim());
+      const result = await api.activateWithCode(email.trim(), code.trim(), true);
       await completeActivation(result);
     } catch (err: unknown) {
       showAuthError(err, "Invalid or expired code.");

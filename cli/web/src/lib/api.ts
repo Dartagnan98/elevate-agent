@@ -218,11 +218,21 @@ export const api = {
   getAccessStatus: () => cachedFetchJSON<AccessStatusResponse>("/api/access", 5_000),
   getLicenseStatus: () =>
     cachedFetchJSON<LicenseStatusResponse>("/api/license/status", 5_000),
-  activateLicense: (email: string, password: string, backendUrl?: string) =>
+  activateLicense: (
+    email: string,
+    password: string,
+    backendUrl?: string,
+    skipSkillSync?: boolean,
+  ) =>
     fetchJSON<LicenseActivateResponse>("/api/license/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, backend_url: backendUrl || undefined }),
+      body: JSON.stringify({
+        email,
+        password,
+        backend_url: backendUrl || undefined,
+        skip_skill_sync: skipSkillSync || undefined,
+      }),
     }),
   requestLoginCode: (email: string) =>
     fetchJSON<{ ok: boolean }>("/api/license/request-code", {
@@ -230,11 +240,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
     }),
-  activateWithCode: (email: string, code: string) =>
+  activateWithCode: (email: string, code: string, skipSkillSync?: boolean) =>
     fetchJSON<LicenseActivateResponse>("/api/license/activate-code", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, code }),
+      body: JSON.stringify({
+        email,
+        code,
+        skip_skill_sync: skipSkillSync || undefined,
+      }),
     }),
   syncLicenseSkills: () =>
     fetchJSON<LicenseSyncSkillsResponse>("/api/license/sync-skills", {
