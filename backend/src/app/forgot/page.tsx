@@ -31,8 +31,14 @@ function ForgotInner() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ email, app: fromApp }),
       });
+      if (!res.ok) {
+        throw new Error(
+          res.status === 429
+            ? "Too many reset attempts. Wait a few minutes and try again."
+            : "request failed",
+        );
+      }
       const data: ForgotResponse = await res.json();
-      if (!res.ok) throw new Error("request failed");
       setSent(true);
       if (data.dev_only?.reset_url) setResetUrl(data.dev_only.reset_url);
     } catch (e: unknown) {
