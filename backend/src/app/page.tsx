@@ -1,96 +1,46 @@
-import Link from "next/link";
+"use client";
+
+import { AUTH_STYLES } from "@/components/auth-shell";
 
 export default function Page() {
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        display: "grid",
-        placeItems: "center",
-        padding: 16,
-        background:
-          "radial-gradient(circle at 20% 0%, rgba(217, 119, 87, 0.06), transparent 50%), radial-gradient(circle at 80% 100%, rgba(122, 158, 135, 0.04), transparent 50%), var(--bg)",
-      }}
-    >
-      <div className="fade-in" style={{ textAlign: "center", maxWidth: 420 }}>
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 20,
-          }}
-        >
-          <svg width="44" height="44" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-            <rect width="28" height="28" rx="7" fill="var(--accent)" />
-            <path d="M9 9h10v2.5h-7.5v3h6V17h-6v3H19V22.5H9V9z" fill="#fff" />
-          </svg>
-        </div>
-        <h1
-          style={{
-            fontSize: 32,
-            fontWeight: 600,
-            margin: 0,
-            letterSpacing: "-0.02em",
-          }}
-        >
-          Elevate HQ
-        </h1>
-        <p
-          style={{
-            color: "var(--text-dim)",
-            marginTop: 8,
-            marginBottom: 24,
-            fontSize: 14,
-          }}
-        >
+    <div className="el-auth">
+      <style dangerouslySetInnerHTML={{ __html: AUTH_STYLES }} />
+      <div className="aurora" aria-hidden />
+      <div
+        style={{
+          position: "relative",
+          zIndex: 1,
+          textAlign: "center",
+          maxWidth: 420,
+          animation: "el-rise 520ms cubic-bezier(0.22,1,0.36,1) both",
+        }}
+      >
+        <img
+          src="/elevateos-wordmark-dark.png"
+          alt="Elevate"
+          style={{ height: 34, width: "auto", objectFit: "contain", marginBottom: 22 }}
+        />
+        <p style={{ color: "#A0A0A0", margin: "0 0 28px", fontSize: 14, lineHeight: 1.5 }}>
           Control panel for users, organizations, and entitlements.
         </p>
-        <div
-          style={{
-            display: "inline-flex",
-            gap: 8,
-            flexWrap: "wrap",
-            justifyContent: "center",
-          }}
-        >
-          <Link
-            href="/signup"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              padding: "8px 16px",
-              background: "var(--accent)",
-              color: "#fff",
-              border: "1px solid var(--accent)",
-              borderRadius: "var(--r-md)",
-              fontSize: 13,
-              fontWeight: 500,
-              textDecoration: "none",
-              transition: "background 120ms",
-            }}
-          >
+        <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+          <a href="/signup" style={{
+            display: "inline-flex", alignItems: "center", padding: "10px 18px",
+            background: "#8A8A8A", color: "#0F0F0F", border: 0, borderRadius: 6,
+            fontSize: 14, fontWeight: 600, textDecoration: "none",
+          }}>
             Create account
-          </Link>
-          <Link
-            href="/admin/login"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              padding: "8px 16px",
-              background: "var(--bg-elev-2)",
-              color: "var(--text)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--r-md)",
-              fontSize: 13,
-              fontWeight: 500,
-              textDecoration: "none",
-            }}
-          >
+          </a>
+          <a href="/admin/login" style={{
+            display: "inline-flex", alignItems: "center", padding: "10px 18px",
+            background: "transparent", color: "#ECECEC", border: "1px solid #2A2A2A", borderRadius: 6,
+            fontSize: 14, fontWeight: 600, textDecoration: "none",
+          }}>
             Sign in
-          </Link>
+          </a>
         </div>
       </div>
-    </main>
+    </div>
   );
 }
