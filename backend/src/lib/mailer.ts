@@ -120,8 +120,8 @@ export function passwordResetEmail(opts: {
     body: `
       <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;color:#FFFFFF;">Reset your password</h1>
       <p style="margin:0 0 26px;font-size:15px;line-height:1.6;color:#C8C8C8;">Someone requested a password reset for your account. If that was you, tap the button below to set a new one.</p>
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#FFFFFF" style="border-radius:8px;">
-        <a href="${escapeAttr(opts.resetUrl)}" style="display:inline-block;background:#FFFFFF;color:#0A0A0A;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Reset password</a>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#D97757" style="border-radius:8px;">
+        <a href="${escapeAttr(opts.resetUrl)}" style="display:inline-block;background:#D97757;color:#FFFFFF;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Reset password</a>
       </td></tr></table>
       <p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:#8C8C8C;">This link expires in ${minutes} minutes.</p>
       <p style="margin:0;font-size:13px;line-height:1.5;color:#8C8C8C;">If you didn't request this, you can ignore this email — your password won't change.</p>
@@ -163,8 +163,8 @@ export function inviteEmail(opts: {
     body: `
       <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;color:#FFFFFF;">You've been invited</h1>
       <p style="margin:0 0 26px;font-size:15px;line-height:1.6;color:#C8C8C8;">${inviter}invited you to join <strong style="color:#FFFFFF;">${escapeHtml(opts.orgName)}</strong> on Elevate Real Estate HQ.</p>
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#FFFFFF" style="border-radius:8px;">
-        <a href="${escapeAttr(opts.inviteUrl)}" style="display:inline-block;background:#FFFFFF;color:#0A0A0A;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Accept invitation</a>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;"><tr><td bgcolor="#D97757" style="border-radius:8px;">
+        <a href="${escapeAttr(opts.inviteUrl)}" style="display:inline-block;background:#D97757;color:#FFFFFF;font-weight:600;font-size:15px;padding:13px 30px;border-radius:8px;text-decoration:none;">Accept invitation</a>
       </td></tr></table>
       <p style="margin:0;font-size:13px;line-height:1.5;color:#8C8C8C;">If you weren't expecting this, you can ignore the email.</p>
     `,
