@@ -64,12 +64,16 @@
 
 .hub-root { min-height: 100%; }
 .hub { min-height: 100%; }
+/* Full-width like Admin/Leads: horizontal margin comes from the app shell
+   (px-3 sm:px-6), NOT from here. No max-width cap and no inner left/right
+   padding, so /hub fills the page identically to the other pages instead of
+   being a narrow, over-inset center band. */
 .hub-inner {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 26px 40px 90px;
+  max-width: none;
+  margin: 0;
+  padding: 26px 0 90px;
 }
-@media (max-width: 720px) { .hub-inner { padding: 20px 18px 70px; } }
+@media (max-width: 720px) { .hub-inner { padding: 20px 0 70px; } }
 
 @keyframes hub-spin { to { transform: rotate(360deg); } }
 .hub-root .spin { animation: hub-spin 0.7s linear infinite; }

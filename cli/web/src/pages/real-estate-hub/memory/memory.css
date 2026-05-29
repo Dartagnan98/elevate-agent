@@ -51,8 +51,10 @@
   -webkit-font-smoothing: antialiased;
   min-height: 100%;
 }
-.mem-inner { max-width: 1480px; margin: 0 auto; padding: 22px 32px 80px; }
-@media (max-width: 720px) { .mem-inner { padding: 18px 16px 60px; } }
+/* Full-width like Admin/Leads: horizontal margin comes from the app shell
+   (px-3 sm:px-6), NOT from here. Matches /hub and every other page. */
+.mem-inner { max-width: none; margin: 0; padding: 22px 0 80px; }
+@media (max-width: 720px) { .mem-inner { padding: 18px 0 60px; } }
 
 @keyframes mem-spin { to { transform: rotate(360deg); } }
 .mem-root .spin { animation: mem-spin 0.7s linear infinite; }
