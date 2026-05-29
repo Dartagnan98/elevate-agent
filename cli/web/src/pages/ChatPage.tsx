@@ -837,27 +837,95 @@ function eventMillis(ev: GatewayEvent, fallback = Date.now()): number {
 }
 
 function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
-  return (messages ?? [])
-    .filter((m) =>
-      shouldKeepTranscriptMessage(
+  const list = messages ?? [];
+  const total = list.length;
+
+  // Pair each tool call with its result message (for summary + completion time).
+  const toolResults = new Map<string, StoredSessionMessage>();
+  list.forEach((m) => {
+    if (m.role === "tool" && m.tool_call_id) toolResults.set(m.tool_call_id, m);
+  });
+
+  const cut = (v?: string | null): string | undefined =>
+    typeof v === "string" ? (v.length > 300 ? `${v.slice(0, 300)}…` : v) : undefined;
+
+  const out: ChatMessage[] = [];
+  // Buffer tool calls (incl. those on empty-content assistant turns that the
+  // transcript filter drops) and attach them to the next kept assistant turn —
+  // so the tool-call dropdown rebuilds from the saved record and shows even
+  // when the localStorage snapshot is gone (cache wipe / fresh install).
+  let pendingTools: ToolEntry[] = [];
+
+  list.forEach((m, index) => {
+    const createdAt = timestampMillis(
+      m.timestamp,
+      Date.now() - Math.max(0, total - index),
+    );
+
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      m.tool_calls.forEach((call, ci) => {
+        const result = call.id ? toolResults.get(call.id) : undefined;
+        pendingTools.push({
+          kind: "tool",
+          id: call.id || `stored-${index}-${ci}`,
+          tool_id: call.id || "",
+          name: call.function?.name || result?.tool_name || "tool",
+          context: cut(call.function?.arguments),
+          summary: cut(typeof result?.content === "string" ? result.content : null),
+          status: "done",
+          startedAt: createdAt,
+          completedAt: result ? timestampMillis(result.timestamp, createdAt) : createdAt,
+        });
+      });
+    }
+
+    if (
+      !shouldKeepTranscriptMessage(
         m.role,
         typeof m.content === "string" ? m.content : "",
-      ),
-    )
-    .map((m, index) => ({
+      )
+    ) {
+      return; // dropped (tool results, empty turns) — tool calls already buffered
+    }
+
+    const messageId = id(`stored-${index}`);
+    const chat: ChatMessage = {
       content: collapseSkillInvocation(
         m.role,
         typeof m.content === "string" ? m.content : "",
       ),
-      createdAt: timestampMillis(
-        m.timestamp,
-        Date.now() - Math.max(0, (messages?.length ?? 0) - index),
-      ),
-      id: id(`stored-${index}`),
+      createdAt,
+      id: messageId,
       role: m.role,
       status: "complete" as const,
       title: m.tool_name,
-    }));
+    };
+    if (m.role === "assistant" && pendingTools.length) {
+      chat.tools = pendingTools.map((t) => ({ ...t, messageId }));
+      pendingTools = [];
+    }
+    out.push(chat);
+  });
+
+  // Trailing tool calls with no assistant turn after them → attach to the last
+  // assistant message so they aren't lost.
+  if (pendingTools.length) {
+    for (let i = out.length - 1; i >= 0; i -= 1) {
+      if (out[i].role === "assistant") {
+        const mid = out[i].id;
+        out[i] = {
+          ...out[i],
+          tools: [
+            ...(out[i].tools ?? []),
+            ...pendingTools.map((t) => ({ ...t, messageId: mid })),
+          ],
+        };
+        break;
+      }
+    }
+  }
+
+  return out;
 }
 
 function readStoredTranscriptCache(): StoredTranscriptCache {
