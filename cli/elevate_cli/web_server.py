@@ -5455,14 +5455,127 @@ async def put_agent_setup_endpoint(body: _AgentSetupUpdateBody):
         raise HTTPException(status_code=500, detail=f"Update agent setup failed: {exc}")
 
 
+# Onboarding wizard provider-dropdown values -> canonical config provider slug.
+_WIZARD_PROVIDER_TO_CONFIG = {
+    "openai": "openai-codex",
+    "qwen": "qwen-oauth",
+    "azure_openai": "azure-foundry",
+}
+# Onboarding memory-store labels -> config memory.provider values. "sqlite_local"
+# is a wizard label only; the runtime's local memory provider is "holographic".
+_WIZARD_MEMORY_TO_CONFIG = {
+    "sqlite_local": "holographic",
+    "supabase": "supabase",
+}
+
+
+def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
+    """Write the onboarding tracker's model/embedding/memory selections into
+    config.yaml so finishing the wizard actually configures the agent — not
+    just the readiness checklist.
+
+    Reads the RAW agent_setup_items rows (the user's actual picks), NOT the
+    env-overlaid snapshot, so an ambient API key can't mask the selection.
+    Best-effort per item; never raises — a materialization failure must not
+    undo the gate-complete the caller just performed.
+    """
+    applied: Dict[str, Any] = {}
+    try:
+        from elevate_cli.config import load_config, save_config
+    except Exception as exc:  # pragma: no cover
+        return {"error": f"config module unavailable: {exc}"}
+
+    items: Dict[str, Dict[str, Any]] = {}
+    try:
+        rows = conn.execute(
+            "SELECT key, status, provider, value_json FROM agent_setup_items"
+        ).fetchall()
+        for r in rows:
+            d = dict(r)
+            try:
+                d["value"] = json.loads(d.get("value_json") or "{}") or {}
+            except Exception:
+                d["value"] = {}
+            items[d.get("key")] = d
+    except Exception as exc:
+        return {"error": f"could not read setup items: {exc}"}
+
+    cfg = load_config()
+    changed = False
+
+    # Primary model + provider -> config["model"] {provider, default}. Same
+    # shape the working composer model-switch persists (_persist_model_switch);
+    # base_url/credentials are resolved at runtime from the provider + auth pool.
+    mp = items.get("model_primary") or {}
+    prov = str(mp.get("provider") or "").strip()
+    model = str((mp.get("value") or {}).get("model") or "").strip()
+    if prov and model:
+        canon = _WIZARD_PROVIDER_TO_CONFIG.get(prov, prov)
+        mc = cfg.get("model")
+        if not isinstance(mc, dict):
+            mc = {}
+            cfg["model"] = mc
+        mc["provider"] = canon
+        mc["default"] = model
+        changed = True
+        applied["model"] = {"provider": canon, "model": model}
+
+    # Embedding -> plugins["elevate-memory-store"].embedding_{provider,model}.
+    me = items.get("model_embedding") or {}
+    eprov = str(me.get("provider") or "").strip()
+    emodel = str((me.get("value") or {}).get("model") or "").strip()
+    if eprov:
+        plugins = cfg.get("plugins")
+        if not isinstance(plugins, dict):
+            plugins = {}
+            cfg["plugins"] = plugins
+        store = plugins.get("elevate-memory-store")
+        if not isinstance(store, dict):
+            store = {}
+            plugins["elevate-memory-store"] = store
+        store["embedding_provider"] = eprov
+        if emodel:
+            store["embedding_model"] = emodel
+        changed = True
+        applied["embedding"] = {"provider": eprov, "model": emodel}
+
+    # Memory store -> config["memory"].provider.
+    mm = items.get("memory_store") or {}
+    mprov = str(mm.get("provider") or "").strip()
+    if mprov:
+        canon_mem = _WIZARD_MEMORY_TO_CONFIG.get(mprov, mprov)
+        mem = cfg.get("memory")
+        if not isinstance(mem, dict):
+            mem = {}
+            cfg["memory"] = mem
+        mem["provider"] = canon_mem
+        changed = True
+        applied["memory"] = {"provider": canon_mem}
+
+    if changed:
+        save_config(cfg)
+    return applied
+
+
 @app.post("/api/agent/setup/complete")
 async def post_agent_setup_complete_endpoint():
-    """Mark Agent onboarding complete once primary LLM + embedding + memory store are ready."""
+    """Mark Agent onboarding complete once primary LLM + embedding + memory store are ready.
+
+    On success, materialize the wizard's model/embedding/memory selections into
+    config.yaml so finishing onboarding actually configures the agent (the
+    selections otherwise live only in the readiness-tracker DB).
+    """
     try:
         from elevate_cli.data import complete_agent_setup, connect
 
         with connect() as conn:
-            return complete_agent_setup(conn)
+            snapshot = complete_agent_setup(conn)
+            try:
+                snapshot["materialized"] = _materialize_agent_setup_to_config(conn)
+            except Exception as exc:  # never let materialization undo completion
+                _log.exception("agent setup materialization failed")
+                snapshot["materialize_error"] = str(exc)
+            return snapshot
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
