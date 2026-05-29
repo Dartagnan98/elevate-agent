@@ -1,4 +1,5 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
+import type { CSSProperties } from "react";
 import {
   Brain,
   CheckCircle2,
@@ -8,7 +9,7 @@ import {
 import type { AgentHubMemoryNode } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { isoTimeAgo } from "@/lib/utils";
+import { cn, isoTimeAgo } from "@/lib/utils";
 import {
   HubShell,
   useHubHeader,
@@ -19,10 +20,26 @@ const MemoryConstellation = lazy(() =>
   import("@/components/MemoryConstellation").then((m) => ({ default: m.MemoryConstellation })),
 );
 
+// Entity hue presets. The graph tints its nodes/edges off `--color-primary`
+// (see MemoryConstellation graphStyle color-mix expressions), so overriding
+// that var on the graph wrapper re-hues the constellation without touching the
+// rest of the app's theme. No backing API — this is a local view preference.
+const ENTITY_HUES: { name: string; value: string }[] = [
+  { name: "silver", value: "#CBD0D8" },
+  { name: "indigo", value: "#8E8CF2" },
+  { name: "violet", value: "#B07CF0" },
+  { name: "sky", value: "#6FA8F5" },
+  { name: "mint", value: "#56D6A6" },
+];
+
+type GraphDensity = "expanded" | "compact";
+
 function MemoryGraphView({
+  compact,
   nodes,
   edges,
 }: {
+  compact: boolean;
   nodes: AgentHubMemoryNode[];
   edges: { source: string; target: string; type: string }[];
 }) {
@@ -43,6 +60,7 @@ function MemoryGraphView({
     >
       <MemoryConstellation
         className="max-h-[38rem] min-h-[24rem]"
+        compact={compact}
         edges={edges}
         nodes={nodes}
       />
@@ -54,6 +72,12 @@ export function RealEstateMemoryPage() {
   const data = useRealEstateHubData();
   useHubHeader("Memory", data);
   const memory = data.snapshot?.memory;
+
+  // View preferences (no backing API — local, per-view tweaks mirroring the
+  // design's "Tweaks" controls).
+  // TODO: persist density + entity hue if these should survive reloads.
+  const [density, setDensity] = useState<GraphDensity>("expanded");
+  const [entityHue, setEntityHue] = useState<string>(ENTITY_HUES[0].value);
 
   const pending = memory?.journal.pending ?? 0;
   const failed = memory?.journal.failed ?? 0;
@@ -71,6 +95,8 @@ export function RealEstateMemoryPage() {
     .filter((v): v is string => Boolean(v))
     .sort()
     .reverse()[0];
+
+  const embeddingsOn = Boolean(memory?.embedding.enabled);
 
   return (
     <HubShell
@@ -95,29 +121,38 @@ export function RealEstateMemoryPage() {
         <SummaryTile
           icon={Brain}
           label="Embeddings"
-          value={memory?.embedding.enabled ? memory.embedding.model || "On" : "Off"}
-          tone={memory?.embedding.enabled ? "ok" : "warn"}
+          value={embeddingsOn ? memory?.embedding.model || "On" : "Off"}
+          tone={embeddingsOn ? "ok" : "warn"}
         />
       </div>
 
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_24rem]">
         <Card className="overflow-hidden bg-card p-0">
           <CardHeader>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="flex items-center gap-2">
                 <Network className="h-4 w-4 text-primary" />
                 Knowledge graph
               </CardTitle>
-              <Badge variant={memory?.embedding.enabled ? "success" : "outline"}>
-                {memory?.embedding.enabled ? "Embeddings on" : "Embeddings off"}
-              </Badge>
+              <div className="flex items-center gap-3">
+                <DensityToggle value={density} onChange={setDensity} />
+                <EntityHuePicker value={entityHue} onChange={setEntityHue} />
+                <Badge variant={embeddingsOn ? "success" : "outline"}>
+                  {embeddingsOn ? "Embeddings on" : "Embeddings off"}
+                </Badge>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <MemoryGraphView
-              nodes={memory?.graph.nodes ?? []}
-              edges={memory?.graph.edges ?? []}
-            />
+            {/* Scope the hue override to the graph so it re-tints the
+                constellation without re-theming the rest of the page. */}
+            <div style={{ "--color-primary": entityHue } as CSSProperties}>
+              <MemoryGraphView
+                compact={density === "compact"}
+                nodes={memory?.graph.nodes ?? []}
+                edges={memory?.graph.edges ?? []}
+              />
+            </div>
           </CardContent>
         </Card>
 
@@ -134,11 +169,11 @@ export function RealEstateMemoryPage() {
               <div className="font-medium text-foreground">
                 {memory?.provider ?? "memory"} · {memory?.embedding.provider ?? "no embedding"}
               </div>
-              <div className="mt-1 truncate">{memory?.db_path ?? "No memory database path yet."}</div>
+              <div className="mt-1 truncate font-mono-ui">{memory?.db_path ?? "No memory database path yet."}</div>
             </div>
             {recentSessions.length > 0 ? (
               <div className="space-y-1.5">
-                <div className="px-1 text-xs text-muted-foreground">
+                <div className="px-1 text-[0.68rem] font-medium uppercase tracking-wider text-muted-foreground">
                   Sessions
                 </div>
                 <div className="space-y-1">
@@ -170,6 +205,69 @@ export function RealEstateMemoryPage() {
   );
 }
 
+function DensityToggle({
+  value,
+  onChange,
+}: {
+  value: GraphDensity;
+  onChange: (value: GraphDensity) => void;
+}) {
+  const options: GraphDensity[] = ["expanded", "compact"];
+  return (
+    <div
+      className="inline-flex items-center gap-0.5 rounded-md border border-border/60 bg-background/60 p-0.5"
+      role="radiogroup"
+      aria-label="Graph density"
+    >
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          role="radio"
+          aria-checked={value === option}
+          onClick={() => onChange(option)}
+          className={cn(
+            "font-mono-ui rounded px-2 py-0.5 text-[0.66rem] capitalize transition-colors",
+            value === option
+              ? "bg-primary/12 text-primary"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function EntityHuePicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Entity hue">
+      {ENTITY_HUES.map((hue) => (
+        <button
+          key={hue.value}
+          type="button"
+          role="radio"
+          aria-checked={value === hue.value}
+          title={hue.name}
+          onClick={() => onChange(hue.value)}
+          style={{ background: hue.value }}
+          className={cn(
+            "h-4 w-4 rounded-full ring-1 ring-inset ring-black/10 transition-transform hover:scale-110",
+            value === hue.value && "ring-2 ring-offset-1 ring-offset-card ring-foreground/70",
+          )}
+        />
+      ))}
+    </div>
+  );
+}
+
 function SummaryTile({
   icon: Icon,
   label,
@@ -189,7 +287,7 @@ function SummaryTile({
         : "text-foreground";
   return (
     <div className="rounded-lg border border-border bg-card px-4 py-3">
-      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="font-mono-ui flex items-center gap-2 text-[0.68rem] font-medium uppercase tracking-wider text-muted-foreground">
         <Icon className="h-3.5 w-3.5" />
         {label}
       </div>

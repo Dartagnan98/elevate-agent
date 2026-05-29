@@ -5,6 +5,7 @@ import {
   KeyRound,
   Loader2,
   Play,
+  Plus,
   RefreshCw,
   RotateCw,
   Save,
@@ -12,7 +13,9 @@ import {
   Terminal,
   Users,
   Wrench,
+  X,
 } from "lucide-react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { FullWindowAurora } from "@/components/FullWindowAurora";
 import type {
@@ -76,6 +79,104 @@ function looksLikeTelegramBotToken(value: string) {
   return /^\d{6,}:[A-Za-z0-9_-]{20,}$/.test(text);
 }
 
+// New-agent modal. Mirrors the design's "Add an agent" sheet (crumb / title /
+// name + description). There is no createAgent endpoint yet, so onAdd is wired
+// to a scaffold callback on the page (see TODO at handleAddAgent).
+function AddAgentModal({
+  onAdd,
+  onClose,
+}: {
+  onAdd: (name: string, description: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="add-agent-title"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-[fade-in_150ms_ease-out]"
+    >
+      <div className="relative mx-4 w-full max-w-md overflow-hidden rounded-md border border-border bg-card animate-[dialog-in_180ms_ease-out]">
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={onClose}
+          className="absolute right-3 top-3 rounded-md p-1 text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+        >
+          <X className="h-4 w-4" />
+        </button>
+        <div className="border-b border-border p-4">
+          <div className="text-xs text-muted-foreground">
+            Agent orchestration <span className="text-muted-foreground/60">/</span> New agent
+          </div>
+          <h2 id="add-agent-title" className="mt-1 text-sm font-semibold text-foreground">
+            Add an agent
+          </h2>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Spin up a new orchestrated agent in your team.
+          </div>
+        </div>
+        <div className="p-4">
+          <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+            <span>Agent name</span>
+            <Input
+              placeholder="e.g. Listings"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <label className="mt-3 grid gap-1 text-xs font-medium text-muted-foreground">
+            <span>Description</span>
+            <Input
+              placeholder="What does this agent handle?"
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </label>
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={!name.trim()}
+              onClick={() => {
+                onAdd(name.trim(), description.trim());
+                onClose();
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add agent
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
 
 function AgentCard({
   agent,
@@ -354,6 +455,18 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
                 {worst?.name ?? "-"} / {formatSavings(worst?.savings_pct)}
               </span>
             </div>
+            <div className="mt-1 flex justify-between gap-2">
+              <span className="text-muted-foreground">Clients</span>
+              <span>{connectedClients.length}/{harness.server.clients.length}</span>
+            </div>
+            <div className="mt-1 flex justify-between gap-2">
+              <span className="text-muted-foreground">Routed runs</span>
+              <span>{harness.orchestration.route_labeled_runs}</span>
+            </div>
+            <div className="mt-1 flex justify-between gap-2">
+              <span className="text-muted-foreground">Memory flow</span>
+              <span>{harness.memory.pipeline.state}</span>
+            </div>
           </div>
         )}
         <details className="group text-xs">
@@ -363,20 +476,8 @@ function HarnessCard({ harness }: { harness?: AgentHubSnapshot["harness"] }) {
           </summary>
           <div className="mt-2 space-y-1.5">
             <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">Clients</span>
-              <span>{connectedClients.length}/{harness.server.clients.length}</span>
-            </div>
-            <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">Routed runs</span>
-              <span>{harness.orchestration.route_labeled_runs}</span>
-            </div>
-            <div className="flex justify-between gap-2">
               <span className="text-muted-foreground">Recent events</span>
               <span>{harness.orchestration.recent_events}</span>
-            </div>
-            <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">Memory flow</span>
-              <span>{harness.memory.pipeline.state}</span>
             </div>
             {harness.orchestration.lifecycle_states.length > 0 && (
               <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 text-muted-foreground">
@@ -712,6 +813,7 @@ export default function AgentHubPage() {
   const [telegramHome, setTelegramHome] = useState("");
   const [telegramLanes, setTelegramLanes] = useState<Record<string, string>>({});
   const [telegramAgentTokens, setTelegramAgentTokens] = useState<Record<string, string>>({});
+  const [addAgentOpen, setAddAgentOpen] = useState(false);
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
   const hydrationTimerRef = useRef<number | null>(null);
@@ -959,6 +1061,17 @@ export default function AgentHubPage() {
     [load, showToast],
   );
 
+  // TODO: no createAgent endpoint exists yet (api only exposes updateAgent).
+  // Wire this to api.createAgent once the backend lands; for now we surface a
+  // toast so the affordance is honest rather than silently failing.
+  const handleAddAgent = useCallback(
+    (name: string, _description: string) => {
+      void _description;
+      showToast(`Agent creation isn't wired yet — "${name}" was not created.`, "error");
+    },
+    [showToast],
+  );
+
   if (loading && !snapshot) {
     return (
       <div role="status" aria-live="polite" className="min-h-[20rem] w-full">
@@ -1044,10 +1157,16 @@ export default function AgentHubPage() {
 
       <div className="flex flex-col gap-6">
         <div>
-          <div className="mb-3 flex items-center gap-2 px-1">
-            <span className="text-sm font-medium">Agent orchestration</span>
-            <span aria-hidden="true" className="text-xs text-muted-foreground">·</span>
-            <span className="text-xs text-muted-foreground">{activeAgents.length} enabled</span>
+          <div className="mb-3 flex items-center justify-between gap-3 px-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">Agent orchestration</span>
+              <span aria-hidden="true" className="text-xs text-muted-foreground">·</span>
+              <span className="text-xs text-muted-foreground">{activeAgents.length} enabled</span>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setAddAgentOpen(true)}>
+              <Plus className="h-3.5 w-3.5" />
+              Add an agent
+            </Button>
           </div>
             <div className="space-y-3">
               <TelegramGatewayControls
@@ -1162,6 +1281,10 @@ export default function AgentHubPage() {
       <div className="text-xs text-muted-foreground">
         Snapshot {timeAgo(snapshot.generated_at)} / {snapshot.elevate_home}
       </div>
+
+      {addAgentOpen && (
+        <AddAgentModal onAdd={handleAddAgent} onClose={() => setAddAgentOpen(false)} />
+      )}
     </div>
   );
 }

@@ -836,6 +836,10 @@ export function MemoryConstellation({
           </div>
         </div>
       )}
+
+      <div className="font-mono-ui pointer-events-none absolute bottom-4 right-4 hidden text-[0.62rem] tracking-[0.04em] text-muted-foreground/60 sm:block">
+        scroll to zoom · drag canvas to pan
+      </div>
     </div>
   );
 }
