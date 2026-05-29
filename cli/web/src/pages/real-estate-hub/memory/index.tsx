@@ -35,7 +35,20 @@ function MemoryGraphView({
 
 export function RealEstateMemoryPage() {
   const data = useRealEstateHubData();
-  useHubHeader("Memory", data);
+  const activeJobs = data.cronJobs.filter((job) => job.enabled).length;
+  // Agent status + job count live in the breadcrumb bar — no separate in-page
+  // hero. (The breadcrumb already renders the gateway/agent status dot + label;
+  // we just fold the job count in after it.)
+  useHubHeader("Memory", data, {
+    afterExtra: (
+      <>
+        <span className="text-muted-foreground/45">·</span>
+        <span>
+          {activeJobs} job{activeJobs === 1 ? "" : "s"}
+        </span>
+      </>
+    ),
+  });
   const memory = data.snapshot?.memory;
 
   // Preserve HubShell's loading guard.
@@ -46,9 +59,6 @@ export function RealEstateMemoryPage() {
       </div>
     );
   }
-
-  const gatewayOnline = Boolean(data.snapshot?.gateway.running || data.status?.gateway_running);
-  const activeJobs = data.cronJobs.filter((job) => job.enabled).length;
 
   const pending = memory?.journal.pending ?? 0;
   const failed = memory?.journal.failed ?? 0;
@@ -73,33 +83,8 @@ export function RealEstateMemoryPage() {
   return (
     <div className="mem-root">
       <div className="mem-inner">
-        {/* Title/status/Refresh live in the app page header (useHubHeader),
-            matching the Admin/Leads single-top-bar pattern — no in-page
-            duplicate top bar here. */}
-        <section className="mem-hero">
-          <div className="mem-hero-l">
-            <span className="mem-hero-icon">
-              <Brain width="17" height="17" />
-            </span>
-            <div>
-              <div className="mem-hero-eyebrow mono">Memory graph</div>
-              <h1 className="mem-hero-title">Memory</h1>
-            </div>
-          </div>
-          <div className="mem-hero-r mono">
-            <span className={gatewayOnline ? "ok" : "err"}>
-              <span className="mem-r-dot" />
-              {gatewayOnline ? "Agent online" : "Agent offline"}
-            </span>
-            <span className="dim">·</span>
-            <span className="dim">
-              {activeJobs} job{activeJobs === 1 ? "" : "s"}
-            </span>
-          </div>
-        </section>
-
-        <div className="mem-divider" />
-
+        {/* Title/status/job-count/Refresh all live in the app breadcrumb bar
+            (useHubHeader) — no separate in-page hero or status row here. */}
         <div className="mem-tiles">
           <SummaryTile icon={Clock} label="Pipeline" value={pipelineState.label} tone={pipelineState.tone} />
           <SummaryTile

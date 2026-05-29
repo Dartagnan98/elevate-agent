@@ -209,10 +209,14 @@ export function MemoryConstellation({
       const d = degree.get(node.id) ?? 0;
       const w = nodeWeight(node, d);
       const kind = nodeKind(node);
+      // Real memory graphs are mostly low-degree leaf nodes (chunks/facts/docs),
+      // so the prototype's small base radius rendered them as near-invisible
+      // specks. Bump the base + minimum so every node is a clearly visible dot
+      // (the design's mock data was fat/high-degree and didn't hit this floor).
       const r = clamp(
-        (compact ? 2.6 : 3.2) + Math.sqrt(d) * (compact ? 1.5 : 2.5) + Math.sqrt(Number.isFinite(node.weight) ? node.weight : 1) * 0.5,
-        compact ? 2.6 : 3.4,
-        compact ? 12 : 23,
+        (compact ? 5 : 7) + Math.sqrt(d) * (compact ? 1.8 : 3) + Math.sqrt(Number.isFinite(node.weight) ? node.weight : 1) * 0.8,
+        compact ? 5 : 10,
+        compact ? 14 : 26,
       );
       const a = rand01(`${node.id}:a`) * Math.PI * 2;
       const pullIn = clamp(1 - Math.min(w, 16) / 40, 0.55, 1);
@@ -301,11 +305,20 @@ export function MemoryConstellation({
       }
       const { pos, vel } = sim;
       const now = performance.now();
-      const tnow = now / 1000;
       const grow = growRef.current;
       const globalGrow = clamp((now - grow.start) / (grow.dur + grow.stagger), 0, 1);
       if (edgesGroupRef.current) edgesGroupRef.current.setAttribute("opacity", globalGrow.toFixed(3));
       const alpha = Math.max(sim.alpha, dragNodeRef.current ? 0.6 : 0);
+
+      // Once the graph has settled and finished growing (and nothing is being
+      // dragged), STOP running the O(n^2) physics every frame — it was the main
+      // source of the "glitchy"/janky feel. Positions are static; hover/select
+      // highlighting is pure CSS, and pan/zoom re-render via React, so none of
+      // that needs the sim. Drag and Replay re-arm alpha and resume the loop.
+      if (alpha === 0 && globalGrow >= 1) {
+        raf = requestAnimationFrame(step);
+        return;
+      }
 
       // link springs
       for (const e of base.edges) {
@@ -351,7 +364,7 @@ export function MemoryConstellation({
           va.y -= uy * rep;
           vb.x += ux * rep;
           vb.y += uy * rep;
-          const minD = ra + metaArr[j].r + 46;
+          const minD = ra + metaArr[j].r + 18;
           if (dist < minD) {
             const push = (minD - dist) * 0.22 * Math.max(alpha, 0.12);
             va.x -= ux * push;
@@ -363,16 +376,11 @@ export function MemoryConstellation({
       }
       // centre gravity (keeps the disc) — fades with alpha so the graph SETTLES
       const g = 0.0009 * alpha;
-      const wander = 0.015 * alpha;
       for (let i = 0; i < ids.length; i += 1) {
         const v = vel.get(ids[i])!;
         const p = pos.get(ids[i])!;
         v.x += (CENTER_X - p.x) * g;
         v.y += (CENTER_Y - p.y) * g;
-        if (wander > 0.003) {
-          v.x += Math.cos(tnow * 0.5 + i) * wander;
-          v.y += Math.sin(tnow * 0.6 + i * 1.3) * wander;
-        }
       }
       // integrate + radial disc clamp
       const drag = dragNodeRef.current;
@@ -406,7 +414,7 @@ export function MemoryConstellation({
           v.y *= 0.5;
         }
       }
-      sim.alpha = sim.alpha * 0.992;
+      sim.alpha = sim.alpha * 0.965; // settle quickly (was 0.992 → ~12s of motion)
       if (sim.alpha < 0.02) sim.alpha = 0;
 
       // ── web mesh: connect each node to its nearest neighbours (frozen once settled) ──

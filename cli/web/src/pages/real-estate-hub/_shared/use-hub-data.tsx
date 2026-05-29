@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
@@ -414,9 +415,13 @@ export function useHubHeader(
   options?: {
     onRefresh?: () => void | Promise<void>;
     refreshing?: boolean;
+    /** Extra content appended after the gateway status in the breadcrumb bar
+     *  (e.g. Memory folds its "· N jobs" here instead of a separate hero). */
+    afterExtra?: ReactNode;
   },
 ) {
   const { setAfterTitle, setEnd, setTitle } = usePageHeader();
+  const afterExtra = options?.afterExtra ?? null;
   const gatewayOnline = Boolean(data.snapshot?.gateway.running || data.status?.gateway_running);
   const isRefreshing = data.loading || data.refreshing || Boolean(options?.refreshing);
   const defaultRefresh = useCallback(() => void data.refresh({ force: true }), [data.refresh]);
@@ -433,6 +438,7 @@ export function useHubHeader(
           )}
         />
         {gatewayOnline ? "Local gateway online" : "Local gateway offline"}
+        {afterExtra}
       </span>,
     );
     setEnd(
@@ -446,5 +452,5 @@ export function useHubHeader(
       setAfterTitle(null);
       setEnd(null);
     };
-  }, [gatewayOnline, isRefreshing, refresh, setAfterTitle, setEnd, setTitle, title]);
+  }, [afterExtra, gatewayOnline, isRefreshing, refresh, setAfterTitle, setEnd, setTitle, title]);
 }

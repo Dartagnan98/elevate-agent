@@ -103,8 +103,10 @@
 .mem-tile-value.warn { color: var(--color-warning); }
 
 /* main grid */
-.mem-grid { margin-top: 16px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) 24rem; align-items: start; }
-@media (max-width: 1200px) { .mem-grid { grid-template-columns: 1fr; } }
+/* Single column: graph full-width on top, Recent ingest below it. (The design's
+   two-column 1fr/24rem layout cramps the graph once the app sidebar eats width,
+   so we stack — graph gets the full width, ingest sits underneath.) */
+.mem-grid { margin-top: 16px; display: grid; gap: 16px; grid-template-columns: 1fr; align-items: start; }
 .mem-card { border: 1px solid var(--border); background: var(--bg-1); border-radius: 14px; overflow: hidden; }
 .mem-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--border-soft); }
 .mem-card-title { display: inline-flex; align-items: center; gap: 9px; font: 600 14px/1 "Geist", sans-serif; color: var(--fg); }
