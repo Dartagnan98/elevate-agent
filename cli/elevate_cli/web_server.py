@@ -204,6 +204,15 @@ def _has_valid_session_token(request: Request) -> bool:
     ):
         return True
 
+    # Cookie path: set when serving the SPA, so the browser auto-sends it with
+    # every same-origin /api request regardless of JS-token-injection timing.
+    cookie_tok = request.cookies.get("elevate_session", "")
+    if cookie_tok and hmac.compare_digest(
+        cookie_tok.encode(),
+        _SESSION_TOKEN.encode(),
+    ):
+        return True
+
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {_SESSION_TOKEN}"
     return hmac.compare_digest(auth.encode(), expected.encode())
@@ -8918,11 +8927,28 @@ def mount_spa(application: FastAPI):
             f'<script>window.__ELEVATE_SESSION_TOKEN__="{_SESSION_TOKEN}";'
             f"window.__ELEVATE_DASHBOARD_EMBEDDED_CHAT__={chat_js};</script>"
         )
-        html = html.replace("</head>", f"{token_script}</head>", 1)
-        return HTMLResponse(
+        # Inject at the TOP of <head> so the token global is set before the
+        # deferred app bundle runs (it sits above this in the built HTML).
+        if "<head>" in html:
+            html = html.replace("<head>", f"<head>{token_script}", 1)
+        else:
+            html = html.replace("</head>", f"{token_script}</head>", 1)
+        resp = HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+        # Also set the token as a cookie so EVERY same-origin request carries it
+        # automatically — even the very first one, before any JS runs. This is
+        # what fixes the race where initial /api calls went out token-less and
+        # 401'd, latching the UI on a false "signed out" screen.
+        resp.set_cookie(
+            "elevate_session",
+            _SESSION_TOKEN,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return resp
 
     application.mount("/assets", ImmutableStaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
