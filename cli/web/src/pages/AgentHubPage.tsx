@@ -1329,28 +1329,14 @@ export default function AgentHubPage() {
     );
   }
 
-  const gatewayState = snapshot.gateway.running ? "online" : busyAction ? "starting" : "offline";
-
   return (
     <div className="hub-root">
       <Toast toast={toast} />
       <div className="hub">
         <div className="hub-inner">
-          {/* top bar */}
-          <div className="hub-topbar">
-            <div className="hub-topbar-l">
-              <span className="hub-brand">Agent Hub</span>
-              <span className={"hub-gw-pill " + gatewayState}>
-                {snapshot.gateway.running ? "Gateway online" : busyAction ? "Gateway starting…" : "Gateway offline"}
-              </span>
-            </div>
-            <div className="hub-hero-actions">
-              <button type="button" className="hub-btn ghost sm" onClick={load} disabled={loading}>
-                <Ico.refresh width="13" height="13" className={loading ? "spin" : ""} />Refresh
-              </button>
-            </div>
-          </div>
-
+          {/* Title/status/Refresh live in the app page header (usePageHeader),
+              matching the Admin/Leads single-top-bar pattern — no in-page
+              duplicate top bar here. */}
           {/* hero */}
           <div className="hub-hero">
             <div>
