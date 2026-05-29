@@ -36,6 +36,15 @@ export function RealEstateSocialMediaPage() {
       if (snapRes.status === "fulfilled") setSnapshot(snapRes.value);
       if (ideaRes.status === "fulfilled") setIdeas(ideaRes.value.items || []);
       if (recentRes.status === "fulfilled") setRecentPosts(recentRes.value.items || []);
+      // allSettled never rejects, so surface a banner when every source failed.
+      if (
+        snapRes.status === "rejected" &&
+        ideaRes.status === "rejected" &&
+        recentRes.status === "rejected"
+      ) {
+        const reason = snapRes.reason;
+        setSocialError(reason instanceof Error ? reason.message : "Failed to load social data");
+      }
     } catch (e) {
       if (signal.aborted) return;
       setSocialError(e instanceof Error ? e.message : "Failed to load social data");

@@ -255,6 +255,19 @@ function compactNum(n: number): string {
   return String(Math.round(n));
 }
 
+// Account-level insights arrive in mixed shapes: a scalar (YouTube subscriber_count),
+// or a Graph API time-series array like [{ value, end_time }] (Instagram follower_count).
+// Unwrap to the most recent numeric value.
+function coerceMetricValue(v: unknown): number {
+  if (Array.isArray(v)) {
+    const last = v[v.length - 1];
+    if (last && typeof last === "object" && "value" in last) return num((last as { value: unknown }).value);
+    return num(last);
+  }
+  if (v && typeof v === "object" && "value" in (v as object)) return num((v as { value: unknown }).value);
+  return num(v);
+}
+
 function accountMetricValue(
   snapshot: SocialSnapshot | null,
   platform: string,
@@ -264,7 +277,7 @@ function accountMetricValue(
   if (!am) return null;
   for (const k of keys) {
     if (am[k] != null) {
-      const n = num(am[k]);
+      const n = coerceMetricValue(am[k]);
       if (n > 0) return n;
     }
   }
