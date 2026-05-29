@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Loader2, LogOut, Package } from "lucide-react";
+import { Check, Loader2, LogOut, Package } from "lucide-react";
 import { api } from "@/lib/api";
 import { useTheme } from "@/themes/context";
 import type {
@@ -9,7 +9,6 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
 
 type Phase =
   | "loading"
@@ -31,8 +30,6 @@ export function LoginCard({ onAuthChange }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [backendUrl, setBackendUrl] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [activationResult, setActivationResult] = useState<LicenseActivateResponse | null>(null);
@@ -79,11 +76,7 @@ export function LoginCard({ onAuthChange }: Props) {
     setError(null);
 
     try {
-      const result = await api.activateLicense(
-        email.trim(),
-        password,
-        backendUrl.trim() || undefined,
-      );
+      const result = await api.activateLicense(email.trim(), password);
       setActivationResult(result);
 
       if (result.skill_count > 0) {
@@ -297,33 +290,6 @@ export function LoginCard({ onAuthChange }: Props) {
             />
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowAdvanced((v) => !v)}
-            className={cn(
-              "flex items-center gap-1 text-[0.72rem] text-muted-foreground/60 transition-colors hover:text-muted-foreground",
-              showAdvanced && "text-muted-foreground",
-            )}
-          >
-            <ChevronDown className={cn("h-3 w-3 transition-transform", showAdvanced && "rotate-180")} />
-            Advanced
-          </button>
-          {showAdvanced && (
-            <div className="space-y-1.5">
-              <label htmlFor="login-backend" className="text-xs font-medium text-muted-foreground">
-                Backend URL
-              </label>
-              <Input
-                id="login-backend"
-                type="url"
-                placeholder="https://api.elevationrealestatehq.com"
-                value={backendUrl}
-                onChange={(e) => setBackendUrl(e.target.value)}
-                disabled={phase === "signing_in" || phase === "syncing"}
-              />
-            </div>
-          )}
-
           {error && (
             <p className="rounded-sm border border-border bg-card px-3 py-2 text-xs font-medium text-destructive">
               {error}
@@ -334,13 +300,12 @@ export function LoginCard({ onAuthChange }: Props) {
             <button
               type="button"
               onClick={() => {
-                const base = (backendUrl.trim() || "https://api.elevationrealestatehq.com").replace(/\/$/, "");
-                const url = `${base}/forgot`;
-                // Desktop exposes openExternal; browser falls back to window.open.
-                const ext = (window as unknown as { elevateDesktop?: { auth?: { openExternal?: (u: string) => void } } })
+                // Desktop maps the relative target ("forgot") to HQ_BASE_URL and
+                // opens it in the system browser; web falls back to window.open.
+                const ext = (window as unknown as { elevateDesktop?: { auth?: { openExternal?: (t: string) => void } } })
                   .elevateDesktop?.auth?.openExternal;
-                if (ext) ext(url);
-                else window.open(url, "_blank", "noopener");
+                if (ext) ext("forgot");
+                else window.open("https://api.elevationrealestatehq.com/forgot", "_blank", "noopener");
               }}
               className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
             >
