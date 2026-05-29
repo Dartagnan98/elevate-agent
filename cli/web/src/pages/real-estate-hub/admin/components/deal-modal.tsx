@@ -17,6 +17,8 @@ import {
   ADMIN_CONDITION_ENUMS,
   ADMIN_CONDITION_TOGGLES,
 } from "../admin-data";
+import { api } from "@/lib/api";
+import type { DealContext } from "@/lib/api-types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,6 +55,36 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const [openPhases, setOpenPhases] = useState<Set<string>>(
     () => new Set([deal.phase || "pre-cma"])
   );
+
+  // Real per-deal context from the backend (province guide, per-stage province
+  // documents, conditional docs). Falls back to seed data when a deal has no
+  // saved file yet (demo/placeholder cards), so this never regresses.
+  const [ctx, setCtx] = useState<DealContext | null>(null);
+  useEffect(() => {
+    if (!deal.id) return;
+    let active = true;
+    api
+      .getDealContext(deal.id)
+      .then((c) => {
+        if (active) setCtx(c);
+      })
+      .catch(() => {
+        /* no saved deal file — keep seed fallback */
+      });
+    return () => {
+      active = false;
+    };
+  }, [deal.id]);
+
+  const guide = ctx?.provinceGuide ?? null;
+  const conditionalDocs = ctx?.conditionalDocs ?? [];
+  const provinceLabel =
+    guide?.provinceLabel || (ctx?.deal?.province ?? "").toUpperCase() || "VANCOUVER";
+  // Real province documents for a stage label like "S8" -> stageDocuments[8].
+  const realStageDocs = (stageLabel: string) => {
+    const n = Number((stageLabel || "").replace(/[^0-9]/g, ""));
+    return ctx?.stageDocuments?.stages?.[String(n)] ?? [];
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -131,9 +163,9 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                     <span>Transaction file</span>
                   </div>
                   <div className="abm-card-pills">
-                    <span className="abm-pill mono">VANCOUVER</span>
-                    <span className="abm-pill mono">0 DOCS</span>
-                    <span className="abm-pill mono">1 RUNS</span>
+                    <span className="abm-pill mono">{provinceLabel}</span>
+                    <span className="abm-pill mono">{(ctx?.attachments?.length ?? 0)} DOCS</span>
+                    <span className="abm-pill mono">{(ctx?.priorRuns?.length ?? 0)} RUNS</span>
                   </div>
                 </header>
 
@@ -252,6 +284,66 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                   </div>
                 </div>
 
+                {/* Province playbook (real backend data) */}
+                {guide && (
+                  <div className="abm-section abm-padded">
+                    <div className="abm-section-row">
+                      <span className="abm-section-label mono">PROVINCE PLAYBOOK</span>
+                      <span className="abm-section-count mono">{provinceLabel}</span>
+                    </div>
+                    <div className="abm-kv-row">
+                      <div>
+                        <span className="dim">Forms:</span>{" "}
+                        <strong>{guide.coverage.forms}</strong>
+                      </div>
+                      <div>
+                        <span className="dim">Guides:</span>{" "}
+                        <strong>{guide.coverage.referencePages}</strong>
+                      </div>
+                      <div>
+                        <span className="dim">Checklists:</span>{" "}
+                        <strong>{guide.coverage.checklists}</strong>
+                      </div>
+                    </div>
+                    {guide.pages.length > 0 && (
+                      <ul className="abm-doc-list">
+                        {guide.pages.slice(0, 6).map((pg) => (
+                          <li key={pg.slug}>
+                            <FileTxt />
+                            {pg.sourceUrl ? (
+                              <a href={pg.sourceUrl} target="_blank" rel="noopener noreferrer">
+                                {pg.title}
+                              </a>
+                            ) : (
+                              <span>{pg.title}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {conditionalDocs.length > 0 && (
+                      <>
+                        <div className="abm-section-label mono" style={{ marginTop: 8 }}>
+                          CONDITIONAL DOCUMENTS
+                        </div>
+                        <ul className="abm-doc-list">
+                          {conditionalDocs.slice(0, 6).map((d) => (
+                            <li key={d.id}>
+                              <FileTxt />
+                              <strong className="mono">{d.docCode}</strong>
+                              <span className="dim">&middot;</span>
+                              <span>{d.docName}</span>
+                              <span className="abm-tag warn mono">
+                                if {d.fieldKey}={d.fieldValue}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )}
+
                 {/* Co-contacts + Documents + Prior runs */}
                 <div className="abm-grid-3 abm-padded">
                   <div className="abm-mini">
@@ -316,6 +408,12 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                 const done    = idx < currentIdx;
                 const current = idx === currentIdx;
                 const open    = openPhases.has(p.id);
+                // Prefer this province's real per-stage documents (from its
+                // transaction guide); fall back to seed docs when unavailable.
+                const provDocs = realStageDocs(p.stage);
+                const docsToShow: [string, string][] = provDocs.length
+                  ? provDocs.map((d) => [d.code, d.name] as [string, string])
+                  : detail.documents;
 
                 return (
                   <div
@@ -390,13 +488,13 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                           ))}
                         </ul>
 
-                        {detail.documents.length > 0 && (
+                        {docsToShow.length > 0 && (
                           <div className="abm-province">
                             <div className="abm-section-label mono">
-                              PROVINCE DOCUMENTS &middot; {detail.documents.length}
+                              PROVINCE DOCUMENTS &middot; {docsToShow.length}
                             </div>
                             <ul className="abm-doc-list">
-                              {detail.documents.map(([key, name], i) => (
+                              {docsToShow.map(([key, name], i) => (
                                 <li key={i}>
                                   <FileTxt />
                                   <strong className="mono">{key}</strong>
