@@ -134,12 +134,26 @@ export function LoginCard({ onAuthChange }: Props) {
       await api.requestLoginCode(email.trim());
       setCodeSent(true);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(
-        message.includes("429")
-          ? "Too many code requests. Wait a few minutes and try again."
-          : "Could not send the code. Check the email and try again.",
-      );
+      // fetchJSON throws "<status>: <body>" — surface the real reason instead
+      // of a blanket message so failures are diagnosable.
+      const raw = err instanceof Error ? err.message : String(err);
+      const m = raw.match(/^(\d{3}):\s*([\s\S]*)$/);
+      let msg = "Could not send the code. Check the email and try again.";
+      if (m) {
+        if (m[1] === "429") {
+          msg = "Too many code requests. Wait a few minutes and try again.";
+        } else {
+          try {
+            const body = JSON.parse(m[2]);
+            msg = body.detail || body.error || `Couldn't send code (error ${m[1]}).`;
+          } catch {
+            msg = `Couldn't send code (error ${m[1]}).`;
+          }
+        }
+      } else if (raw) {
+        msg = raw;
+      }
+      setError(msg);
     } finally {
       setRequestingCode(false);
     }
