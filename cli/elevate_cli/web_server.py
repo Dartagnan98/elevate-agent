@@ -972,6 +972,18 @@ class LicenseActivateBody(BaseModel):
     skip_skill_sync: bool = False
 
 
+class LoginCodeRequestBody(BaseModel):
+    email: str
+    backend_url: Optional[str] = None
+
+
+class LoginCodeVerifyBody(BaseModel):
+    email: str
+    code: str
+    backend_url: Optional[str] = None
+    skip_skill_sync: bool = False
+
+
 class LicenseLogoutBody(BaseModel):
     pass
 
@@ -1023,6 +1035,53 @@ async def activate_license(body: LicenseActivateBody, request: Request):
 
     try:
         lic = lic_mod.login(body.email, body.password)
+    except lic_mod.LicenseError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    activation = lic_mod.activate_install(lic, sync_skills=not body.skip_skill_sync)
+    return {
+        "authenticated": True,
+        "email": lic.email,
+        "tier": lic.tier,
+        "license_id": lic.license_id,
+        "entitlements": list(lic.entitlements or []),
+        "expires_at": lic.expires_at,
+        "packs": activation.get("packs", {}),
+        "skill_count": activation.get("skill_count", 0),
+        "skill_names": activation.get("skill_names", []),
+        "skill_error": activation.get("skill_error"),
+    }
+
+
+@app.post("/api/license/request-code")
+async def request_license_code(body: LoginCodeRequestBody, request: Request):
+    _require_token(request)
+
+    from elevate_cli import license as lic_mod
+
+    if body.backend_url:
+        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
+        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
+
+    try:
+        lic_mod.request_login_code(body.email)
+    except lic_mod.LicenseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/license/activate-code")
+async def activate_license_code(body: LoginCodeVerifyBody, request: Request):
+    _require_token(request)
+
+    from elevate_cli import license as lic_mod
+
+    if body.backend_url:
+        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
+        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
+
+    try:
+        lic = lic_mod.login_with_code(body.email, body.code)
     except lic_mod.LicenseError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
 

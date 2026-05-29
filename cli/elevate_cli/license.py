@@ -263,6 +263,55 @@ def login(email: str, password: str, device_label: Optional[str] = None) -> Lice
     return lic
 
 
+def request_login_code(email: str) -> None:
+    """POST /api/auth/login-code/request — HQ emails a one-time sign-in code."""
+    base_url = backend_url()
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{base_url}/api/auth/login-code/request",
+            json={"email": email},
+        )
+    if resp.status_code == 429:
+        raise LicenseError("Too many code requests. Wait a few minutes and try again.")
+    if not resp.is_success:
+        raise LicenseError(f"Could not send code ({resp.status_code}): {resp.text[:200]}")
+
+
+def login_with_code(email: str, code: str, device_label: Optional[str] = None) -> License:
+    """POST /api/auth/login-code/verify, persist license. Same outcome as
+    login() but authenticated by a one-time emailed code instead of a password."""
+    base_url = backend_url()
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{base_url}/api/auth/login-code/verify",
+            json={
+                "email": email,
+                "code": code,
+                "device_label": device_label or os.uname().nodename,
+            },
+        )
+    if resp.status_code == 402:
+        raise LicenseError("No active subscription. Contact Elevation Real Estate HQ to activate Elevate.")
+    if resp.status_code == 401:
+        raise LicenseError("Invalid or expired code.")
+    if not resp.is_success:
+        raise LicenseError(f"Code sign-in failed ({resp.status_code}): {resp.text[:200]}")
+
+    data = resp.json()
+    lic = License(
+        access_token=data["access_token"],
+        refresh_token=data["refresh_token"],
+        license_id=data["license_id"],
+        tier=data.get("tier", "pro"),
+        email=email,
+        expires_at=_decode_jwt_exp(data["access_token"]),
+        entitlements=_extract_entitlements(data),
+    )
+    save(lic)
+    sync_license_entitlements(lic)
+    return lic
+
+
 def refresh(lic: License) -> License:
     """POST /api/license/refresh. Rotates the refresh token."""
     base_url = backend_url()

@@ -224,6 +224,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password, backend_url: backendUrl || undefined }),
     }),
+  requestLoginCode: (email: string) =>
+    fetchJSON<{ ok: boolean }>("/api/license/request-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    }),
+  activateWithCode: (email: string, code: string) =>
+    fetchJSON<LicenseActivateResponse>("/api/license/activate-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, code }),
+    }),
   syncLicenseSkills: () =>
     fetchJSON<LicenseSyncSkillsResponse>("/api/license/sync-skills", {
       method: "POST",

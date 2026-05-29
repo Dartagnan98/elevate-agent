@@ -33,6 +33,10 @@ export function LoginCard({ onAuthChange }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [activationResult, setActivationResult] = useState<LicenseActivateResponse | null>(null);
+  const [mode, setMode] = useState<"password" | "code">("password");
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [requestingCode, setRequestingCode] = useState(false);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -70,40 +74,86 @@ export function LoginCard({ onAuthChange }: Props) {
     };
   }, [loadStatus]);
 
+  // Shared success path for both password and code sign-in.
+  const completeActivation = async (result: LicenseActivateResponse) => {
+    setActivationResult(result);
+    if (result.skill_count > 0) {
+      setPhase("success");
+    } else {
+      setPhase("syncing");
+      try {
+        await api.syncLicenseSkills();
+      } catch {
+        // skill sync is best-effort
+      }
+      setPhase("success");
+    }
+    onAuthChange?.(true, result.packs);
+    window.dispatchEvent(new Event("elevate:auth-changed"));
+    await loadStatus();
+  };
+
+  const showAuthError = (err: unknown, invalidMsg: string) => {
+    setPhase("error");
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("401") || message.includes("Invalid")) {
+      setError(invalidMsg);
+    } else if (message.includes("402")) {
+      setError("No active subscription. Contact Elevation Real Estate HQ.");
+    } else {
+      setError(message);
+    }
+  };
+
+  const openForgot = () => {
+    // Desktop maps the relative target ("forgot") to HQ_BASE_URL and opens it
+    // in the system browser; web falls back to window.open.
+    const ext = (window as unknown as { elevateDesktop?: { auth?: { openExternal?: (t: string) => void } } })
+      .elevateDesktop?.auth?.openExternal;
+    if (ext) ext("forgot");
+    else window.open("https://api.elevationrealestatehq.com/forgot", "_blank", "noopener");
+  };
+
   const handleSignIn = async () => {
     if (!email.trim() || !password) return;
     setPhase("signing_in");
     setError(null);
-
     try {
       const result = await api.activateLicense(email.trim(), password);
-      setActivationResult(result);
-
-      if (result.skill_count > 0) {
-        setPhase("success");
-      } else {
-        setPhase("syncing");
-        try {
-          await api.syncLicenseSkills();
-        } catch {
-          // skill sync is best-effort
-        }
-        setPhase("success");
-      }
-
-      onAuthChange?.(true, result.packs);
-      window.dispatchEvent(new Event("elevate:auth-changed"));
-      await loadStatus();
+      await completeActivation(result);
     } catch (err: unknown) {
-      setPhase("error");
+      showAuthError(err, "Invalid email or password.");
+    }
+  };
+
+  const handleRequestCode = async () => {
+    if (!email.trim()) return;
+    setError(null);
+    setRequestingCode(true);
+    try {
+      await api.requestLoginCode(email.trim());
+      setCodeSent(true);
+    } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("401") || message.includes("Invalid")) {
-        setError("Invalid email or password.");
-      } else if (message.includes("402")) {
-        setError("No active subscription. Contact Elevation Real Estate HQ.");
-      } else {
-        setError(message);
-      }
+      setError(
+        message.includes("429")
+          ? "Too many code requests. Wait a few minutes and try again."
+          : "Could not send the code. Check the email and try again.",
+      );
+    } finally {
+      setRequestingCode(false);
+    }
+  };
+
+  const handleVerifyCode = async () => {
+    if (!email.trim() || !code.trim()) return;
+    setPhase("signing_in");
+    setError(null);
+    try {
+      const result = await api.activateWithCode(email.trim(), code.trim());
+      await completeActivation(result);
+    } catch (err: unknown) {
+      showAuthError(err, "Invalid or expired code.");
     }
   };
 
@@ -115,6 +165,9 @@ export function LoginCard({ onAuthChange }: Props) {
       setPhase("logged_out");
       setEmail("");
       setPassword("");
+      setMode("password");
+      setCode("");
+      setCodeSent(false);
       onAuthChange?.(false, result.packs);
       window.dispatchEvent(new Event("elevate:auth-changed"));
     } catch {
@@ -257,7 +310,12 @@ export function LoginCard({ onAuthChange }: Props) {
       </CardHeader>
       <CardContent>
         <form
-          onSubmit={(e) => { e.preventDefault(); handleSignIn(); }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (mode === "password") handleSignIn();
+            else if (!codeSent) handleRequestCode();
+            else handleVerifyCode();
+          }}
           className="space-y-3"
         >
           <div className="space-y-1.5">
@@ -270,25 +328,57 @@ export function LoginCard({ onAuthChange }: Props) {
               placeholder="you@elevationrealestatehq.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              disabled={phase === "signing_in" || phase === "syncing"}
+              disabled={phase === "signing_in" || phase === "syncing" || codeSent}
               autoComplete="email"
               autoFocus
             />
           </div>
-          <div className="space-y-1.5">
-            <label htmlFor="login-password" className="text-xs font-medium text-muted-foreground">
-              Password
-            </label>
-            <Input
-              id="login-password"
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={phase === "signing_in" || phase === "syncing"}
-              autoComplete="current-password"
-            />
-          </div>
+
+          {mode === "password" && (
+            <div className="space-y-1.5">
+              <label htmlFor="login-password" className="text-xs font-medium text-muted-foreground">
+                Password
+              </label>
+              <Input
+                id="login-password"
+                type="password"
+                placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={phase === "signing_in" || phase === "syncing"}
+                autoComplete="current-password"
+              />
+            </div>
+          )}
+
+          {mode === "code" && codeSent && (
+            <div className="space-y-1.5">
+              <label htmlFor="login-code" className="text-xs font-medium text-muted-foreground">
+                6-digit code
+              </label>
+              <Input
+                id="login-code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="123456"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                disabled={phase === "signing_in" || phase === "syncing"}
+                autoFocus
+              />
+              <p className="text-[0.72rem] text-muted-foreground/70">
+                We emailed a code to {email.trim()}.{" "}
+                <button
+                  type="button"
+                  onClick={handleRequestCode}
+                  disabled={requestingCode}
+                  className="underline underline-offset-2 hover:text-muted-foreground"
+                >
+                  Resend
+                </button>
+              </p>
+            </div>
+          )}
 
           {error && (
             <p className="rounded-sm border border-border bg-card px-3 py-2 text-xs font-medium text-destructive">
@@ -296,27 +386,29 @@ export function LoginCard({ onAuthChange }: Props) {
             </p>
           )}
 
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={() => {
-                // Desktop maps the relative target ("forgot") to HQ_BASE_URL and
-                // opens it in the system browser; web falls back to window.open.
-                const ext = (window as unknown as { elevateDesktop?: { auth?: { openExternal?: (t: string) => void } } })
-                  .elevateDesktop?.auth?.openExternal;
-                if (ext) ext("forgot");
-                else window.open("https://api.elevationrealestatehq.com/forgot", "_blank", "noopener");
-              }}
-              className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
-            >
-              Forgot password?
-            </button>
-          </div>
+          {mode === "password" && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={openForgot}
+                className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+              >
+                Forgot password?
+              </button>
+            </div>
+          )}
 
           <Button
             type="submit"
             className="w-full"
-            disabled={phase === "signing_in" || phase === "syncing" || !email.trim() || !password}
+            disabled={
+              phase === "signing_in" ||
+              phase === "syncing" ||
+              requestingCode ||
+              !email.trim() ||
+              (mode === "password" && !password) ||
+              (mode === "code" && codeSent && !code.trim())
+            }
           >
             {phase === "signing_in" ? (
               <>
@@ -328,12 +420,36 @@ export function LoginCard({ onAuthChange }: Props) {
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 Syncing skill packs...
               </>
+            ) : requestingCode ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Sending code...
+              </>
+            ) : mode === "code" && !codeSent ? (
+              "Send code"
             ) : phase === "error" ? (
               "Try again"
             ) : (
               "Sign in"
             )}
           </Button>
+
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={() => {
+                setMode((m) => (m === "password" ? "code" : "password"));
+                setError(null);
+                setCodeSent(false);
+                setCode("");
+                setPassword("");
+                if (phase === "error") setPhase("logged_out");
+              }}
+              className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+            >
+              {mode === "password" ? "Sign in with a code instead" : "Use password instead"}
+            </button>
+          </div>
         </form>
       </CardContent>
     </Card>
