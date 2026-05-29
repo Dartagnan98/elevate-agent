@@ -617,7 +617,7 @@ export function MemoryConstellation({
     "--memory-panel": "color-mix(in srgb, var(--midground-base) 6%, var(--background-base))",
     "--memory-panel-strong": "color-mix(in srgb, var(--midground-base) 10%, var(--background-base))",
     "--memory-grid": "color-mix(in srgb, var(--midground-base) 8%, transparent)",
-    "--memory-edge": "color-mix(in srgb, var(--midground-base) 42%, transparent)",
+    "--memory-edge": "color-mix(in srgb, var(--midground-base) 90%, var(--background-base))",
     "--memory-edge-soft": "color-mix(in srgb, var(--midground-base) 12%, transparent)",
     "--memory-edge-active": "color-mix(in srgb, #D8DBE2 80%, var(--midground-base))",
     // Node tones are the design prototype's exact cool-silver palette — a
@@ -765,7 +765,7 @@ export function MemoryConstellation({
                     prominent && "memory-constellation-edge-flow",
                     connected && "memory-constellation-edge-active",
                   )}
-                  opacity={dormant ? 0.26 : connected ? 0.95 : edge.visual ? 0.12 : 0.55}
+                  opacity={dormant ? 0.22 : connected ? 1 : edge.visual ? 0.14 : 1}
                   stroke={connected ? "var(--memory-edge-active)" : edge.visual ? "var(--memory-edge-soft)" : "var(--memory-edge)"}
                   strokeLinecap="round"
                   strokeWidth={connected ? 1.9 : edge.visual ? 0.6 : 1.1}
