@@ -749,16 +749,21 @@ function loadLocalPage(fileName) {
   mainWindow.loadFile(path.join(__dirname, fileName));
 }
 
-// Pops the login form in a small floating window (instead of swapping the
-// main window) so the dashboard stays put underneath. The auth:login IPC
-// handler closes this window and reloads the dashboard on success.
+// The dashboard renders a full-screen <LoginCard /> whenever there's no valid
+// license (see cli/web App.tsx's license gate), so the sign-in screen lives
+// inside the app itself. We deliberately do NOT pop a separate native login
+// window — that produced two competing sign-in screens stacked on top of each
+// other. This just brings the dashboard forward and nudges it to re-check
+// license state so the in-app card renders.
 function openLoginWindow() {
-  // Nudge the dashboard renderer to re-check /api/license/status. Without
-  // this the SidebarUserPill can sit with stale "signed in as foo" state
-  // (loaded earlier in the session) while we pop the modal because the
-  // license file was cleared out from under it. The pill seeing the same
-  // 401 and rendering "Not signed in" makes the modal experience make sense.
-  if (mainWindow && !mainWindow.isDestroyed()) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.focus();
+  const currentUrl = mainWindow.webContents.getURL();
+  if (!currentUrl.startsWith(backendUrl)) {
+    // Drifted off the dashboard origin (e.g. sitting on a local page) — load
+    // it so the in-app login screen can render.
+    loadAppPath(START_PATH);
+  } else {
     mainWindow.webContents
       .executeJavaScript(
         "window.dispatchEvent(new Event('elevate:auth-changed'));",
@@ -766,35 +771,6 @@ function openLoginWindow() {
       )
       .catch(() => {});
   }
-  if (loginWindow && !loginWindow.isDestroyed()) {
-    loginWindow.focus();
-    return;
-  }
-  loginWindow = new BrowserWindow({
-    width: 460,
-    height: 560,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    title: "Sign in to Elevate",
-    backgroundColor: "#0F0F0F",
-    parent: mainWindow || undefined,
-    modal: false,
-    show: false,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  loginWindow.once("ready-to-show", () => {
-    loginWindow.show();
-  });
-  loginWindow.on("closed", () => {
-    loginWindow = null;
-  });
-  loginWindow.loadFile(path.join(__dirname, "login.html"));
 }
 
 function loadAppPath(pathname = START_PATH) {
@@ -973,7 +949,9 @@ ipcMain.handle("auth:status", async () => {
 
 ipcMain.handle("auth:logout", async () => {
   clearLicense();
-  loadLocalPage("login.html");
+  // Reload the dashboard; with no license on disk it renders the in-app
+  // <LoginCard /> — the single sign-in screen.
+  if (mainWindow && !mainWindow.isDestroyed()) loadAppPath(START_PATH);
   return { ok: true };
 });
 

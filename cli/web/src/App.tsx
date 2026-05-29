@@ -902,8 +902,8 @@ export default function App() {
                 isAdminRoute && "p-0",
                 isLeadsRoute && "p-0",
                 isTodayRoute && "p-0",
-                !isConfigRoute && !isChatRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "px-3 sm:px-6 pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
-                isDocsRoute && "min-h-0 flex-1",
+                !isConfigRoute && !isChatRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && !isDocsRoute && "px-3 sm:px-6 pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
+                isDocsRoute && "min-h-0 flex-1 px-4 sm:px-10 lg:px-16 pt-2 sm:pt-4 lg:pt-6 pb-4 sm:pb-8",
               )}
             >
               <PluginSlot name="pre-main" />
