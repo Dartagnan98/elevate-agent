@@ -1,5 +1,5 @@
-import { lazy, Suspense, useState } from "react";
-import type { ComponentType, CSSProperties, SVGProps } from "react";
+import { lazy, Suspense } from "react";
+import type { ComponentType, SVGProps } from "react";
 import { Brain, CheckCircle2, Clock, Network } from "lucide-react";
 import type { AgentHubMemoryEdge, AgentHubMemoryNode } from "@/lib/api";
 import { isoTimeAgo } from "@/lib/utils";
@@ -9,21 +9,6 @@ import "./memory.css";
 const MemoryConstellation = lazy(() =>
   import("@/components/MemoryConstellation").then((m) => ({ default: m.MemoryConstellation })),
 );
-
-type GraphDensity = "expanded" | "compact";
-
-// Entity-hue presets. The graph tints its entity / project / community / plaud
-// nodes off `--color-primary` (see MemoryConstellation graphStyle color-mix
-// expressions), so overriding that var on the page root re-hues the
-// constellation without touching the rest of the app. No backing API — this is
-// a local view preference (the design exposed it via a Tweaks panel we stripped).
-const ENTITY_HUES: { name: string; value: string }[] = [
-  { name: "indigo", value: "#8E8CF2" },
-  { name: "violet", value: "#B07CF0" },
-  { name: "sky", value: "#6FA8F5" },
-  { name: "mint", value: "#56D6A6" },
-  { name: "silver", value: "#CBD0D8" },
-];
 
 function MemoryGraphView({
   compact,
@@ -52,11 +37,6 @@ export function RealEstateMemoryPage() {
   const data = useRealEstateHubData();
   useHubHeader("Memory", data);
   const memory = data.snapshot?.memory;
-
-  // Local view preferences (no backing API). TODO: persist density + entity hue
-  // if these should survive reloads.
-  const [density, setDensity] = useState<GraphDensity>("expanded");
-  const [entityHue, setEntityHue] = useState<string>(ENTITY_HUES[0].value);
 
   // Preserve HubShell's loading guard.
   if (data.loading && !data.snapshot && !data.status) {
@@ -91,7 +71,7 @@ export function RealEstateMemoryPage() {
   const embeddingModel = memory?.embedding.model || "On";
 
   return (
-    <div className="mem-root" style={{ "--color-primary": entityHue } as CSSProperties}>
+    <div className="mem-root">
       <div className="mem-inner">
         {/* Title/status/Refresh live in the app page header (useHubHeader),
             matching the Admin/Leads single-top-bar pattern — no in-page
@@ -143,17 +123,13 @@ export function RealEstateMemoryPage() {
                 <Network width="15" height="15" />
                 Knowledge graph
               </div>
-              <div className="mem-graph-controls">
-                <DensityToggle value={density} onChange={setDensity} />
-                <EntityHuePicker value={entityHue} onChange={setEntityHue} />
-                <span className={"mem-badge " + (embeddingsOn ? "on" : "")}>
-                  {embeddingsOn ? "Embeddings on" : "Embeddings off"}
-                </span>
-              </div>
+              <span className={"mem-badge " + (embeddingsOn ? "on" : "")}>
+                {embeddingsOn ? "Embeddings on" : "Embeddings off"}
+              </span>
             </div>
             <div className="mem-card-body">
               <MemoryGraphView
-                compact={density === "compact"}
+                compact={false}
                 nodes={memory?.graph.nodes ?? []}
                 edges={memory?.graph.edges ?? []}
               />
@@ -203,45 +179,6 @@ export function RealEstateMemoryPage() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function DensityToggle({ value, onChange }: { value: GraphDensity; onChange: (value: GraphDensity) => void }) {
-  const options: GraphDensity[] = ["expanded", "compact"];
-  return (
-    <div className="mem-density" role="radiogroup" aria-label="Graph density">
-      {options.map((option) => (
-        <button
-          key={option}
-          type="button"
-          role="radio"
-          aria-checked={value === option}
-          onClick={() => onChange(option)}
-          className={"mem-density-opt mono" + (value === option ? " active" : "")}
-        >
-          {option}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function EntityHuePicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return (
-    <div className="mem-accent-row" role="radiogroup" aria-label="Entity hue">
-      {ENTITY_HUES.map((hue) => (
-        <button
-          key={hue.value}
-          type="button"
-          role="radio"
-          aria-checked={value === hue.value}
-          title={hue.name}
-          onClick={() => onChange(hue.value)}
-          style={{ background: hue.value }}
-          className={"mem-accent-sw" + (value === hue.value ? " active" : "")}
-        />
-      ))}
     </div>
   );
 }
