@@ -25,21 +25,17 @@ export default function Page() {
           Control panel for users, organizations, and entitlements.
         </p>
         <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
-          <a href="/signup" style={{
-            display: "inline-flex", alignItems: "center", padding: "10px 18px",
-            background: "#8A8A8A", color: "#0F0F0F", border: 0, borderRadius: 6,
-            fontSize: 14, fontWeight: 600, textDecoration: "none",
-          }}>
-            Create account
-          </a>
           <a href="/admin/login" style={{
             display: "inline-flex", alignItems: "center", padding: "10px 18px",
-            background: "transparent", color: "#ECECEC", border: "1px solid #2A2A2A", borderRadius: 6,
+            background: "#8A8A8A", color: "#0F0F0F", border: 0, borderRadius: 6,
             fontSize: 14, fontWeight: 600, textDecoration: "none",
           }}>
             Sign in
           </a>
         </div>
+        <p style={{ color: "#6E6E6E", margin: "20px 0 0", fontSize: 12, lineHeight: 1.5 }}>
+          Access is invite-only. If you have an invitation, use the link in your email.
+        </p>
       </div>
     </div>
   );

@@ -101,8 +101,6 @@ function LoginInner() {
         ? "Enter the 6-digit code we emailed you."
         : "We'll email you a one-time sign-in code.";
 
-  const signupHref = `/signup${next !== "/admin/users" ? `?next=${encodeURIComponent(next)}` : ""}`;
-
   return (
     <AuthShell title="Sign in" subtitle={subtitle}>
       {mode === "password" && (
@@ -150,16 +148,11 @@ function LoginInner() {
         </form>
       )}
 
-      <div className="row-links">
-        {mode === "password" ? (
-          <>
-            <a href="/forgot">Forgot password?</a>
-            <a href={signupHref}>Create account</a>
-          </>
-        ) : (
-          <a href={signupHref}>Create account</a>
-        )}
-      </div>
+      {mode === "password" && (
+        <div className="row-links">
+          <a href="/forgot">Forgot password?</a>
+        </div>
+      )}
 
       <div className="divider" />
       <div className="alt-action">
