@@ -86,10 +86,36 @@ class ImmutableStaticFiles(StaticFiles):
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
-# Generated fresh on every server start — dies when the process exits.
-# Injected into the SPA HTML so only the legitimate web UI can use it.
+# Persisted at ~/.elevate/dashboard-session-token (0600) so it stays STABLE
+# across dashboard restarts. The desktop dashboard restarts once at startup
+# (to enable embedded chat); a fresh-per-process token would leave the already-
+# loaded Electron renderer holding a stale token -> every API call 401s ->
+# false "Unauthorized" screen. A stable token keeps the renderer's injected
+# token valid across restarts (and even if the SPA HTML is cached). Local-only
+# (127.0.0.1) API, same trust level as license.json next to it. Override with
+# ELEVATE_DASHBOARD_SESSION_TOKEN.
 # ---------------------------------------------------------------------------
-_SESSION_TOKEN = secrets.token_urlsafe(32)
+def _load_session_token() -> str:
+    env = os.environ.get("ELEVATE_DASHBOARD_SESSION_TOKEN")
+    if env:
+        return env.strip()
+    try:
+        path = os.path.join(os.path.expanduser("~"), ".elevate", "dashboard-session-token")
+        if os.path.exists(path):
+            existing = open(path, encoding="utf-8").read().strip()
+            if existing:
+                return existing
+        token = secrets.token_urlsafe(32)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        os.chmod(path, 0o600)
+        return token
+    except Exception:
+        return secrets.token_urlsafe(32)
+
+
+_SESSION_TOKEN = _load_session_token()
 _SESSION_HEADER_NAME = "X-Elevate-Session-Token"
 _RUN_TOKEN_HEADER_NAME = "X-Elevate-Run-Token"
 _RUN_RESULT_PATH_RE = re.compile(r"^/api/deals/([^/]+)/runs/([^/]+)/result$")
