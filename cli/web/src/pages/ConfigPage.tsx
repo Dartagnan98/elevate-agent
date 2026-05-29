@@ -2660,6 +2660,29 @@ export default function ConfigPage() {
             })}
           </nav>
 
+          {/* Agent pages — Agent Hub, Skills, and Memory live here now (moved
+              out of the main app sidebar). Primary nav, NOT behind Advanced. */}
+          <div className="mx-3 mt-4 mb-1 text-[0.68rem] font-medium uppercase tracking-wide text-muted-foreground/55">
+            Agent
+          </div>
+          <nav className="flex flex-col gap-0.5 px-2" aria-label="Agent pages">
+            {[
+              { to: "/hub", label: "Agent Hub", icon: <Bot className="h-4 w-4" /> },
+              { to: "/skills", label: "Skills", icon: <Puzzle className="h-4 w-4" /> },
+              { to: "/memory", label: "Memory graph", icon: <Brain className="h-4 w-4" /> },
+            ].map((it) => (
+              <Link
+                key={it.to}
+                to={it.to}
+                onClick={() => setMobileNavOpen(false)}
+                className="flex min-h-[36px] items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-sm text-foreground/85 transition-colors hover:text-foreground hover:bg-foreground/[0.04]"
+              >
+                <span className="text-foreground/70" aria-hidden="true">{it.icon}</span>
+                <span className="flex-1 truncate">{it.label}</span>
+              </Link>
+            ))}
+          </nav>
+
           {/* Advanced (schema-driven) categories — collapsed by default */}
           <div className="mx-3 my-3 border-t border-border/50" />
           <div className="px-3">

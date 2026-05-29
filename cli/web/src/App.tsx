@@ -111,8 +111,6 @@ const loadRealEstateMemoryPage = () =>
   import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage }));
 const loadRealEstateSocialMediaPage = () =>
   import("@/pages/real-estate-hub/social").then((m) => ({ default: m.RealEstateSocialMediaPage }));
-const loadRealEstateTasksPage = () =>
-  import("@/pages/real-estate-hub/tasks").then((m) => ({ default: m.RealEstateTasksPage }));
 const loadRealEstateTodayPage = () =>
   import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage }));
 const loadAgentOnboardingPage = () =>
@@ -135,7 +133,6 @@ const RealEstateTemplatesPage = lazy(loadRealEstateTemplatesPage);
 const RealEstateLeadsPage = lazy(loadRealEstateLeadsPage);
 const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
 const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
-const RealEstateTasksPage = lazy(loadRealEstateTasksPage);
 const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
 const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
 
@@ -145,7 +142,6 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/admin": loadRealEstateAdminPage,
   "/admin/templates": loadRealEstateTemplatesPage,
   "/social-media": loadRealEstateSocialMediaPage,
-  "/tasks": loadRealEstateTasksPage,
   "/memory": loadRealEstateMemoryPage,
   "/hub": loadAgentHubPage,
   "/chat": loadChatPage,
@@ -173,7 +169,7 @@ function normalizePreloadPath(path: string): string {
 }
 
 function preloadRealEstateRouteData(path: string): void {
-  if (!["/", "/today", "/leads", "/admin", "/tasks", "/memory", "/social-media"].includes(path)) return;
+  if (!["/", "/today", "/leads", "/admin", "/memory", "/social-media"].includes(path)) return;
   void import("@/pages/real-estate-hub/_shared/use-hub-data").then((module) => {
     void module.preloadRealEstateHubData(path);
   });
@@ -603,7 +599,6 @@ function buildAccessControlledBuiltinRoutes(
       ? RealEstateSocialMediaPage
       : PendingOrLocked,
     "/marketing": packs.realEstateMarketing ? MarketingRedirect : PendingOrLocked,
-    "/tasks": RealEstateTasksPage,
     "/approvals": packs.realEstateAdmin ? ApprovalsRedirect : PendingOrLocked,
     "/memory": RealEstateMemoryPage,
     ...BUILTIN_ROUTES_BASE,
@@ -1779,34 +1774,8 @@ function DesktopSidebar({
           </SidebarSectionLabel>
           {!collapsedSections.agent && (
             <div className="space-y-0.5">
-              <SidebarAction
-                icon={Bot}
-                label="Agent Hub"
-                path="/hub"
-                onNavigate={go}
-                onPreload={onPreloadRoute}
-              />
-              <SidebarAction
-                icon={ListChecks}
-                label="Tasks"
-                path="/tasks"
-                onNavigate={go}
-                onPreload={onPreloadRoute}
-              />
-              <SidebarAction
-                icon={Brain}
-                label="Memory"
-                path="/memory"
-                onNavigate={go}
-                onPreload={onPreloadRoute}
-              />
-              <SidebarAction
-                icon={Puzzle}
-                label="Skills"
-                path="/skills"
-                onNavigate={go}
-                onPreload={onPreloadRoute}
-              />
+              {/* Agent Hub, Memory, and Skills moved into Settings (linked from
+                  the Config page). Tasks removed. Automations stays here. */}
               <SidebarAction
                 icon={Clock}
                 label="Automations"
