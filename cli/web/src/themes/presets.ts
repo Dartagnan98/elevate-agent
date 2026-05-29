@@ -3,7 +3,7 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
 /**
  * Built-in dashboard themes.
  *
- * Elevate keeps the dashboard chrome deliberately simple: one refined dark
+ * Elevation keeps the dashboard chrome deliberately simple: one refined dark
  * mode and one clean light mode. Theme names must stay in sync with the
  * backend's `_BUILTIN_DASHBOARD_THEMES` list in `elevate_cli/web_server.py`.
  */

@@ -202,7 +202,7 @@ export function SidebarUserPill() {
               onClick={() => runSystemAction("update")}
             >
               <Download className={cn(updateBusy && "animate-pulse")} />
-              <span>{updateBusy ? "Updating Elevate" : "Update Elevate"}</span>
+              <span>{updateBusy ? "Updating Elevation" : "Update Elevation"}</span>
               {hasUpdate && !updateBusy && (
                 <span className="user-menu-tag">
                   {updateBehind > 0 ? updateBehind : "new"}

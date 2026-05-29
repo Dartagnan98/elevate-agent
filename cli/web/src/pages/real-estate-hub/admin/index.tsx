@@ -104,7 +104,7 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
     deliver: "local",
     workdir: "",
     prompt:
-      "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevate deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.",
+      "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevation deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.",
   },
   {
     name: "Seller Update",
@@ -114,7 +114,7 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
     deliver: "local",
     workdir: "",
     prompt:
-      "Run the seller-update skill. Pull ShowingTime feedback/activity for active listings, match each listing to an Elevate deal, write the digest back to SQLite, and create Gmail seller-update drafts. Never send directly.",
+      "Run the seller-update skill. Pull ShowingTime feedback/activity for active listings, match each listing to an Elevation deal, write the digest back to SQLite, and create Gmail seller-update drafts. Never send directly.",
   },
   {
     name: "Market Stats Watcher",
@@ -1218,7 +1218,7 @@ function AdminOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip:
           Admin · first run
         </div>
         <h1 className="onboarding-rise-delay-1 mt-3 text-[34px] font-medium leading-[1.05] tracking-tight text-foreground">
-          Set up Elevate Admin
+          Set up Elevation Admin
         </h1>
         <p className="onboarding-rise-delay-2 mt-3 max-w-sm text-[13.5px] leading-6 text-muted-foreground">
           A short guided run sets the realtor profile, province, tools, and approval lane. Two minutes, end-to-end.
@@ -1263,7 +1263,7 @@ function AdminOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Welcome to Elevate Admin"
+      aria-label="Welcome to Elevation Admin"
       className={cn(
         "onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden",
         exiting && "onboarding-exit",
@@ -1273,10 +1273,10 @@ function AdminOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
       <div className="relative flex max-w-xl flex-col items-center px-6 text-center">
         <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-          Elevate · Admin
+          Elevation · Admin
         </div>
         <h1 className="onboarding-rise-delay-1 mt-4 text-[52px] font-medium leading-[1.02] tracking-tight text-foreground">
-          Welcome to Elevate Admin.
+          Welcome to Elevation Admin.
         </h1>
         <p className="onboarding-rise-delay-2 mt-4 max-w-lg text-[15px] leading-7 text-muted-foreground">
           A few quick questions and Admin starts running listings, conditions, and closings alongside you.
@@ -5219,7 +5219,7 @@ function RealEstateAdminPageLegacy() {
     if (needsVerificationBits.length > 0) {
       lines.push(
         `Provider set but health-check still pending — ${needsVerificationBits.join(", ")}. ` +
-          `These count as missing until Elevate runs a verification ping; usually clears on its own once a sync runs.`,
+          `These count as missing until Elevation runs a verification ping; usually clears on its own once a sync runs.`,
       );
     }
     if (notPicked.length > 0) {

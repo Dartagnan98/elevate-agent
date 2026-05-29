@@ -49,7 +49,7 @@ export const zh: Translations = {
   },
 
   app: {
-    brand: "Elevate",
+    brand: "Elevation",
     brandShort: "HA",
     closeNavigation: "关闭导航",
     closeModelTools: "关闭模型与工具",
@@ -119,9 +119,9 @@ export const zh: Translations = {
     starting: "启动中",
     startedInBackground: "已在后台启动 — 请查看日志",
     stopped: "已停止",
-    updateElevate: "更新 Elevate",
+    updateElevate: "更新 Elevation",
     updatesAvailable: "有可用更新",
-    updatingElevate: "正在更新 Elevate…",
+    updatingElevate: "正在更新 Elevation…",
     waitingForOutput: "等待输出…",
   },
 

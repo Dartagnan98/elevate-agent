@@ -243,7 +243,7 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
   if (connector.initializeBehavior === "local_messages_import") {
     return connector.sourceExists
       ? "Live sync runs every 10 min via launchd. Click Re-import to force a full rebuild."
-      : "Reads the synced Mac Messages database and builds a local Elevate message index for lead context.";
+      : "Reads the synced Mac Messages database and builds a local Elevation message index for lead context.";
   }
   if (connector.initializeBehavior === "composio_social_setup") {
     return connector.sourceExists
@@ -276,7 +276,7 @@ function LeadsOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip:
           Leads · first run
         </div>
         <h1 className="onboarding-rise-delay-1 mt-3 text-[34px] font-medium leading-[1.05] tracking-tight text-foreground">
-          Wire up Elevate Leads
+          Wire up Elevation Leads
         </h1>
         <p className="onboarding-rise-delay-2 mt-3 max-w-sm text-[13.5px] leading-6 text-muted-foreground">
           A short guided run sets your lead sources, outreach channels, and auto-reply policy. Two minutes, end-to-end.
@@ -326,7 +326,7 @@ function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Welcome to Elevate Leads"
+      aria-label="Welcome to Elevation Leads"
       className={cn(
         "onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden",
         exiting && "onboarding-exit",
@@ -336,10 +336,10 @@ function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
       <div className="relative flex max-w-xl flex-col items-center px-6 text-center">
         <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-          Elevate · Leads
+          Elevation · Leads
         </div>
         <h1 className="onboarding-rise-delay-1 mt-4 text-[52px] font-medium leading-[1.02] tracking-tight text-foreground">
-          Welcome to Elevate Leads.
+          Welcome to Elevation Leads.
         </h1>
         <p className="onboarding-rise-delay-2 mt-4 max-w-lg text-[15px] leading-7 text-muted-foreground">
           A few quick questions and Leads starts catching, routing, and drafting replies the moment a lead lands.
@@ -380,7 +380,7 @@ const LEADS_WIZARD_STEPS: LeadsWizardStep[] = [
     eyebrow: "Step 2 of 5",
     title: "Google Lead Forms",
     subtitle:
-      "Skip if you don't run Google Ads. One developer token is enough — Elevate's CLI auto-discovers your customer ID and campaigns.",
+      "Skip if you don't run Google Ads. One developer token is enough — Elevation's CLI auto-discovers your customer ID and campaigns.",
   },
   {
     id: "webhook",
@@ -394,7 +394,7 @@ const LEADS_WIZARD_STEPS: LeadsWizardStep[] = [
     eyebrow: "Step 4 of 5",
     title: "Auto-reply policy",
     subtitle:
-      "Tell Elevate how aggressive to be on the first touch. You can change the cadence per lane after onboarding.",
+      "Tell Elevation how aggressive to be on the first touch. You can change the cadence per lane after onboarding.",
   },
   {
     id: "outreach",
@@ -700,7 +700,7 @@ function LeadsOnboardingWizard({
                   placeholder="optional"
                   type="password"
                   fullWidth
-                  helper="Optional. If set, Elevate verifies HMAC signature on each incoming submission."
+                  helper="Optional. If set, Elevation verifies HMAC signature on each incoming submission."
                 />
               </div>
             )}
@@ -820,7 +820,7 @@ function LeadsOnboardingWizard({
 
                 <p className="text-[11.5px] text-muted-foreground/80">
                   Run prompt opens a chat seeded with the connector's setup prompt — same flow as Config → Source connectors.
-                  Elevate auto-routes by lead device: iPhone → iMessage, Android → SMS / RCS.
+                  Elevation auto-routes by lead device: iPhone → iMessage, Android → SMS / RCS.
                 </p>
               </div>
             )}
@@ -839,7 +839,7 @@ function LeadsOnboardingWizard({
                       Send an automated first reply when a lead lands
                     </div>
                     <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-                      Off by default — Elevate drafts and queues a reply for your approval instead.
+                      Off by default — Elevation drafts and queues a reply for your approval instead.
                     </p>
                   </div>
                 </label>
@@ -850,7 +850,7 @@ function LeadsOnboardingWizard({
                         Template library
                       </span>
                       <span className="text-[11px] leading-[1.4] text-muted-foreground">
-                        Elevate picks per situation — best-fit template is auto-attached by ID and tracked for reply rate. Click any card to pin it as the default first-touch.
+                        Elevation picks per situation — best-fit template is auto-attached by ID and tracked for reply rate. Click any card to pin it as the default first-touch.
                       </span>
                     </div>
                     <Link
@@ -1295,7 +1295,7 @@ function OutreachConnectorsCard({
           <h3 className="text-[13px] font-semibold text-foreground">Outreach channels</h3>
           <p className="mt-0.5 text-[11.5px] text-muted-foreground">
             iMessage, SMS, and RCS aren't configured here — they live as Source Connectors so the same wiring
-            powers ingestion (read-only message index) and outbound. Elevate auto-routes: iPhone leads get
+            powers ingestion (read-only message index) and outbound. Elevation auto-routes: iPhone leads get
             iMessage, Android leads fall through to SMS / RCS.
           </p>
         </div>
@@ -1565,7 +1565,7 @@ export function LeadsSetupLaunch({
             <p className="mt-1 text-[12px] text-muted-foreground">
               CRM is inherited from Admin setup and already counts as an outreach lane. Wire at least one
               lead source (Meta / Google / Website webhook) and set your auto-reply policy. Texting channels
-              (iMessage / SMS / RCS) are managed in Source Connectors below — Elevate auto-routes by lead device.
+              (iMessage / SMS / RCS) are managed in Source Connectors below — Elevation auto-routes by lead device.
             </p>
           </div>
           <div className="flex flex-col items-end gap-2">
@@ -1662,7 +1662,7 @@ export function LeadsSetupLaunch({
 
       <ItemCard
         title="Google Lead Form Ads (optional)"
-        description="Skip if you don't run Google Ads. One developer token — Elevate's CLI auto-discovers your customer ID and campaigns."
+        description="Skip if you don't run Google Ads. One developer token — Elevation's CLI auto-discovers your customer ID and campaigns."
         status={googleItem?.status ?? "missing"}
       >
         <FieldRow

@@ -764,7 +764,7 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
     }
     if (clean.startsWith("[System note:")) return false;
     if (clean.startsWith("You've reached the maximum number of tool-calling iterations")) return false;
-    if (clean.startsWith("[Elevate Hub interface context]")) return false;
+    if (clean.startsWith("[Elevation Hub interface context]")) return false;
     if (clean.startsWith("User follow-up received while you were already working:")) return false;
   }
   return true;
@@ -2106,8 +2106,8 @@ function composerAgentFromHub(agent: AgentHubAgent): ComposerAgent {
 }
 
 const HUB_INTERFACE_CONTEXT = [
-  "[Elevate Hub interface context]",
-  "The user is typing inside Elevate Agent Hub web chat.",
+  "[Elevation Hub interface context]",
+  "The user is typing inside Elevation Agent Hub web chat.",
   [
     "When the user asks to open, view, show, preview, or pull up a generated PDF,",
     "document, image, report, local artifact, 'it', 'this', or something on the",
@@ -5498,7 +5498,7 @@ export default function ChatPage() {
                     ref={inputRef}
                     aria-autocomplete="list"
                     aria-controls="slash-popover-listbox"
-                    aria-label="Message Elevate Agent"
+                    aria-label="Message Elevation Agent"
                     className={cn(
                       "composer-input block",
                       "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
@@ -5548,7 +5548,7 @@ export default function ChatPage() {
                     placeholder={
                       state === "error"
                         ? "Reconnect to continue..."
-                        : "Message Elevate Agent..."
+                        : "Message Elevation Agent..."
                     }
                     rows={1}
                     spellCheck
@@ -5931,7 +5931,7 @@ function ComposerStageBar({
         className="stage-action"
         disabled={loading && !status}
         onClick={onReview}
-        title="Ask Elevate to review these changes"
+        title="Ask Elevation to review these changes"
         type="button"
       >
         <Eye aria-hidden="true" />

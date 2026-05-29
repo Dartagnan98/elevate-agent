@@ -4,7 +4,7 @@ import { ReactNode } from "react";
 
 // Shared auth-page shell + styles, matching the app login: black canvas with an
 // animated aurora gradient (ported from cli/web's onboarding-aurora), the
-// Elevate wordmark logo, a #1A1A1A graphite card, #8A8A8A primary button, and
+// Elevation wordmark logo, a #1A1A1A graphite card, #8A8A8A primary button, and
 // #ECECEC / #A0A0A0 text. Every auth page (login, signup, forgot, reset)
 // renders through this so they stay consistent with the app.
 export const AUTH_STYLES = `
@@ -90,7 +90,7 @@ export function AuthShell({
       <div className="aurora" aria-hidden />
       <div className="card">
         <div className="brand">
-          <img src="/elevateos-wordmark-dark.png" alt="Elevate" />
+          <img src="/elevateos-wordmark-dark.png" alt="Elevation" />
         </div>
         <h1>{title}</h1>
         <p className="subtitle">{subtitle}</p>

@@ -107,7 +107,7 @@ declare global {
   }
 }
 let _sessionToken: string | null = null;
-const SESSION_HEADER = "X-Elevate-Session-Token";
+const SESSION_HEADER = "X-Elevation-Session-Token";
 const GET_CACHE = new Map<
   string,
   {
@@ -207,7 +207,7 @@ async function getSessionToken(): Promise<string> {
     _sessionToken = injected;
     return _sessionToken;
   }
-  throw new Error("Session token not available — page must be served by the Elevate dashboard server");
+  throw new Error("Session token not available — page must be served by the Elevation dashboard server");
 }
 
 export const api = {

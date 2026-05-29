@@ -354,7 +354,7 @@ export function AgentConfigEditor({
 }
 
 // Per-agent Telegram lane editor. Each Agent Hub agent can have its own bot
-// token + chat target, completely separate from the primary Elevate bot.
+// token + chat target, completely separate from the primary Elevation bot.
 export function AgentTelegramLaneEditor({
   agent,
   tokenValue,

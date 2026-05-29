@@ -3,8 +3,8 @@ import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 
 export const metadata = {
-  title: "Elevate HQ",
-  description: "Elevate admin control panel",
+  title: "Elevation Real Estate HQ",
+  description: "Elevation Real Estate HQ admin control panel",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

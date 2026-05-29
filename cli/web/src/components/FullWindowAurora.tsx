@@ -4,7 +4,7 @@ import { useTheme } from "@/themes/context";
 
 export function FullWindowAurora({
   label,
-  title = "Starting Elevate",
+  title = "Starting Elevation",
   subtitle = "Bringing the local agent runtime online.",
 }: {
   label: string;

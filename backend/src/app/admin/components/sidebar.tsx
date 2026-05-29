@@ -310,7 +310,7 @@ function UserMenu({ onClose }: { onClose: () => void }) {
           <Refresh /><span>Restart gateway</span>
         </button>
         <button className="user-menu-row" role="menuitem">
-          <Download /><span>Update Elevate</span>
+          <Download /><span>Update Elevation</span>
           {u.hasUpdate && <span className="user-menu-tag">new</span>}
         </button>
       </div>

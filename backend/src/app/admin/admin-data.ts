@@ -1,4 +1,4 @@
-// Seed data for the Elevate Agent admin board.
+// Seed data for the Elevation Agent admin board.
 // Ported from /tmp/elevate-design/src/admin-data.jsx — will be replaced with real API data.
 
 // ---------------------------------------------------------------------------
@@ -169,7 +169,7 @@ export const ADMIN_BUYER_DEALS: BuyerDeal[] = [
 export const ADMIN_ACTIONS: AdminAction[] = [
   { id: "ar1", kind: "review", title: "Admin review: Hot Leads Watcher",        desc: "Run the outreach skill in monitor mode. Scan every connected source (Lofty CRM, Apple Messages, Gmail, SMS, social via Composio) for hot signals since the last run: inbound replies, viewing requests, repeat opens, CRM stage moves, listing alerts. Re-score heat across the inbox and surface the top 10 hottest leads. For any lead with a brand-new inbound message that needs a reply, draft a same-channel response and queue it for approval. Do not send.", schedule: "0 8 * * *" },
   { id: "ar2", kind: "review", title: "Admin review: Social Content Engine",    desc: "Run the social-content-engine skill (weekly content engine for the connected real estate agent). Steps: 1. Pull last-30-day post metrics from every connected social platform (Instagram, TikTok, YouTube, Facebook, LinkedIn) using the bundled native fetchers. 2. Aggregate + rank with scripts/aggregate.py. 3. Research current real-estate content trends in the agent’s market via the last30days skill. 4. Read inbox + CRM signals with scripts/read_signals.py to ground ideas in real client questions. 5. Generate 5–10…", next: "unknown" },
-  { id: "ar3", kind: "review", title: "Admin review: Gmail Doc Router",         desc: "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevate deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.", next: "16d ago" },
+  { id: "ar3", kind: "review", title: "Admin review: Gmail Doc Router",         desc: "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, match listing documents to active Elevation deals with deal-matcher, file documents to the correct Drive folder, and write artifacts/checklist evidence back to the deal with admin-result-writer. Do not send messages.", next: "16d ago" },
   { id: "ar4", kind: "resume", title: "Admin workflow: WEBForms transaction setup", desc: "Open WEBForms, authenticate with the configured account, and create the transaction shell.", session: "tui · 13h ago" },
   { id: "ar5", kind: "resume", title: "Admin workflow: Go into webforms and create a transaction", desc: "Go into webforms and create a transaction", session: "tui · 11h ago" },
   { id: "ar6", kind: "resume", title: "Admin workflow: Go into webforms and create a transaction", desc: "Go into webforms and create a transaction", session: "tui · 13h ago" },

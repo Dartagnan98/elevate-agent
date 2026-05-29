@@ -139,7 +139,7 @@ export const LEADS_SOURCES: LeadsSource[] = [
 ];
 
 export const LEADS_CHANNELS: LeadsChannel[] = [
-  { id: "imessage", name: "Apple Messages", kind: "imessage", status: "blocked", uncontacted: 0, contacted: 0, records: 0, note: "Grant Full Disk Access to the terminal/app running Elevate." },
+  { id: "imessage", name: "Apple Messages", kind: "imessage", status: "blocked", uncontacted: 0, contacted: 0, records: 0, note: "Grant Full Disk Access to the terminal/app running Elevation." },
   { id: "composio-gmail", name: "Composio — gmail", kind: "gmail", status: "live", uncontacted: 0, contacted: 0, records: 728, note: "" },
   { id: "composio-insta", name: "Composio — instagram", kind: "instagram", status: "live", uncontacted: 2, contacted: 0, records: 515, note: "" },
 ];

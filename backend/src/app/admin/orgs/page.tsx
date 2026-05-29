@@ -113,7 +113,7 @@ export default function OrgsPage() {
     <div>
       <PageHeader
         title="Organizations"
-        subtitle={`${orgs.length} ${orgs.length === 1 ? "team" : "teams"} on Elevate`}
+        subtitle={`${orgs.length} ${orgs.length === 1 ? "team" : "teams"} on Elevation`}
         actions={
           <Button variant="primary" onClick={() => setShowCreate((s) => !s)}>
             {showCreate ? "Cancel" : "+ New organization"}

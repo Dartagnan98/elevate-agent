@@ -992,7 +992,7 @@ export default function AgentHubPage() {
               <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
                 {executiveAgent?.description ||
                   executiveAgent?.role ||
-                  "Primary operator and orchestration agent for the local Elevate workspace."}
+                  "Primary operator and orchestration agent for the local Elevation workspace."}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">

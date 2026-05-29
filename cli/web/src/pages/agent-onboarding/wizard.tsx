@@ -213,7 +213,7 @@ export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void 
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Welcome to Elevate"
+      aria-label="Welcome to Elevation"
       className={cn(
         "onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden",
         exiting && "onboarding-exit",
@@ -223,7 +223,7 @@ export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void 
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
       <div className="relative flex max-w-xl flex-col items-center px-6 text-center">
         <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-          Elevate · Agent
+          Elevation · Agent
         </div>
         <h1 className="onboarding-rise-delay-1 mt-4 text-[52px] font-medium leading-[1.02] tracking-tight text-foreground">
           Bring the agent online.
@@ -769,7 +769,7 @@ export function AgentOnboardingWizard({
                   </div>
                 )}
                 <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
-                  On finish, Elevate creates the operational tables (contacts, conversations, deals, tasks) via migrations.
+                  On finish, Elevation creates the operational tables (contacts, conversations, deals, tasks) via migrations.
                 </p>
               </WizardSection>
             )}
@@ -1259,7 +1259,7 @@ function TelegramPeerRail() {
 
 // Surfaces the AI peers the operator has wired up alongside this elevate
 // agent — signed-in model providers + the agents the operator has built in
-// the Elevate Agent Hub. Read-only summary; deep config lives on /hub.
+// the Elevation Agent Hub. Read-only summary; deep config lives on /hub.
 function ConnectedAgentsRail({
   oauthProviders,
 }: {
@@ -4782,7 +4782,7 @@ function IMessageSetupPanel({
             <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
               ~/Library/Messages/chat.db
             </code>
-            . Grant Full Disk Access to Terminal/Elevate (System Settings →
+            . Grant Full Disk Access to Terminal/Elevation (System Settings →
             Privacy & Security).
           </p>
           <WizardField
@@ -5082,7 +5082,7 @@ function WhatsAppLocalPanel() {
   if (!status?.bridgePresent) {
     return (
       <p className="text-[11.5px] text-warning">
-        WhatsApp bridge script not found. This Elevate install ships it at
+        WhatsApp bridge script not found. This Elevation install ships it at
         scripts/whatsapp-bridge/bridge.js — try running `elevate update`.
       </p>
     );

@@ -50,7 +50,7 @@ export const en: Translations = {
   },
 
   app: {
-    brand: "Elevate",
+    brand: "Elevation",
     brandShort: "HA",
     closeNavigation: "Close navigation",
     closeModelTools: "Close model and tools",
@@ -120,9 +120,9 @@ export const en: Translations = {
     starting: "Starting",
     startedInBackground: "Started in background — check logs for progress",
     stopped: "Stopped",
-    updateElevate: "Update Elevate",
+    updateElevate: "Update Elevation",
     updatesAvailable: "Updates available",
-    updatingElevate: "Updating Elevate…",
+    updatingElevate: "Updating Elevation…",
     waitingForOutput: "Waiting for output…",
   },
 

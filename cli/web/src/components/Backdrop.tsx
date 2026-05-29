@@ -1,5 +1,5 @@
 /**
- * Elevate's local-first app backdrop.
+ * Elevation's local-first app backdrop.
  *
  * The previous blueprint/noise texture made the shell feel like a skin. The
  * new app chrome is intentionally quiet: a solid product canvas with a soft

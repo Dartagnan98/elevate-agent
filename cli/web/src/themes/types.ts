@@ -168,7 +168,7 @@ export interface DashboardTheme {
  * Wire response shape for `GET /api/dashboard/themes`.
  *
  * The `themes` list is intentionally partial — built-in themes are fully
- * defined in `presets.ts`. Elevate currently exposes only light/dark product
+ * defined in `presets.ts`. Elevation currently exposes only light/dark product
  * themes, so `definition` is kept for wire compatibility with older clients.
  */
 export interface ThemeListEntry {

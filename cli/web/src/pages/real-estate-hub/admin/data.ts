@@ -1,4 +1,4 @@
-// Seed data for the Elevate Agent admin dashboard.
+// Seed data for the Elevation Agent admin dashboard.
 // Ported from /tmp/elevate-design/src/data.jsx — will be replaced with real API data.
 
 // ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ export const NAV_TOOLS: NavItem[] = [
 
 export const MOCK_AUTOMATIONS: Automation[] = [
   { id: "a1",  name: "Memory maintenance benchmark",       status: "live",   age: "14h" },
-  { id: "a2",  name: "Elevate memory maintenance smoke",   status: "warn",   age: null },
+  { id: "a2",  name: "Elevation memory maintenance smoke",   status: "warn",   age: null },
   { id: "a3",  name: "New Outreach",                       status: "warn",   age: null,  expandable: true },
   { id: "a4",  name: "Hot Leads Watcher",                  status: "warn",   age: null,  expandable: true },
   { id: "a5",  name: "Social Content Engine",              status: "live",   age: "5d",  expandable: true },

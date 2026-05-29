@@ -867,7 +867,7 @@ export function AgentSetupLaunch({
           </>
         )}
         <p className="text-[10.5px] text-muted-foreground">
-          On Mark complete, Elevate creates the operational tables (contacts, conversations, deals,
+          On Mark complete, Elevation creates the operational tables (contacts, conversations, deals,
           tasks, etc.) automatically via migrations.
         </p>
       </ItemCard>

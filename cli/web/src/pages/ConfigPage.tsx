@@ -113,7 +113,7 @@ const ADVANCED_CATEGORIES = new Set([
 const SETUP_STEPS = [
   {
     label: "1. Connect the model",
-    description: "Give Elevate its own OpenAI Codex session so the Hub can start chats without fighting the Codex app.",
+    description: "Give Elevation its own OpenAI Codex session so the Hub can start chats without fighting the Codex app.",
     command: "elevate auth add openai-codex",
   },
   {
@@ -939,7 +939,7 @@ function SourceConnectorSettingsPanel() {
             Source connectors
           </h2>
           <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
-            Where Elevate pulls its data from. Grouped by purpose: messages & inbox, CRM, MLS / buyer intelligence, social, and back-office. Each connector self-describes what it does.
+            Where Elevation pulls its data from. Grouped by purpose: messages & inbox, CRM, MLS / buyer intelligence, social, and back-office. Each connector self-describes what it does.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -1744,7 +1744,7 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
             onClick={() =>
               startSetupChat(
                 "Channel setup: Telegram",
-                "Help me wire up Telegram for Elevate. I want to test that my bot can receive messages, route to the right agent (executive-assistant by default), and send replies back. Walk me through pairing and verify with a test message.",
+                "Help me wire up Telegram for Elevation. I want to test that my bot can receive messages, route to the right agent (executive-assistant by default), and send replies back. Walk me through pairing and verify with a test message.",
               )
             }
           >
@@ -1785,7 +1785,7 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
               onClick={() => void (async () => {
                 const prompt = await sourceConnectorPrompt(
                   appleConnector?.id || "apple-messages",
-                  "Help me wire iMessage so Elevate can read my Mac Messages history into the local message index. Walk me through Full Disk Access for the Elevate binary and run a first sync.",
+                  "Help me wire iMessage so Elevation can read my Mac Messages history into the local message index. Walk me through Full Disk Access for the Elevation binary and run a first sync.",
                 );
                 startSetupChat(
                   "Channel setup: iMessage receive",
@@ -1837,12 +1837,12 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
         <div className="mt-3">
           <label className="block text-xs font-medium text-foreground/80">Reply prefix</label>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Prepended to every outgoing WhatsApp message. Default is &quot;▲ *Elevate*&quot;. Empty string disables it.
+            Prepended to every outgoing WhatsApp message. Default is &quot;▲ *Elevation*&quot;. Empty string disables it.
           </p>
           <div className="mt-2 flex items-center gap-2">
             <Input
               className="h-8 text-sm font-mono"
-              placeholder="▲ *Elevate*"
+              placeholder="▲ *Elevation*"
               value={effectivePrefix}
               onChange={(e) => setWhatsappPrefixInput(e.target.value)}
             />
@@ -1863,7 +1863,7 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
             onClick={() =>
               startSetupChat(
                 "Channel setup: WhatsApp",
-                "Help me wire WhatsApp send/receive for Elevate via Composio. I want one connected number that can receive messages into Elevate and send replies. Walk me through what I need (Business account, phone number, webhook) and verify with a test message.",
+                "Help me wire WhatsApp send/receive for Elevation via Composio. I want one connected number that can receive messages into Elevation and send replies. Walk me through what I need (Business account, phone number, webhook) and verify with a test message.",
               )
             }
           >
@@ -1941,7 +1941,7 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
             Memory
           </h2>
           <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
-            What Elevate remembers between sessions. Curated memory is injected into the system prompt; the memory store is the durable backing index.
+            What Elevation remembers between sessions. Curated memory is injected into the system prompt; the memory store is the durable backing index.
           </p>
         </div>
         <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>

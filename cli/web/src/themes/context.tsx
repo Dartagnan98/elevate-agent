@@ -319,7 +319,7 @@ function applyTheme(theme: DashboardTheme) {
 // ---------------------------------------------------------------------------
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  /** Name of the currently active theme. Elevate intentionally supports only
+  /** Name of the currently active theme. Elevation intentionally supports only
    *  the two product modes here: dark and light. */
   const [themeName, setThemeName] = useState<string>(() => {
     if (typeof window === "undefined") return DEFAULT_THEME_NAME;

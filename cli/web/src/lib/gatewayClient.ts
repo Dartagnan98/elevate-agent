@@ -132,7 +132,7 @@ export class GatewayClient {
     if (!resolved) {
       this.setState("error");
       throw new Error(
-        "Session token not available — page must be served by the Elevate dashboard",
+        "Session token not available — page must be served by the Elevation dashboard",
       );
     }
 

@@ -46,7 +46,7 @@ export default function InviteAccept() {
   }
 
   return (
-    <AuthShell title="Accept invitation" subtitle="Join the organization and start using Elevate.">
+    <AuthShell title="Accept invitation" subtitle="Join the organization and start using Elevation Real Estate HQ.">
       {done ? (
         <div className="notice">Joined. Redirecting…</div>
       ) : (

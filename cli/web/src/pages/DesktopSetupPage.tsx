@@ -368,7 +368,7 @@ function PackUnlockOnboarding({
 
   const unlockedTitle =
     selectedPack.packId === BASIC_PACK_ID
-      ? "Congratulations on installing Elevate Basic"
+      ? "Congratulations on installing Elevation Basic"
       : selectedPack.unlocked
         ? `Congratulations on unlocking ${selectedPack.label}`
         : `${selectedPack.label} is locked`;
@@ -488,9 +488,9 @@ function PackUnlockOnboarding({
                 <h3 className="mt-3 text-2xl font-semibold tracking-normal text-foreground">{unlockedTitle}</h3>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
                   {selectedPack.packId === BASIC_PACK_ID
-                    ? "Connect the model, memory, messaging, browser-use, and update settings that every Elevate install needs before paid packs start."
+                    ? "Connect the model, memory, messaging, browser-use, and update settings that every Elevation install needs before paid packs start."
                     : selectedPack.unlocked
-                      ? "Connect the providers and credential references this pack needs. Elevate stores the workflow contract in SQLite and saves secrets or account refs into the local .env file."
+                      ? "Connect the providers and credential references this pack needs. Elevation stores the workflow contract in SQLite and saves secrets or account refs into the local .env file."
                       : "This pack stays hidden from production users until their license unlocks it."}
                 </p>
               </div>
@@ -589,7 +589,7 @@ function PackUnlockOnboarding({
             {step === "credentials" ? (
               <div className="pack-step-enter mt-5 space-y-3">
                 <div className="rounded-md border border-border bg-card p-3 text-xs leading-5 text-muted-foreground">
-                  Values entered here are saved through the dashboard env endpoint into the local Elevate `.env`. Use API keys,
+                  Values entered here are saved through the dashboard env endpoint into the local Elevation `.env`. Use API keys,
                   tokens, account IDs, or credential refs. Avoid raw passwords unless the local operator explicitly wants that.
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
@@ -824,7 +824,7 @@ export default function DesktopSetupPage() {
               Desktop setup
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-              One place to see whether this local Elevate install is actually ready to run for a realtor: runtime,
+              One place to see whether this local Elevation install is actually ready to run for a realtor: runtime,
               separate agent inboxes, connected accounts, admin setup, and the logs needed to debug handoffs.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">

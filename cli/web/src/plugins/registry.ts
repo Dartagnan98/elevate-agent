@@ -96,7 +96,7 @@ declare global {
     };
     // Legacy Hermes-era global names. Shipped plugin bundles
     // (example-dashboard, strike-freedom-cockpit) still read these; keep
-    // them aliased to the Elevate globals until those bundles are rebuilt.
+    // them aliased to the Elevation globals until those bundles are rebuilt.
     __HERMES_PLUGIN_SDK__?: unknown;
     __HERMES_PLUGINS__?: {
       register: typeof registerPlugin;
@@ -124,7 +124,7 @@ export function exposePluginSDK() {
       createContext,
     },
 
-    // Elevate API client
+    // Elevation API client
     api,
     // Raw fetchJSON for plugin-specific endpoints
     fetchJSON,

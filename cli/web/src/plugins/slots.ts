@@ -19,7 +19,7 @@ import React, { Fragment, useEffect, useState } from "react";
  *  these in their manifest's `slots` field get wired in automatically.
  *
  *  - `backdrop`         — rendered inside `<Backdrop />`, above the noise layer
- *  - `header-left`      — injected before the Elevate brand in the top bar
+ *  - `header-left`      — injected before the Elevation brand in the top bar
  *  - `header-right`     — injected before the theme/language switchers
  *  - `header-banner`    — injected below the top nav bar, full-width
  *  - `sidebar`          — the cockpit sidebar rail (only rendered when

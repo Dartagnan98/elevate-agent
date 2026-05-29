@@ -352,7 +352,7 @@ export default function AccountPage() {
             <path d="M9 9h10v2.5h-7.5v3h6V17h-6v3H19V22.5H9V9z" fill="#fff" />
           </svg>
           <div>
-            <div style={{ fontWeight: 600, fontSize: 14, letterSpacing: "-0.01em" }}>Elevate HQ</div>
+            <div style={{ fontWeight: 600, fontSize: 14, letterSpacing: "-0.01em" }}>Elevation Real Estate HQ</div>
             <div
               style={{
                 fontSize: 10,
