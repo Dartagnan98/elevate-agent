@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin-guard";
+import { inviteEmail, mailerEnabled, sendMail } from "@/lib/mailer";
 import {
   addMembership,
   createInvitation,
@@ -72,8 +73,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const origin = req.nextUrl.origin;
   const accept_url = `${origin}/invite/${token}`;
 
+  // Email the invitee the accept link. Best-effort: the accept_url is still
+  // returned so the admin can copy/share it if mail is disabled or fails.
+  let emailed = false;
+  if (mailerEnabled()) {
+    const { subject, html } = inviteEmail({ inviteUrl: accept_url, orgName: org.name });
+    const result = await sendMail({ to: email, subject, html });
+    emailed = result.ok;
+  }
+
   return NextResponse.json({
     invited: true,
+    emailed,
     invitation: {
       id: invitation.id,
       email: invitation.email,
