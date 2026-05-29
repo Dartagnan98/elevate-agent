@@ -1418,6 +1418,8 @@ function DesktopSidebar({
   if (realEstatePacks.realEstateMarketing) {
     realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
+  // Automations lives in this (now "Agent") section — always shown.
+  realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const go = (path: string) => {
     onPreloadRoute?.(path);
     navigate(path);
@@ -1746,10 +1748,13 @@ function DesktopSidebar({
               collapsed={collapsedSections.realEstate}
               onToggle={() => toggleSection("realEstate")}
             >
-              Real Estate
+              Agent
             </SidebarSectionLabel>
             {!collapsedSections.realEstate && (
               <div className="space-y-0.5">
+                {/* Single "Agent" section: Today/Leads/Admin/Social Media +
+                    Automations. (Agent Hub, Memory, Skills moved to Settings;
+                    Tasks removed. No separate "Real estate" section.) */}
                 {realEstateNavItems.map((item) => (
                   <SidebarAction
                     key={item.path}
@@ -1764,28 +1769,6 @@ function DesktopSidebar({
             )}
           </div>
         )}
-
-        <div className="mt-2.5">
-          <SidebarSectionLabel
-            collapsed={collapsedSections.agent}
-            onToggle={() => toggleSection("agent")}
-          >
-            Agent
-          </SidebarSectionLabel>
-          {!collapsedSections.agent && (
-            <div className="space-y-0.5">
-              {/* Agent Hub, Memory, and Skills moved into Settings (linked from
-                  the Config page). Tasks removed. Automations stays here. */}
-              <SidebarAction
-                icon={Clock}
-                label="Automations"
-                path="/cron"
-                onNavigate={go}
-                onPreload={onPreloadRoute}
-              />
-            </div>
-          )}
-        </div>
 
         {pinnedSessions.length > 0 && (
           <SessionSection
