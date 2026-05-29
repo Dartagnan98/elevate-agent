@@ -177,7 +177,21 @@
 .memory-constellation-edge-active { filter: drop-shadow(0 0 6px color-mix(in srgb, #D8DBE2 38%, transparent)); }
 
 .memory-constellation-node {
-  cursor: pointer; outline: none; transform-box: fill-box; transform-origin: center;
+  cursor: pointer; outline: none;
+}
+/* CRITICAL: the global index.css carries a STALE DUPLICATE of the constellation
+   styles. Its `.memory-constellation-node` applies `animation: memory-node-enter
+   ... both` + `transform-box: fill-box`. That CSS animation's end-state transform
+   OVERRIDES our SVG `transform` attribute (translate/scale set per-frame in JS),
+   collapsing every node to the SVG origin — so nodes painted spread but their
+   hit-regions all stacked at the center and only the top node was hoverable.
+   Win the cascade with a `.mem-root`-scoped override (higher specificity) and
+   kill that animation + force the default transform-box so the JS-driven
+   transform attribute positions each node — and its hit-region — correctly. */
+.mem-root .memory-constellation-node {
+  animation: none;
+  transform-box: view-box;
+  transform-origin: 0 0;
 }
 .memory-constellation-halo {
   opacity: 0.42; pointer-events: none; transform-box: fill-box; transform-origin: center;
