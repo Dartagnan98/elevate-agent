@@ -362,6 +362,56 @@ _PACKAGES: dict[str, dict[str, Any]] = {
 }
 
 
+# BC is the only Canadian province that calls buyer/seller conditions
+# "subjects" ("subject removal", "subjects off"). Every other province uses
+# "conditions" ("condition removal/waiver"). The reference flow (_BC) is written
+# in BC terminology, so when it's reused for another province we rewrite the
+# visible stage names + checklist labels. Field KEYS (e.g. subjectRemovalDate)
+# and checklist IDs are deliberately left untouched so the gate logic, data
+# binding, and per-deal document overlay keep working. Ordered specific->generic
+# so multi-word phrases match before the bare-word fallback.
+_CONDITION_TERM_SUBS: list[tuple[Any, str]] = [
+    (re.compile(r"\bSubjects Off\b"), "Conditions Removed"),
+    (re.compile(r"\bSubject Removal\b"), "Condition Removal"),
+    (re.compile(r"\bsubjects off\b"), "conditions removed"),
+    (re.compile(r"\bsubject removal\b"), "condition removal"),
+    (re.compile(r"\bSubjects\b"), "Conditions"),
+    (re.compile(r"\bSubject\b"), "Condition"),
+    (re.compile(r"\bsubjects\b"), "conditions"),
+    (re.compile(r"\bsubject\b"), "condition"),
+]
+
+
+def _reterm_condition(text: str) -> str:
+    if not text:
+        return text
+    for pattern, repl in _CONDITION_TERM_SUBS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def _apply_condition_terminology(package: dict[str, Any]) -> None:
+    """Rewrite BC 'subject' terminology to 'condition' on display text only."""
+    for side in ("listing", "buyer"):
+        side_cfg = package.get(side)
+        if not isinstance(side_cfg, dict):
+            continue
+        for stage in side_cfg.get("stages", []) or []:
+            if not isinstance(stage, dict):
+                continue
+            stage["title"] = _reterm_condition(stage.get("title", ""))
+            stage["subtitle"] = _reterm_condition(stage.get("subtitle", ""))
+            for item in stage.get("checklist", []) or []:
+                if isinstance(item, dict):
+                    item["label"] = _reterm_condition(item.get("label", ""))
+            for field in stage.get("requiredFields", []) or []:
+                if isinstance(field, dict):
+                    field["label"] = _reterm_condition(field.get("label", ""))
+            for doc in stage.get("requiredDocs", []) or []:
+                if isinstance(doc, dict):
+                    doc["label"] = _reterm_condition(doc.get("label", ""))
+
+
 def _canadian_province_package(province_slug: str) -> dict[str, Any]:
     province = province_slug.upper()
     package = deepcopy(_BC)
@@ -379,6 +429,8 @@ def _canadian_province_package(province_slug: str) -> dict[str, Any]:
             },
         }
     )
+    # Non-BC provinces use "condition" terminology, not BC's "subjects".
+    _apply_condition_terminology(package)
     return package
 
 
