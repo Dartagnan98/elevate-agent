@@ -4120,4 +4120,3 @@ export { RealEstateAdminPage } from "@/pages/real-estate-hub/admin";
 
 export { RealEstateMemoryPage } from "@/pages/real-estate-hub/memory";
 export { RealEstateSocialMediaPage } from "@/pages/real-estate-hub/social";
-export { RealEstateTasksPage } from "@/pages/real-estate-hub/tasks";

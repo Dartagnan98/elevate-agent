@@ -1,41 +1,13 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import {
-  Activity,
-  Award,
-  Loader2,
-  Megaphone,
-  RefreshCw,
-  Sparkles,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { SocialIdea, SocialMetricRow, SocialSnapshot } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
-import {
-  HubShell,
-  useHubHeader,
-  useRealEstateHubData,
-} from "@/pages/real-estate-hub/_shared";
-import {
-  IdeaCard,
-  PlatformBlockCard,
-  PlatformRankingsBlock,
-  PlatformTablist,
-  PostDetailModal,
-  RealVideoCard,
-  YouTubeTabView,
-  computeEngagementScore,
-  formatCompact,
-  formatPct,
-} from "@/pages/real-estate-hub/social-media-widgets";
-
-const EMPTY_SOCIAL_PLATFORMS: NonNullable<SocialSnapshot["platforms"]> = {};
+import { useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { SocialBoard } from "./board";
+import { buildSocialViewModel } from "./view-model";
+import "./social.css";
 
 export function RealEstateSocialMediaPage() {
   const data = useRealEstateHubData();
-  useHubHeader("Social Media", data);
 
   const [snapshot, setSnapshot] = useState<SocialSnapshot | null>(null);
   const [ideas, setIdeas] = useState<SocialIdea[]>([]);
@@ -43,14 +15,8 @@ export function RealEstateSocialMediaPage() {
   const [loadingSocial, setLoadingSocial] = useState(true);
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [socialError, setSocialError] = useState<string | null>(null);
-  const [platformFilter, setPlatformFilter] = useState<string>("all");
-  const [selectedPost, setSelectedPost] = useState<SocialMetricRow | null>(null);
-  const [refreshing, setRefreshing] = useState<string | null>(null);
-  const [postLimit, setPostLimit] = useState<number>(100);
+  const [refreshing, setRefreshing] = useState(false);
   const [lookbackDays, setLookbackDays] = useState<number>(730);
-  const tabIdPrefix = useId();
-  const panelId = useId();
-  const activeTabId = `${tabIdPrefix}-tab-${platformFilter}`;
   const refreshAbortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
@@ -85,15 +51,12 @@ export function RealEstateSocialMediaPage() {
     };
   }, [refresh]);
 
-  useEffect(() => {
-    setPostLimit(100);
-  }, [platformFilter]);
-
   const handleIdeaAction = useCallback(
-    async (recordId: string, action: "approve" | "reject" | "edit", edit?: Partial<SocialIdea>) => {
+    async (recordId: string, action: "approve" | "reject") => {
       setActingOn(recordId);
+      setSocialError(null);
       try {
-        await api.socialIdeaAction(recordId, { action, ...(edit ? { edit } : {}) });
+        await api.socialIdeaAction(recordId, { action });
         await refresh();
       } catch (e) {
         setSocialError(e instanceof Error ? e.message : "Action failed");
@@ -104,71 +67,8 @@ export function RealEstateSocialMediaPage() {
     [refresh],
   );
 
-  const totals = snapshot?.totals;
-  const platforms = snapshot?.platforms ?? EMPTY_SOCIAL_PLATFORMS;
-  const platformList = useMemo(() => Object.entries(platforms), [platforms]);
-
-  const avgEngagement = useMemo(() => {
-    const vals = platformList
-      .map(([, p]) => p.averages?.engagement_rate)
-      .filter((v): v is number => v != null);
-    if (!vals.length) return null;
-    return vals.reduce((a, b) => a + b, 0) / vals.length;
-  }, [platformList]);
-
-  const avgHook = useMemo(() => {
-    const vals = platformList
-      .map(([, p]) => p.averages?.hook_rate)
-      .filter((v): v is number => v != null);
-    if (!vals.length) return null;
-    return vals.reduce((a, b) => a + b, 0) / vals.length;
-  }, [platformList]);
-
-  const wow = snapshot?.wow_delta;
-
-  const platformCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const r of recentPosts) {
-      const p = (r.platform || "").toLowerCase();
-      if (!p) continue;
-      counts[p] = (counts[p] || 0) + 1;
-    }
-    return counts;
-  }, [recentPosts]);
-
-  const filteredPosts = useMemo(() => {
-    const base = recentPosts.filter(
-      (r) => (r.media_type || "").toUpperCase() !== "ACCOUNT",
-    );
-    if (platformFilter === "all") return base;
-    return base.filter((r) => (r.platform || "").toLowerCase() === platformFilter);
-  }, [recentPosts, platformFilter]);
-
-  const topPerformers = useMemo(() => {
-    const scored = recentPosts
-      .map((r) => ({ row: r, score: computeEngagementScore(r) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
-    return scored.map((x) => x.row);
-  }, [recentPosts]);
-  const topPerformerKeys = useMemo(
-    () => new Set(topPerformers.map((r) => `${r.platform}:${r.post_id}`)),
-    [topPerformers],
-  );
-
-  const orderedPosts = useMemo(() => {
-    if (platformFilter !== "all") return filteredPosts;
-    const pinned: SocialMetricRow[] = [];
-    const rest: SocialMetricRow[] = [];
-    for (const post of filteredPosts) {
-      (topPerformerKeys.has(`${post.platform}:${post.post_id}`) ? pinned : rest).push(post);
-    }
-    return [...pinned, ...rest];
-  }, [filteredPosts, platformFilter, topPerformerKeys]);
-
   const handleRefreshAll = useCallback(async () => {
-    setRefreshing("all");
+    setRefreshing(true);
     setSocialError(null);
     try {
       await api.refreshSocialMetrics({ lookbackDays, maxPosts: 200 });
@@ -176,282 +76,45 @@ export function RealEstateSocialMediaPage() {
     } catch (e) {
       setSocialError(e instanceof Error ? e.message : "Refresh failed");
     } finally {
-      setRefreshing(null);
+      setRefreshing(false);
     }
   }, [refresh, lookbackDays]);
 
-  const hasData = (totals?.post_count ?? 0) > 0 || avgEngagement != null;
+  const vm = useMemo(
+    () => buildSocialViewModel(snapshot, ideas, recentPosts, lookbackDays, Date.now()),
+    [snapshot, ideas, recentPosts, lookbackDays],
+  );
+
+  // Title + gateway status + job count + Refresh all live in the breadcrumb bar
+  // (no separate in-page hero), matching Memory and the other hub pages.
+  const activeJobs = data.cronJobs.filter((job) => job.enabled).length;
+  useHubHeader("Social Media", data, {
+    onRefresh: refresh,
+    refreshing: loadingSocial,
+    afterExtra: (
+      <>
+        <span className="text-muted-foreground/45">·</span>
+        <span>
+          {activeJobs} job{activeJobs === 1 ? "" : "s"}
+        </span>
+      </>
+    ),
+  });
 
   return (
-    <HubShell
-      data={data}
-      eyebrow="Social Studio"
-      icon={Megaphone}
-      title="Social Media"
-    >
-      {hasData ? (
-        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-xs text-muted-foreground">
-          <span>
-            <span className="font-medium tabular-nums text-foreground">
-              {totals?.post_count ?? 0}
-            </span>{" "}
-            posts
-          </span>
-          <span>
-            <span className="tabular-nums text-foreground">{formatCompact(totals?.reach)}</span>{" "}
-            reach
-          </span>
-          {avgEngagement != null && (
-            <span>
-              <span className="tabular-nums text-foreground">{formatPct(avgEngagement, 2)}</span>{" "}
-              avg engagement
-            </span>
-          )}
-          {avgHook != null && (
-            <span>
-              <span className="tabular-nums text-foreground">{formatPct(avgHook, 2)}</span>{" "}
-              avg hook rate
-            </span>
-          )}
-        </div>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          Weekly content engine runs Monday 7am Pacific. Connect a social platform in Channels to populate this view.
-        </p>
-      )}
-
-      {socialError && (
-        <p className="px-1 py-1 text-xs text-destructive">{socialError}</p>
-      )}
-
-      {snapshot && snapshot.exists === false && (
-        <p className="px-1 py-1 text-xs text-muted-foreground/80">
-          No snapshot yet. Weekly content engine runs Mondays 7am Pacific.{" "}
-          {snapshot.message ?? "Connect at least one social platform in Channels to begin."}
-        </p>
-      )}
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle className="flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-primary" />
-              AI idea approval queue
-            </CardTitle>
-            <div className="flex items-center gap-2">
-              <Badge variant={ideas.length ? "warning" : "success"}>{ideas.length}</Badge>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={refresh}
-                disabled={loadingSocial}
-                aria-label="Refresh idea queue"
-              >
-                <RefreshCw className={cn("h-3.5 w-3.5", loadingSocial && "animate-spin")} />
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          {loadingSocial && !ideas.length ? (
-            <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading ideas…</p>
-          ) : ideas.length === 0 ? (
-            <p className="px-1 py-1 text-xs text-muted-foreground/80">
-              No ideas waiting — the engine queues 5–10 every Monday morning.
-            </p>
-          ) : (
-            ideas.map((idea) => (
-              <IdeaCard
-                key={idea.source_record_id}
-                idea={idea}
-                busy={actingOn === idea.source_record_id}
-                onAction={(action, edit) => handleIdeaAction(idea.source_record_id, action, edit)}
-              />
-            ))
-          )}
-        </CardContent>
-      </Card>
-
-      {platformList.length > 0 && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between gap-3">
-              <CardTitle className="flex items-center gap-2">
-                <Award className="h-4 w-4" />
-                Per-platform performance
-              </CardTitle>
-              {wow && (
-                <div className="font-mono-ui flex items-center gap-3 text-[0.7rem] text-muted-foreground">
-                  <span>
-                    Posts WoW{" "}
-                    <span className={wow.post_count_delta >= 0 ? "text-success" : "text-destructive"}>
-                      {wow.post_count_delta >= 0 ? "+" : ""}
-                      {wow.post_count_delta}
-                    </span>
-                  </span>
-                  {wow.engagement_rate_delta != null && (
-                    <span>
-                      Eng WoW{" "}
-                      <span className={wow.engagement_rate_delta >= 0 ? "text-success" : "text-destructive"}>
-                        {wow.engagement_rate_delta >= 0 ? "+" : ""}
-                        {(wow.engagement_rate_delta * 100).toFixed(2)}pp
-                      </span>
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-              {platformList.map(([platform, block]) => (
-                <PlatformBlockCard key={platform} platform={platform} block={block} />
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      <Card>
-        <CardHeader className="space-y-1">
-          <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
-            <div className="space-y-1">
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <Activity className="h-4 w-4" />
-                Your posts
-              </CardTitle>
-              <p className="text-xs text-muted-foreground">
-                {recentPosts.length === 0
-                  ? "Nothing pulled yet"
-                  : `${recentPosts.length} pulled · last ${lookbackDays} days`}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span>Lookback</span>
-                <select
-                  value={lookbackDays}
-                  onChange={(e) => setLookbackDays(Number(e.target.value))}
-                  disabled={refreshing !== null}
-                  aria-label="Lookback period"
-                  className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
-                >
-                  <option value={30}>30 days</option>
-                  <option value={90}>90 days</option>
-                  <option value={180}>180 days</option>
-                  <option value={365}>1 year</option>
-                  <option value={730}>2 years</option>
-                </select>
-              </label>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefreshAll}
-                disabled={refreshing !== null}
-              >
-                {refreshing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3.5 w-3.5" />
-                )}
-                {refreshing ? "Pulling…" : "Refresh"}
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-8">
-          {recentPosts.length > 0 && (
-            <div className="border-b border-border/40 pb-4">
-              <PlatformTablist
-                tabs={[
-                  { label: "all", count: recentPosts.length },
-                  ...Object.entries(platformCounts)
-                    .sort(([, a], [, b]) => b - a)
-                    .map(([p, c]) => ({ label: p, count: c })),
-                ]}
-                active={platformFilter}
-                onChange={setPlatformFilter}
-                idPrefix={tabIdPrefix}
-                panelId={panelId}
-              />
-            </div>
-          )}
-          <div
-            id={panelId}
-            role="tabpanel"
-            aria-labelledby={activeTabId}
-            tabIndex={0}
-            className="space-y-10 focus:outline-none"
-          >
-            {platformFilter === "youtube" ? (
-              <YouTubeTabView posts={recentPosts} onSelect={setSelectedPost} />
-            ) : (
-              <>
-                {(["instagram", "facebook", "tiktok"].includes(platformFilter) ||
-                  platformFilter === "all") && (
-                  <PlatformRankingsBlock posts={filteredPosts} onSelect={setSelectedPost} />
-                )}
-                {filteredPosts.length === 0 ? (
-                  <p className="px-1 py-1 text-xs text-muted-foreground/80">
-                    {recentPosts.length === 0
-                      ? "No posts pulled yet — click Refresh to pull live from every connected account."
-                      : `No ${platformFilter} posts in the last ${lookbackDays} days. Connect ${platformFilter} or extend the lookback.`}
-                  </p>
-                ) : (
-                  <section className="space-y-4" aria-labelledby="all-posts-heading">
-                    <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                      <h3
-                        id="all-posts-heading"
-                        className="text-sm font-medium text-foreground"
-                      >
-                        All posts
-                      </h3>
-                      <span
-                        className="text-xs text-muted-foreground tabular-nums"
-                        aria-live="polite"
-                      >
-                        {Math.min(postLimit, filteredPosts.length)} of {filteredPosts.length}
-                      </span>
-                    </header>
-                    <div className="grid gap-4 items-start grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
-                      {orderedPosts.slice(0, postLimit).map((row) => (
-                        <RealVideoCard
-                          key={`${row.platform}:${row.post_id}`}
-                          row={row}
-                          onClick={() => setSelectedPost(row)}
-                          highlight={topPerformerKeys.has(`${row.platform}:${row.post_id}`)}
-                        />
-                      ))}
-                    </div>
-                    {filteredPosts.length > postLimit && (
-                      <div className="mt-2 flex flex-wrap justify-center gap-2 border-t border-border/40 pt-4">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setPostLimit((n) => n + 100)}
-                        >
-                          Show 100 more ({filteredPosts.length - postLimit} remaining)
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setPostLimit(filteredPosts.length)}
-                        >
-                          Show all ({filteredPosts.length})
-                        </Button>
-                      </div>
-                    )}
-                  </section>
-                )}
-              </>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {selectedPost && (
-        <PostDetailModal row={selectedPost} onClose={() => setSelectedPost(null)} />
-      )}
-    </HubShell>
+    <div className="sm-root">
+      {socialError && <div className="sm-error mono">{socialError}</div>}
+      <SocialBoard
+        vm={vm}
+        refreshing={refreshing}
+        loadingIdeas={loadingSocial}
+        actingId={actingOn}
+        lookbackDays={lookbackDays}
+        onRefresh={refresh}
+        onRefreshAll={handleRefreshAll}
+        onLookback={setLookbackDays}
+        onIdeaAction={handleIdeaAction}
+      />
+    </div>
   );
 }

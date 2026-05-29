@@ -76,14 +76,12 @@ function flagsForPath(pathname: string): HubRequestFlags {
     pathname === "/" ||
     routeHas(pathname, "/today") ||
     routeHas(pathname, "/leads") ||
-    routeHas(pathname, "/admin") ||
-    routeHas(pathname, "/tasks");
+    routeHas(pathname, "/admin");
   const includeSourceInbox =
     pathname === "/" ||
     routeHas(pathname, "/today") ||
     routeHas(pathname, "/leads");
   const includeAdminTaskData =
-    routeHas(pathname, "/tasks") ||
     routeHas(pathname, "/today") ||
     pathname === "/";
   const includeOrchestration = pathname === "/" || routeHas(pathname, "/today");

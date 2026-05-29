@@ -43,9 +43,6 @@ export function resolvePageTitle(
   if (normalized === "/marketing") {
     return "Social Media";
   }
-  if (normalized === "/tasks") {
-    return "Tasks";
-  }
   if (normalized === "/approvals") {
     return "Today";
   }
