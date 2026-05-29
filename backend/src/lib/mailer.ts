@@ -118,12 +118,12 @@ export function passwordResetEmail(opts: {
   const html = baseTemplate({
     preheader: "Use the link below to set a new password.",
     body: `
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#1a1b1a;">Someone requested a password reset for your Elevate account. If that was you, set a new password using the button below.</p>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#ECECEC;">Someone requested a password reset for your Elevate account. If that was you, set a new password using the button below.</p>
       <p style="margin:0 0 24px;">
-        <a href="${escapeAttr(opts.resetUrl)}" style="display:inline-block;background:#d97757;color:#fff;font-weight:600;font-size:15px;padding:12px 22px;border-radius:6px;text-decoration:none;">Reset password</a>
+        <a href="${escapeAttr(opts.resetUrl)}" style="display:inline-block;background:#8A8A8A;color:#0F0F0F;font-weight:600;font-size:15px;padding:12px 22px;border-radius:6px;text-decoration:none;">Reset password</a>
       </p>
-      <p style="margin:0 0 8px;font-size:13px;color:#5a5c5a;">Link expires in ${minutes} minutes.</p>
-      <p style="margin:0;font-size:13px;color:#5a5c5a;">If you didn't request this, you can ignore this email — your password won't change.</p>
+      <p style="margin:0 0 8px;font-size:13px;color:#A0A0A0;">Link expires in ${minutes} minutes.</p>
+      <p style="margin:0;font-size:13px;color:#A0A0A0;">If you didn't request this, you can ignore this email — your password won't change.</p>
     `,
   });
   return { subject, html };
@@ -138,12 +138,12 @@ export function loginCodeEmail(opts: {
   const html = baseTemplate({
     preheader: "Your one-time login code.",
     body: `
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#1a1b1a;">Use this code to sign in to Elevate:</p>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.55;color:#ECECEC;">Use this code to sign in to Elevate:</p>
       <p style="margin:0 0 24px;">
-        <span style="display:inline-block;background:#f3f1ee;color:#1a1b1a;font-weight:700;font-size:30px;letter-spacing:8px;padding:14px 24px;border-radius:8px;font-family:monospace;">${escapeHtml(opts.code)}</span>
+        <span style="display:inline-block;background:#0F0F0F;color:#ECECEC;border:1px solid #2A2A2A;font-weight:700;font-size:30px;letter-spacing:8px;padding:14px 24px;border-radius:8px;font-family:monospace;">${escapeHtml(opts.code)}</span>
       </p>
-      <p style="margin:0 0 8px;font-size:13px;color:#5a5c5a;">Code expires in ${minutes} minutes.</p>
-      <p style="margin:0;font-size:13px;color:#5a5c5a;">If you didn't try to sign in, you can ignore this email.</p>
+      <p style="margin:0 0 8px;font-size:13px;color:#A0A0A0;">Code expires in ${minutes} minutes.</p>
+      <p style="margin:0;font-size:13px;color:#A0A0A0;">If you didn't try to sign in, you can ignore this email.</p>
     `,
   });
   return { subject, html };
@@ -170,21 +170,26 @@ export function inviteEmail(opts: {
 }
 
 function baseTemplate(opts: { preheader: string; body: string }): string {
+  // Dark graphite shell to match the desktop/web app (#0F0F0F canvas, #1A1A1A
+  // card, #2A2A2A borders, #ECECEC text, #8A8A8A brand mark). bgcolor attrs +
+  // color-scheme hints help clients honor the dark background; some still force
+  // their own light/dark, which is unavoidable in HTML email.
   return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Elevate</title></head>
-<body style="margin:0;padding:0;background:#f5f4f2;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-<span style="display:none;font-size:1px;color:#f5f4f2;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(opts.preheader)}</span>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f5f4f2;">
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark light"><title>Elevate</title></head>
+<body style="margin:0;padding:0;background:#0F0F0F;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,sans-serif;">
+<span style="display:none;font-size:1px;color:#0F0F0F;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(opts.preheader)}</span>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#0F0F0F" style="background:#0F0F0F;">
   <tr><td align="center" style="padding:40px 20px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;background:#ffffff;border-radius:10px;border:1px solid #e5e3df;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" bgcolor="#1A1A1A" style="max-width:520px;background:#1A1A1A;border-radius:12px;border:1px solid #2A2A2A;">
       <tr><td style="padding:28px 32px 8px;">
-        <div style="font-size:18px;font-weight:600;letter-spacing:-0.01em;color:#1a1b1a;">Elevate</div>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:#8A8A8A;vertical-align:middle;margin-right:9px;"></span><span style="font-size:16px;font-weight:600;letter-spacing:-0.01em;color:#ECECEC;vertical-align:middle;">Elevate</span>
       </td></tr>
       <tr><td style="padding:12px 32px 32px;">
         ${opts.body}
       </td></tr>
-      <tr><td style="padding:0 32px 24px;border-top:1px solid #f0eeeb;">
-        <p style="margin:18px 0 0;font-size:12px;color:#8a8c8a;">Elevation Real Estate HQ · <a href="https://elevationrealestatehq.com" style="color:#8a8c8a;text-decoration:underline;">elevationrealestatehq.com</a></p>
+      <tr><td style="padding:0 32px 24px;border-top:1px solid #2A2A2A;">
+        <p style="margin:18px 0 0;font-size:12px;color:#8A8A8A;">Elevation Real Estate HQ · <a href="https://elevationrealestatehq.com" style="color:#8A8A8A;text-decoration:underline;">elevationrealestatehq.com</a></p>
       </td></tr>
     </table>
   </td></tr>
