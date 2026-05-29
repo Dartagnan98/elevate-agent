@@ -3645,6 +3645,34 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
         "docs_url": "https://github.com/QwenLM/qwen-code",
         "status_fn": None,  # dispatched via auth.get_qwen_auth_status
     },
+    {
+        "id": "xai-oauth",
+        "name": "xAI Grok (SuperGrok subscription)",
+        # Loopback PKCE browser login (auth.x.ai). Surfaced as `external` so the
+        # card shows the one-shot `elevate auth add xai-oauth` command + live
+        # connection status, mirroring how Qwen is handled — no in-dashboard
+        # OAuth server needed.
+        "flow": "external",
+        "cli_command": "elevate auth add xai-oauth",
+        "docs_url": "https://elevate-agent.nousresearch.com/docs/guides/xai-grok-oauth",
+        "status_fn": None,  # dispatched via auth.get_xai_oauth_auth_status
+    },
+    {
+        "id": "google-gemini-cli",
+        "name": "Google Gemini (OAuth — free tier)",
+        "flow": "external",
+        "cli_command": "elevate auth add google-gemini-cli",
+        "docs_url": "https://github.com/google-gemini/gemini-cli",
+        "status_fn": None,  # dispatched via auth.get_gemini_oauth_auth_status
+    },
+    {
+        "id": "minimax-oauth",
+        "name": "MiniMax (OAuth Coding Plan)",
+        "flow": "external",
+        "cli_command": "elevate auth add minimax-oauth",
+        "docs_url": "https://www.minimax.io",
+        "status_fn": None,  # dispatched via auth.get_minimax_oauth_auth_status
+    },
 )
 
 
@@ -3687,6 +3715,37 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
                 "token_preview": _truncate_token(raw.get("access_token")),
                 "expires_at": raw.get("expires_at"),
                 "has_refresh_token": bool(raw.get("has_refresh_token")),
+            }
+        if provider_id == "xai-oauth":
+            raw = hauth.get_xai_oauth_auth_status()
+            return {
+                "logged_in": bool(raw.get("logged_in")),
+                "source": raw.get("source") or "xai_oauth",
+                "source_label": raw.get("auth_mode") or "xAI Grok",
+                "token_preview": _truncate_token(raw.get("api_key")),
+                "expires_at": None,
+                "has_refresh_token": bool(raw.get("api_key")),
+                "last_refresh": raw.get("last_refresh"),
+            }
+        if provider_id == "google-gemini-cli":
+            raw = hauth.get_gemini_oauth_auth_status()
+            return {
+                "logged_in": bool(raw.get("logged_in")),
+                "source": raw.get("source") or "google_oauth",
+                "source_label": raw.get("email") or "Google Gemini",
+                "token_preview": _truncate_token(raw.get("api_key")),
+                "expires_at": raw.get("expires_at_ms"),
+                "has_refresh_token": bool(raw.get("logged_in")),
+            }
+        if provider_id == "minimax-oauth":
+            raw = hauth.get_minimax_oauth_auth_status()
+            return {
+                "logged_in": bool(raw.get("logged_in")),
+                "source": "minimax_oauth",
+                "source_label": f"MiniMax ({raw.get('region', 'global')})",
+                "token_preview": None,
+                "expires_at": raw.get("expires_at"),
+                "has_refresh_token": bool(raw.get("logged_in")),
             }
     except Exception as e:
         return {"logged_in": False, "error": str(e)}

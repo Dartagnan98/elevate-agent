@@ -626,6 +626,24 @@ export function AgentOnboardingWizard({
                         },
                         { value: "nous", label: `Nous Portal${connectedProviderIds.has("nous") ? " · connected" : ""}` },
                         { value: "qwen", label: `Qwen${connectedProviderIds.has("qwen-oauth") ? " · connected" : ""}` },
+                        {
+                          value: "xai",
+                          label: `xAI (Grok)${connectedProviderIds.has("xai-oauth") || connectedProviderIds.has("xai") ? " · connected" : ""}`,
+                        },
+                        {
+                          value: "gemini",
+                          label: `Google Gemini${connectedProviderIds.has("google-gemini-cli") || connectedProviderIds.has("gemini") ? " · connected" : ""}`,
+                        },
+                        {
+                          value: "minimax",
+                          label: `MiniMax${connectedProviderIds.has("minimax-oauth") || connectedProviderIds.has("minimax") ? " · connected" : ""}`,
+                        },
+                        { value: "deepseek", label: "DeepSeek (paste key in .env)" },
+                        { value: "zai", label: "Z.AI / GLM (paste key in .env)" },
+                        { value: "kimi-coding", label: "Kimi / Moonshot (paste key in .env)" },
+                        { value: "nvidia", label: "NVIDIA NIM (paste key in .env)" },
+                        { value: "huggingface", label: "Hugging Face (paste key in .env)" },
+                        { value: "ollama-cloud", label: "Ollama Cloud (paste key in .env)" },
                         { value: "openrouter", label: "OpenRouter (paste key in .env)" },
                         { value: "azure_openai", label: "Azure OpenAI (paste key in .env)" },
                       ]}
@@ -655,6 +673,7 @@ export function AgentOnboardingWizard({
                         { value: "openai", label: "OpenAI" },
                         { value: "voyage", label: "Voyage AI" },
                         { value: "cohere", label: "Cohere" },
+                        { value: "ollama", label: "Ollama (local server)" },
                         { value: "local", label: "Local (sentence-transformers)" },
                       ]}
                     />
@@ -1770,6 +1789,62 @@ const API_KEY_FIELDS: ApiKeyField[] = [
     description: "Cohere embeddings + reranker.",
     docsUrl: "https://dashboard.cohere.com/api-keys",
     placeholder: "cohere key",
+  },
+  {
+    envKey: "XAI_API_KEY",
+    label: "xAI (Grok)",
+    description: "Grok models via direct API key. (Subscription login is the xAI Grok card above.)",
+    docsUrl: "https://console.x.ai/",
+    placeholder: "xai-...",
+  },
+  {
+    envKey: "GEMINI_API_KEY",
+    label: "Google AI Studio (Gemini)",
+    description: "Gemini models via direct API key. (Free OAuth login is the Google Gemini card above.)",
+    docsUrl: "https://aistudio.google.com/apikey",
+    placeholder: "AIza...",
+  },
+  {
+    envKey: "DEEPSEEK_API_KEY",
+    label: "DeepSeek",
+    description: "DeepSeek-V3 / R1 / coder — direct API.",
+    docsUrl: "https://platform.deepseek.com/api_keys",
+    placeholder: "sk-...",
+  },
+  {
+    envKey: "GLM_API_KEY",
+    label: "Z.AI / GLM",
+    description: "Zhipu GLM models — direct API.",
+    docsUrl: "https://z.ai/manage-apikey/apikey-list",
+    placeholder: "glm key",
+  },
+  {
+    envKey: "KIMI_API_KEY",
+    label: "Kimi / Moonshot",
+    description: "Kimi Coding Plan (api.kimi.com) & Moonshot API.",
+    docsUrl: "https://platform.moonshot.ai/console/api-keys",
+    placeholder: "sk-...",
+  },
+  {
+    envKey: "MINIMAX_API_KEY",
+    label: "MiniMax",
+    description: "MiniMax global direct API. (OAuth Coding Plan is the MiniMax card above.)",
+    docsUrl: "https://www.minimax.io/platform/user-center/basic-information",
+    placeholder: "minimax key",
+  },
+  {
+    envKey: "NVIDIA_API_KEY",
+    label: "NVIDIA NIM",
+    description: "Nemotron models via build.nvidia.com.",
+    docsUrl: "https://build.nvidia.com/",
+    placeholder: "nvapi-...",
+  },
+  {
+    envKey: "HF_TOKEN",
+    label: "Hugging Face",
+    description: "Inference Providers — 20+ open models.",
+    docsUrl: "https://huggingface.co/settings/tokens",
+    placeholder: "hf_...",
   },
 ];
 
