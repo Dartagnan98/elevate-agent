@@ -1,38 +1,29 @@
 import { lazy, Suspense, useState } from "react";
-import type { CSSProperties } from "react";
-import {
-  Brain,
-  CheckCircle2,
-  Clock,
-  Network,
-} from "lucide-react";
-import type { AgentHubMemoryNode } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { cn, isoTimeAgo } from "@/lib/utils";
-import {
-  HubShell,
-  useHubHeader,
-  useRealEstateHubData,
-} from "@/pages/real-estate-hub/_shared";
+import type { ComponentType, CSSProperties, SVGProps } from "react";
+import { Brain, CheckCircle2, Clock, Network } from "lucide-react";
+import type { AgentHubMemoryEdge, AgentHubMemoryNode } from "@/lib/api";
+import { isoTimeAgo } from "@/lib/utils";
+import { LoadingState, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import "./memory.css";
 
 const MemoryConstellation = lazy(() =>
   import("@/components/MemoryConstellation").then((m) => ({ default: m.MemoryConstellation })),
 );
 
-// Entity hue presets. The graph tints its nodes/edges off `--color-primary`
-// (see MemoryConstellation graphStyle color-mix expressions), so overriding
-// that var on the graph wrapper re-hues the constellation without touching the
-// rest of the app's theme. No backing API — this is a local view preference.
+type GraphDensity = "expanded" | "compact";
+
+// Entity-hue presets. The graph tints its entity / project / community / plaud
+// nodes off `--color-primary` (see MemoryConstellation graphStyle color-mix
+// expressions), so overriding that var on the page root re-hues the
+// constellation without touching the rest of the app. No backing API — this is
+// a local view preference (the design exposed it via a Tweaks panel we stripped).
 const ENTITY_HUES: { name: string; value: string }[] = [
-  { name: "silver", value: "#CBD0D8" },
   { name: "indigo", value: "#8E8CF2" },
   { name: "violet", value: "#B07CF0" },
   { name: "sky", value: "#6FA8F5" },
   { name: "mint", value: "#56D6A6" },
+  { name: "silver", value: "#CBD0D8" },
 ];
-
-type GraphDensity = "expanded" | "compact";
 
 function MemoryGraphView({
   compact,
@@ -41,29 +32,18 @@ function MemoryGraphView({
 }: {
   compact: boolean;
   nodes: AgentHubMemoryNode[];
-  edges: { source: string; target: string; type: string }[];
+  edges: AgentHubMemoryEdge[];
 }) {
   if (nodes.length === 0) {
     return (
-      <div className="font-mono-ui flex h-48 items-center justify-center px-4 text-center text-[0.72rem] text-muted-foreground/80">
+      <div className="mem-graph-empty mono">
         Graph is empty — memory will populate as agents process sessions.
       </div>
     );
   }
   return (
-    <Suspense
-      fallback={
-        <div className="font-mono-ui flex h-64 items-center justify-center text-[0.72rem] text-muted-foreground/80">
-          Loading graph…
-        </div>
-      }
-    >
-      <MemoryConstellation
-        className="max-h-[38rem] min-h-[24rem]"
-        compact={compact}
-        edges={edges}
-        nodes={nodes}
-      />
+    <Suspense fallback={<div className="mem-graph-empty mono">Loading graph…</div>}>
+      <MemoryConstellation className="mem-constellation-host" compact={compact} edges={edges} nodes={nodes} />
     </Suspense>
   );
 }
@@ -73,11 +53,22 @@ export function RealEstateMemoryPage() {
   useHubHeader("Memory", data);
   const memory = data.snapshot?.memory;
 
-  // View preferences (no backing API — local, per-view tweaks mirroring the
-  // design's "Tweaks" controls).
-  // TODO: persist density + entity hue if these should survive reloads.
+  // Local view preferences (no backing API). TODO: persist density + entity hue
+  // if these should survive reloads.
   const [density, setDensity] = useState<GraphDensity>("expanded");
   const [entityHue, setEntityHue] = useState<string>(ENTITY_HUES[0].value);
+
+  // Preserve HubShell's loading guard.
+  if (data.loading && !data.snapshot && !data.status) {
+    return (
+      <div className="mem-root">
+        <LoadingState />
+      </div>
+    );
+  }
+
+  const gatewayOnline = Boolean(data.snapshot?.gateway.running || data.status?.gateway_running);
+  const activeJobs = data.cronJobs.filter((job) => job.enabled).length;
 
   const pending = memory?.journal.pending ?? 0;
   const failed = memory?.journal.failed ?? 0;
@@ -97,128 +88,129 @@ export function RealEstateMemoryPage() {
     .reverse()[0];
 
   const embeddingsOn = Boolean(memory?.embedding.enabled);
+  const embeddingModel = memory?.embedding.model || "On";
 
   return (
-    <HubShell
-      data={data}
-      eyebrow="Memory Graph"
-      icon={Brain}
-      title="Memory"
-    >
-      <div className="grid gap-3 sm:grid-cols-3">
-        <SummaryTile
-          icon={Clock}
-          label="Pipeline"
-          value={pipelineState.label}
-          tone={pipelineState.tone}
-        />
-        <SummaryTile
-          icon={CheckCircle2}
-          label="Last ingest"
-          value={latestIngest ? isoTimeAgo(latestIngest) : "Never"}
-          tone={latestIngest ? "ok" : "warn"}
-        />
-        <SummaryTile
-          icon={Brain}
-          label="Embeddings"
-          value={embeddingsOn ? memory?.embedding.model || "On" : "Off"}
-          tone={embeddingsOn ? "ok" : "warn"}
-        />
-      </div>
+    <div className="mem-root" style={{ "--color-primary": entityHue } as CSSProperties}>
+      <div className="mem-inner">
+        {/* Title/status/Refresh live in the app page header (useHubHeader),
+            matching the Admin/Leads single-top-bar pattern — no in-page
+            duplicate top bar here. */}
+        <section className="mem-hero">
+          <div className="mem-hero-l">
+            <span className="mem-hero-icon">
+              <Brain width="17" height="17" />
+            </span>
+            <div>
+              <div className="mem-hero-eyebrow mono">Memory graph</div>
+              <h1 className="mem-hero-title">Memory</h1>
+            </div>
+          </div>
+          <div className="mem-hero-r mono">
+            <span className={gatewayOnline ? "ok" : "err"}>
+              <span className="mem-r-dot" />
+              {gatewayOnline ? "Agent online" : "Agent offline"}
+            </span>
+            <span className="dim">·</span>
+            <span className="dim">
+              {activeJobs} job{activeJobs === 1 ? "" : "s"}
+            </span>
+          </div>
+        </section>
 
-      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <Card className="overflow-hidden bg-card p-0">
-          <CardHeader>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <CardTitle className="flex items-center gap-2">
-                <Network className="h-4 w-4 text-primary" />
+        <div className="mem-divider" />
+
+        <div className="mem-tiles">
+          <SummaryTile icon={Clock} label="Pipeline" value={pipelineState.label} tone={pipelineState.tone} />
+          <SummaryTile
+            icon={CheckCircle2}
+            label="Last ingest"
+            value={latestIngest ? isoTimeAgo(latestIngest) : "Never"}
+            tone={latestIngest ? "ok" : "warn"}
+          />
+          <SummaryTile
+            icon={Brain}
+            label="Embeddings"
+            value={embeddingsOn ? embeddingModel : "Off"}
+            tone={embeddingsOn ? "neutral" : "warn"}
+          />
+        </div>
+
+        <div className="mem-grid">
+          <div className="mem-card mem-graph-card">
+            <div className="mem-card-head">
+              <div className="mem-card-title">
+                <Network width="15" height="15" />
                 Knowledge graph
-              </CardTitle>
-              <div className="flex items-center gap-3">
+              </div>
+              <div className="mem-graph-controls">
                 <DensityToggle value={density} onChange={setDensity} />
                 <EntityHuePicker value={entityHue} onChange={setEntityHue} />
-                <Badge variant={embeddingsOn ? "success" : "outline"}>
+                <span className={"mem-badge " + (embeddingsOn ? "on" : "")}>
                   {embeddingsOn ? "Embeddings on" : "Embeddings off"}
-                </Badge>
+                </span>
               </div>
             </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            {/* Scope the hue override to the graph so it re-tints the
-                constellation without re-theming the rest of the page. */}
-            <div style={{ "--color-primary": entityHue } as CSSProperties}>
+            <div className="mem-card-body">
               <MemoryGraphView
                 compact={density === "compact"}
                 nodes={memory?.graph.nodes ?? []}
                 edges={memory?.graph.edges ?? []}
               />
             </div>
-          </CardContent>
-        </Card>
+          </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent ingest</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="text-muted-foreground">Active sessions</span>
-              <span className="font-medium text-foreground tabular-nums">{activeSessionCount}</span>
+          <div className="mem-card">
+            <div className="mem-card-head">
+              <div className="mem-card-title">Recent ingest</div>
             </div>
-            <div className="rounded-md border border-border bg-card p-3 text-xs leading-5 text-muted-foreground">
-              <div className="font-medium text-foreground">
-                {memory?.provider ?? "memory"} · {memory?.embedding.provider ?? "no embedding"}
+            <div className="mem-card-body mem-ingest">
+              <div className="mem-ingest-active">
+                <span className="dim">Active sessions</span>
+                <span className="mem-ingest-count mono">{activeSessionCount}</span>
               </div>
-              <div className="mt-1 truncate font-mono-ui">{memory?.db_path ?? "No memory database path yet."}</div>
-            </div>
-            {recentSessions.length > 0 ? (
-              <div className="space-y-1.5">
-                <div className="px-1 text-[0.68rem] font-medium uppercase tracking-wider text-muted-foreground">
-                  Sessions
+              <div className="mem-provider">
+                <div className="mem-provider-name">
+                  {memory?.provider ?? "memory"} · {memory?.embedding.provider ?? "no embedding"}
                 </div>
-                <div className="space-y-1">
+                <div className="mem-provider-path mono">{memory?.db_path ?? "No memory database path yet."}</div>
+              </div>
+              <div className="mem-sessions-label">Sessions</div>
+              {recentSessions.length > 0 ? (
+                <div className="mem-sessions">
                   {recentSessions.slice(0, 6).map((session) => (
-                    <div
-                      key={`${session.session_id}-${session.session_day}`}
-                      className="flex items-center justify-between gap-2 rounded-md border border-border/50 bg-background/40 px-2.5 py-1.5 text-xs"
-                    >
-                      <div className="min-w-0 truncate">
-                        <span className="font-medium text-foreground">{session.session_day}</span>
-                        <span className="ml-1.5 text-muted-foreground/70">
+                    <div className="mem-session" key={`${session.session_id}-${session.session_day}`}>
+                      <div className="mem-session-l">
+                        <span className="mem-session-day">{session.session_day}</span>
+                        <span className="mem-session-ago">
                           {session.latest_created_at ? isoTimeAgo(session.latest_created_at) : ""}
                         </span>
                       </div>
-                      <Badge variant="outline" className="shrink-0">{session.total}</Badge>
+                      <span className="mem-session-total mono">{session.total}</span>
                     </div>
                   ))}
                 </div>
-              </div>
-            ) : (
-              <p className="px-1 text-xs text-muted-foreground/80">
-                No recent ingest sessions.
-              </p>
-            )}
-          </CardContent>
-        </Card>
+              ) : (
+                <div className="mem-sessions-empty">No recent ingest sessions.</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {data.error && (
+          <div className="mem-tile mem-tile-value warn" style={{ marginTop: 16 }}>
+            {data.error}
+          </div>
+        )}
       </div>
-    </HubShell>
+    </div>
   );
 }
 
-function DensityToggle({
-  value,
-  onChange,
-}: {
-  value: GraphDensity;
-  onChange: (value: GraphDensity) => void;
-}) {
+function DensityToggle({ value, onChange }: { value: GraphDensity; onChange: (value: GraphDensity) => void }) {
   const options: GraphDensity[] = ["expanded", "compact"];
   return (
-    <div
-      className="inline-flex items-center gap-0.5 rounded-md border border-border/60 bg-background/60 p-0.5"
-      role="radiogroup"
-      aria-label="Graph density"
-    >
+    <div className="mem-density" role="radiogroup" aria-label="Graph density">
       {options.map((option) => (
         <button
           key={option}
@@ -226,12 +218,7 @@ function DensityToggle({
           role="radio"
           aria-checked={value === option}
           onClick={() => onChange(option)}
-          className={cn(
-            "font-mono-ui rounded px-2 py-0.5 text-[0.66rem] capitalize transition-colors",
-            value === option
-              ? "bg-primary/12 text-primary"
-              : "text-muted-foreground hover:text-foreground",
-          )}
+          className={"mem-density-opt mono" + (value === option ? " active" : "")}
         >
           {option}
         </button>
@@ -240,15 +227,9 @@ function DensityToggle({
   );
 }
 
-function EntityHuePicker({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-}) {
+function EntityHuePicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   return (
-    <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Entity hue">
+    <div className="mem-accent-row" role="radiogroup" aria-label="Entity hue">
       {ENTITY_HUES.map((hue) => (
         <button
           key={hue.value}
@@ -258,10 +239,7 @@ function EntityHuePicker({
           title={hue.name}
           onClick={() => onChange(hue.value)}
           style={{ background: hue.value }}
-          className={cn(
-            "h-4 w-4 rounded-full ring-1 ring-inset ring-black/10 transition-transform hover:scale-110",
-            value === hue.value && "ring-2 ring-offset-1 ring-offset-card ring-foreground/70",
-          )}
+          className={"mem-accent-sw" + (value === hue.value ? " active" : "")}
         />
       ))}
     </div>
@@ -274,26 +252,18 @@ function SummaryTile({
   value,
   tone,
 }: {
-  icon: typeof Clock;
+  icon: ComponentType<SVGProps<SVGSVGElement>>;
   label: string;
   value: string | number;
-  tone: "ok" | "warn" | "active";
+  tone: "ok" | "warn" | "active" | "neutral";
 }) {
-  const valueClass =
-    tone === "warn"
-      ? "text-warning"
-      : tone === "active"
-        ? "text-primary"
-        : "text-foreground";
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-3">
-      <div className="font-mono-ui flex items-center gap-2 text-[0.68rem] font-medium uppercase tracking-wider text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
+    <div className="mem-tile">
+      <div className="mem-tile-label mono">
+        <Icon width="13" height="13" />
         {label}
       </div>
-      <div className={`mt-1 truncate text-lg font-semibold ${valueClass}`}>
-        {value}
-      </div>
+      <div className={"mem-tile-value " + tone}>{value}</div>
     </div>
   );
 }
