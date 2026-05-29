@@ -1145,8 +1145,14 @@ ipcMain.handle("updater:check", async () => {
 app.setAsDefaultProtocolClient("elevate");
 app.on("open-url", (event) => {
   event.preventDefault();
+  // steal:true brings Elevate to the foreground over the browser the user
+  // clicked the link from — window.focus() alone won't activate a backgrounded
+  // macOS app.
+  app.focus({ steal: true });
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
     openLoginWindow();
   }
 });
