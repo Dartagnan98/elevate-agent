@@ -107,11 +107,10 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
   { id: "intake",     stage: "S2",  name: "Listing Intake",           next: "MLC intake complete + listing docs ready",                  note: "automated · approval" },
   { id: "skyslope",   stage: "S3",  name: "SkySlope & Matrix Prep",   next: "signed docs saved + SkySlope/Matrix prep complete",         note: "automated + background · approval" },
   { id: "go",         stage: "S4",  name: "Marketing Go",             next: "photos cleaned/saved + Marketing Go package ready",         note: "automated + background · approval" },
-  { id: "live",       stage: "S6",  name: "Listing Live / Marketing", next: "Flodesk mailout sent",                                     note: "automated + background · approval" },
-  { id: "offer",      stage: "S7",  name: "Accepted Offer",           next: "accepted-offer dates verified",                            note: "automated + background · approval" },
-  { id: "conditions", stage: "S8",  name: "Condition Removal",        next: "conditions removed + deposit verified",                    note: "automated + background · approval" },
-  { id: "closing",    stage: "S9",  name: "Closing",                  next: "closing package complete",                                 note: "automated · approval" },
-  { id: "closed",     stage: "S10", name: "Closed",                   next: "file closed + nurture queued",                             note: "automated + background" },
+  { id: "live",       stage: "S5",  name: "Listing Live / Marketing", next: "Flodesk mailout sent",                                     note: "automated + background · approval" },
+  { id: "offer",      stage: "S6",  name: "Accepted Offer",           next: "accepted-offer dates verified",                            note: "automated + background · approval" },
+  { id: "conditions", stage: "S7",  name: "Condition Removal",        next: "conditions removed + deposit verified",                    note: "automated + background · approval" },
+  { id: "closed",     stage: "S8",  name: "Closed",                   next: "file closed + nurture queued",                             note: "automated + background" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -119,17 +118,10 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_PIPELINE: PipelinePhase[] = [
-  { id: "intake",       stage: "S0",  name: "Intake",              motion: "manual", next: "Moves on profile verified",               hint: "Profile + budget" },
-  { id: "search",       stage: "S1",  name: "Search Setup",        motion: "manual", next: "Moves on search criteria ready",          hint: "Criteria + MLS" },
-  { id: "tours",        stage: "S2",  name: "Tours",               motion: "manual", next: "Moves on showing notes complete",         hint: "Route + notes" },
-  { id: "followup",     stage: "S3",  name: "Follow-Up",           motion: "manual", next: "Moves on follow-up complete",             hint: "Feedback + fit" },
-  { id: "offer",        stage: "S4",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
-  { id: "accepted",     stage: "S5",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
-  { id: "conditions",   stage: "S6",  name: "Conditions",          motion: "manual", next: "Moves on conditions tracked",             hint: "Inspection + property review" },
-  { id: "removed",      stage: "S7",  name: "Conditions Removed",  motion: "manual", next: "Moves on conditions removed",             hint: "Deposit + dates" },
-  { id: "closing",      stage: "S8",  name: "Closing",             motion: "manual", next: "Moves on closing checklist complete",     hint: "Lawyer + walkthrough" },
-  { id: "possession",   stage: "S9",  name: "Possession",          motion: "manual", next: "Moves on possession follow-up queued",    hint: "Gift + follow-up" },
-  { id: "buyer-closed", stage: "S10", name: "Closed",              motion: "manual", next: "Moves on file archived",                  hint: "Archive + nurture" },
+  { id: "offer",        stage: "S0",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
+  { id: "accepted",     stage: "S1",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
+  { id: "conditions",   stage: "S2",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
+  { id: "closed",       stage: "S4",  name: "Closed",              motion: "manual", next: "Moves on file archived",                  hint: "Archive + nurture" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -141,11 +133,11 @@ export const ADMIN_DEALS: Deal[] = [
   { id: "d2",  phase: "pre-cma",    addr: "BETA MOCK Skyleigh Listing — 610 G…",      line2: "610 Gleneagles Drive, Kamloops, BC",               badge: "Pre-CMA",                 progress: "0/3", next: "Pre-CMA Google Form filled" },
   { id: "d3",  phase: "live",       addr: "B11-7155 Dallas Drive, Kamloops, BC",                 line2: "B11-7155 Dallas Drive, Kamloops, BC",              badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent",       price: "$349,900", mls: "10378689", blocked: true, primary: true },
   { id: "d4",  phase: "live",       addr: "1232 Ellis Street # 1403, Kelowna, B…",         line2: "1232 Ellis Street # 1403, Kelowna, BC V1Y",       badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
-  { id: "d5",  phase: "live",       addr: "1127 Columbia Street, Kamloops, BC…",            line2: "1127 Columbia Street, Kamloops, BC V2C",           badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
+  { id: "d5",  phase: "offer",      addr: "1127 Columbia Street, Kamloops, BC…",            line2: "1127 Columbia Street, Kamloops, BC V2C",           badge: "Accepted Offer",           progress: "0/5", next: "accepted-offer dates verified" },
   { id: "d6",  phase: "live",       addr: "17-750 Fortune Drive, Kamloops, BC",                  line2: "17-750 Fortune Drive, Kamloops, BC",               badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent" },
   { id: "d7",  phase: "live",       addr: "703-525 Nicola Street, Kamloops, BC",                 line2: "703-525 Nicola Street, Kamloops, BC",              badge: "Listing Live / Marketing", progress: "3/5", next: "Flodesk mailout sent" },
   { id: "d8",  phase: "live",       addr: "1872 Red Tail Crescent, Kamloops, BC",                line2: "1872 Red Tail Crescent, Kamloops, BC",             badge: "Listing Live / Marketing", progress: "1/5", next: "Lofty text blast sent" },
-  { id: "d9",  phase: "live",       addr: "1836 Greenfield Avenue # 43, Kamlo…",           line2: "1836 Greenfield Avenue # 43, Kamloops, BC",        badge: "Listing Live / Marketing", progress: "0/5", next: "Just listed blast sent" },
+  { id: "d9",  phase: "offer",      addr: "1836 Greenfield Avenue # 43, Kamlo…",           line2: "1836 Greenfield Avenue # 43, Kamloops, BC",        badge: "Accepted Offer",           progress: "0/5", next: "accepted-offer dates verified" },
   { id: "d10", phase: "conditions", addr: "Lot 3 Eagle Ridge Place, Powell Riv…",          line2: "Lot 3 Eagle Ridge Place, Powell River, BC",        badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
   { id: "d11", phase: "conditions", addr: "460 Nicola St # 801, Kamloops, BC V…",          line2: "460 Nicola St # 801, Kamloops, BC V2C",           badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
   { id: "d12", phase: "conditions", addr: "1616 Hillcrest Avenue, Kamloops, B…",           line2: "1616 Hillcrest Avenue, Kamloops, BC V2B",          badge: "Condition Removal",                          next: "Condition removal / waiver sent" },
@@ -159,9 +151,9 @@ export const ADMIN_DEALS: Deal[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_DEALS: BuyerDeal[] = [
-  { id: "b1", side: "buyer", phase: "tours",  addr: "Priya Devi — buyer track",     line2: "Looking: Brock area, $550–650K, 2BR+",   badge: "Tours",        progress: "2/4", next: "Showing notes for 1872 Red Tail Cres" },
-  { id: "b2", side: "buyer", phase: "search", addr: "Marcus Greene — buyer track",   line2: "Looking: Sahali/Aberdeen, $700K+, 3BR",       badge: "Search Setup", progress: "1/3", next: "MLS criteria saved" },
-  { id: "b3", side: "buyer", phase: "intake", addr: "Sam & Rosie — buyer track",     line2: "Couple, first-time buyers, $400–500K",   badge: "Intake",       progress: "0/2", next: "Profile + budget conversation" },
+  { id: "b1", side: "buyer", phase: "offer",  addr: "Priya Devi — buyer track",     line2: "Looking: Brock area, $550–650K, 2BR+",   badge: "Offer Prep",   progress: "2/4", next: "Offer package ready" },
+  { id: "b2", side: "buyer", phase: "offer", addr: "Marcus Greene — buyer track",   line2: "Looking: Sahali/Aberdeen, $700K+, 3BR",       badge: "Offer Prep", progress: "1/3", next: "Offer package ready" },
+  { id: "b3", side: "buyer", phase: "offer", addr: "Sam & Rosie — buyer track",     line2: "Couple, first-time buyers, $400–500K",   badge: "Offer Prep",       progress: "0/2", next: "Offer package ready" },
   { id: "b4", side: "buyer", phase: "offer",  addr: "Linda Hayworth — buyer track",  line2: "Repeat client, $850K range",                   badge: "Offer Prep",   progress: "3/4", next: "Comps pulled, awaiting client sign-off", blocked: true },
 ];
 

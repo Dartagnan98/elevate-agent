@@ -206,26 +206,6 @@ _BC: dict[str, Any] = {
                 ],
             ),
             _stage(
-                "MLS Entry",
-                "Listing build + launch prep",
-                [
-                    _wf("eValue BC age verified", "eValue BC Age Verified"),
-                    _wf("Listing description approved", "Listing Description Approved"),
-                    _wf("Feature sheet uploaded", "Feature Sheet Uploaded"),
-                    _wf("AI-edited photos labelled", "AI-Edited Photos Labelled"),
-                    _wf("Stage 4 complete", "Stage 4 Complete ✓"),
-                ],
-                fields=[
-                    _wf("MLS input started date", "MLS Input Started Date"),
-                    _wf("Realtor tour scheduled", "Realtor Tour Scheduled"),
-                ],
-                docs=[("feature_sheet", "Feature sheet")],
-                triggers=[
-                    ("property-context", "Research prior listing context", "property-lookup"),
-                    ("listing-build", "Build MLS launch package", "listing-build"),
-                ],
-            ),
-            _stage(
                 "Listing Live / Marketing",
                 "MLS live + seller updates",
                 [
@@ -285,24 +265,6 @@ _BC: dict[str, Any] = {
                 ],
             ),
             _stage(
-                "Closing",
-                "Conveyance + possession",
-                [
-                    _wf("Conveyancer package sent", "Conveyancer Package Sent"),
-                    _wf("Down payment to trust", "Down Payment to Trust"),
-                    _wf("Mortgage instructions received", "Mortgage Instructions Received"),
-                    _wf("Insurance binder confirmed", "Insurance Binder Confirmed"),
-                    _wf("Client signed at lawyer", "Client Signed @ Lawyer"),
-                    _wf("Funds released", "Funds Released"),
-                    _wf("Stage 8 complete", "Stage 8 Complete ✓"),
-                ],
-                fields=[
-                    ("possessionDate", "Possession date"),
-                    _wf("Sign down scheduled date", "Sign Down Scheduled Date"),
-                ],
-                triggers=[("closing-admin", "Run closing admin check", "closing-admin")],
-            ),
-            _stage(
                 "Closed",
                 "Archive + nurture",
                 [
@@ -323,16 +285,10 @@ _BC: dict[str, Any] = {
     },
     "buyer": {
         "stages": [
-            _stage("Intake", "Profile + budget", [("buyer-profile", "Buyer profile captured"), ("search-criteria", "MLS / Lofty search filter built")]),
-            _stage("Search Setup", "Criteria + MLS", [("shortlist", "Property shortlist + ranked-fit"), ("showing-route", "Showing route + itinerary")]),
-            _stage("Tours", "Route + notes", [("followup-draft", "Per-showing follow-up draft"), ("feedback-summary", "Feedback summary")]),
-            _stage("Follow-Up", "Feedback + fit", [("criteria-update", "Buyer criteria updated"), ("comp-pull", "Comparable sales pulled")]),
             _stage("Offer Prep", "Comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("accepted-offer-checklist", "Accepted-offer checklist run"), ("doc-list", "Doc list built")], docs=[("cps_draft", "CPS draft")]),
             _stage("Accepted", "Lender + docs", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked")], fields=[("subjectRemovalDate", "Subject removal date")]),
             _stage("Conditions", "Inspection + strata", [("deposit-due", "Deposit due date tracked"), ("lawyer-info", "Lawyer / conveyancer info captured")], fields=[("depositDueDate", "Deposit due date")]),
             _stage("Subjects Off", "Deposit + dates", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")]),
-            _stage("Closing", "Lawyer + walkthrough", [("lawyer-final-docs", "Final docs forwarded to lawyer"), ("completion-checklist", "Completion checklist complete"), ("final-walkthrough", "Final walkthrough scheduled")]),
-            _stage("Possession", "Gift + follow-up", [("utility-reminder", "Utility / change-of-address reminder sent"), ("key-handoff", "Key handoff coordinated"), ("closing-gift", "Closing gift sent"), ("thank-you", "Thank-you / review / referral drafts queued")], fields=[("anniversaryDate", "Anniversary date")]),
         ],
     },
 }

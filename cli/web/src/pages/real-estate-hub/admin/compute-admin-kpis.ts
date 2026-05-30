@@ -20,25 +20,34 @@ function isActive(d: AdminDeal): boolean {
   return s === "active" || s === "" || (s !== "closed" && s !== "archived");
 }
 
-function daysBetween(a: string, b: string): number {
-  const ms = new Date(b).getTime() - new Date(a).getTime();
-  return Math.max(0, Math.round(ms / 86_400_000));
-}
-
-function startOfMonth(now: Date): Date {
-  return new Date(now.getFullYear(), now.getMonth(), 1);
-}
-function endOfMonth(now: Date): Date {
-  return new Date(now.getFullYear(), now.getMonth() + 1, 1);
-}
 function startOfYear(now: Date): Date {
   return new Date(now.getFullYear(), 0, 1);
 }
 
+function dealPrice(d: AdminDeal): number {
+  return d.offerPrice || d.listPrice || 0;
+}
+
+function dealGci(d: AdminDeal): number {
+  const pct = (d.commissionPct ?? 2.5) / 100;
+  return dealPrice(d) * pct;
+}
+
+function closedDate(d: AdminDeal): string | null | undefined {
+  return d.completedAt ?? d.closedAt;
+}
+
+function hasConditionsRemoved(d: AdminDeal): boolean {
+  if (d.subjectsRemovedAt) return true;
+
+  const stage = d.currentStage ?? 0;
+  if (d.side === "buyer") return stage >= 3;
+
+  return false;
+}
+
 export function computeAdminKpis(deals: AdminDeal[]): AdminKpi[] {
   const now = new Date();
-  const monthStart = startOfMonth(now);
-  const monthEnd = endOfMonth(now);
   const yearStart = startOfYear(now);
 
   const active = deals.filter(isActive);
@@ -50,28 +59,10 @@ export function computeAdminKpis(deals: AdminDeal[]): AdminKpi[] {
   const pipelineBuyer = activeBuyer.reduce((s, d) => s + (d.offerPrice || d.listPrice || 0), 0);
   const pipelineTotal = pipelineListing + pipelineBuyer;
 
-  // 2. Closing this month = completionDate within current month, projected commission @ default 5%
-  const closingThisMonth = deals.filter(d => {
-    if (!d.completionDate) return false;
-    const c = new Date(d.completionDate);
-    return c >= monthStart && c < monthEnd;
-  });
-  const projectedRevenue = closingThisMonth.reduce((s, d) => {
-    const price = d.offerPrice || d.listPrice || 0;
-    const pct = (d.commissionPct ?? 2.5) / 100;
-    return s + price * pct;
-  }, 0);
-  const firmCount = closingThisMonth.filter(d => !!d.subjectsRemovedAt).length;
-  const conditionalCount = closingThisMonth.length - firmCount;
-
-  // 3. Avg time to close (createdAt → completedAt) over closed deals
-  const closedAll = deals.filter(d => !!d.completedAt);
-  const avgDays = closedAll.length === 0
-    ? 0
-    : Math.round(
-        closedAll.reduce((s, d) => s + daysBetween(d.createdAt, d.completedAt as string), 0) /
-          closedAll.length,
-      );
+  // 2. GCI pending = active firm deals only. Conditional accepted offers stay out
+  // until subjects/conditions are removed.
+  const pendingClosing = active.filter(hasConditionsRemoved);
+  const pendingGci = pendingClosing.reduce((s, d) => s + dealGci(d), 0);
 
   // 4. Active listings
   const listingCount = activeListing.length;
@@ -86,22 +77,14 @@ export function computeAdminKpis(deals: AdminDeal[]): AdminKpi[] {
   const inMotionListing = inMotion.filter(d => d.side === "listing").length;
   const inMotionBuyer = inMotion.filter(d => d.side === "buyer").length;
 
-  // 6. Closed YTD
+  // 6. Closed YTD financials
   const closedYtd = deals.filter(d => {
-    if (!d.completedAt) return false;
-    return new Date(d.completedAt) >= yearStart;
+    const date = closedDate(d);
+    if (!date) return false;
+    return new Date(date) >= yearStart;
   });
-  const closedYtdRevenue = closedYtd.reduce((s, d) => {
-    const price = d.offerPrice || d.listPrice || 0;
-    const pct = (d.commissionPct ?? 2.5) / 100;
-    return s + price * pct;
-  }, 0);
-
-  // 7. Stalled deals: in same stage > 21 days and not closed
-  const stalled = active.filter(d => {
-    if (!d.stageEnteredAt) return false;
-    return daysBetween(d.stageEnteredAt, now.toISOString()) >= 21;
-  });
+  const closedYtdGci = closedYtd.reduce((s, d) => s + dealGci(d), 0);
+  const closedYtdVolume = closedYtd.reduce((s, d) => s + dealPrice(d), 0);
 
   // 8. Upcoming key dates this week (offer / subject removal / completion / deposit)
   const weekFromNow = new Date(now.getTime() + 7 * 86_400_000);
@@ -122,16 +105,16 @@ export function computeAdminKpis(deals: AdminDeal[]): AdminKpi[] {
       deltaTone: "",
     },
     {
-      label: "Closing this month",
-      value: String(closingThisMonth.length),
-      breakdown: projectedRevenue > 0 ? `${fmtMoney(projectedRevenue)} projected` : "—",
-      delta: closingThisMonth.length > 0 ? `${firmCount} firm · ${conditionalCount} conditional` : undefined,
+      label: "GCI pending",
+      value: fmtMoney(pendingGci),
+      breakdown: `${pendingClosing.length} firm pending closing${pendingClosing.length === 1 ? "" : "s"}`,
+      delta: pendingClosing.length > 0 ? "conditions removed" : undefined,
       deltaTone: "",
     },
     {
-      label: "Avg time to close",
-      value: avgDays > 0 ? `${avgDays}d` : "—",
-      breakdown: `${closedAll.length} closed deals`,
+      label: "GCI YTD",
+      value: fmtMoney(closedYtdGci),
+      breakdown: `${closedYtd.length} closed unit${closedYtd.length === 1 ? "" : "s"}`,
       delta: undefined,
       deltaTone: "",
     },
@@ -150,18 +133,18 @@ export function computeAdminKpis(deals: AdminDeal[]): AdminKpi[] {
       deltaTone: inMotion.length > 0 ? "warn" : "",
     },
     {
-      label: "Closed YTD",
+      label: "Closed YTD units",
       value: String(closedYtd.length),
-      breakdown: closedYtdRevenue > 0 ? `${fmtMoney(closedYtdRevenue)} GCI` : "—",
+      breakdown: closedYtdGci > 0 ? `${fmtMoney(closedYtdGci)} GCI` : "—",
       delta: undefined,
       deltaTone: "",
     },
     {
-      label: "Stalled deals",
-      value: String(stalled.length),
-      breakdown: "≥ 21d in stage",
-      delta: stalled.length > 0 ? "Needs attention" : "All moving",
-      deltaTone: stalled.length > 0 ? "warn" : "up",
+      label: "Closed YTD volume",
+      value: fmtMoney(closedYtdVolume),
+      breakdown: `${closedYtd.length} closed unit${closedYtd.length === 1 ? "" : "s"}`,
+      delta: undefined,
+      deltaTone: "",
     },
     {
       label: "Key dates this week",

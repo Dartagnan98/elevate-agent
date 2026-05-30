@@ -136,6 +136,11 @@ def _field_api_name(field: str) -> str:
 
 def _row_to_deal(row: sqlite3.Row) -> dict[str, Any]:
     """Normalize one deals row into the Admin Hub API shape."""
+    row_keys = set(row.keys())
+
+    def row_value(key: str) -> Any:
+        return row[key] if key in row_keys else None
+
     deal = {
         "id": row["id"],
         "title": row["title"],
@@ -177,6 +182,16 @@ def _row_to_deal(row: sqlite3.Row) -> dict[str, Any]:
         "offerAcceptedAt": row["offer_accepted_at"],
         "subjectsRemovedAt": row["subjects_removed_at"],
         "completedAt": row["completed_at"],
+        # Deal-sheet / CRM revenue fields.  These are especially important for
+        # referral files where there may be no MLS sale package, but Admin still
+        # needs to show what was paid out.
+        "homePrice": row_value("home_price"),
+        "gci": row_value("gci"),
+        "teamRevenue": row_value("team_revenue"),
+        "agentRevenue": row_value("agent_revenue"),
+        "expectedCloseDate": row_value("expected_close_date"),
+        "crmTransactionStatus": row_value("crm_transaction_status"),
+        "crmTransactionType": row_value("crm_transaction_type"),
     }
     for field in sorted(_ENUM_FIELDS):
         deal[_field_api_name(field)] = row[field]
@@ -1342,9 +1357,18 @@ def _dispatch_safely(
 
 _DATE_FIELDS = {
     "listing_date", "offer_date", "subject_removal_date", "deposit_due_date",
-    "completion_date", "possession_date", "anniversary_date",
+    "completion_date", "possession_date", "anniversary_date", "expected_close_date",
 }
-_MONEY_FIELDS = {"list_price", "offer_price", "deposit_amount", "commission_pct"}
+_MONEY_FIELDS = {
+    "list_price",
+    "offer_price",
+    "deposit_amount",
+    "commission_pct",
+    "home_price",
+    "gci",
+    "team_revenue",
+    "agent_revenue",
+}
 _PROPERTY_FIELDS = {"mls_number", "legal_description", "lot_size_sqft", "year_built"}
 _STATUS_TS_FIELDS = {
     "deposit_in_trust_at", "listing_published_at", "offer_accepted_at",
@@ -1363,6 +1387,11 @@ _API_TO_DB_DETAIL_FIELDS = {
     "offerPrice": "offer_price",
     "depositAmount": "deposit_amount",
     "commissionPct": "commission_pct",
+    "homePrice": "home_price",
+    "gci": "gci",
+    "teamRevenue": "team_revenue",
+    "agentRevenue": "agent_revenue",
+    "expectedCloseDate": "expected_close_date",
     "mlsNumber": "mls_number",
     "legalDescription": "legal_description",
     "lotSizeSqft": "lot_size_sqft",

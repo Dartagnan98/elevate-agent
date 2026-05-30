@@ -406,6 +406,13 @@ export interface AdminDeal {
   offerPrice?: number | null;
   depositAmount?: number | null;
   commissionPct?: number | null;
+  homePrice?: number | null;
+  gci?: number | null;
+  teamRevenue?: number | null;
+  agentRevenue?: number | null;
+  expectedCloseDate?: string | null;
+  crmTransactionStatus?: string | null;
+  crmTransactionType?: string | null;
   mlsNumber?: string | null;
   legalDescription?: string | null;
   lotSizeSqft?: number | null;

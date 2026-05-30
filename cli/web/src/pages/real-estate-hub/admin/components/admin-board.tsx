@@ -265,8 +265,7 @@ function Top25Deals({
       "offer", "conditions", "closing", "closed",
     ];
     const buyerOrder = [
-      "intake", "search", "tours", "followup", "offer",
-      "accepted", "conditions", "removed", "closing", "possession", "buyer-closed",
+      "offer", "accepted", "conditions", "closed",
     ];
     const order = mode === "buyer" ? buyerOrder : listingOrder;
     const score = (d: Deal) => {
@@ -749,12 +748,12 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           ) : (
             <>
               <KpiTile label="Pipeline value"        value="—" breakdown="loading" />
-              <KpiTile label="Closing this month"    value="—" breakdown="loading" />
-              <KpiTile label="Avg time to close"     value="—" breakdown="loading" />
+              <KpiTile label="GCI pending"           value="—" breakdown="loading" />
+              <KpiTile label="GCI YTD"               value="—" breakdown="loading" />
               <KpiTile label="Active deals"          value="—" breakdown="loading" />
               <KpiTile label="In offer / conditions" value="—" breakdown="loading" />
-              <KpiTile label="Closed YTD"            value="—" breakdown="loading" />
-              <KpiTile label="Stalled deals"         value="—" breakdown="loading" />
+              <KpiTile label="Closed YTD units"      value="—" breakdown="loading" />
+              <KpiTile label="Closed YTD volume"     value="—" breakdown="loading" />
               <KpiTile label="Key dates this week"   value="—" breakdown="loading" />
             </>
           )}
