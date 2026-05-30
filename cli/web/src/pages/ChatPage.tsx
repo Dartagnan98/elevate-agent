@@ -2535,6 +2535,10 @@ export default function ChatPage() {
   const queueDispatchRef = useRef(false);
   const historyHydratedRef = useRef(false);
   const persistedSessionIdRef = useRef<string | null>(null);
+  // Session id we minted ourselves this launch and pinned into the URL as
+  // ?resume=. It is NOT a user resume: it has no saved REST transcript yet
+  // (so getSessionMessages 404s) and should read as "New chat", not "Resumed".
+  const mintedSessionIdRef = useRef<string | null>(null);
   const chatStickToBottomRef = useRef(true);
   const pendingInitialBottomScrollRef = useRef(true);
   const scrollSessionKeyRef = useRef<string | null>(null);
@@ -3249,7 +3253,12 @@ export default function ChatPage() {
         }
       }
 
-      void api.getSessionMessages(resumeId)
+      // A freshly minted + pinned session (mintedSessionIdRef) has no saved
+      // REST transcript yet — skip the hydrate so its expected 404 never
+      // surfaces as a "could not load saved messages" error.
+      if (resumeId === mintedSessionIdRef.current) {
+        historyHydratedRef.current = true;
+      } else void api.getSessionMessages(resumeId)
         .then((response) => {
           if (cancelled) return;
           const hydrated = normalizeStoredTranscript(response.messages);
@@ -3879,6 +3888,10 @@ export default function ChatPage() {
         {
           const pinnedId = persistedSessionIdRef.current;
           if (pinnedId && !resumeId) {
+            // This resume id is one we just minted, not a user resume. Record
+            // it so the re-run triggered by this URL change skips the REST
+            // transcript fetch (nothing saved yet) and the title stays "New chat".
+            mintedSessionIdRef.current = pinnedId;
             setSearchParams(
               (prev) => {
                 const next = new URLSearchParams(prev);
@@ -5119,7 +5132,14 @@ export default function ChatPage() {
     return grouped;
   }, [activityTrace]);
   const chatTitle = useMemo(
-    () => deriveChatTitle(visibleMessages, resumeId, resumeFallback),
+    // A self-minted+pinned id is a fresh chat, not a user resume — pass null
+    // so an empty transcript reads "New chat", never "Resumed chat".
+    () =>
+      deriveChatTitle(
+        visibleMessages,
+        resumeId === mintedSessionIdRef.current ? null : resumeId,
+        resumeFallback,
+      ),
     [resumeFallback, resumeId, visibleMessages],
   );
   const [folderLabel, setFolderLabel] = useState<string | undefined>(undefined);
