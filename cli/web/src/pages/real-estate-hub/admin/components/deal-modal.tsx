@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   Home,
   Clock,
@@ -117,7 +118,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const FileTxt   = FileText;
   const ChevDown  = Chevron;
 
-  return (
+  return createPortal(
     <div className="ab-modal-backdrop" onClick={onClose}>
       <div
         className="ab-modal"
@@ -545,6 +546,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
           </section>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
