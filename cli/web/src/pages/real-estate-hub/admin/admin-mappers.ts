@@ -8,10 +8,10 @@ const LISTING_STAGE_TO_PHASE: Record<number, string> = {
   3: "skyslope",
   4: "go",
   5: "live",
-  6: "live",
-  7: "offer",
-  8: "conditions",
-  9: "closing",
+  6: "offer",
+  7: "conditions",
+  8: "closed",
+  9: "closed",
   10: "closed",
 };
 
@@ -22,38 +22,38 @@ const LISTING_STAGE_BADGE: Record<number, string> = {
   3: "SkySlope & Matrix Prep",
   4: "Marketing Go",
   5: "Listing Live / Marketing",
-  6: "Listing Live / Marketing",
-  7: "Accepted Offer",
-  8: "Condition Removal",
-  9: "Closing",
+  6: "Accepted Offer",
+  7: "Condition Removal",
+  8: "Closed",
+  9: "Closed",
   10: "Closed",
 };
 
 const BUYER_STAGE_TO_PHASE: Record<number, string> = {
-  0: "intake",
-  1: "search",
-  2: "tours",
-  3: "followup",
-  4: "offer",
-  5: "accepted",
-  6: "conditions",
-  7: "removed",
-  8: "closing",
-  9: "possession",
-  10: "buyer-closed",
+  0: "offer",
+  1: "accepted",
+  2: "conditions",
+  3: "conditions",
+  4: "closed",
+  5: "closed",
+  6: "closed",
+  7: "closed",
+  8: "closed",
+  9: "closed",
+  10: "closed",
 };
 
 const BUYER_STAGE_BADGE: Record<number, string> = {
-  0: "Intake",
-  1: "Search Setup",
-  2: "Tours",
-  3: "Follow-Up",
-  4: "Offer Prep",
-  5: "Accepted",
-  6: "Conditions",
-  7: "Conditions Removed",
-  8: "Closing",
-  9: "Possession",
+  0: "Offer Prep",
+  1: "Accepted",
+  2: "Condition Removal",
+  3: "Condition Removal",
+  4: "Closed",
+  5: "Closed",
+  6: "Closed",
+  7: "Closed",
+  8: "Closed",
+  9: "Closed",
   10: "Closed",
 };
 
@@ -64,24 +64,24 @@ const LISTING_STAGE_NEXT: Record<number, string> = {
   3: "SkySlope/Matrix prep complete",
   4: "Marketing Go package ready",
   5: "Just listed blast sent",
-  6: "Flodesk mailout sent",
-  7: "Accepted-offer dates verified",
-  8: "Condition removal / waiver sent",
-  9: "Closing package complete",
+  6: "Accepted-offer dates verified",
+  7: "Condition removal / waiver sent",
+  8: "File closed + nurture queued",
+  9: "File closed + nurture queued",
   10: "File closed + nurture queued",
 };
 
 const BUYER_STAGE_NEXT: Record<number, string> = {
-  0: "Profile + budget conversation",
-  1: "MLS criteria saved",
-  2: "Showing notes complete",
-  3: "Follow-up complete",
-  4: "Offer package ready",
-  5: "Accepted-offer checked",
-  6: "Conditions tracked",
-  7: "Conditions removed",
-  8: "Closing checklist complete",
-  9: "Possession follow-up queued",
+  0: "Offer package ready",
+  1: "Accepted-offer checked",
+  2: "Conditions tracked / removal pending",
+  3: "Conditions removed",
+  4: "File archived",
+  5: "File archived",
+  6: "File archived",
+  7: "File archived",
+  8: "File archived",
+  9: "File archived",
   10: "File archived",
 };
 
@@ -145,8 +145,8 @@ export function adminDealToDeal(d: AdminDeal): Deal {
 
 export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
   const stage = clampStage(d.currentStage ?? 0);
-  const phase = BUYER_STAGE_TO_PHASE[stage] ?? "intake";
-  const badge = BUYER_STAGE_BADGE[stage] ?? "Intake";
+  const phase = BUYER_STAGE_TO_PHASE[stage] ?? "offer";
+  const badge = BUYER_STAGE_BADGE[stage] ?? "Offer Prep";
   const next = BUYER_STAGE_NEXT[stage] ?? "—";
   const title = d.title || "Buyer";
   const note = top25Note(d);

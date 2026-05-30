@@ -21,7 +21,7 @@ export function useAdminDeals(): UseAdminDealsResult {
 
   const load = useCallback(async (signal?: { cancelled: boolean }) => {
     try {
-      const response = await api.getAdminDeals({ limit: 200 });
+      const response = await api.getAdminDeals({ status: null, limit: 200 });
       if (signal?.cancelled) return;
       setDeals(response.items);
       setError(null);

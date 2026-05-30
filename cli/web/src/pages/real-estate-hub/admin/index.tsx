@@ -129,6 +129,7 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
 ];
 
 const ADMIN_STAGE_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
+const ADMIN_HIDDEN_PIPELINE_STAGES = new Set<AdminStageNumber>([9, 10]);
 
 type AdminSide = "listing" | "buyer";
 type AdminStageNumber = (typeof ADMIN_STAGE_NUMBERS)[number];
@@ -248,8 +249,8 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageNumber: "S0",
     stageLabel: "Pre-CMA",
     labels: {
-      listing: { title: "Pre-CMA", subtitle: "Google Form + Lofty contact" },
-      buyer: { title: "Intake", subtitle: "Profile + budget" },
+      listing: { title: "Pre-CMA", subtitle: "Dashboard setup + contact verification" },
+      buyer: { title: "Offer Prep", subtitle: "Comps + offer paperwork" },
     },
   },
   {
@@ -258,7 +259,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "CMA",
     labels: {
       listing: { title: "CMA / Evaluation", subtitle: "PDF + pricing story" },
-      buyer: { title: "Search Setup", subtitle: "Criteria + MLS" },
+      buyer: { title: "Accepted", subtitle: "Lender + docs" },
     },
   },
   {
@@ -267,7 +268,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "Intake",
     labels: {
       listing: { title: "Listing Intake", subtitle: "Trigger MLC + missing fields" },
-      buyer: { title: "Tours", subtitle: "Route + notes" },
+      buyer: { title: "Conditions", subtitle: "Inspection + strata" },
     },
   },
   {
@@ -276,7 +277,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "SkySlope",
     labels: {
       listing: { title: "SkySlope & Matrix Prep", subtitle: "Compliance file + incomplete MLS draft" },
-      buyer: { title: "Follow-Up", subtitle: "Feedback + fit" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
@@ -285,52 +286,52 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "Marketing",
     labels: {
       listing: { title: "Marketing Go", subtitle: "Coming-soon + launch assets" },
-      buyer: { title: "Offer Prep", subtitle: "Comps + offer paperwork" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
     stage: 5,
     stageNumber: "S5",
-    stageLabel: "MLS",
+    stageLabel: "Live",
     labels: {
-      listing: { title: "MLS Entry", subtitle: "Listing build + launch prep" },
-      buyer: { title: "Accepted", subtitle: "Lender + docs" },
+      listing: { title: "Listing Live / Marketing", subtitle: "MLS live + seller updates" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
     stage: 6,
     stageNumber: "S6",
-    stageLabel: "Live",
+    stageLabel: "Contract",
     labels: {
-      listing: { title: "Listing Live / Marketing", subtitle: "MLS live + seller updates" },
-      buyer: { title: "Conditions", subtitle: "Inspection + property review" },
+      listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
     stage: 7,
     stageNumber: "S7",
-    stageLabel: "Contract",
+    stageLabel: "Conditions",
     labels: {
-      listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
-      buyer: { title: "Conditions Removed", subtitle: "Deposit + dates" },
+      listing: { title: "Condition Removal", subtitle: "Conditions + lawyer package" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
     stage: 8,
     stageNumber: "S8",
-    stageLabel: "Conditions",
+    stageLabel: "Closed",
     labels: {
-      listing: { title: "Condition Removal", subtitle: "Conditions + lawyer package" },
-      buyer: { title: "Closing", subtitle: "Lawyer + walkthrough" },
+      listing: { title: "Closed", subtitle: "Archive + nurture" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
     stage: 9,
     stageNumber: "S9",
-    stageLabel: "Closing",
+    stageLabel: "Closed",
     labels: {
-      listing: { title: "Closing", subtitle: "Lawyer / conveyance + possession" },
-      buyer: { title: "Possession", subtitle: "Gift + follow-up" },
+      listing: { title: "Closed", subtitle: "Archive + nurture" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
   {
@@ -339,7 +340,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "Closed",
     labels: {
       listing: { title: "Closed", subtitle: "Archive + nurture" },
-      buyer: { title: "Closed", subtitle: "Archive + nurture" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
     },
   },
 ];
@@ -377,34 +378,34 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
       approvalGate: "answer Marketing Go/photo questions and approve launch assets before external publishing",
     },
     5: {
-      agents: ["property-lookup", "listing-build"],
-      background: [],
-      moveSignal: "MLS package approved",
-      approvalGate: "approve MLS copy/package",
-    },
-    6: {
       agents: ["marketing"],
       background: ["seller-update"],
       moveSignal: "offer accepted",
       approvalGate: "approve outgoing drafts",
     },
-    7: {
+    6: {
       agents: ["offer-review"],
       background: ["gmail-doc-router"],
       moveSignal: "accepted-offer dates verified",
       approvalGate: "review offer terms",
     },
-    8: {
+    7: {
       agents: ["subject-removal", "signing-package"],
       background: ["gmail-doc-router"],
       moveSignal: "conditions removed + deposit verified",
       approvalGate: "confirm condition removal",
     },
+    8: {
+      agents: ["skyslope-sync", "marketing"],
+      background: [],
+      moveSignal: "file closed + nurture queued",
+      approvalGate: "approve closeout",
+    },
     9: {
-      agents: ["closing-admin"],
-      background: ["gmail-doc-router"],
-      moveSignal: "closing package complete",
-      approvalGate: "confirm closing package",
+      agents: ["skyslope-sync", "marketing"],
+      background: [],
+      moveSignal: "file closed + nurture queued",
+      approvalGate: "approve closeout",
     },
     10: {
       agents: ["skyslope-sync", "marketing"],
@@ -414,17 +415,17 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
     },
   },
   buyer: {
-    0: { agents: [], background: [], moveSignal: "profile verified" },
-    1: { agents: [], background: [], moveSignal: "search criteria ready" },
-    2: { agents: [], background: [], moveSignal: "showing notes complete" },
-    3: { agents: [], background: [], moveSignal: "follow-up complete" },
-    4: { agents: [], background: [], moveSignal: "offer package ready" },
-    5: { agents: [], background: [], moveSignal: "accepted-offer checklist complete" },
-    6: { agents: [], background: [], moveSignal: "conditions tracked" },
+    0: { agents: [], background: [], moveSignal: "offer package ready" },
+    1: { agents: [], background: [], moveSignal: "accepted-offer checklist complete" },
+    2: { agents: [], background: [], moveSignal: "conditions tracked" },
+    3: { agents: [], background: [], moveSignal: "conditions removed" },
+    4: { agents: [], background: [], moveSignal: "conditions removed" },
+    5: { agents: [], background: [], moveSignal: "conditions removed" },
+    6: { agents: [], background: [], moveSignal: "conditions removed" },
     7: { agents: [], background: [], moveSignal: "conditions removed" },
-    8: { agents: [], background: [], moveSignal: "closing checklist complete" },
-    9: { agents: [], background: [], moveSignal: "possession follow-up queued" },
-    10: { agents: [], background: [], moveSignal: "file archived" },
+    8: { agents: [], background: [], moveSignal: "conditions removed" },
+    9: { agents: [], background: [], moveSignal: "conditions removed" },
+    10: { agents: [], background: [], moveSignal: "conditions removed" },
   },
 };
 
@@ -467,20 +468,13 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "marketing_package_ready_for_approval", label: "Marketing package ready for approval" },
     ],
     5: [
-    { id: "workflow_evalue_bc_age_verified", label: "Property valuation age verified" },
-    { id: "workflow_listing_description_approved", label: "Listing description approved" },
-    { id: "workflow_feature_sheet_uploaded", label: "Feature sheet uploaded" },
-    { id: "workflow_ai_edited_photos_labelled", label: "AI-edited photos labelled" },
-    { id: "workflow_stage_4_complete", label: "MLS package approved" },
-    ],
-    6: [
     { id: "workflow_just_listed_blast_sent", label: "Just listed blast sent" },
     { id: "workflow_social_posts_published", label: "Social posts published" },
     { id: "workflow_flodesk_mailout_sent", label: "Flodesk mailout sent" },
     { id: "workflow_lofty_text_blast_sent", label: "Lofty text blast sent" },
     { id: "workflow_stage_5_complete", label: "Live marketing checklist complete" },
     ],
-    7: [
+    6: [
     { id: "workflow_within_24hrs_contract_reviewed", label: "Contract reviewed within 24 hours" },
     { id: "workflow_email_buyer_accepted_offer_checklist_sent", label: "Accepted-offer checklist email sent" },
     { id: "workflow_fintrac_drivers_occupation_employer_captured", label: "FINTRAC details captured" },
@@ -488,21 +482,28 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
     { id: "workflow_moving_checklist_sent", label: "Moving checklist sent" },
     { id: "workflow_stage_6_complete", label: "Accepted-offer admin verified" },
     ],
-    8: [
+    7: [
     { id: "workflow_subject_removal_form_sent", label: "Condition removal / waiver sent" },
     { id: "workflow_title_charges_verified", label: "Title charges verified" },
     { id: "workflow_bir_pds_received", label: "Property disclosure docs received" },
     { id: "workflow_lawyer_info_requested", label: "Lawyer info requested" },
     { id: "workflow_stage_7_complete", label: "Conditions removed / waived" },
     ],
+    8: [
+    { id: "workflow_commission_submitted", label: "Commission submitted" },
+    { id: "workflow_skyslope_deal_closed", label: "SkySlope deal closed" },
+    { id: "workflow_sold_update_sent", label: "Sold update sent" },
+    { id: "workflow_closing_gift_sent", label: "Closing gift sent" },
+    { id: "workflow_review_requested", label: "Review requested" },
+    { id: "workflow_stage_9_complete", label: "Closed file archived" },
+    ],
     9: [
-    { id: "workflow_conveyancer_package_sent", label: "Lawyer / conveyancer package sent" },
-    { id: "workflow_down_payment_to_trust", label: "Down payment to trust" },
-    { id: "workflow_mortgage_instructions_received", label: "Mortgage instructions received" },
-    { id: "workflow_insurance_binder_confirmed", label: "Insurance binder confirmed" },
-    { id: "workflow_client_signed_lawyer", label: "Client signed at lawyer" },
-    { id: "workflow_funds_released", label: "Funds released" },
-    { id: "workflow_stage_8_complete", label: "Closing admin verified" },
+    { id: "workflow_commission_submitted", label: "Commission submitted" },
+    { id: "workflow_skyslope_deal_closed", label: "SkySlope deal closed" },
+    { id: "workflow_sold_update_sent", label: "Sold update sent" },
+    { id: "workflow_closing_gift_sent", label: "Closing gift sent" },
+    { id: "workflow_review_requested", label: "Review requested" },
+    { id: "workflow_stage_9_complete", label: "Closed file archived" },
     ],
     10: [
     { id: "workflow_commission_submitted", label: "Commission submitted" },
@@ -515,58 +516,59 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
   },
   buyer: {
     0: [
-    { id: "buyer-profile", label: "Buyer profile (budget, financing, areas, beds, must-haves)" },
-    { id: "search-criteria", label: "MLS / Lofty search filter built" },
-    ],
-    1: [
-    { id: "shortlist", label: "Property shortlist + ranked-fit" },
-    { id: "showing-route", label: "Showing route + itinerary" },
-    { id: "preview-notes", label: "Preview notes per property" },
-    ],
-    2: [
-    { id: "followup-draft", label: "Per-showing follow-up draft" },
-    { id: "feedback-summary", label: "Feedback summary (liked / disliked / dealbreakers)" },
-    ],
-    3: [
-    { id: "criteria-update", label: "Buyer criteria updated" },
-    { id: "comp-pull", label: "Comparable sales pulled" },
-    { id: "cps-checklist", label: "Offer document checklist + strategy" },
-    ],
-    4: [
     { id: "lender-paperwork", label: "Lender paperwork sent" },
     { id: "accepted-offer-checklist", label: "Accepted-offer checklist run" },
     { id: "doc-list", label: "Doc list (offer, addenda, disclosures, deposit receipt)" },
     ],
-    5: [
+    1: [
     { id: "inspection-booked", label: "Inspection booked" },
     { id: "insurance-deadline", label: "Insurance deadline tracked" },
     { id: "strata-review", label: "Strata / condo review (if applicable)" },
     ],
-    6: [
+    2: [
     { id: "deposit-due", label: "Deposit due date tracked" },
     { id: "lawyer-info", label: "Lawyer / conveyancer info captured" },
     { id: "skyslope-docs", label: "SkySlope missing-doc list cleared" },
     ],
+    3: [
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
+    ],
+    4: [
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
+    ],
+    5: [
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
+    ],
+    6: [
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
+    ],
     7: [
-    { id: "subjects-removed", label: "All conditions removed / waived" },
+    { id: "conditions-removed", label: "All conditions removed / waived" },
     { id: "deposit-received", label: "Deposit received" },
     { id: "completion-locked", label: "Completion + possession dates locked" },
     ],
     8: [
-    { id: "lawyer-final-docs", label: "Final docs forwarded to lawyer" },
-    { id: "completion-checklist", label: "Completion checklist complete" },
-    { id: "final-walkthrough", label: "Final walkthrough scheduled" },
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
     ],
     9: [
-    { id: "utility-reminder", label: "Utility / change-of-address reminder sent" },
-    { id: "key-handoff", label: "Key handoff coordinated" },
-    { id: "closing-gift", label: "Closing gift sent" },
-    { id: "thank-you", label: "Thank-you / review / referral drafts queued" },
-    { id: "one-week-followup", label: "One-week-after follow-up scheduled" },
-    { id: "anniversary", label: "Anniversary reminder added" },
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
     ],
     10: [
-    { id: "buyer-file-archived", label: "Buyer file archived" },
+    { id: "conditions-removed", label: "All conditions removed / waived" },
+    { id: "deposit-received", label: "Deposit received" },
+    { id: "completion-locked", label: "Completion + possession dates locked" },
     ],
   },
 };
@@ -728,17 +730,18 @@ function adminPhaseAutomation(side: AdminSide, stage: AdminStageNumber): AdminPh
   return ADMIN_PHASE_AUTOMATIONS[side][stage];
 }
 
+function isHiddenAdminStage(side: AdminSide, stage: AdminStageNumber): boolean {
+  if (side === "buyer") return stage > 3;
+  return ADMIN_HIDDEN_PIPELINE_STAGES.has(stage);
+}
+
 function visibleAdminStages(side: AdminSide): AdminStageNumber[] {
-  return ADMIN_STAGE_NUMBERS.filter((stage) => {
-    if (side === "listing") return stage !== 5;
-    return stage >= 4;
-  });
+  return ADMIN_STAGE_NUMBERS.filter((stage) => !isHiddenAdminStage(side, stage));
 }
 
 function adminNextStage(card: AdminCard): AdminStageNumber | null {
-  if (card.stage >= 10) return null;
-  if (card.side === "listing" && card.stage === 4) return 6;
-  return (card.stage + 1) as AdminStageNumber;
+  const nextStage = visibleAdminStages(card.side).find((stage) => stage > card.stage);
+  return nextStage ?? null;
 }
 
 function getStageProgress(card: AdminCard, stage: AdminStageNumber): { done: number; total: number; nextItem?: string } {
@@ -2877,6 +2880,7 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
   const due = dueLabel(card.daysOut);
   const { done, total, nextItem } = getCardProgress(card);
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const isReferral = String(card.conditions?.transaction_type ?? "").toLowerCase().includes("referral");
   return (
     <button
       type="button"
@@ -2896,6 +2900,11 @@ const AdminKanbanCard = memo(function AdminKanbanCard({
         {card.pinnedTop25 && (
           <span title="Top 25" className="shrink-0 font-mono-ui text-[10px] uppercase tracking-wider text-warning">
             Top
+          </span>
+        )}
+        {isReferral && (
+          <span title="Referral" className="shrink-0 font-mono-ui text-[10px] uppercase tracking-wider text-primary">
+            Referral
           </span>
         )}
       </div>
@@ -3518,13 +3527,20 @@ function adminContextDate(value?: string | null): string {
   return isoTimeAgo(value);
 }
 
-function adminContextMoney(value?: number | null): string {
-  if (value == null || !Number.isFinite(value)) return "Not set";
+function adminContextMoney(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return new Intl.NumberFormat("en-CA", {
     style: "currency",
     currency: "CAD",
     maximumFractionDigits: 0,
   }).format(value);
+}
+
+function adminIsReferralDeal(deal: AdminDeal | null): boolean {
+  if (!deal) return false;
+  return [deal.transactionType, deal.crmTransactionType]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes("referral"));
 }
 
 function AdminDealContextSection({
@@ -3558,12 +3574,19 @@ function AdminDealContextSection({
     depositDueDate: "",
     completionDate: "",
     possessionDate: "",
+    expectedCloseDate: "",
     mlsNumber: "",
     listPrice: "",
+    offerPrice: "",
+    homePrice: "",
+    gci: "",
+    teamRevenue: "",
+    agentRevenue: "",
   });
   const [docDraft, setDocDraft] = useState({ kind: "cma_report", filePath: "", summary: "" });
   const [contactDraft, setContactDraft] = useState({ role: "lawyer", contactId: "", notes: "" });
   const deal = context?.deal ?? null;
+  const isReferral = adminIsReferralDeal(deal);
   const primary = context?.primaryContact ?? null;
   const coContacts = context?.coContacts ?? [];
   const attachments = context?.attachments ?? [];
@@ -3602,9 +3625,24 @@ function AdminDealContextSection({
     ? ([
         ["List price", deal.listPrice],
         ["Offer price", deal.offerPrice],
+        ["Home price", deal.homePrice],
         ["Deposit", deal.depositAmount],
+        ["GCI", deal.gci],
+        ["Team revenue", deal.teamRevenue],
+        [isReferral ? "Paid out" : "Agent revenue", deal.agentRevenue],
       ] as Array<[string, number | null | undefined]>).flatMap(([label, value]) =>
         typeof value === "number" ? [[label, value]] : [],
+      )
+    : [];
+  const dealSheetRows: Array<[string, string]> = deal
+    ? ([
+        ["Transaction", deal.transactionType],
+        ["CRM type", deal.crmTransactionType],
+        ["CRM status", deal.crmTransactionStatus],
+        ["Expected close", deal.expectedCloseDate],
+        ["Commission", typeof deal.commissionPct === "number" ? `${deal.commissionPct}%` : null],
+      ] as Array<[string, string | null | undefined]>).flatMap(([label, value]) =>
+        value ? [[label, value]] : [],
       )
     : [];
 
@@ -3850,12 +3888,21 @@ function AdminDealContextSection({
             </div>
           </div>
 
-          {(moneyRows.length > 0 || deal.mlsNumber || deal.legalDescription) && (
+          {(moneyRows.length > 0 || dealSheetRows.length > 0 || deal.mlsNumber || deal.legalDescription) && (
             <div className="rounded-sm border border-border bg-background px-3 py-2">
-              <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
-                File details
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+                  Deal sheet
+                </div>
+                {isReferral && <Badge variant="secondary">Referral</Badge>}
               </div>
               <div className="mt-1 grid gap-x-3 gap-y-1 text-[0.74rem] sm:grid-cols-2">
+                {dealSheetRows.map(([label, value]) => (
+                  <div key={label}>
+                    <span className="text-muted-foreground">{label}: </span>
+                    <span className="text-foreground">{label === "Expected close" ? adminContextDate(value) : value}</span>
+                  </div>
+                ))}
                 {moneyRows.map(([label, value]) => (
                   <div key={label}>
                     <span className="text-muted-foreground">{label}: </span>
@@ -3980,15 +4027,21 @@ function AdminDealContextSection({
                       subjectRemovalDate: "",
                       depositDueDate: "",
                       completionDate: "",
-                      possessionDate: "",
-                      mlsNumber: "",
-                      listPrice: "",
-                    });
+                    possessionDate: "",
+                    expectedCloseDate: "",
+                    mlsNumber: "",
+                    listPrice: "",
+                    offerPrice: "",
+                    homePrice: "",
+                    gci: "",
+                    teamRevenue: "",
+                    agentRevenue: "",
+                  });
                     setActionMode(null);
                   });
                 }}
               >
-                {(["listingDate", "subjectRemovalDate", "depositDueDate", "completionDate", "possessionDate", "mlsNumber", "listPrice"] as const).map((field) => (
+                {(["listingDate", "subjectRemovalDate", "depositDueDate", "completionDate", "possessionDate", "expectedCloseDate", "mlsNumber", "listPrice", "offerPrice", "homePrice", "gci", "teamRevenue", "agentRevenue"] as const).map((field) => (
                   <label key={field} className="text-[0.72rem] text-muted-foreground">
                     {field}
                     <input
@@ -4371,7 +4424,7 @@ function AdminCardDetailPanel({
             }
           />
           <div className="flex flex-col gap-2">
-            {ADMIN_STAGE_NUMBERS.map((stage) => (
+            {visibleAdminStages(card.side).map((stage) => (
                 <AdminCardStageSection
                   key={`${card.side}-${stage}`}
                   card={card}
@@ -4423,6 +4476,13 @@ function NewDealDialog({
   const [notesAutoFilled, setNotesAutoFilled] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stages = visibleAdminStages(side);
+    if (!stages.includes(stage)) {
+      setStage(stages[0] ?? 0);
+    }
+  }, [side, stage]);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -4908,7 +4968,7 @@ function NewDealDialog({
               onChange={(e) => setStage(toAdminStage(Number(e.target.value)))}
               className="mt-1.5 h-11 w-full rounded-sm border border-border bg-background px-3 text-[0.88rem] text-foreground focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              {ADMIN_STAGE_NUMBERS.map((s) => {
+              {visibleAdminStages(side).map((s) => {
                 const def = adminStageDefinition(s);
                 return (
                   <option key={s} value={s}>

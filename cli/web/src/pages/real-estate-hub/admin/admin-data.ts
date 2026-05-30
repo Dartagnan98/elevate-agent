@@ -107,11 +107,10 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
   { id: "intake",     stage: "S2",  name: "Listing Intake",           next: "MLC intake complete + listing docs ready",                  note: "automated · approval" },
   { id: "skyslope",   stage: "S3",  name: "SkySlope & Matrix Prep",   next: "signed docs saved + SkySlope/Matrix prep complete",         note: "automated + background · approval" },
   { id: "go",         stage: "S4",  name: "Marketing Go",             next: "photos cleaned/saved + Marketing Go package ready",         note: "automated + background · approval" },
-  { id: "live",       stage: "S6",  name: "Listing Live / Marketing", next: "Flodesk mailout sent",                                     note: "automated + background · approval" },
-  { id: "offer",      stage: "S7",  name: "Accepted Offer",           next: "accepted-offer dates verified",                            note: "automated + background · approval" },
-  { id: "conditions", stage: "S8",  name: "Condition Removal",        next: "conditions removed + deposit verified",                    note: "automated + background · approval" },
-  { id: "closing",    stage: "S9",  name: "Closing",                  next: "closing package complete",                                 note: "automated · approval" },
-  { id: "closed",     stage: "S10", name: "Closed",                   next: "file closed + nurture queued",                             note: "automated + background" },
+  { id: "live",       stage: "S5",  name: "Listing Live / Marketing", next: "Flodesk mailout sent",                                     note: "automated + background · approval" },
+  { id: "offer",      stage: "S6",  name: "Accepted Offer",           next: "accepted-offer dates verified",                            note: "automated + background · approval" },
+  { id: "conditions", stage: "S7",  name: "Condition Removal",        next: "conditions removed + deposit verified",                    note: "automated + background · approval" },
+  { id: "closed",     stage: "S8",  name: "Closed",                   next: "file closed + nurture queued",                             note: "automated + background" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -119,17 +118,10 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_PIPELINE: PipelinePhase[] = [
-  { id: "intake",       stage: "S0",  name: "Intake",              motion: "manual", next: "Moves on profile verified",               hint: "Profile + budget" },
-  { id: "search",       stage: "S1",  name: "Search Setup",        motion: "manual", next: "Moves on search criteria ready",          hint: "Criteria + MLS" },
-  { id: "tours",        stage: "S2",  name: "Tours",               motion: "manual", next: "Moves on showing notes complete",         hint: "Route + notes" },
-  { id: "followup",     stage: "S3",  name: "Follow-Up",           motion: "manual", next: "Moves on follow-up complete",             hint: "Feedback + fit" },
-  { id: "offer",        stage: "S4",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
-  { id: "accepted",     stage: "S5",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
-  { id: "conditions",   stage: "S6",  name: "Conditions",          motion: "manual", next: "Moves on conditions tracked",             hint: "Inspection + property review" },
-  { id: "removed",      stage: "S7",  name: "Conditions Removed",  motion: "manual", next: "Moves on conditions removed",             hint: "Deposit + dates" },
-  { id: "closing",      stage: "S8",  name: "Closing",             motion: "manual", next: "Moves on closing checklist complete",     hint: "Lawyer + walkthrough" },
-  { id: "possession",   stage: "S9",  name: "Possession",          motion: "manual", next: "Moves on possession follow-up queued",    hint: "Gift + follow-up" },
-  { id: "buyer-closed", stage: "S10", name: "Closed",              motion: "manual", next: "Moves on file archived",                  hint: "Archive + nurture" },
+  { id: "offer",        stage: "S0",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
+  { id: "accepted",     stage: "S1",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
+  { id: "conditions",   stage: "S2",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
+  { id: "closed",       stage: "S4",  name: "Closed",              motion: "manual", next: "Moves on file archived",                  hint: "Archive + nurture" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -159,9 +151,9 @@ export const ADMIN_DEALS: Deal[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_DEALS: BuyerDeal[] = [
-  { id: "b1", side: "buyer", phase: "tours",  addr: "Priya Devi — buyer track",     line2: "Looking: Brock area, $550–650K, 2BR+",   badge: "Tours",        progress: "2/4", next: "Showing notes for 1872 Valley Cres" },
-  { id: "b2", side: "buyer", phase: "search", addr: "Marcus Greene — buyer track",   line2: "Looking: Sahali/Aberdeen, $700K+, 3BR",       badge: "Search Setup", progress: "1/3", next: "MLS criteria saved" },
-  { id: "b3", side: "buyer", phase: "intake", addr: "Sam & Rosie — buyer track",     line2: "Couple, first-time buyers, $400–500K",   badge: "Intake",       progress: "0/2", next: "Profile + budget conversation" },
+  { id: "b1", side: "buyer", phase: "offer",  addr: "Priya Devi — buyer track",     line2: "Looking: Brock area, $550–650K, 2BR+",   badge: "Offer Prep",   progress: "2/4", next: "Offer package ready" },
+  { id: "b2", side: "buyer", phase: "offer", addr: "Marcus Greene — buyer track",   line2: "Looking: Sahali/Aberdeen, $700K+, 3BR",       badge: "Offer Prep", progress: "1/3", next: "Offer package ready" },
+  { id: "b3", side: "buyer", phase: "offer", addr: "Sam & Rosie — buyer track",     line2: "Couple, first-time buyers, $400–500K",   badge: "Offer Prep",       progress: "0/2", next: "Offer package ready" },
   { id: "b4", side: "buyer", phase: "offer",  addr: "Linda Hayworth — buyer track",  line2: "Repeat client, $850K range",                   badge: "Offer Prep",   progress: "3/4", next: "Comps pulled, awaiting client sign-off", blocked: true },
 ];
 
