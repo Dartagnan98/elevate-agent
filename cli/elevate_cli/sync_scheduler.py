@@ -49,11 +49,11 @@ _JOBS: tuple[tuple[str, str, int, str], ...] = (
     # dispatch (see source_connectors.scaffold_source). 172800s = 2d.
     ("sync-xposure-pcs",    "xposure-pcs",    172800, "MLS private-search scrape"),
     ("sync-buyer-brief",    "buyer-brief",    172800, "Buyer-brief enrichment (post-scrape)"),
-    # Per-listing engagement (Client View one-way mirror). Same 48h
-    # cadence as the criteria scrape but staggered: this one cares
-    # about view counts / favorites / last_client_access and is the
-    # primary signal source for the activity + outreach flagger.
-    ("sync-xposure-pcs-views", "xposure-pcs-views", 172800, "MLS per-listing engagement scrape"),
+    # Per-listing engagement (Client View one-way mirror). Daily morning
+    # cadence: this one cares about view counts / favorites /
+    # last_client_access and is the primary signal source for the
+    # activity + outreach flagger. 86400s = 1d.
+    ("sync-xposure-pcs-views", "xposure-pcs-views", 86400, "MLS per-listing engagement scrape"),
 )
 
 
@@ -187,6 +187,46 @@ def _job_timeout_seconds(job: SchedulerJob) -> int:
     return max(60, min(600, job.interval_seconds // 2))
 
 
+def _start_schedule_xml(job: SchedulerJob) -> str:
+    """Render launchd schedule keys for one job.
+
+    Most connectors are fixed-interval daemons. Xposure PCS listing views are
+    seller/buyer-engagement signals and should land once in the morning so the
+    Today/Outreach surfaces are fresh before call blocks.
+    """
+    if job.source_id == "xposure-pcs-views":
+        return """    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>"""
+    return f"""    <key>StartInterval</key>
+    <integer>{job.interval_seconds}</integer>"""
+
+
+def _run_at_load_xml(job: SchedulerJob) -> str:
+    """Render the launchd RunAtLoad block.
+
+    Most syncs should warm themselves immediately after install/login. The MLS
+    per-listing scrape is intentionally morning-only: it drives a browser/MLS
+    session, may involve MFA, and the user asked for one daily morning run.
+    """
+    if job.source_id == "xposure-pcs-views":
+        return """    <!-- Morning-only scrape: do not also fire on install/login. -->
+    <key>RunAtLoad</key>
+    <false/>"""
+    return """    <!--
+      RunAtLoad fires the job once when launchctl bootstraps the plist
+      (i.e. at install time and at each login). That doubles as the
+      "setup cron" — `elevate db init` installs the plist, launchd fires
+      the sync immediately, the DB is hot before the first scheduled tick.
+    -->
+    <key>RunAtLoad</key>
+    <true/>"""
+
+
 def generate_plist(job: SchedulerJob) -> str:
     """Render an XML plist for one sync job.
 
@@ -205,6 +245,8 @@ def generate_plist(job: SchedulerJob) -> str:
     stderr = log_dir / f"{job.label}.error.log"
     cwd = str(Path(__file__).parent.parent.resolve())
     timeout = _job_timeout_seconds(job)
+    schedule_xml = _start_schedule_xml(job)
+    run_at_load_xml = _run_at_load_xml(job)
 
     # Inline bash watchdog: background the python child, sleep for the cap,
     # then SIGKILL if still alive. Single file, no extra shipping artifact.
@@ -240,17 +282,9 @@ def generate_plist(job: SchedulerJob) -> str:
     <key>WorkingDirectory</key>
     <string>{cwd}</string>
 
-    <key>StartInterval</key>
-    <integer>{job.interval_seconds}</integer>
+{schedule_xml}
 
-    <!--
-      RunAtLoad fires the job once when launchctl bootstraps the plist
-      (i.e. at install time and at each login). That doubles as the
-      "setup cron" — `elevate db init` installs the plist, launchd fires
-      the sync immediately, the DB is hot before the first scheduled tick.
-    -->
-    <key>RunAtLoad</key>
-    <true/>
+{run_at_load_xml}
 
     <key>EnvironmentVariables</key>
     <dict>
