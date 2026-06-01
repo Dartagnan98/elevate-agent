@@ -1029,7 +1029,10 @@ export default function App() {
 const PINNED_SESSIONS_KEY = "elevate.sidebar.pinnedSessions";
 const UNREAD_SESSIONS_KEY = "elevate.sidebar.unreadSessions";
 const ARCHIVED_SESSIONS_KEY = "elevate.sidebar.archivedSessions";
-const SIDEBAR_SESSION_LIMIT = 48;
+const SIDEBAR_SESSION_PAGE_LIMIT = 200;
+const SIDEBAR_SESSION_SCAN_LIMIT = 1400;
+const SIDEBAR_CHAT_TARGET = 48;
+const SIDEBAR_CRON_RUN_TARGET = 48;
 
 function readStoredSessionIds(key: string): string[] {
   if (typeof window === "undefined") return [];
@@ -1093,12 +1096,35 @@ function isCronSession(session: SessionInfo): boolean {
   return cronJobIdFromSession(session) !== null;
 }
 
+function isDetachedAutomationSession(session: SessionInfo): boolean {
+  if ((session.source ?? "") !== "cli") return false;
+  const preview = session.preview?.trim().toLowerCase() ?? "";
+  const title = session.title?.trim().toLowerCase() ?? "";
+  return (
+    preview.startsWith("you are an automation agent driving the aoir xposure") ||
+    title === "daily pcs listing snapshot" ||
+    title === "xposure buyer export source"
+  );
+}
+
+function isSidebarAutomationSession(session: SessionInfo): boolean {
+  return isCronSession(session) || isDetachedAutomationSession(session);
+}
+
 function shouldShowCronSession(session: SessionInfo, nowSec: number): boolean {
   if (!isCronSession(session)) return false;
   if ((session.message_count ?? 0) > 0) return true;
   if (session.is_active) return true;
   const startedAt = session.started_at ?? session.last_active ?? 0;
   return startedAt > 0 && nowSec - startedAt < 120;
+}
+
+function isSidebarRelevantSession(session: SessionInfo, nowSec: number): boolean {
+  if (isDetachedAutomationSession(session)) return false;
+  if (isCronSession(session)) return shouldShowCronSession(session, nowSec);
+  if ((session.message_count ?? 0) > 0) return true;
+  const startedAt = session.started_at ?? 0;
+  return session.is_active && nowSec - startedAt < 10;
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
@@ -1220,28 +1246,55 @@ function DesktopSidebar({
   const sidebarLogoSrc =
     themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
 
-  const loadSessions = useCallback((options?: { refresh?: boolean }) => {
-    api
-      .getSessions(SIDEBAR_SESSION_LIMIT, 0, {
-        includeTotal: false,
-        refresh: options?.refresh,
-      })
-      .then((resp) => {
-        // Filter out sidebar noise: a new-chat click is a draft until the
-        // user sends text, so empty persisted sessions are abandoned
-        // bootstrap leftovers and should not show as real chats.
-        const nowSec = Date.now() / 1000;
-        const filtered = resp.sessions.filter((s) => {
-          if (isCronSession(s)) return shouldShowCronSession(s, nowSec);
-          if ((s.message_count ?? 0) > 0) return true;
-          const startedAt = s.started_at ?? 0;
-          return s.is_active && nowSec - startedAt < 10;
+  const loadSessions = useCallback(async (options?: { refresh?: boolean }) => {
+    try {
+      const nowSec = Date.now() / 1000;
+      const byId = new Map<string, SessionInfo>();
+      let chatCount = 0;
+      let cronRunCount = 0;
+      let hiddenAutomationCount = 0;
+
+      for (
+        let offset = 0;
+        offset < SIDEBAR_SESSION_SCAN_LIMIT;
+        offset += SIDEBAR_SESSION_PAGE_LIMIT
+      ) {
+        const resp = await api.getSessions(SIDEBAR_SESSION_PAGE_LIMIT, offset, {
+          includeTotal: false,
+          refresh: options?.refresh,
         });
-        setSessions(filtered);
-        setSessionError(false);
-      })
-      .catch(() => setSessionError(true))
-      .finally(() => setSessionsLoading(false));
+        const page = resp.sessions ?? [];
+        if (page.length === 0) break;
+
+        for (const session of page) {
+          if (isDetachedAutomationSession(session)) {
+            hiddenAutomationCount += 1;
+            continue;
+          }
+          if (!isSidebarRelevantSession(session, nowSec)) continue;
+          if (!byId.has(session.id)) byId.set(session.id, session);
+        }
+
+        const loaded = Array.from(byId.values());
+        chatCount = loaded.filter((session) => !isCronSession(session)).length;
+        cronRunCount = loaded.filter(isCronSession).length;
+
+        const hasEnoughVisibleRows =
+          chatCount >= SIDEBAR_CHAT_TARGET &&
+          (hiddenAutomationCount === 0 || cronRunCount >= SIDEBAR_CRON_RUN_TARGET);
+        const noMorePages = page.length < SIDEBAR_SESSION_PAGE_LIMIT;
+        if (hasEnoughVisibleRows || noMorePages) {
+          break;
+        }
+      }
+
+      setSessions(Array.from(byId.values()));
+      setSessionError(false);
+    } catch {
+      setSessionError(true);
+    } finally {
+      setSessionsLoading(false);
+    }
   }, []);
 
   const loadCronJobs = useCallback((options?: { refresh?: boolean }) => {
@@ -1381,11 +1434,11 @@ function DesktopSidebar({
   }, [archivedIds, query, sessions]);
 
   const pinnedSessions = filteredSessions
-    .filter((session) => pinnedIds.includes(session.id) && !isCronSession(session))
+    .filter((session) => pinnedIds.includes(session.id) && !isSidebarAutomationSession(session))
     .slice(0, 8);
   const spotlightIds = new Set(pinnedSessions.map((session) => session.id));
   const chatSessions = filteredSessions
-    .filter((session) => !spotlightIds.has(session.id) && !isCronSession(session))
+    .filter((session) => !spotlightIds.has(session.id) && !isSidebarAutomationSession(session))
     .slice(0, 18);
   const cronSessionsByJobId = useMemo(() => {
     const map = new Map<string, SessionInfo[]>();
@@ -1433,6 +1486,11 @@ function DesktopSidebar({
   }
   // Automations lives in this (now "Agent") section — always shown.
   realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
+  const toolsNavItems: NavItem[] = [
+    { icon: Bot, label: "Agent Hub", path: "/hub" },
+    { icon: Puzzle, label: "Skills", path: "/skills" },
+    { icon: Brain, label: "Memory graph", path: "/memory" },
+  ];
   const go = (path: string) => {
     onPreloadRoute?.(path);
     navigate(path);
@@ -1762,7 +1820,7 @@ function DesktopSidebar({
             {!collapsedSections.realEstate && (
               <div className="space-y-0.5">
                 {/* Single "Agent" section: Today/Leads/Admin/Social Media +
-                    Automations. (Agent Hub, Memory, Skills moved to Settings;
+                    Automations. (Agent Hub, Memory, Skills live in Tools;
                     Tasks removed. No separate "Real estate" section.) */}
                 {realEstateNavItems.map((item) => (
                   <SidebarAction
@@ -1823,21 +1881,31 @@ function DesktopSidebar({
           onToggle={() => setAutomationsOpen((prev) => !prev)}
           liveJobIds={runningCronJobIds}
           sessionsByJobId={cronSessionsByJobId}
-          onOpenCron={(jobId) => {
-            const latest = latestCronSessionByJobId.get(jobId);
-            if (latest) {
-              openSession(latest);
-              return;
-            }
-            onPreloadRoute?.("/cron");
-            navigate(`/cron#cron-job-${jobId}`);
-            onNavigate();
-          }}
           onOpenSession={openSession}
         />
 
-        {/* Tools (Analytics, Logs, Keys, Documentation) moved into the profile
-            menu (SidebarUserPill) per request — no longer a sidebar section. */}
+        <div className="mt-3 lg:mt-2.5">
+          <SidebarSectionLabel
+            collapsed={collapsedSections.tools}
+            onToggle={() => toggleSection("tools")}
+          >
+            Tools
+          </SidebarSectionLabel>
+          {!collapsedSections.tools && (
+            <div className="space-y-0.5">
+              {toolsNavItems.map((item) => (
+                <SidebarAction
+                  key={item.path}
+                  icon={item.icon}
+                  label={item.label}
+                  path={item.path}
+                  onNavigate={go}
+                  onPreload={onPreloadRoute}
+                />
+              ))}
+            </div>
+          )}
+        </div>
 
       </div>
 
@@ -2194,7 +2262,6 @@ function AutomationsSection({
   jobs,
   open,
   onToggle,
-  onOpenCron,
   onOpenSession,
   liveJobIds,
   sessionsByJobId,
@@ -2202,7 +2269,6 @@ function AutomationsSection({
   jobs: CronJob[];
   open: boolean;
   onToggle: () => void;
-  onOpenCron: (jobId: string) => void;
   onOpenSession: (session: SessionInfo) => void;
   liveJobIds: Set<string>;
   sessionsByJobId: Map<string, SessionInfo[]>;
@@ -2257,47 +2323,39 @@ function AutomationsSection({
             const Icon = errored ? AlertTriangle : paused ? Pause : Clock;
             const status = errored ? "warn" : paused ? "paused" : "live";
             const trail = running ? "live" : paused ? "paused" : formatNextRun(job.next_run_at);
+            const handleJobAction = () => {
+              toggleExpand(job.id);
+            };
             return (
               <div key={job.id}>
               <div
                 className="auto-row"
                 data-status={status}
-                onClick={() => onOpenCron(job.id)}
+                onClick={handleJobAction}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    onOpenCron(job.id);
+                    handleJobAction();
                   }
                 }}
                 role="button"
                 tabIndex={0}
+                aria-expanded={isExpanded}
                 title={`${title} · ${job.schedule_display}${running ? " · running now" : ""}${job.last_error ? ` · ${job.last_error}` : ""}`}
               >
-                <Icon />
+                <ChevronRight
+                  className={cn("auto-chev", isExpanded && "rotate-90")}
+                  aria-hidden="true"
+                />
+                <Icon className="auto-icon" />
                 <span className="title">{title}</span>
                 <span className={cn("auto-trail", paused && "paused", trail === "—" && "dash")}>
                   {trail}
                 </span>
-                {runs.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      toggleExpand(job.id);
-                    }}
-                    className={cn("auto-chev", isExpanded && "rotate-90")}
-                    title={`${runs.length} run${runs.length === 1 ? "" : "s"}`}
-                    aria-label={isExpanded ? "Collapse run history" : "Expand run history"}
-                    aria-expanded={isExpanded}
-                  >
-                    <ChevronRight />
-                  </button>
-                )}
               </div>
-              {isExpanded && recentRuns.length > 0 && (
+              {isExpanded && (
                 <div className="session-list mb-1 mt-0.5">
-                  {recentRuns.map((session) => {
+                  {recentRuns.length > 0 ? recentRuns.map((session) => {
                     const runLabel =
                       session.preview?.trim() ||
                       (session.title && session.title.trim() !== "Untitled"
@@ -2320,7 +2378,15 @@ function AutomationsSection({
                       <span className="age">{compactSessionAge(session.last_active ?? 0)}</span>
                     </button>
                     );
-                  })}
+                  }) : (
+                    <div className="session-row auto-empty" data-status="inactive">
+                      <span className="status-cell">
+                        <span className="dot idle" />
+                      </span>
+                      <span className="title">No recorded runs yet</span>
+                      <span className="age">—</span>
+                    </div>
+                  )}
                 </div>
               )}
               </div>

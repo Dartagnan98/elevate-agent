@@ -1,6 +1,6 @@
 """Portable recurring-sync scheduler for Elevate connectors.
 
-Installs one launchd plist per connector (apple-messages / crm / social) that
+Installs one launchd plist per deterministic connector (apple-messages / crm / social) that
 calls ``elevate sync <source>`` on a fixed interval. The plists are generated
 at install time using the real user's HOME, the detected venv, and the active
 ``ELEVATE_HOME`` so any fresh install gets correct paths without hard-coding.
@@ -9,9 +9,9 @@ Mac-only today. On non-Darwin platforms, ``install_all`` reports unsupported
 and exits cleanly so ``elevate db init`` still succeeds.
 
 Why launchd (not the AI cron in ``cron/jobs.json``):
-- These are deterministic shell calls, not LLM prompts. AI cron would burn
-  tokens for every fire. Memory rule ``feedback_scheduling_layer_choice``:
-  launchd for dumb scripts, mcp__scheduled-tasks for AI work.
+- These are deterministic shell calls, not LLM prompts. AI/browser work belongs
+  in the app Automations scheduler so runs keep ``source=cron`` metadata and do
+  not leak into the Chats sidebar as ordinary CLI sessions.
 - launchd survives reboots, runs even when no terminal is open, and matches
   the existing pattern at ``~/Library/LaunchAgents/ai.elevate.*.plist``.
 """
@@ -26,6 +26,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from xml.sax.saxutils import escape as _xml_escape
 
 
 # ─── Job registry ──────────────────────────────────────────────────────
@@ -41,19 +42,16 @@ _JOBS: tuple[tuple[str, str, int, str], ...] = (
     ("sync-apple-messages", "apple-messages", 600, "iMessage / SMS pull"),
     ("sync-crm",            "crm",            3600, "CRM adapter pull (provider-agnostic)"),
     ("sync-social",         "social",         600, "Composio inbound (gmail, ig, wa, fb, slack, ...)"),
-    # MLS private-search scraper. 48h cadence — Xposure scrapes are
-    # browser sessions that take ~3-5 min each, and the underlying
-    # buyer-search criteria don't change minute-to-minute. The buyer-
-    # brief enrichment runs immediately after and is a cheap local
-    # compute, so we chain them in one plist via the same source-id
-    # dispatch (see source_connectors.scaffold_source). 172800s = 2d.
-    ("sync-xposure-pcs",    "xposure-pcs",    172800, "MLS private-search scrape"),
-    ("sync-buyer-brief",    "buyer-brief",    172800, "Buyer-brief enrichment (post-scrape)"),
-    # Per-listing engagement (Client View one-way mirror). Daily morning
-    # cadence: this one cares about view counts / favorites /
-    # last_client_access and is the primary signal source for the
-    # activity + outreach flagger. 86400s = 1d.
-    ("sync-xposure-pcs-views", "xposure-pcs-views", 86400, "MLS per-listing engagement scrape"),
+)
+
+_RETIRED_JOBS: tuple[tuple[str, str, int, str], ...] = (
+    # These used to run through launchd as ``elevate sync ...``. They drive
+    # browser/LLM agents, so the direct sync path created source="cli" sessions
+    # whose titles/previews showed up in Chats. Keep them here so install/status
+    # can remove stale plists while the real runs live in app Automations.
+    ("sync-xposure-pcs", "xposure-pcs", 172800, "retired: use Automations / Private Searches"),
+    ("sync-buyer-brief", "buyer-brief", 172800, "retired: chained from Automations / Private Searches"),
+    ("sync-xposure-pcs-views", "xposure-pcs-views", 86400, "retired: use Automations / AOIR Xposure PCS listing views"),
 )
 
 
@@ -150,6 +148,19 @@ def jobs() -> list[SchedulerJob]:
     ]
 
 
+def retired_jobs() -> list[SchedulerJob]:
+    return [
+        SchedulerJob(
+            label=_label_for(stem),
+            source_id=source_id,
+            interval_seconds=interval,
+            description=desc,
+            plist_path=_plist_path_for(_label_for(stem)),
+        )
+        for (stem, source_id, interval, desc) in _RETIRED_JOBS
+    ]
+
+
 # ─── Plist generation ──────────────────────────────────────────────────
 
 def _sane_path() -> str:
@@ -227,6 +238,10 @@ def _run_at_load_xml(job: SchedulerJob) -> str:
     <true/>"""
 
 
+def _xml_text(value: object) -> str:
+    return _xml_escape(str(value), {'"': "&quot;", "'": "&apos;"})
+
+
 def generate_plist(job: SchedulerJob) -> str:
     """Render an XML plist for one sync job.
 
@@ -270,17 +285,17 @@ def generate_plist(job: SchedulerJob) -> str:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{job.label}</string>
+    <string>{_xml_text(job.label)}</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>{bash_cmd}</string>
+        <string>{_xml_text(bash_cmd)}</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>{cwd}</string>
+    <string>{_xml_text(cwd)}</string>
 
 {schedule_xml}
 
@@ -289,18 +304,18 @@ def generate_plist(job: SchedulerJob) -> str:
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
-        <string>{_user_home()}</string>
+        <string>{_xml_text(_user_home())}</string>
         <key>PATH</key>
-        <string>{path}</string>
+        <string>{_xml_text(path)}</string>
         <key>ELEVATE_HOME</key>
-        <string>{home}</string>
+        <string>{_xml_text(home)}</string>
     </dict>
 
     <key>StandardOutPath</key>
-    <string>{stdout}</string>
+    <string>{_xml_text(stdout)}</string>
 
     <key>StandardErrorPath</key>
-    <string>{stderr}</string>
+    <string>{_xml_text(stderr)}</string>
 </dict>
 </plist>
 """
@@ -378,7 +393,9 @@ def install_one(job: SchedulerJob, *, force: bool = False) -> SchedulerResult:
 
 
 def install_all(*, force: bool = False) -> list[SchedulerResult]:
-    return [install_one(j, force=force) for j in jobs()]
+    return [uninstall_one(j) for j in retired_jobs()] + [
+        install_one(j, force=force) for j in jobs()
+    ]
 
 
 def uninstall_one(job: SchedulerJob) -> SchedulerResult:
@@ -410,7 +427,7 @@ def uninstall_all() -> list[SchedulerResult]:
 def status() -> list[dict]:
     """Return a snapshot for each job: installed/loaded state + next interval."""
     out: list[dict] = []
-    for job in jobs():
+    for job in [*jobs(), *retired_jobs()]:
         installed = job.plist_path.exists()
         loaded = False
         last_exit: int | None = None
@@ -440,6 +457,7 @@ def status() -> list[dict]:
             "loaded": loaded,
             "last_exit": last_exit,
             "description": job.description,
+            "retired": job in retired_jobs(),
         })
     return out
 
@@ -453,7 +471,9 @@ def print_status(rows: Iterable[dict] | None = None) -> None:
     for r in rows:
         flag = "loaded" if r["loaded"] else ("installed" if r["installed"] else "absent")
         exit_part = f" last_exit={r['last_exit']}" if r["last_exit"] is not None else ""
-        print(f"- {r['source_id']:<14} {flag:<10} every {r['interval_seconds']}s{exit_part}")
+        retired_part = " retired" if r.get("retired") else ""
+        schedule_part = "removed from launchd" if r.get("retired") else f"every {r['interval_seconds']}s"
+        print(f"- {r['source_id']:<18} {flag:<10} {schedule_part}{retired_part}{exit_part}")
         print(f"  {r['plist_path']}")
 
 

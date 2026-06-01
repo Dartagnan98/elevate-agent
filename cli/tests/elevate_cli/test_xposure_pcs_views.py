@@ -116,27 +116,20 @@ class TestConnectorWiring:
         assert "STATUS: No live pull code exists" not in prompt
         assert "Canonical contract" not in prompt
 
-    def test_scheduler_tuple(self) -> None:
-        from elevate_cli.sync_scheduler import _JOBS, jobs, generate_plist
+    def test_scheduler_tuple_is_retired_from_launchd(self) -> None:
+        from elevate_cli.sync_scheduler import _JOBS, _RETIRED_JOBS, retired_jobs
 
-        match = [j for j in _JOBS if j[1] == "xposure-pcs-views"]
-        assert match, "xposure-pcs-views missing from sync_scheduler._JOBS"
+        assert not any(j[1] == "xposure-pcs-views" for j in _JOBS)
+        match = [j for j in _RETIRED_JOBS if j[1] == "xposure-pcs-views"]
+        assert match, "xposure-pcs-views missing from sync_scheduler._RETIRED_JOBS"
         label, source_id, interval, desc = match[0]
         assert label == "sync-xposure-pcs-views"
-        # Daily cadence; launchd plist pins it to the morning.
+        # Daily cadence is now owned by app Automations, not launchd.
         assert interval == 86400
         assert desc  # non-empty description
 
-        job = next(j for j in jobs() if j.source_id == "xposure-pcs-views")
-        plist = generate_plist(job)
-        assert "<key>StartCalendarInterval</key>" in plist
-        assert "<key>Hour</key>" in plist
-        assert "<integer>7</integer>" in plist
-        assert "<key>Minute</key>" in plist
-        assert "<integer>0</integer>" in plist
-        assert "<key>StartInterval</key>" not in plist
-        assert "<key>RunAtLoad</key>" in plist
-        assert "<false/>" in plist
+        job = next(j for j in retired_jobs() if j.source_id == "xposure-pcs-views")
+        assert job.label == "ai.elevate.sync-xposure-pcs-views"
 
     def test_scaffold_source_dispatches(self) -> None:
         # We don't actually run the scraper here — just confirm the

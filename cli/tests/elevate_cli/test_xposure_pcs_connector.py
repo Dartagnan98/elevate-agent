@@ -105,7 +105,8 @@ def test_source_prompt_is_executable_xposure_agent_prompt() -> None:
     assert "Canonical contract" not in prompt
 
 
-def test_xposure_pcs_is_scheduled() -> None:
-    from elevate_cli.sync_scheduler import _JOBS
+def test_xposure_pcs_is_not_launchd_scheduled() -> None:
+    from elevate_cli.sync_scheduler import _JOBS, _RETIRED_JOBS
 
-    assert any(source_id == "xposure-pcs" for _, source_id, _, _ in _JOBS)
+    assert not any(source_id == "xposure-pcs" for _, source_id, _, _ in _JOBS)
+    assert any(source_id == "xposure-pcs" for _, source_id, _, _ in _RETIRED_JOBS)

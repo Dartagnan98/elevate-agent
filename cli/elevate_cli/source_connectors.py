@@ -314,10 +314,10 @@ Identity-first writethrough (handled for you by `elevate_cli/data/migrate.py:wal
 - `_SOURCE_TO_HANDLE_KIND` + `_CRM_PROVIDER_TO_IDENTITY_KIND` + `_TOOLKIT_TO_HANDLE_KIND` registries map raw native ids to canonical identity kinds. Add a row to the right registry — do NOT branch in code.
 - The same person collapses to one `contact_id` across every source. Cross-source duplicates land in `identity_conflicts` for operator review (never auto-merge — `merge_contacts` requires `actor.startswith("human")`).
 
-Recurring sync (handled by `elevate_cli/sync_scheduler.py`):
-- Every wired source gets a launchd plist `ai.elevate.sync-<source-id>` installed by `elevate db init`.
-- Plist runs `elevate sync <source-id>` on a fixed interval (apple-messages 600s, crm 3600s, social 600s). `RunAtLoad=true` doubles as the setup cron.
-- New sources auto-register by adding a tuple to `sync_scheduler._JOBS`.
+Recurring sync:
+- Deterministic source pulls can use `elevate_cli/sync_scheduler.py` launchd plists.
+- AI/browser agent work belongs in the app Automations scheduler, not launchd, so its sessions keep cron metadata and stay out of the Chats sidebar.
+- New deterministic sources auto-register by adding a tuple to `sync_scheduler._JOBS`.
 
 Per-source files:
 - `source.json` — provider, account_label, connection_type, auth_status, sync_mode, owner_agent, enabled_ui_surfaces, setup_status, last_sync_at, setup_notes.
@@ -2579,8 +2579,9 @@ def source_prompt_for(source_id: str) -> str:
         "  `elevate_cli/composio_inbound.py:synthesize_canonical_files`.\n\n"
         f"{CONNECTION_CONTRACT}{extra_contract}\n\n"
         "When the connector is built:\n"
-        f"- Add a tuple to `elevate_cli/sync_scheduler.py:_JOBS` so `elevate db init`\n"
-        f"  installs the recurring launchd plist on every fresh install.\n"
+        f"- If the source is deterministic, add a tuple to `elevate_cli/sync_scheduler.py:_JOBS`\n"
+        f"  so `elevate db init` installs the recurring launchd plist on every fresh install.\n"
+        f"  If it launches an AI/browser agent, register it in app Automations instead.\n"
         f"- Add `{source_id}` to the routing block in\n"
         f"  `elevate_cli/web_server.py:update_source_connector` so the UI Run button fires it.\n"
         f"- Add the relevant identity kind to the `_SOURCE_TO_HANDLE_KIND`,\n"
