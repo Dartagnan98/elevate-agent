@@ -123,6 +123,11 @@ from agent.display import (
     _detect_tool_failure,
     get_tool_emoji as _get_tool_emoji,
 )
+from agent.tool_dispatch_helpers import (
+    _append_subdir_hint_to_multimodal,
+    _is_multimodal_tool_result,
+    _multimodal_text_summary,
+)
 from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
@@ -3907,6 +3912,91 @@ class AIAgent:
             return None
 
     @staticmethod
+    def _strip_image_parts_for_persistence(content: Any) -> Any:
+        """Return a persistence-safe copy of message content.
+
+        The live in-memory/API copy may keep image bytes for one native-vision
+        turn. Session logs should never retain raw ``data:image`` blobs because
+        they bloat resume context and disk writes without improving future
+        answers. Text parts are preserved, including any local path hints.
+        """
+        if _is_multimodal_tool_result(content):
+            return _multimodal_text_summary(content)
+
+        if not isinstance(content, list):
+            return content
+
+        changed = False
+        cleaned: List[Any] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in {"image", "image_url", "input_image"}:
+                changed = True
+                cleaned.append({
+                    "type": "text",
+                    "text": "[Attached image omitted from persisted session log]",
+                })
+            else:
+                cleaned.append(part)
+        return cleaned if changed else content
+
+    @classmethod
+    def _message_for_session_log(cls, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Copy *msg* and remove media payloads that should not be persisted."""
+        safe = dict(msg)
+        safe["content"] = cls._strip_image_parts_for_persistence(safe.get("content"))
+        # These blocks can also contain raw base64 image data. They are only
+        # needed for provider replay, not for the human-readable JSON log.
+        safe.pop("_anthropic_content_blocks", None)
+        return safe
+
+    def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
+        """Return the tool content shape to send on the immediate API retry.
+
+        Multimodal tools construct the envelope only after their own routing
+        policy decides native vision is appropriate. Preserve that image list
+        for the next model call unless this session has already learned that
+        the provider rejects images.
+        """
+        if not _is_multimodal_tool_result(result):
+            return result
+        if not getattr(self, "_vision_supported", True):
+            return _multimodal_text_summary(result)
+        return result.get("content") or _multimodal_text_summary(result)
+
+    @staticmethod
+    def _try_strip_image_parts_from_tool_messages(api_messages: list) -> bool:
+        """Downgrade image-bearing tool messages to text after provider rejection."""
+        changed = False
+        for msg in api_messages or []:
+            if not isinstance(msg, dict) or msg.get("role") != "tool":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            new_parts: List[Any] = []
+            removed = False
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in {"image", "image_url", "input_image"}:
+                    removed = True
+                    continue
+                new_parts.append(part)
+            if not removed:
+                continue
+            changed = True
+            msg["content"] = new_parts or "[image content removed after provider rejected tool images]"
+        return changed
+
+    @staticmethod
+    def _try_shrink_image_parts_in_messages(api_messages: list) -> bool:
+        """Compatibility shim for the active run_agent conversation loop."""
+        try:
+            from agent.conversation_compression import try_shrink_image_parts_in_messages
+        except Exception as exc:
+            logger.warning("image-shrink recovery unavailable: %s", exc)
+            return False
+        return try_shrink_image_parts_in_messages(api_messages)
+
+    @staticmethod
     def _clean_session_content(content: str) -> str:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
         if not content:
@@ -3939,7 +4029,8 @@ class AIAgent:
             # recalled memory blocks duplicated on every saved turn.
             cleaned = []
             for msg in messages:
-                if msg.get("role") == "assistant" and msg.get("content"):
+                msg = self._message_for_session_log(msg)
+                if msg.get("role") == "assistant" and isinstance(msg.get("content"), str) and msg.get("content"):
                     msg = dict(msg)
                     msg["content"] = self._clean_session_content(msg["content"])
                 elif msg.get("role") == "user" and "_ephemeral_context" in msg:
@@ -8056,6 +8147,14 @@ class AIAgent:
                 api_msg.pop("_thinking_prefill", None)
                 if _needs_sanitize:
                     self._sanitize_tool_calls_for_strict_api(api_msg)
+                if (
+                    api_msg.get("role") == "tool"
+                    and _is_multimodal_tool_result(api_msg.get("content"))
+                ):
+                    api_msg["content"] = self._tool_result_content_for_active_model(
+                        str(api_msg.get("tool_name") or api_msg.get("name") or ""),
+                        api_msg.get("content"),
+                    )
                 api_messages.append(api_msg)
 
             if self._cached_system_prompt:
@@ -8634,11 +8733,12 @@ class AIAgent:
                 result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
             duration = time.time() - start
-            is_error, _ = _detect_tool_failure(function_name, result)
+            result_text = _multimodal_text_summary(result)
+            is_error, _ = _detect_tool_failure(function_name, result_text)
             if is_error:
-                logger.info("tool %s failed (%.2fs): %s", function_name, duration, result[:200])
+                logger.info("tool %s failed (%.2fs): %s", function_name, duration, result_text[:200])
             else:
-                logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result))
+                logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result_text))
             results[index] = (function_name, function_args, result, duration, is_error)
             # Tear down worker-tid tracking.  Clear any interrupt bit we may
             # have set so the next task scheduled onto this recycled tid
@@ -8728,25 +8828,29 @@ class AIAgent:
                 else:
                     function_result = f"Error executing tool '{name}': thread did not return a result"
                 tool_duration = 0.0
+                function_name = name
+                function_args = args
+                is_error = True
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
+            function_result_text = _multimodal_text_summary(function_result)
 
-                if is_error:
-                    result_preview = function_result[:200] if len(function_result) > 200 else function_result
-                    logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
+            if is_error:
+                result_preview = function_result_text[:200] if len(function_result_text) > 200 else function_result_text
+                logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
-                if self.tool_progress_callback:
-                    try:
-                        self.tool_progress_callback(
-                            "tool.completed", function_name, None, None,
-                            duration=tool_duration, is_error=is_error,
-                        )
-                    except Exception as cb_err:
-                        logging.debug(f"Tool progress callback error: {cb_err}")
+            if self.tool_progress_callback:
+                try:
+                    self.tool_progress_callback(
+                        "tool.completed", function_name, None, None,
+                        duration=tool_duration, is_error=is_error,
+                    )
+                except Exception as cb_err:
+                    logging.debug(f"Tool progress callback error: {cb_err}")
 
-                if self.verbose_logging:
-                    logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                    logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+            if self.verbose_logging:
+                logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
+                logging.debug(f"Tool result ({len(function_result_text)} chars): {function_result_text}")
 
             # Print cute message per tool
             if self._should_emit_quiet_tool_messages():
@@ -8755,9 +8859,9 @@ class AIAgent:
             elif not self.quiet_mode:
                 if self.verbose_logging:
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s")
-                    print(self._wrap_verbose("Result: ", function_result))
+                    print(self._wrap_verbose("Result: ", function_result_text))
                 else:
-                    response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
+                    response_preview = function_result_text[:self.log_prefix_chars] + "..." if len(function_result_text) > self.log_prefix_chars else function_result_text
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
             self._current_tool = None
@@ -8769,16 +8873,22 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
-            function_result = maybe_persist_tool_result(
-                content=function_result,
-                tool_name=name,
-                tool_use_id=tc.id,
-                env=get_active_env(effective_task_id),
-            )
+            if not _is_multimodal_tool_result(function_result):
+                if not isinstance(function_result, str):
+                    function_result = function_result_text
+                function_result = maybe_persist_tool_result(
+                    content=function_result,
+                    tool_name=name,
+                    tool_use_id=tc.id,
+                    env=get_active_env(effective_task_id),
+                )
 
             subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
             if subdir_hints:
-                function_result += subdir_hints
+                if _is_multimodal_tool_result(function_result):
+                    _append_subdir_hint_to_multimodal(function_result, subdir_hints)
+                else:
+                    function_result += subdir_hints
 
             tool_msg = {
                 "role": "tool",
@@ -9110,17 +9220,25 @@ class AIAgent:
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
 
-            result_preview = function_result if self.verbose_logging else (
-                function_result[:200] if len(function_result) > 200 else function_result
+            function_result_text = _multimodal_text_summary(function_result)
+            result_preview = function_result_text if self.verbose_logging else (
+                function_result_text[:200]
+                if len(function_result_text) > 200
+                else function_result_text
             )
 
             # Log tool errors to the persistent error log so [error] tags
             # in the UI always have a corresponding detailed entry on disk.
-            _is_error_result, _ = _detect_tool_failure(function_name, function_result)
+            _is_error_result, _ = _detect_tool_failure(function_name, function_result_text)
             if _is_error_result:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
             else:
-                logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, len(function_result))
+                logger.info(
+                    "tool %s completed (%.2fs, %d chars)",
+                    function_name,
+                    tool_duration,
+                    len(function_result_text),
+                )
 
             if self.tool_progress_callback:
                 try:
@@ -9136,7 +9254,7 @@ class AIAgent:
 
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+                logging.debug(f"Tool result ({len(function_result_text)} chars): {function_result_text}")
 
             if self.tool_complete_callback:
                 try:
@@ -9144,17 +9262,23 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
-            function_result = maybe_persist_tool_result(
-                content=function_result,
-                tool_name=function_name,
-                tool_use_id=tool_call.id,
-                env=get_active_env(effective_task_id),
-            )
+            if not _is_multimodal_tool_result(function_result):
+                if not isinstance(function_result, str):
+                    function_result = function_result_text
+                function_result = maybe_persist_tool_result(
+                    content=function_result,
+                    tool_name=function_name,
+                    tool_use_id=tool_call.id,
+                    env=get_active_env(effective_task_id),
+                )
 
             # Discover subdirectory context files from tool arguments
             subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
             if subdir_hints:
-                function_result += subdir_hints
+                if _is_multimodal_tool_result(function_result):
+                    _append_subdir_hint_to_multimodal(function_result, subdir_hints)
+                else:
+                    function_result += subdir_hints
 
             tool_msg = {
                 "role": "tool",
@@ -9175,9 +9299,9 @@ class AIAgent:
             if not self.quiet_mode:
                 if self.verbose_logging:
                     print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s")
-                    print(self._wrap_verbose("Result: ", function_result))
+                    print(self._wrap_verbose("Result: ", function_result_text))
                 else:
-                    response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
+                    response_preview = function_result_text[:self.log_prefix_chars] + "..." if len(function_result_text) > self.log_prefix_chars else function_result_text
                     print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s - {response_preview}")
 
             if self._interrupt_requested and i < len(assistant_message.tool_calls):
@@ -9977,6 +10101,14 @@ class AIAgent:
                 # for Codex Responses compatibility.
                 if self._should_sanitize_tool_calls():
                     self._sanitize_tool_calls_for_strict_api(api_msg)
+                if (
+                    api_msg.get("role") == "tool"
+                    and _is_multimodal_tool_result(api_msg.get("content"))
+                ):
+                    api_msg["content"] = self._tool_result_content_for_active_model(
+                        str(api_msg.get("tool_name") or api_msg.get("name") or ""),
+                        api_msg.get("content"),
+                    )
                 # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
                 # The signature field helps maintain reasoning continuity
                 api_messages.append(api_msg)
@@ -10102,6 +10234,8 @@ class AIAgent:
             nous_auth_retry_attempted=False
             copilot_auth_retry_attempted=False
             thinking_sig_retry_attempted = False
+            image_shrink_retry_attempted = False
+            multimodal_tool_content_retry_attempted = False
             has_retried_429 = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
@@ -11082,6 +11216,48 @@ class AIAgent:
                     )
                     if recovered_with_pool:
                         continue
+
+                    # Image-too-large recovery: shrink oversized native image
+                    # parts in the current API payload and retry once. This
+                    # preserves normal first-pass image quality, and only
+                    # reduces resolution after the provider rejects the request.
+                    if (
+                        classified.reason == FailoverReason.image_too_large
+                        and not image_shrink_retry_attempted
+                    ):
+                        image_shrink_retry_attempted = True
+                        if self._try_shrink_image_parts_in_messages(api_messages):
+                            self._vprint(
+                                f"{self.log_prefix}📐 Image(s) exceeded provider size limit — "
+                                f"shrank and retrying...",
+                                force=True,
+                            )
+                            continue
+                        logger.info(
+                            "image-shrink recovery: no data-URL image parts found "
+                            "or shrink did not reduce size; surfacing original error."
+                        )
+
+                    # Some providers reject list-type content on tool messages
+                    # even when those lists are valid multimodal blocks. Fall
+                    # back once to text-only tool content instead of failing.
+                    if (
+                        classified.reason == FailoverReason.multimodal_tool_content_unsupported
+                        and not multimodal_tool_content_retry_attempted
+                    ):
+                        multimodal_tool_content_retry_attempted = True
+                        if self._try_strip_image_parts_from_tool_messages(api_messages):
+                            self._vision_supported = False
+                            self._vprint(
+                                f"{self.log_prefix}📐 Provider rejected tool image content — "
+                                f"downgraded screenshots to text and retrying...",
+                                force=True,
+                            )
+                            continue
+                        logger.info(
+                            "multimodal-tool-content recovery: no list-type tool "
+                            "messages with image parts found; surfacing original error."
+                        )
                     if (
                         self.api_mode == "codex_responses"
                         and self.provider == "openai-codex"
