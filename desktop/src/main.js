@@ -1008,7 +1008,7 @@ ipcMain.handle("auth:open-external", async (_event, target) => {
 // Auto-update
 // ---------------------------------------------------------------------------
 // Flow:
-//   1. App boots → checkForUpdates() hits the GitHub release feed.
+//   1. App boots → checkForUpdates() hits the configured generic release feed.
 //   2. If a newer version is found, autoDownload=true pulls the zip silently.
 //   3. We forward every event to the renderer via `updater:event` so the toast
 //      UI can show progress / "restart to update".
@@ -1127,11 +1127,25 @@ autoUpdater.on("error", (err) => {
 });
 
 function kickoffUpdates() {
-  // Auto-update disabled until the Mac build is signed with a Developer ID +
-  // shipped through a real publish channel. Without signing, electron-updater
-  // downloads the new bundle but macOS refuses the cert-mismatched swap, so
-  // the popup just confuses users. Clients install updates manually for now.
-  log.info("[updater] disabled — manual updates only (no Developer ID signing yet)");
+  if (!app.isPackaged) {
+    log.info("[updater] skipped in development build");
+    return;
+  }
+
+  const check = async (reason) => {
+    try {
+      log.info(`[updater] checking for updates (${reason})`);
+      await autoUpdater.checkForUpdates();
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      log.warn(`[updater] check failed (${reason}): ${message}`);
+      broadcastUpdaterEvent({ status: "error", error: message });
+    }
+  };
+
+  check("startup");
+  const timer = setInterval(() => check("poll"), 2 * 60 * 60 * 1000);
+  if (typeof timer.unref === "function") timer.unref();
 }
 
 // Renderer can ask "what's the latest status?" on mount so it doesn't miss

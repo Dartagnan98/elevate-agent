@@ -1,6 +1,6 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "0.15.0",
+  "version": "1.0.0",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
@@ -9,7 +9,9 @@
     "start": "electron .",
     "pack:mac": "electron-builder --mac dir",
     "build:mac": "electron-builder --mac dmg zip --x64 --arm64",
-    "release:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never && node scripts/ship-to-hetzner.js"
+    "finalize:mac": "node scripts/finalize-mac-dist.js",
+    "ship:mac": "node scripts/ship-to-hetzner.js",
+    "release:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never && npm run finalize:mac && npm run ship:mac"
   },
   "build": {
     "appId": "com.elevationrealestate.elevate",
@@ -73,6 +75,11 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "notarize": true,
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Elevate uses the microphone for voice input in chat."
       },
@@ -85,10 +92,7 @@
           "target": "zip",
           "arch": ["arm64", "x64"]
         }
-      ],
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false,
-      "identity": null
+      ]
     },
     "dmg": {
       "title": "Elevate"
@@ -96,7 +100,8 @@
   },
   "devDependencies": {
     "electron": "^38.4.0",
-    "electron-builder": "^26.0.12"
+    "electron-builder": "^26.0.12",
+    "js-yaml": "^4.1.1"
   },
   "dependencies": {
     "electron-log": "^5.4.4",

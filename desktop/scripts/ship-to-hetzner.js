@@ -15,8 +15,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const yaml = require("js-yaml");
 
 const DIST = path.resolve(__dirname, "..", "dist");
+const FEED = path.join(DIST, "latest-mac.yml");
 const HOST = "root@5.78.46.234";
 const REMOTE = "/var/www/elevate-updates/";
 
@@ -25,19 +27,27 @@ if (!fs.existsSync(DIST)) {
   process.exit(1);
 }
 
-// electron-builder emits latest-mac.yml (the feed file electron-updater
-// polls), one zip + blockmap per arch, plus the dmgs. Ship the lot.
-const PATTERNS = [
-  /^latest-mac\.yml$/,
-  /^Elevate-.*-mac.*\.zip$/,
-  /^Elevate-.*-mac.*\.zip\.blockmap$/,
-  /^Elevate-.*\.dmg$/,
-  /^Elevate-.*\.dmg\.blockmap$/,
-];
+if (!fs.existsSync(FEED)) {
+  console.error(`[ship] no latest-mac.yml at ${FEED} — did the build run?`);
+  process.exit(1);
+}
 
-const matches = fs
-  .readdirSync(DIST)
-  .filter((name) => PATTERNS.some((re) => re.test(name)));
+// electron-builder emits latest-mac.yml (the feed file electron-updater polls).
+// Ship exactly the files referenced by the feed, plus matching blockmaps when
+// present, so stale artifacts in dist/ never leak into the update directory.
+const feed = yaml.load(fs.readFileSync(FEED, "utf8"));
+const selected = new Set(["latest-mac.yml"]);
+for (const file of feed.files || []) {
+  selected.add(file.url);
+  // The updater uses zip blockmaps on macOS. DMG blockmaps are generated before
+  // finalize:mac signs/staples the DMGs, so do not upload stale DMG blockmaps.
+  if (file.url.endsWith(".zip")) {
+    const blockMap = `${file.url}.blockmap`;
+    if (fs.existsSync(path.join(DIST, blockMap))) selected.add(blockMap);
+  }
+}
+
+const matches = Array.from(selected).filter((name) => fs.existsSync(path.join(DIST, name)));
 
 if (matches.length === 0) {
   console.error(`[ship] no matching artifacts in ${DIST}`);
