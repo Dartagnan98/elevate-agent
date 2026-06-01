@@ -30,6 +30,13 @@ from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
 )
+from agent.media_context import (
+    IMAGE_PART_TYPES as _MEDIA_IMAGE_PART_TYPES,
+    content_has_images as _media_content_has_images,
+    is_image_part as _media_is_image_part,
+    strip_image_parts_from_parts as _media_strip_image_parts_from_parts,
+    strip_images_from_content as _media_strip_images_from_content,
+)
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -98,8 +105,7 @@ def _content_length_for_budget(raw_content: Any) -> int:
         if not isinstance(p, dict):
             total += len(str(p))
             continue
-        ptype = p.get("type")
-        if ptype in {"image_url", "input_image", "image"}:
+        if _is_image_part(p):
             total += _IMAGE_CHAR_EQUIVALENT
         else:
             # text / input_text / tool_result-with-text / anything else with
@@ -158,21 +164,10 @@ def _strip_image_parts_from_parts(parts: Any) -> Any:
     skip the replacement in that case). Used by the compressor to prune
     old computer_use screenshots.
     """
-    if not isinstance(parts, list):
-        return None
-    had_image = False
-    out = []
-    for part in parts:
-        if not isinstance(part, dict):
-            out.append(part)
-            continue
-        ptype = part.get("type")
-        if ptype in {"image", "image_url", "input_image"}:
-            had_image = True
-            out.append({"type": "text", "text": "[screenshot removed to save context]"})
-        else:
-            out.append(part)
-    return out if had_image else None
+    return _media_strip_image_parts_from_parts(
+        parts,
+        placeholder="[screenshot removed to save context]",
+    )
 
 
 def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
@@ -221,7 +216,7 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     return json.dumps(shrunken, ensure_ascii=False)
 
 
-_IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+_IMAGE_PART_TYPES = _MEDIA_IMAGE_PART_TYPES
 
 
 def _is_image_part(part: Any) -> bool:
@@ -232,9 +227,7 @@ def _is_image_part(part: Any) -> bool:
       - OpenAI Responses API:    ``{"type": "input_image", "image_url": "..."}``
       - Anthropic native:        ``{"type": "image", "source": {...}}``
     """
-    if not isinstance(part, dict):
-        return False
-    return part.get("type") in _IMAGE_PART_TYPES
+    return _media_is_image_part(part)
 
 
 def _content_has_images(content: Any) -> bool:
@@ -244,11 +237,7 @@ def _content_has_images(content: Any) -> bool:
     results use a wrapper dict with ``{"_multimodal": True, "content": [...]}``;
     treat those the same way so historical media cleanup sees tool images too.
     """
-    if isinstance(content, dict) and content.get("_multimodal"):
-        return _content_has_images(content.get("content"))
-    if not isinstance(content, list):
-        return False
-    return any(_is_image_part(p) for p in content)
+    return _media_content_has_images(content)
 
 
 def _strip_images_from_content(content: Any) -> Any:
@@ -263,40 +252,11 @@ def _strip_images_from_content(content: Any) -> Any:
 
     Input is never mutated.
     """
-    if isinstance(content, dict) and content.get("_multimodal"):
-        inner = content.get("content")
-        if not _content_has_images(inner):
-            return content
-        summary = str(content.get("text_summary") or "native vision image")
-        meta = content.get("meta") if isinstance(content.get("meta"), dict) else {}
-        source = meta.get("image_url") or meta.get("source") or ""
-        size_bytes = meta.get("size_bytes")
-        details = []
-        if source:
-            details.append(f"source={source}")
-        if isinstance(size_bytes, int) and size_bytes > 0:
-            details.append(f"size={size_bytes} bytes")
-        detail_text = f" ({', '.join(details)})" if details else ""
-        return (
-            "[Attached image stripped after user follow-up] "
-            f"{summary[:300]}{detail_text}"
-        )
-
-    if not isinstance(content, list):
-        return content
-    if not any(_is_image_part(p) for p in content):
-        return content
-
-    new_parts: List[Any] = []
-    for p in content:
-        if _is_image_part(p):
-            new_parts.append({
-                "type": "text",
-                "text": "[Attached image — stripped after compression]",
-            })
-        else:
-            new_parts.append(p)
-    return new_parts
+    return _media_strip_images_from_content(
+        content,
+        placeholder="[Attached image — stripped after compression]",
+        multimodal_prefix="[Attached image stripped after user follow-up]",
+    )
 
 
 def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

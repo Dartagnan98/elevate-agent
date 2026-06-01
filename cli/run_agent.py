@@ -123,10 +123,16 @@ from agent.display import (
     _detect_tool_failure,
     get_tool_emoji as _get_tool_emoji,
 )
-from agent.tool_dispatch_helpers import (
-    _append_subdir_hint_to_multimodal,
-    _is_multimodal_tool_result,
-    _multimodal_text_summary,
+from agent.media_context import (
+    append_text_to_multimodal as _append_subdir_hint_to_multimodal,
+    content_for_persistence as _media_content_for_persistence,
+    content_has_images as _media_content_has_images,
+    is_multimodal_tool_result as _is_multimodal_tool_result,
+    media_stats_for_messages as _media_stats_for_messages,
+    message_for_persistence as _media_message_for_persistence,
+    multimodal_text_summary as _multimodal_text_summary,
+    strip_image_parts_from_tool_messages as _media_strip_image_parts_from_tool_messages,
+    tool_result_content_for_active_model as _media_tool_result_content_for_active_model,
 )
 from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
@@ -3391,7 +3397,7 @@ class AIAgent:
             flush_from = max(start_idx, self._last_flushed_db_idx)
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
-                content = msg.get("content")
+                content = self._strip_image_parts_for_persistence(msg.get("content"))
                 if isinstance(content, list):
                     # Multimodal turn — the SQLite `content` column is TEXT,
                     # so a raw block list would fail to bind.  Persist only
@@ -3920,34 +3926,12 @@ class AIAgent:
         they bloat resume context and disk writes without improving future
         answers. Text parts are preserved, including any local path hints.
         """
-        if _is_multimodal_tool_result(content):
-            return _multimodal_text_summary(content)
-
-        if not isinstance(content, list):
-            return content
-
-        changed = False
-        cleaned: List[Any] = []
-        for part in content:
-            if isinstance(part, dict) and part.get("type") in {"image", "image_url", "input_image"}:
-                changed = True
-                cleaned.append({
-                    "type": "text",
-                    "text": "[Attached image omitted from persisted session log]",
-                })
-            else:
-                cleaned.append(part)
-        return cleaned if changed else content
+        return _media_content_for_persistence(content)
 
     @classmethod
     def _message_for_session_log(cls, msg: Dict[str, Any]) -> Dict[str, Any]:
         """Copy *msg* and remove media payloads that should not be persisted."""
-        safe = dict(msg)
-        safe["content"] = cls._strip_image_parts_for_persistence(safe.get("content"))
-        # These blocks can also contain raw base64 image data. They are only
-        # needed for provider replay, not for the human-readable JSON log.
-        safe.pop("_anthropic_content_blocks", None)
-        return safe
+        return _media_message_for_persistence(msg)
 
     def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
         """Return the tool content shape to send on the immediate API retry.
@@ -3957,34 +3941,15 @@ class AIAgent:
         for the next model call unless this session has already learned that
         the provider rejects images.
         """
-        if not _is_multimodal_tool_result(result):
-            return result
-        if not getattr(self, "_vision_supported", True):
-            return _multimodal_text_summary(result)
-        return result.get("content") or _multimodal_text_summary(result)
+        return _media_tool_result_content_for_active_model(
+            result,
+            vision_supported=getattr(self, "_vision_supported", True),
+        )
 
     @staticmethod
     def _try_strip_image_parts_from_tool_messages(api_messages: list) -> bool:
         """Downgrade image-bearing tool messages to text after provider rejection."""
-        changed = False
-        for msg in api_messages or []:
-            if not isinstance(msg, dict) or msg.get("role") != "tool":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            new_parts: List[Any] = []
-            removed = False
-            for part in content:
-                if isinstance(part, dict) and part.get("type") in {"image", "image_url", "input_image"}:
-                    removed = True
-                    continue
-                new_parts.append(part)
-            if not removed:
-                continue
-            changed = True
-            msg["content"] = new_parts or "[image content removed after provider rejected tool images]"
-        return changed
+        return _media_strip_image_parts_from_tool_messages(api_messages)
 
     @staticmethod
     def _try_shrink_image_parts_in_messages(api_messages: list) -> bool:
@@ -4037,6 +4002,13 @@ class AIAgent:
                     msg = dict(msg)
                     msg.pop("_ephemeral_context", None)
                 cleaned.append(msg)
+            media_stats = _media_stats_for_messages(messages)
+            if media_stats.data_url_bytes:
+                logger.debug(
+                    "session persistence media sanitization: image_parts=%d inline_image_bytes=%d",
+                    media_stats.image_parts,
+                    media_stats.data_url_bytes,
+                )
 
             # Guard: never overwrite a larger session log with fewer messages.
             # This protects against data loss when --resume loads a session whose
@@ -7509,12 +7481,7 @@ class AIAgent:
 
     @staticmethod
     def _content_has_image_parts(content: Any) -> bool:
-        if not isinstance(content, list):
-            return False
-        for part in content:
-            if isinstance(part, dict) and part.get("type") in {"image_url", "input_image"}:
-                return True
-        return False
+        return _media_content_has_images(content)
 
     @staticmethod
     def _materialize_data_url_for_vision(image_url: str) -> tuple[str, Optional[Path]]:

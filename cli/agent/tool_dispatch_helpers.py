@@ -30,6 +30,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.media_context import (
+    append_text_to_multimodal as _media_append_text_to_multimodal,
+    is_multimodal_tool_result as _media_is_multimodal_tool_result,
+    message_for_trajectory as _media_message_for_trajectory,
+    multimodal_text_summary as _media_multimodal_text_summary,
+)
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
 )
@@ -181,11 +187,7 @@ def _is_multimodal_tool_result(value: Any) -> bool:
     `_multimodal=True`, a `content` key holding OpenAI-style content
     parts, and an optional `text_summary` for string-only fallbacks.
     """
-    return (
-        isinstance(value, dict)
-        and value.get("_multimodal") is True
-        and isinstance(value.get("content"), list)
-    )
+    return _media_is_multimodal_tool_result(value)
 
 
 def _multimodal_text_summary(value: Any) -> str:
@@ -195,22 +197,7 @@ def _multimodal_text_summary(value: Any) -> str:
     persistence size heuristics, fall-back content for providers that
     don't support multipart tool messages.
     """
-    if _is_multimodal_tool_result(value):
-        if value.get("text_summary"):
-            return str(value["text_summary"])
-        parts = []
-        for p in value.get("content") or []:
-            if isinstance(p, dict) and p.get("type") == "text":
-                parts.append(str(p.get("text", "")))
-        if parts:
-            return "\n".join(parts)
-        return "[multimodal tool result]"
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, default=str)
-    except Exception:
-        return str(value)
+    return _media_multimodal_text_summary(value)
 
 
 def _append_subdir_hint_to_multimodal(value: Dict[str, Any], hint: str) -> None:
@@ -220,18 +207,7 @@ def _append_subdir_hint_to_multimodal(value: Dict[str, Any], hint: str) -> None:
     parts are left untouched. `text_summary` is also updated for
     string-fallback callers.
     """
-    if not _is_multimodal_tool_result(value):
-        return
-    parts = value.get("content") or []
-    for p in parts:
-        if isinstance(p, dict) and p.get("type") == "text":
-            p["text"] = str(p.get("text", "")) + hint
-            break
-    else:
-        parts.insert(0, {"type": "text", "text": hint})
-        value["content"] = parts
-    if isinstance(value.get("text_summary"), str):
-        value["text_summary"] = value["text_summary"] + hint
+    _media_append_text_to_multimodal(value, hint)
 
 
 def _extract_file_mutation_targets(tool_name: str, args: Dict[str, Any]) -> List[str]:
@@ -301,20 +277,7 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     text_summary, and image parts in content lists replaced by
     `[screenshot]` placeholders. Keeps the message schema otherwise intact.
     """
-    if not isinstance(msg, dict):
-        return msg
-    content = msg.get("content")
-    if _is_multimodal_tool_result(content):
-        return {**msg, "content": _multimodal_text_summary(content)}
-    if isinstance(content, list):
-        cleaned = []
-        for p in content:
-            if isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
-                cleaned.append({"type": "text", "text": "[screenshot]"})
-            else:
-                cleaned.append(p)
-        return {**msg, "content": cleaned}
-    return msg
+    return _media_message_for_trajectory(msg)
 
 
 def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:

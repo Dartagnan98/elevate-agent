@@ -37,7 +37,9 @@ def test_session_log_replaces_native_tool_result_with_text_summary():
 
     safe = AIAgent._message_for_session_log(original)
 
-    assert safe["content"] == "Image attached natively: /tmp/cma/screenshot.png"
+    assert safe["content"].startswith("[Attached image omitted from persisted session log]")
+    assert "Image attached natively: /tmp/cma/screenshot.png" in safe["content"]
+    assert "size=48 bytes" in safe["content"]
     assert "data:image" not in json.dumps(safe)
     assert "data:image" in json.dumps(original)
 
@@ -112,3 +114,41 @@ def test_strip_image_parts_from_tool_messages_downgrades_list_content():
         {"type": "text", "text": "Image attached at: /tmp/cma/screenshot.png"}
     ]
     assert "data:image" not in json.dumps(api_messages)
+
+
+def test_session_db_flush_uses_persistence_safe_media_content():
+    captured = {}
+
+    class FakeSessionDb:
+        def ensure_session(self, *args, **kwargs):
+            captured["ensured"] = True
+
+        def append_message(self, **kwargs):
+            captured["content"] = kwargs["content"]
+            captured["role"] = kwargs["role"]
+
+    agent = object.__new__(AIAgent)
+    agent._session_db = FakeSessionDb()
+    agent.session_id = "session_1"
+    agent.platform = "cli"
+    agent.model = "gpt-5"
+    agent._last_flushed_db_idx = 0
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+
+    agent._flush_messages_to_session_db(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "tool_name": "vision_analyze",
+                "content": _native_tool_result(),
+            }
+        ]
+    )
+
+    assert captured["ensured"] is True
+    assert captured["role"] == "tool"
+    assert captured["content"].startswith("[Attached image omitted from persisted session log]")
+    assert "/tmp/cma/screenshot.png" in captured["content"]
+    assert "data:image" not in captured["content"]
