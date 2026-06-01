@@ -389,6 +389,69 @@ def test_telegram_auto_mode_cma_message_escalates_to_skill_runner_profile():
     assert "image_gen" not in toolsets
 
 
+def test_telegram_auto_mode_deal_questions_load_admin_tool_profile():
+    runner = _make_runner()
+    cfg = {
+        "agent": {"gateway_tool_profile": "auto"},
+        "platform_toolsets": {"telegram": ["elevate-telegram"]},
+    }
+
+    decision = runner._gateway_tool_profile_decision(
+        cfg,
+        "telegram",
+        "What deals do we have right now?",
+    )
+
+    assert decision["selected_profile"] == "skill-runner"
+    assert {"skills", "terminal", "file", "todo"}.issubset(set(decision["selected_toolsets"]))
+    assert "browser" not in decision["selected_toolsets"]
+
+
+def test_telegram_auto_mode_preference_notes_stay_lightweight():
+    runner = _make_runner()
+    cfg = {
+        "agent": {"gateway_tool_profile": "auto"},
+        "platform_toolsets": {"telegram": ["elevate-telegram"]},
+    }
+
+    decision = runner._gateway_tool_profile_decision(
+        cfg,
+        "telegram",
+        "Whenever we do a relist, I would rather not say that phrase",
+    )
+
+    assert decision["selected_profile"] == "gateway-followup"
+    assert {"memory", "messaging", "session_search", "todo"}.issubset(
+        set(decision["selected_toolsets"])
+    )
+    assert "terminal" not in decision["selected_toolsets"]
+    assert "code_execution" not in decision["selected_toolsets"]
+
+
+def test_telegram_auto_mode_survives_saved_configurable_allowlist():
+    """A saved Telegram allowlist should narrow auto mode, not disable it."""
+    runner = _make_runner()
+    from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS
+
+    _all_builtin = [name for name, _, _ in CONFIGURABLE_TOOLSETS]
+    cfg = {
+        "agent": {"gateway_tool_profile": "auto"},
+        "platform_toolsets": {"telegram": _all_builtin},
+        "known_builtin_toolsets": {"telegram": _all_builtin},
+    }
+
+    toolsets = runner._resolve_gateway_enabled_toolsets(
+        cfg,
+        "telegram",
+        "what should I do next",
+    )
+
+    assert {"memory", "messaging", "session_search", "todo"}.issubset(set(toolsets))
+    assert "terminal" not in toolsets
+    assert "file" not in toolsets
+    assert "code_execution" not in toolsets
+
+
 def test_explicit_platform_tool_config_is_respected():
     runner = _make_runner()
     # known_builtin_toolsets records the builtin set known at the last

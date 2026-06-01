@@ -41,9 +41,9 @@ class TestResolveDisplaySetting:
 
         # Empty config — should get built-in defaults
         config = {}
-        # Telegram tier_high override: "new" (not "all") to reduce edit
-        # pressure during streaming on Telegram's ~1 edit/s flood envelope.
-        assert resolve_display_setting(config, "telegram", "tool_progress") == "new"
+        # Telegram defaults quiet so chats see typing + final answer, not raw
+        # tool traces.
+        assert resolve_display_setting(config, "telegram", "tool_progress") == "off"
         # Email defaults to tier_minimal → "off"
         assert resolve_display_setting(config, "email", "tool_progress") == "off"
 
@@ -180,12 +180,11 @@ class TestPlatformDefaults:
     """Built-in defaults reflect platform capability tiers."""
 
     def test_high_tier_platforms(self):
-        """Discord defaults to 'all' tool progress; Telegram is in tier_high
-        but overrides tool_progress to 'new' (less edit pressure)."""
+        """Discord defaults to 'all' tool progress; Telegram defaults quiet."""
         from gateway.display_config import resolve_display_setting
 
-        # Telegram: tier_high member with tool_progress="new" override.
-        assert resolve_display_setting({}, "telegram", "tool_progress") == "new"
+        # Telegram: typing + final answer by default.
+        assert resolve_display_setting({}, "telegram", "tool_progress") == "off"
         # Discord: pure tier_high.
         assert resolve_display_setting({}, "discord", "tool_progress") == "all"
 
@@ -224,10 +223,18 @@ class TestPlatformDefaults:
         assert resolve_display_setting({}, "email", "streaming") is False
 
     def test_high_tier_streaming_defaults_to_none(self):
-        """High-tier platforms default streaming to None (follow global)."""
+        """High-tier platforms default streaming to None, except quiet Telegram."""
         from gateway.display_config import resolve_display_setting
 
-        assert resolve_display_setting({}, "telegram", "streaming") is None
+        assert resolve_display_setting({}, "telegram", "streaming") is False
+        assert resolve_display_setting({}, "discord", "streaming") is None
+
+    def test_telegram_lifecycle_status_defaults_off(self):
+        """Telegram should not show Sending request / Still working bubbles by default."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "telegram", "lifecycle_status") is False
+        assert resolve_display_setting({}, "discord", "lifecycle_status") is True
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +310,8 @@ class TestStreamingPerPlatform:
         from gateway.display_config import resolve_display_setting
 
         config = {}
-        # Telegram has no streaming override in defaults → None
-        result = resolve_display_setting(config, "telegram", "streaming")
+        # Discord has no streaming override in defaults → None
+        result = resolve_display_setting(config, "discord", "streaming")
         assert result is None  # caller should check global StreamingConfig
 
     def test_global_display_streaming_is_cli_only(self):
@@ -313,8 +320,8 @@ class TestStreamingPerPlatform:
 
         for value in (True, False):
             config = {"display": {"streaming": value}}
-            assert resolve_display_setting(config, "telegram", "streaming") is None
             assert resolve_display_setting(config, "discord", "streaming") is None
+            assert resolve_display_setting(config, "telegram", "streaming") is False
 
     def test_explicit_false_disables(self):
         """Explicit False disables streaming for that platform."""

@@ -504,6 +504,9 @@ DEFAULT_CONFIG = {
     },
     "agent": {
         "max_turns": 90,
+        # Gateway tool routing. "auto" keeps chat turns lightweight and only
+        # loads heavier code/browser/cron tools when the message asks for them.
+        "gateway_tool_profile": "auto",
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has
@@ -815,7 +818,13 @@ DEFAULT_CONFIG = {
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
         "tool_progress_overrides": {},  # DEPRECATED — use display.platforms instead
         "tool_preview_length": 0,  # Max chars for tool call previews (0 = no limit, show full paths/commands)
-        "platforms": {},  # Per-platform display overrides: {"telegram": {"tool_progress": "all"}, "slack": {"tool_progress": "off"}}
+        "platforms": {
+            "telegram": {
+                "tool_progress": "off",
+                "lifecycle_status": False,
+                "streaming": False,
+            },
+        },  # Per-platform display overrides: {"telegram": {"tool_progress": "off"}, "slack": {"tool_progress": "off"}}
     },
 
     # Web dashboard settings

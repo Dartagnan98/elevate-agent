@@ -52,7 +52,8 @@ async def test_orchestration_snapshot_and_health(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tools_snapshot_exposes_code_profile(tmp_path):
+async def test_tools_snapshot_exposes_code_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
@@ -66,18 +67,18 @@ async def test_tools_snapshot_exposes_code_profile(tmp_path):
         )
         assert resp.status == 200
         body = await resp.json()
-        assert body["focused_auto"]["selected_profile"] == "configured"
+        assert body["focused_auto"]["selected_profile"] == "coding-edit"
         selected = set(body["focused_auto"]["selected_toolsets"])
         assert {"terminal", "file", "delegation", "code_execution"} <= selected
-        assert body["focused_auto"]["decision"]["reason"] == "gateway_tool_profile=configured"
+        assert body["focused_auto"]["decision"]["reason"] == "matched coding-edit intent"
         assert "patch" in body["focused_auto"]["decision"]["matched_keywords"]
         assert (
             body["focused_auto"]["router_probes"]["followup"]["selected_profile"]
-            == "configured"
+            == "gateway-followup"
         )
         assert (
             body["focused_auto"]["router_probes"]["code_patch"]["selected_profile"]
-            == "configured"
+            == "coding-edit"
         )
 
 

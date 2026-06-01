@@ -124,17 +124,17 @@ class TestVerboseCommand:
         runner = _make_runner()
         result = await runner._handle_verbose_command(_make_event())
 
-        # Telegram platform default is "new" → cycles to "all"
-        assert "ALL" in result
+        # Telegram platform default is "off" → cycles to "new"
+        assert "NEW" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "all"
+        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "new"
 
     @pytest.mark.asyncio
     async def test_per_platform_isolation(self, tmp_path, monkeypatch):
         """Cycling /verbose on Telegram doesn't change Slack's setting.
 
         Without a global tool_progress, each platform uses its built-in
-        default: Telegram = 'new' (overridden high tier), Slack = 'off' (quiet Slack default).
+        default: Telegram = 'off' (quiet chat default), Slack = 'off' (quiet Slack default).
         """
         elevate_home = tmp_path / "elevate"
         elevate_home.mkdir()
@@ -159,8 +159,8 @@ class TestVerboseCommand:
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         platforms = saved["display"]["platforms"]
-        # Telegram: new -> all (platform default = new)
-        assert platforms["telegram"]["tool_progress"] == "all"
+        # Telegram: off -> new (quiet platform default)
+        assert platforms["telegram"]["tool_progress"] == "new"
         # Slack: off -> new (first /verbose cycle from quiet default)
         assert platforms["slack"]["tool_progress"] == "new"
 

@@ -1534,10 +1534,18 @@ def setup_terminal_backend(config: dict):
 
 def _apply_default_agent_settings(config: dict):
     """Apply recommended defaults for all agent settings without prompting."""
-    config.setdefault("agent", {})["max_turns"] = 90
+    agent_config = config.setdefault("agent", {})
+    agent_config["max_turns"] = 90
+    agent_config.setdefault("gateway_tool_profile", "auto")
+    agent_config.setdefault("api_turn_deadline", 0)
     save_env_value("ELEVATE_MAX_ITERATIONS", "90")
 
-    config.setdefault("display", {})["tool_progress"] = "all"
+    display = config.setdefault("display", {})
+    display["tool_progress"] = "all"
+    telegram_display = display.setdefault("platforms", {}).setdefault("telegram", {})
+    telegram_display.setdefault("tool_progress", "off")
+    telegram_display.setdefault("lifecycle_status", False)
+    telegram_display.setdefault("streaming", False)
 
     config.setdefault("compression", {})["enabled"] = True
     config["compression"]["threshold"] = 0.50
@@ -1551,7 +1559,7 @@ def _apply_default_agent_settings(config: dict):
     save_config(config)
     print_success("Applied recommended defaults:")
     print_info("  Max iterations: 90")
-    print_info("  Tool progress: all")
+    print_info("  Tool progress: all (Telegram quiet)")
     print_info("  Compression threshold: 0.50")
     print_info("  Session reset: inactivity (1440 min) + daily (4:00)")
     print_info("  Run `elevate setup agent` later to customize.")

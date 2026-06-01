@@ -154,6 +154,11 @@ def _make_runner(adapter):
 @pytest.mark.asyncio
 async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_path):
     monkeypatch.setenv("ELEVATE_TOOL_PROGRESS_MODE", "all")
+    import yaml
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"display": {"platforms": {"telegram": {"tool_progress": "all"}}}}),
+        encoding="utf-8",
+    )
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -202,6 +207,11 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
 async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(monkeypatch, tmp_path):
     """Telegram DM progress must not reuse event message id as thread metadata."""
     monkeypatch.setenv("ELEVATE_TOOL_PROGRESS_MODE", "all")
+    import yaml
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"display": {"platforms": {"telegram": {"tool_progress": "all"}}}}),
+        encoding="utf-8",
+    )
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -315,8 +325,14 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
     fake_run_agent.AIAgent = LongPreviewAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    # Write config.yaml so _run_agent picks up tool_preview_length
-    config = {"display": {"tool_preview_length": preview_length}}
+    # Write config.yaml so _run_agent picks up tool_preview_length and
+    # explicitly opts Telegram into the progress path under test.
+    config = {
+        "display": {
+            "tool_preview_length": preview_length,
+            "platforms": {"telegram": {"tool_progress": "all"}},
+        }
+    }
     (tmp_path / "config.yaml").write_text(yaml.dump(config), encoding="utf-8")
 
     adapter = ProgressCaptureAdapter()
@@ -625,7 +641,11 @@ async def test_run_agent_streaming_does_not_enable_completed_interim_commentary(
         CommentaryAgent,
         session_id="sess-commentary-streaming",
         config_data={
-            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "display": {
+                "tool_progress": "off",
+                "interim_assistant_messages": False,
+                "platforms": {"telegram": {"streaming": True}},
+            },
             "streaming": {"enabled": True},
         },
     )

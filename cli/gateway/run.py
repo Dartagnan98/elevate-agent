@@ -1016,6 +1016,9 @@ _GATEWAY_PROFILE_KEYWORDS = {
     "skill-runner": (
         "skill", "cma", "comparative market", "comps",
         "listing", "xposure", "matrix", "mls", "interior bc",
+        "deal", "deals", "pipeline", "lead", "leads", "buyer",
+        "buyers", "seller", "sellers", "transaction", "transactions",
+        "admin hub",
     ),
     "research-browser": (
         "browser", "website", "webpage", "login", "click", "screenshot",
@@ -2496,8 +2499,11 @@ class GatewayRunner:
         return depth
 
     @staticmethod
-    def _gateway_tool_profile_mode(user_config: dict, platform_key: str) -> str:
-        """Return focused-tool routing mode for gateway turns.
+    def _gateway_tool_profile_mode_info(
+        user_config: dict,
+        platform_key: str,
+    ) -> tuple[str, bool]:
+        """Return focused-tool routing mode and whether the user set it.
 
         Modes:
           - auto: select a small profile from the user's message
@@ -2505,6 +2511,7 @@ class GatewayRunner:
         """
         env_mode = os.getenv("ELEVATE_GATEWAY_TOOL_PROFILE")
         raw_mode = env_mode
+        explicit_mode = bool(str(env_mode or "").strip())
         if not raw_mode:
             agent_cfg = user_config.get("agent", {}) if isinstance(user_config, dict) else {}
             display_cfg = user_config.get("display", {}) if isinstance(user_config, dict) else {}
@@ -2517,12 +2524,18 @@ class GatewayRunner:
                 if isinstance(display_cfg, dict)
                 else None
             )
+            explicit_mode = bool(str(raw_mode or "").strip())
         mode = str(raw_mode or "").strip().lower()
         if mode in {"auto", "focused", "focus"}:
-            return "auto"
+            return "auto", explicit_mode
         if mode in {"full", "off", "disabled", "configured"}:
-            return "configured"
-        return "auto" if platform_key in _FOCUSED_GATEWAY_DEFAULT_PLATFORMS else "configured"
+            return "configured", explicit_mode
+        default_mode = "auto" if platform_key in _FOCUSED_GATEWAY_DEFAULT_PLATFORMS else "configured"
+        return default_mode, False
+
+    @staticmethod
+    def _gateway_tool_profile_mode(user_config: dict, platform_key: str) -> str:
+        return GatewayRunner._gateway_tool_profile_mode_info(user_config, platform_key)[0]
 
     @staticmethod
     def _has_explicit_platform_tool_config(user_config: dict, platform_key: str) -> bool:
@@ -2568,7 +2581,10 @@ class GatewayRunner:
 
         configured = sorted(str(name) for name in _get_platform_tools(user_config, platform_key))
         configured_set = set(configured)
-        mode = GatewayRunner._gateway_tool_profile_mode(user_config, platform_key)
+        mode, explicit_profile_mode = GatewayRunner._gateway_tool_profile_mode_info(
+            user_config,
+            platform_key,
+        )
         explicit_platform_config = GatewayRunner._has_explicit_platform_tool_config(
             user_config,
             platform_key,
@@ -2600,7 +2616,7 @@ class GatewayRunner:
         if mode != "auto":
             selected_profile = "configured"
             reason = f"gateway_tool_profile={mode}"
-        elif explicit_platform_config:
+        elif explicit_platform_config and not explicit_profile_mode:
             selected_profile = "configured"
             reason = "explicit platform_toolsets configured"
 
@@ -2631,6 +2647,7 @@ class GatewayRunner:
             "reason": reason,
             "matched_keywords": matched_keywords,
             "explicit_platform_config": explicit_platform_config,
+            "explicit_profile_mode": explicit_profile_mode,
             "configured_toolsets": configured,
             "requested_toolsets": requested_toolsets,
             "selected_toolsets": selected_toolsets,
@@ -11469,13 +11486,16 @@ class GatewayRunner:
             or os.getenv("ELEVATE_TOOL_PROGRESS_MODE")
             or "all"
         )
+        lifecycle_status_enabled = bool(
+            resolve_display_setting(user_config, platform_key, "lifecycle_status", True)
+        )
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
         tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
         # Natural assistant status messages are intentionally independent from
-        # tool progress and token streaming. Users can keep tool_progress quiet
-        # in chat platforms while opting into concise mid-turn updates.
+        # raw tool/lifecycle progress. Users can keep Telegram quiet while
+        # still allowing concise mid-turn assistant commentary.
         interim_assistant_messages_enabled = (
             source.platform != Platform.WEBHOOK
             and is_truthy_value(
@@ -11763,6 +11783,8 @@ class GatewayRunner:
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
+                return
+            if event_type == "lifecycle" and not lifecycle_status_enabled:
                 return
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -12608,6 +12630,15 @@ class GatewayRunner:
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
                 _elapsed_mins = int((time.time() - _notify_start) // 60)
+                if not lifecycle_status_enabled:
+                    try:
+                        await _notify_adapter.send_typing(
+                            source.chat_id,
+                            metadata=_status_thread_metadata,
+                        )
+                    except Exception as _type_err:
+                        logger.debug("Long-running typing refresh error: %s", _type_err)
+                    continue
                 # Include agent activity context if available.
                 _agent_ref = agent_holder[0]
                 _status_detail = ""
