@@ -127,6 +127,8 @@ from agent.media_context import (
     append_text_to_multimodal as _append_subdir_hint_to_multimodal,
     content_for_persistence as _media_content_for_persistence,
     content_has_images as _media_content_has_images,
+    externalize_inline_media_in_messages as _media_externalize_inline_media_in_messages,
+    hydrate_media_refs_in_messages as _media_hydrate_media_refs_in_messages,
     is_multimodal_tool_result as _is_multimodal_tool_result,
     media_stats_for_messages as _media_stats_for_messages,
     message_for_persistence as _media_message_for_persistence,
@@ -3961,6 +3963,22 @@ class AIAgent:
             return False
         return try_shrink_image_parts_in_messages(api_messages)
 
+    def _externalize_inline_media_messages(self, messages: list) -> list:
+        """Move inline media bytes out of live conversation state."""
+        externalized, result = _media_externalize_inline_media_in_messages(messages)
+        if result.changed:
+            logger.debug(
+                "externalized inline media: assets=%d bytes=%d session=%s",
+                result.assets,
+                result.bytes_written,
+                self.session_id or "",
+            )
+        return externalized
+
+    def _hydrate_media_refs_for_api(self, api_messages: list) -> list:
+        """Hydrate managed media refs in the API-bound copy only."""
+        return _media_hydrate_media_refs_in_messages(api_messages)
+
     @staticmethod
     def _clean_session_content(content: str) -> str:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
@@ -4334,6 +4352,8 @@ class AIAgent:
         existing_content = messages[target_idx].get("content", "")
         if isinstance(existing_content, str):
             messages[target_idx]["content"] = existing_content + marker
+        elif _is_multimodal_tool_result(existing_content):
+            _append_subdir_hint_to_multimodal(existing_content, marker)
         else:
             try:
                 blocks = list(existing_content) if existing_content else []
@@ -4410,7 +4430,9 @@ class AIAgent:
             return
         marker = f"\n\nUser guidance: {steer_text}"
         existing_content = messages[target_idx].get("content", "")
-        if not isinstance(existing_content, str):
+        if _is_multimodal_tool_result(existing_content):
+            _append_subdir_hint_to_multimodal(existing_content, marker)
+        elif not isinstance(existing_content, str):
             # Anthropic multimodal content blocks — preserve them and append
             # a text block at the end.
             try:
@@ -8100,6 +8122,7 @@ class AIAgent:
         _sentinel = f"__flush_{id(self)}_{time.monotonic()}"
         flush_msg = {"role": "user", "content": flush_content, "_flush_sentinel": _sentinel}
         messages.append(flush_msg)
+        messages[:] = self._externalize_inline_media_messages(messages)
 
         try:
             # Build API messages for the flush call
@@ -8126,6 +8149,7 @@ class AIAgent:
 
             if self._cached_system_prompt:
                 api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
+            api_messages = self._hydrate_media_refs_for_api(api_messages)
 
             # Make one API call with only the memory tool available
             memory_tool_def = None
@@ -9312,6 +9336,7 @@ class AIAgent:
             "without calling any more tools."
         )
         messages.append({"role": "system", "content": summary_request})
+        messages = self._externalize_inline_media_messages(messages)
 
         try:
             # Build API messages, stripping internal-only fields
@@ -9335,6 +9360,7 @@ class AIAgent:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
+            api_messages = self._hydrate_media_refs_for_api(api_messages)
 
             summary_extra_body = {}
             try:
@@ -9986,6 +10012,8 @@ class AIAgent:
                         existing = _sm.get("content", "")
                         if isinstance(existing, str):
                             _sm["content"] = existing + marker
+                        elif _is_multimodal_tool_result(existing):
+                            _append_subdir_hint_to_multimodal(existing, marker)
                         else:
                             # Multimodal content blocks — append text block
                             try:
@@ -10019,6 +10047,7 @@ class AIAgent:
             # the final-response branch below injects them as a fresh user
             # message after the assistant text response.
             self._apply_pending_soft_interrupts_to_tool_results(messages, None)
+            messages = self._externalize_inline_media_messages(messages)
 
             # Prepare messages for API call
             # If we have an ephemeral system prompt, prepend it to the messages
@@ -10106,6 +10135,7 @@ class AIAgent:
             # gated on context_compressor — so orphans from session loading or
             # manual message manipulation are always caught.
             api_messages = self._sanitize_api_messages(api_messages)
+            api_messages = self._hydrate_media_refs_for_api(api_messages)
 
             # Normalize message whitespace and tool-call JSON for consistent
             # prefix matching.  Ensures bit-perfect prefixes across turns,

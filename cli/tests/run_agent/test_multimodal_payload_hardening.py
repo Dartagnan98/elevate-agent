@@ -152,3 +152,57 @@ def test_session_db_flush_uses_persistence_safe_media_content():
     assert captured["content"].startswith("[Attached image omitted from persisted session log]")
     assert "/tmp/cma/screenshot.png" in captured["content"]
     assert "data:image" not in captured["content"]
+
+
+def test_agent_externalizes_live_media_and_hydrates_api_copy(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    agent = object.__new__(AIAgent)
+    agent.session_id = "session_1"
+
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "tool_name": "vision_analyze",
+            "content": _native_tool_result(),
+        }
+    ]
+
+    externalized = agent._externalize_inline_media_messages(messages)
+    api_messages = agent._hydrate_media_refs_for_api([msg.copy() for msg in externalized])
+
+    assert "data:image" not in json.dumps(externalized)
+    assert "media://" in json.dumps(externalized)
+    assert "data:image" in json.dumps(api_messages)
+    assert "data:image" in json.dumps(messages)
+
+
+def test_pending_steer_appends_to_multimodal_envelope_without_corrupting_it():
+    agent = object.__new__(AIAgent)
+    agent._pending_steer = "focus on the navbar"
+    agent._pending_steer_lock = None
+    content = _native_tool_result()
+    messages = [{"role": "tool", "content": content, "tool_call_id": "call_1"}]
+
+    agent._apply_pending_steer_to_tool_results(messages, 1)
+
+    assert messages[0]["content"]["_multimodal"] is True
+    assert isinstance(messages[0]["content"]["content"], list)
+    assert "User guidance: focus on the navbar" in messages[0]["content"]["content"][0]["text"]
+    assert "User guidance: focus on the navbar" in messages[0]["content"]["text_summary"]
+
+
+def test_soft_interrupt_appends_to_multimodal_envelope_without_corrupting_it():
+    agent = object.__new__(AIAgent)
+    agent._pending_soft_interrupts = [{"content": "also check mobile"}]
+    agent._pending_soft_interrupts_lock = None
+    content = _native_tool_result()
+    messages = [{"role": "tool", "content": content, "tool_call_id": "call_1"}]
+
+    delivered = agent._apply_pending_soft_interrupts_to_tool_results(messages, 1)
+
+    assert delivered is True
+    assert messages[0]["content"]["_multimodal"] is True
+    assert isinstance(messages[0]["content"]["content"], list)
+    assert "also check mobile" in messages[0]["content"]["content"][0]["text"]
+    assert "also check mobile" in messages[0]["content"]["text_summary"]

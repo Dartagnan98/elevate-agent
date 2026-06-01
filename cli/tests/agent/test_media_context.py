@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 
 from agent.media_context import (
+    MediaAssetStore,
     content_for_persistence,
     content_has_images,
+    externalize_inline_media_in_content,
+    externalize_inline_media_in_messages,
+    hydrate_media_refs_in_content,
+    hydrate_media_refs_in_messages,
     media_stats_for_messages,
     message_for_trajectory,
     strip_image_parts_from_tool_messages,
@@ -86,3 +91,40 @@ def test_trajectory_message_replaces_image_with_placeholder():
     assert content_has_images(msg["content"]) is True
     assert content_has_images(safe["content"]) is False
     assert safe["content"][1] == {"type": "text", "text": "[screenshot]"}
+
+
+def test_externalize_inline_media_stores_asset_and_replaces_data_url(tmp_path):
+    store = MediaAssetStore(tmp_path)
+
+    result = externalize_inline_media_in_content(_parts(), store=store)
+
+    assert result.changed is True
+    assert result.assets == 1
+    assert result.bytes_written == 4
+    assert "data:image" not in json.dumps(result.content)
+    assert result.content[1]["image_url"]["url"].startswith("media://")
+    assert result.content[1]["_media_asset"]["path"]
+    assert (tmp_path / result.content[1]["_media_asset"]["id"][:2]).exists()
+
+
+def test_hydrate_media_refs_restores_provider_data_url(tmp_path):
+    store = MediaAssetStore(tmp_path)
+    externalized = externalize_inline_media_in_content(_parts(), store=store).content
+
+    hydrated = hydrate_media_refs_in_content(externalized, store=store)
+
+    assert hydrated[1]["image_url"]["url"] == DATA_URL
+
+
+def test_externalize_and_hydrate_messages_preserves_live_state_separation(tmp_path):
+    store = MediaAssetStore(tmp_path)
+    messages = [{"role": "user", "content": _parts()}]
+
+    externalized, result = externalize_inline_media_in_messages(messages, store=store)
+    hydrated = hydrate_media_refs_in_messages(externalized, store=store)
+
+    assert result.changed is True
+    assert "data:image" not in json.dumps(externalized)
+    assert "media://" in json.dumps(externalized)
+    assert "data:image" in json.dumps(hydrated)
+    assert "data:image" in json.dumps(messages)
