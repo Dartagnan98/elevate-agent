@@ -2647,6 +2647,63 @@ def refresh_launchd_plist_if_needed() -> bool:
     return True
 
 
+def _launchd_service_is_running(label: str | None = None) -> bool:
+    """Return True only when launchd reports the gateway job is actually running."""
+    label = label or get_launchd_label()
+    target = f"{_launchd_domain()}/{label}"
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            output = result.stdout or ""
+            if "state = running" in output or "\n\tpid = " in output or "\npid = " in output:
+                return True
+    except subprocess.TimeoutExpired:
+        return False
+
+    try:
+        result = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if result.returncode != 0:
+        return False
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == label and parts[0] != "-":
+            return True
+    return False
+
+
+def _verify_launchd_started(plist_path: Path, label: str, *, retry_bootstrap: bool = True) -> None:
+    """Verify launchd loaded and started the gateway, retrying once if needed."""
+    if _launchd_service_is_running(label):
+        return
+
+    target = f"{_launchd_domain()}/{label}"
+    if retry_bootstrap:
+        print("↻ launchd did not report the gateway running; retrying bootstrap")
+        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+        subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
+        if _launchd_service_is_running(label):
+            return
+
+    print("✗ launchd did not report the gateway running after start")
+    print(f"  Check: launchctl print {target}")
+    print("  Logs:")
+    from elevate_constants import display_elevate_home as _dhh
+    print(f"    tail -40 {_dhh()}/logs/gateway.error.log")
+    raise SystemExit(1)
+
+
 def launchd_install(force: bool = False):
     plist_path = get_launchd_plist_path()
     
@@ -2696,6 +2753,7 @@ def launchd_start():
         plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
         subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
         subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+        _verify_launchd_started(plist_path, label)
         print("✓ Service started")
         return
 
@@ -2708,6 +2766,7 @@ def launchd_start():
         print("↻ launchd job was unloaded; reloading service definition")
         subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
         subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+    _verify_launchd_started(plist_path, label)
     print("✓ Service started")
 
 def launchd_stop():
