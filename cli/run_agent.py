@@ -95,7 +95,7 @@ from agent.model_metadata import (
     save_context_length, is_local_endpoint,
     query_ollama_num_ctx,
 )
-from agent.context_compressor import ContextCompressor
+from agent.context_compressor import ContextCompressor, _strip_historical_media
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import (
@@ -9537,6 +9537,13 @@ class AIAgent:
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
+
+        stripped_messages = _strip_historical_media(messages)
+        if stripped_messages is not messages:
+            messages = stripped_messages
+            conversation_history = None
+            if not self.quiet_mode:
+                logger.info("%sStripped historical image payloads after new user turn", self.log_prefix)
         
         if not self.quiet_mode:
             _print_preview = _summarize_user_message_for_log(user_message)

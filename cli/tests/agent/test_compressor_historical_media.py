@@ -36,6 +36,12 @@ ANTHROPIC_IMG = {
 }
 TEXT = {"type": "text", "text": "hi"}
 INPUT_TEXT = {"type": "input_text", "text": "hi"}
+NATIVE_VISION_RESULT = {
+    "_multimodal": True,
+    "content": [TEXT, IMG_URL],
+    "text_summary": "Image attached natively for the main model (669.1 KB).",
+    "meta": {"image_url": "/tmp/rosehill_embedded_contact.jpg", "size_bytes": 685_153},
+}
 
 
 class TestIsImagePart:
@@ -70,6 +76,9 @@ class TestContentHasImages:
 
     def test_list_with_image(self):
         assert _content_has_images([TEXT, IMG_URL]) is True
+
+    def test_native_multimodal_tool_result_with_image(self):
+        assert _content_has_images(NATIVE_VISION_RESULT) is True
 
     def test_none(self):
         assert _content_has_images(None) is False
@@ -107,6 +116,13 @@ class TestStripImagesFromContent:
         out = _strip_images_from_content(parts)
         assert sum(1 for p in out if p.get("type") == "text") == 4
         assert not any(_is_image_part(p) for p in out)
+
+    def test_native_multimodal_tool_result_becomes_text_summary(self):
+        out = _strip_images_from_content(NATIVE_VISION_RESULT)
+        assert isinstance(out, str)
+        assert "Image attached natively" in out
+        assert "/tmp/rosehill_embedded_contact.jpg" in out
+        assert "data:image" not in out
 
 
 class TestStripHistoricalMedia:
@@ -158,32 +174,63 @@ class TestStripHistoricalMedia:
         assert _content_has_images(out[3]["content"])
 
     def test_text_only_newest_user_still_strips_older_images(self):
-        # The anchor is "newest user WITH images". If the newest user is
-        # text-only, we fall back to the previous image-bearing user turn.
+        # The anchor is the newest user turn, even when it is text-only.
         msgs = [
             {"role": "user", "content": [TEXT, IMG_URL]},
             {"role": "assistant", "content": "ok"},
-            {"role": "user", "content": [TEXT, IMG_URL]},  # anchor
+            {"role": "user", "content": [TEXT, IMG_URL]},
             {"role": "assistant", "content": "done"},
-            {"role": "user", "content": "follow-up text only"},
+            {"role": "user", "content": "follow-up text only"},  # anchor
         ]
         out = _strip_historical_media(msgs)
-        # First image-bearing user (index 0) was stripped — it was before the
-        # newest image-bearing user (index 2).
+        # Both earlier images were stripped because the text-only follow-up is
+        # now the safety boundary.
         assert not _content_has_images(out[0]["content"])
-        # Anchor (index 2) keeps its image.
-        assert _content_has_images(out[2]["content"])
+        assert not _content_has_images(out[2]["content"])
 
-    def test_no_image_bearing_user_is_noop(self):
+    def test_strips_assistant_image_before_text_only_user(self):
         msgs = [
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": [TEXT, IMG_URL]},  # assistant image only
             {"role": "user", "content": "second"},
         ]
         out = _strip_historical_media(msgs)
-        # No image-bearing user anchor → no stripping.
+        assert out is not msgs
+        assert not _content_has_images(out[1]["content"])
+
+    def test_no_user_message_is_noop(self):
+        msgs = [
+            {"role": "assistant", "content": [TEXT, IMG_URL]},
+            {"role": "tool", "content": [TEXT, IMG_URL], "tool_call_id": "t1"},
+        ]
+        out = _strip_historical_media(msgs)
         assert out is msgs
+        assert _content_has_images(out[0]["content"])
         assert _content_has_images(out[1]["content"])
+
+    def test_strips_native_tool_image_before_text_only_followup(self):
+        msgs = [
+            {"role": "user", "content": "inspect these photos"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "type": "function",
+                        "function": {"name": "vision_analyze", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "content": NATIVE_VISION_RESULT, "tool_call_id": "t1"},
+            {"role": "user", "content": "did you do it ?"},
+        ]
+        out = _strip_historical_media(msgs)
+        assert out is not msgs
+        assert not _content_has_images(out[2]["content"])
+        assert "Image attached natively" in out[2]["content"]
+        assert "data:image" not in out[2]["content"]
+        assert out[3]["content"] == "did you do it ?"
 
     def test_does_not_mutate_input_messages(self):
         msg0 = {"role": "user", "content": [TEXT, IMG_URL]}
@@ -264,3 +311,28 @@ class TestCompressIntegration:
             assert not _content_has_images(m.get("content")), (
                 f"Stale image in {m.get('role')!r} message after compression"
             )
+
+    def test_compress_strips_native_tool_image_even_when_too_short(self, compressor):
+        msgs = [
+            {"role": "user", "content": "inspect these photos"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "type": "function",
+                        "function": {"name": "vision_analyze", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "content": NATIVE_VISION_RESULT, "tool_call_id": "t1"},
+            {"role": "user", "content": "did you do it ?"},
+        ]
+
+        out = compressor.compress(msgs, current_tokens=60_000)
+
+        assert len(out) == len(msgs)
+        assert not _content_has_images(out[2]["content"])
+        assert "Image attached natively" in out[2]["content"]
+        assert "data:image" not in out[2]["content"]

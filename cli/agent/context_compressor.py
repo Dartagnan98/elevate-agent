@@ -238,7 +238,14 @@ def _is_image_part(part: Any) -> bool:
 
 
 def _content_has_images(content: Any) -> bool:
-    """True if a message's ``content`` is a multimodal list with image parts."""
+    """True if ``content`` contains native image parts.
+
+    Most messages store multimodal content as a list.  Native vision tool
+    results use a wrapper dict with ``{"_multimodal": True, "content": [...]}``;
+    treat those the same way so historical media cleanup sees tool images too.
+    """
+    if isinstance(content, dict) and content.get("_multimodal"):
+        return _content_has_images(content.get("content"))
     if not isinstance(content, list):
         return False
     return any(_is_image_part(p) for p in content)
@@ -249,12 +256,32 @@ def _strip_images_from_content(content: Any) -> Any:
     short text placeholder.
 
     - String content is returned unchanged.
+    - Native multimodal tool-result dicts become a short text summary.
     - Non-list, non-string content is returned unchanged.
     - List content: image parts become ``{"type": "text", "text": "[Attached
       image — stripped after compression]"}``; other parts are preserved as-is.
 
     Input is never mutated.
     """
+    if isinstance(content, dict) and content.get("_multimodal"):
+        inner = content.get("content")
+        if not _content_has_images(inner):
+            return content
+        summary = str(content.get("text_summary") or "native vision image")
+        meta = content.get("meta") if isinstance(content.get("meta"), dict) else {}
+        source = meta.get("image_url") or meta.get("source") or ""
+        size_bytes = meta.get("size_bytes")
+        details = []
+        if source:
+            details.append(f"source={source}")
+        if isinstance(size_bytes, int) and size_bytes > 0:
+            details.append(f"size={size_bytes} bytes")
+        detail_text = f" ({', '.join(details)})" if details else ""
+        return (
+            "[Attached image stripped after user follow-up] "
+            f"{summary[:300]}{detail_text}"
+        )
+
     if not isinstance(content, list):
         return content
     if not any(_is_image_part(p) for p in content):
@@ -275,14 +302,14 @@ def _strip_images_from_content(content: Any) -> Any:
 def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Replace image parts in older messages with placeholder text.
 
-    The anchor is the *last* user message that has any image content. Every
-    message before that anchor gets its image parts replaced with a short
-    placeholder so the outgoing request stops re-shipping the same multi-MB
-    base-64 image blobs on every turn.
+    The anchor is the *last* user message, whether or not that message has
+    image content. Every message before that anchor gets its image parts
+    replaced with a short placeholder so the outgoing request stops re-shipping
+    the same multi-MB base-64 image blobs on every turn.
 
-    If no user message carries images, the list is returned unchanged.
-    If the only user message with images is the very first one (nothing
-    earlier to strip), the list is returned unchanged.
+    If there is no user message, the list is returned unchanged. If the only
+    user message is the very first message (nothing earlier to strip), the
+    list is returned unchanged.
 
     Shallow copies of touched messages only; input is never mutated.
     Port of Kilo-Org/kilocode#9434 (adapted for the OpenAI-style message
@@ -291,10 +318,9 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
     if not messages:
         return messages
 
-    # Find the newest user message that carries at least one image part.
-    # We anchor on image-bearing user messages (not all user messages) so
-    # a plain text follow-up after a big-image turn still strips the old
-    # image — matching the problem kilocode#9434 set out to solve.
+    # Find the newest user message. A text-only follow-up means the model has
+    # moved on from stale media; older images should be summarized before the
+    # next provider request, including native vision tool-result images.
     anchor = -1
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
@@ -302,13 +328,12 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
         if msg.get("role") != "user":
             continue
-        if _content_has_images(msg.get("content")):
-            anchor = i
-            break
+        anchor = i
+        break
 
     if anchor <= 0:
-        # No image-bearing user message, or it's the very first message —
-        # nothing before it to strip.
+        # No user message, or it's the very first message -- nothing before it
+        # to strip.
         return messages
 
     changed = False
@@ -1565,6 +1590,13 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # this, /compress would silently no-op for 30-60s after a failure.
         if force and self._summary_failure_cooldown_until > 0.0:
             self._summary_failure_cooldown_until = 0.0
+
+        # Cheap media cleanup must happen even when the transcript is too short
+        # for a summarizing compression pass. Otherwise a tiny session with a
+        # recent native vision tool result can keep re-shipping a huge base64
+        # image payload until the provider rejects it.
+        messages = _strip_historical_media(messages)
+
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1

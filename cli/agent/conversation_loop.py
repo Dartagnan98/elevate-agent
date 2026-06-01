@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from agent.anthropic_adapter import _is_oauth_token
 from agent.auxiliary_client import set_runtime_main
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.context_compressor import _strip_historical_media
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
@@ -443,6 +444,13 @@ def run_conversation(
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
+
+    stripped_messages = _strip_historical_media(messages)
+    if stripped_messages is not messages:
+        messages = stripped_messages
+        conversation_history = None
+        if not agent.quiet_mode:
+            logger.info("%sStripped historical image payloads after new user turn", agent.log_prefix)
     
     if not agent.quiet_mode:
         _print_preview = _summarize_user_message_for_log(user_message)
