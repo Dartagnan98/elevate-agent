@@ -87,4 +87,18 @@ if (chown.status !== 0) {
 }
 
 console.log("\n[ship] live at https://api.elevationrealestatehq.com/updates/");
-console.log("[ship] running apps will pick up the update within ~2hr (or on next launch).");
+console.log("[ship] running apps poll every ~3min (and on window focus), so it lands within minutes.");
+
+// Cleanup: electron-builder leaves unpacked .app bundles in dist/mac and
+// dist/mac-arm64. macOS Spotlight indexes those as standalone "Elevate" apps,
+// which then clutter the launcher as ghost duplicates of the real install.
+// The shippable artifacts (zip/dmg/yml) are already on Hetzner, so drop the
+// unpacked bundles after every successful ship. Keep the dmg/zip as a local
+// release archive.
+for (const sub of ["mac", "mac-arm64"]) {
+  const dir = path.join(DIST, sub);
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log(`[ship] cleaned unpacked bundle dist/${sub}/ (no Spotlight ghost)`);
+  }
+}
