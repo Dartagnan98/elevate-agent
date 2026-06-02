@@ -2172,6 +2172,10 @@ class MemoryStore:
             category_clause = "AND f.category = ?"
             params.append(category)
 
+        # Hold the lock ONLY for the DB fetch. The cosine scoring below is a
+        # pure-Python loop over every candidate vector — keeping it inside the
+        # lock blocked all other memory operations for the duration of the
+        # scan. Materialize rows under the lock, then score lock-free.
         with self._lock:
             rows = self._conn.execute(
                 f"""
@@ -2190,21 +2194,21 @@ class MemoryStore:
                 params,
             ).fetchall()
 
-            scored = []
-            for row in rows:
-                fact = self._row_to_dict(row)
-                try:
-                    vec = blob_to_vector(fact.pop("vector"), int(fact.pop("dimensions")))
-                except Exception:
-                    continue
-                sim = max(0.0, cosine_similarity(query_vec, vec))
-                trust_score = float(fact.get("trust_score") or 0.0)
-                fact["semantic_score"] = sim
-                fact["score"] = sim * trust_score
-                scored.append(fact)
+        scored = []
+        for row in rows:
+            fact = self._row_to_dict(row)
+            try:
+                vec = blob_to_vector(fact.pop("vector"), int(fact.pop("dimensions")))
+            except Exception:
+                continue
+            sim = max(0.0, cosine_similarity(query_vec, vec))
+            trust_score = float(fact.get("trust_score") or 0.0)
+            fact["semantic_score"] = sim
+            fact["score"] = sim * trust_score
+            scored.append(fact)
 
-            scored.sort(key=lambda x: x["score"], reverse=True)
-            results = scored[:limit]
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        results = scored[:limit]
 
         try:
             if memory_activity is not None:  # type: ignore[name-defined]

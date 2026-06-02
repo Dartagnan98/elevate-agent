@@ -84,7 +84,9 @@ class TestSidecarSourceContract:
         # Sidecar attach happens after both _ext_prefetch_cache and
         # _plugin_user_context are computed.  Order matters: bail early
         # otherwise we'd stash an incomplete injection.
-        idx_prefetch = RUN_AGENT_SRC.index("_ext_prefetch_cache = self._memory_manager.prefetch_all(")
+        # prefetch_all is now submitted to a budgeted executor; anchor on the
+        # submit reference rather than the old inline assignment.
+        idx_prefetch = RUN_AGENT_SRC.index("self._memory_manager.prefetch_all")
         idx_attach = RUN_AGENT_SRC.index('_u["_ephemeral_context"] = _ephemeral_injection')
         assert idx_attach > idx_prefetch, (
             "_ephemeral_context sidecar must be stashed AFTER prefetch_all() so "

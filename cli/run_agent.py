@@ -9898,7 +9898,27 @@ class AIAgent:
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                # Budget the prefetch: it runs synchronously before the model
+                # call and can include a network embedding + a fact full-scan.
+                # If it overruns, skip the injection rather than hang the turn.
+                # An overrun thread self-cleans (embedding client has a 10s
+                # timeout); memory context is best-effort, so dropping it is safe.
+                _pf_budget_s = float(os.getenv("ELEVATE_MEMORY_PREFETCH_BUDGET_S", "2.0"))
+                # Note: do NOT use `with ...:` — its shutdown(wait=True) would
+                # block on the overrunning thread and defeat the budget. Detach
+                # with wait=False on timeout; the thread self-cleans.
+                _pf_ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _pf_future = _pf_ex.submit(self._memory_manager.prefetch_all, _query)
+                try:
+                    _ext_prefetch_cache = _pf_future.result(timeout=_pf_budget_s) or ""
+                    _pf_ex.shutdown(wait=False)
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "Memory prefetch exceeded %.1fs budget — skipping "
+                        "memory injection for this turn.", _pf_budget_s,
+                    )
+                    _ext_prefetch_cache = ""
+                    _pf_ex.shutdown(wait=False)
             except Exception:
                 pass
 

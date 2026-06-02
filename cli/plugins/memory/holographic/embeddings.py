@@ -174,7 +174,11 @@ class OpenAIEmbeddingClient(BaseEmbeddingClient):
             from openai import OpenAI
         except Exception as exc:  # pragma: no cover - dependency is core, but stay defensive
             raise EmbeddingError(f"openai package is not available: {exc}") from exc
-        kwargs = {"api_key": api_key}
+        # Bounded timeout + no SDK retries: this client runs on the per-turn
+        # memory-prefetch hot path. The SDK default (600s, 2 retries) could
+        # hang a whole turn if OpenAI is slow/unreachable. Fail fast instead;
+        # the prefetch call site treats embedding failure as non-fatal.
+        kwargs = {"api_key": api_key, "timeout": 10.0, "max_retries": 0}
         if base_url:
             kwargs["base_url"] = base_url
             self.provider = "openai_compatible"

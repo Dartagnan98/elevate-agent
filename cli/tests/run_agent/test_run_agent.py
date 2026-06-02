@@ -4801,7 +4801,9 @@ class TestMemoryProviderTurnStart:
         src = inspect.getsource(AIAgent.run_conversation)
         # Find the actual method calls, not comments
         idx_turn_start = src.index(".on_turn_start(")
-        idx_prefetch = src.index(".prefetch_all(")
+        # prefetch_all is submitted to a budgeted executor (passed as a
+        # reference, not called inline), so match ".prefetch_all" without "(".
+        idx_prefetch = src.index(".prefetch_all")
         assert idx_turn_start < idx_prefetch, (
             "on_turn_start() must be called before prefetch_all() in run_conversation "
             "so that memory providers have the correct turn count for cadence checks"
