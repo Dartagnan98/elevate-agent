@@ -3123,25 +3123,32 @@ export default function ChatPage() {
     };
   }, [startRange]);
 
+  // Persist the transcript + active-turn snapshot — THROTTLED. Both do a full
+  // JSON.stringify of the (growing) transcript + a localStorage write; running
+  // them on every streamed delta and tool event jammed the main thread during
+  // tool-heavy turns and froze the renderer (the chat would "stop showing
+  // what's happening" while the agent kept working underneath). Throttle to at
+  // most once / 1.5s while a turn streams, and persist immediately the moment
+  // it goes idle so the final state is never lost. Each run reads the current
+  // messages/tools (no stale closure); idle-flush + the ~50ms delta cadence
+  // keep persistence within ~1.5s of live.
+  const lastPersistAtRef = useRef(0);
   useEffect(() => {
     const persisted = persistedSessionIdRef.current;
-    if (persisted && messages.length) {
+    if (!persisted) return;
+    const PERSIST_THROTTLE_MS = 1500;
+    if (busy && Date.now() - lastPersistAtRef.current < PERSIST_THROTTLE_MS) return;
+    lastPersistAtRef.current = Date.now();
+    if (messages.length) {
       rememberTranscript(
         persisted,
         attachLiveActivitySnapshots(messages, tools, activityTrace),
       );
     }
-  }, [activityTrace, messages, tools]);
-
-  useEffect(() => {
-    const persisted = persistedSessionIdRef.current;
-    if (!persisted) return;
     const active = activeAssistantMessage(messages, currentAssistantRef.current);
     if (active) {
       writeActiveTurnSnapshot(persisted, active, tools, activityTrace);
-      return;
-    }
-    if (!busy) {
+    } else if (!busy) {
       clearActiveTurnSnapshot(persisted);
     }
   }, [activityTrace, busy, messages, sessionId, tools]);

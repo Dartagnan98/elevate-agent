@@ -8320,6 +8320,13 @@ class AIAgent:
             f"{approx_tokens:,}" if approx_tokens else "unknown", self.model,
             focus_topic,
         )
+        # Surface compaction to the UI. The summary call blocks the turn for
+        # ~24-36s with nothing to stream, so without this the chat looks frozen.
+        # Shows a "Compacting context…" indicator until the loop resumes.
+        try:
+            self._emit_status("🗜️ Compacting context…")
+        except Exception:
+            pass
         # Pre-compression memory flush: let the model save memories before they're lost
         self.flush_memories(messages, min_turns=0)
 
