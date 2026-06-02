@@ -353,7 +353,7 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 
 | Variable | Description |
 |----------|-------------|
-| `ELEVATE_MAX_ITERATIONS` | Max tool-calling iterations per conversation (default: 90) |
+| `ELEVATE_MAX_ITERATIONS` | Max tool-calling iterations per conversation (default: 150) |
 | `ELEVATE_TOOL_PROGRESS` | Deprecated compatibility variable for tool progress display. Prefer `display.tool_progress` in `config.yaml`. |
 | `ELEVATE_TOOL_PROGRESS_MODE` | Deprecated compatibility variable for tool progress mode. Prefer `display.tool_progress` in `config.yaml`. |
 | `ELEVATE_HUMAN_DELAY_MODE` | Response pacing: `off`/`natural`/`custom` |

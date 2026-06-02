@@ -355,7 +355,7 @@ def load_cli_config() -> Dict[str, Any]:
             "threshold": 0.50,    # Compress at 50% of model's context limit
         },
         "agent": {
-            "max_turns": 90,  # Default max tool-calling iterations (shared with subagents)
+            "max_turns": 150,  # Default max tool-calling iterations (shared with subagents)
             "verbose": False,
             "system_prompt": "",
             "prefill_messages_file": "",
@@ -1833,7 +1833,7 @@ class ElevateCLI:
             provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
             api_key: API key (default: from environment)
             base_url: API base URL (default: OpenRouter)
-            max_turns: Maximum tool-calling iterations shared with subagents (default: 90)
+            max_turns: Maximum tool-calling iterations shared with subagents (default: 150)
             verbose: Enable verbose logging
             compact: Use compact display mode
             resume: Session ID to resume (restores conversation history from SQLite)
@@ -1956,7 +1956,7 @@ class ElevateCLI:
         elif os.getenv("ELEVATE_MAX_ITERATIONS"):
             self.max_turns = int(os.getenv("ELEVATE_MAX_ITERATIONS"))
         else:
-            self.max_turns = 90
+            self.max_turns = 150
         
         # Parse and validate toolsets
         self.enabled_toolsets = toolsets
@@ -8869,8 +8869,8 @@ class ElevateCLI:
             # Notify when iteration budget was hit
             if result and not result.get("completed") and not result.get("interrupted"):
                 _api_calls = result.get("api_calls", 0)
-                if _api_calls >= getattr(self.agent, "max_iterations", 90):
-                    _max_iter = getattr(self.agent, "max_iterations", 90)
+                if _api_calls >= getattr(self.agent, "max_iterations", 150):
+                    _max_iter = getattr(self.agent, "max_iterations", 150)
                     _cprint(
                         f"\n{_DIM}⚠ Iteration budget reached "
                         f"({_api_calls}/{_max_iter}) — "
@@ -10991,7 +10991,7 @@ def main(
         provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
         api_key: API key for authentication
         base_url: Base URL for the API
-        max_turns: Maximum tool-calling iterations (default: 60)
+        max_turns: Maximum tool-calling iterations (default: 150)
         verbose: Enable verbose logging
         compact: Use compact display mode
         list_tools: List available tools and exit

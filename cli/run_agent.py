@@ -238,7 +238,7 @@ class IterationBudget:
     """Thread-safe iteration counter for an agent.
 
     Each agent (parent or subagent) gets its own ``IterationBudget``.
-    The parent's budget is capped at ``max_iterations`` (default 90).
+    The parent's budget is capped at ``max_iterations`` (default 150 from the Elevate CLI).
     Each subagent gets an independent budget capped at
     ``delegation.max_iterations`` (default 50) — this means total
     iterations across parent + subagents can exceed the parent's cap.
@@ -869,7 +869,7 @@ class AIAgent:
             provider (str): Provider identifier (optional; used for telemetry/routing hints)
             api_mode (str): API mode override: "chat_completions" or "codex_responses"
             model (str): Model name to use (default: "anthropic/claude-opus-4.6")
-            max_iterations (int): Maximum number of tool calling iterations (default: 90)
+            max_iterations (int): Maximum number of tool calling iterations (default: 150 from the Elevate CLI)
             tool_delay (float): Delay between tool calls in seconds (default: 1.0)
             enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
             disabled_toolsets (List[str]): Disable tools from these toolsets (optional)

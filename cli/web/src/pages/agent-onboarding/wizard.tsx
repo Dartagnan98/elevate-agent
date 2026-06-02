@@ -739,7 +739,7 @@ export function AgentOnboardingWizard({
             {step.id === "agent_settings" && (
               <WizardSection
                 title="Runtime knobs"
-                hint="Defaults are sensible — only change if you know why. 90 iterations, all tool progress, 50% compression threshold, daily reset at 4am local."
+                hint="Defaults are sensible — only change if you know why. 150 iterations, all tool progress, 50% compression threshold, daily reset at 4am local."
               >
                 <AgentSettingsBrowser />
               </WizardSection>
@@ -2752,7 +2752,7 @@ function AgentSettingsBrowser() {
       const display = (config?.display as Record<string, unknown>) ?? {};
       const compression = (config?.compression as Record<string, unknown>) ?? {};
       const reset = (config?.session_reset as Record<string, unknown>) ?? {};
-      setMaxTurns(String(agent.max_turns ?? "90"));
+      setMaxTurns(String(agent.max_turns ?? "150"));
       setToolProgress(String(display.tool_progress ?? "all"));
       setCompressionThreshold(String(compression.threshold ?? "0.50"));
       setSessionResetMode(String(reset.mode ?? "both"));
@@ -2771,7 +2771,7 @@ function AgentSettingsBrowser() {
       const compressionThresholdNum = Number(compressionThreshold);
       const payload: Record<string, unknown> = {
         ...current,
-        agent: { ...(current.agent as Record<string, unknown> ?? {}), max_turns: Number(maxTurns) || 90 },
+        agent: { ...(current.agent as Record<string, unknown> ?? {}), max_turns: Number(maxTurns) || 150 },
         display: { ...(current.display as Record<string, unknown> ?? {}), tool_progress: toolProgress },
         compression: {
           ...(current.compression as Record<string, unknown> ?? {}),

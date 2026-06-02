@@ -104,7 +104,7 @@ Header: "Agent Settings".
   - For `both` / `idle`: "  Inactivity timeout (minutes)" → `config.session_reset.idle_minutes`
   - For `both` / `daily`: "  Daily reset hour (0-23, local time)" → `config.session_reset.at_hour`
 
-`_apply_default_agent_settings` (no prompts) writes the same keys with defaults: max_turns=90, tool_progress=all, compression.threshold=0.50, session_reset.mode=both, idle_minutes=1440, at_hour=4.
+`_apply_default_agent_settings` (no prompts) writes the same keys with defaults: max_turns=150, tool_progress=all, compression.threshold=0.50, session_reset.mode=both, idle_minutes=1440, at_hour=4.
 
 ---
 

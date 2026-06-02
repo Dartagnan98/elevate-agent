@@ -69,7 +69,7 @@ TIPS = [
     "elevate chat -t web,terminal enables only specific toolsets for a focused session.",
     "elevate chat -s github-pr-workflow preloads a skill at launch.",
     "elevate chat -q \"query\" runs a single non-interactive query and exits.",
-    "elevate chat --max-turns 200 overrides the default 90-iteration limit per turn.",
+    "elevate chat --max-turns 200 overrides the default 150-iteration limit per turn.",
     "elevate chat --checkpoints enables filesystem snapshots before every destructive file change.",
     "elevate --yolo bypasses all dangerous command approval prompts for the entire session.",
     "elevate chat --source telegram tags the session for filtering in elevate sessions list.",
@@ -480,5 +480,4 @@ def get_random_tip(exclude_recent: int = 0) -> str:
             deduplication across sessions.
     """
     return random.choice(TIPS)
-
 

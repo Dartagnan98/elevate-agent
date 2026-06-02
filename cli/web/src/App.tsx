@@ -35,6 +35,7 @@ import {
   Code,
   Copy,
   Database,
+  Download,
   ExternalLink,
   Eye,
   FileText,
@@ -57,6 +58,7 @@ import {
   Pin,
   Plus,
   Puzzle,
+  RefreshCw,
   Search,
   Settings,
   Shield,
@@ -72,7 +74,7 @@ import {
 } from "lucide-react";
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
-import { api, type CronJob, type SessionInfo } from "@/lib/api";
+import { api, type CronJob, type SessionInfo, type UpdateStatusResponse } from "@/lib/api";
 import type { AccessStatusResponse, LicenseStatusResponse } from "@/lib/api-types";
 import { LoginCard } from "@/components/LoginCard";
 import { cn, timeAgo } from "@/lib/utils";
@@ -89,6 +91,7 @@ import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { markStartup, reportStartup } from "@/lib/startup-performance";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
+import { useSystemActions } from "@/contexts/useSystemActions";
 
 const loadConfigPage = () => import("@/pages/ConfigPage");
 const loadDocsPage = () => import("@/pages/DocsPage");
@@ -1146,6 +1149,34 @@ type SessionMenuState = {
   y: number;
 };
 
+type DesktopUpdaterState = {
+  status?: string;
+  info?: { version?: string | null } | null;
+  progress?: { percent?: number | null } | null;
+  error?: string | null;
+};
+
+type DesktopUpdaterResult = {
+  ok?: boolean;
+  message?: string;
+  version?: string | null;
+};
+
+type DesktopUpdaterApi = {
+  getStatus: () => Promise<DesktopUpdaterState>;
+  checkNow: () => Promise<DesktopUpdaterResult>;
+  install: () => Promise<DesktopUpdaterResult>;
+  onEvent?: (callback: (payload: DesktopUpdaterState) => void) => (() => void);
+};
+
+function getDesktopUpdater(): DesktopUpdaterApi | null {
+  if (typeof window === "undefined") return null;
+  const desktopWindow = window as Window & {
+    elevateDesktop?: { updater?: DesktopUpdaterApi };
+  };
+  return desktopWindow.elevateDesktop?.updater ?? null;
+}
+
 async function copyToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
@@ -1243,8 +1274,70 @@ function DesktopSidebar({
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const { toast, showToast } = useToast();
   const { themeName } = useTheme();
+  const {
+    activeAction,
+    isBusy: systemActionBusy,
+    isRunning: systemActionRunning,
+    pendingAction,
+    runAction,
+    updateStatus,
+  } = useSystemActions();
+  const desktopUpdater = useMemo(getDesktopUpdater, []);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdaterState | null>(null);
   const sidebarLogoSrc =
     themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
+
+  useEffect(() => {
+    if (!desktopUpdater) return;
+    let alive = true;
+    desktopUpdater
+      .getStatus()
+      .then((status) => {
+        if (alive) setDesktopUpdate(status);
+      })
+      .catch(() => {
+        if (alive) setDesktopUpdate(null);
+      });
+    const unsubscribe = desktopUpdater.onEvent?.((status) => setDesktopUpdate(status));
+    return () => {
+      alive = false;
+      unsubscribe?.();
+    };
+  }, [desktopUpdater]);
+
+  const updateBusy =
+    pendingAction === "update" || (activeAction === "update" && systemActionRunning);
+
+  const handleSidebarUpdate = useCallback(async () => {
+    const desktopStatus = desktopUpdate?.status;
+    if (desktopUpdater && desktopStatus === "ready") {
+      const result = await desktopUpdater.install();
+      if (!result?.ok) {
+        showToast(result?.message || "Update is not ready yet", "error");
+      }
+      return;
+    }
+
+    if (desktopUpdater && desktopStatus === "error") {
+      const result = await desktopUpdater.checkNow();
+      if (!result?.ok) {
+        showToast(result?.message || "Could not check for updates", "error");
+      }
+      return;
+    }
+
+    if (updateStatus?.available) {
+      await runAction("update");
+      return;
+    }
+
+    if (desktopUpdater) {
+      const result = await desktopUpdater.checkNow();
+      if (!result?.ok) {
+        showToast(result?.message || "Could not check for updates", "error");
+      }
+    }
+  }, [desktopUpdate?.status, desktopUpdater, runAction, showToast, updateStatus?.available]);
 
   const loadSessions = useCallback(async (options?: { refresh?: boolean }) => {
     try {
@@ -1910,9 +2003,105 @@ function DesktopSidebar({
       </div>
 
       <div className="sidebar-foot shrink-0">
+        <SidebarUpdateCard
+          desktopUpdate={desktopUpdate}
+          cliUpdateStatus={updateStatus}
+          disabled={systemActionBusy && !updateBusy}
+          updateBusy={updateBusy}
+          onClick={handleSidebarUpdate}
+        />
         <SidebarUserPill />
       </div>
     </div>
+  );
+}
+
+function SidebarUpdateCard({
+  cliUpdateStatus,
+  desktopUpdate,
+  disabled,
+  onClick,
+  updateBusy,
+}: {
+  cliUpdateStatus: UpdateStatusResponse | null;
+  desktopUpdate: DesktopUpdaterState | null;
+  disabled: boolean;
+  onClick: () => void;
+  updateBusy: boolean;
+}) {
+  const desktopStatus = desktopUpdate?.status ?? "idle";
+  const desktopVisible =
+    desktopStatus === "available" ||
+    desktopStatus === "downloading" ||
+    desktopStatus === "ready" ||
+    desktopStatus === "error";
+  const cliVisible = Boolean(cliUpdateStatus?.available || updateBusy);
+  if (!desktopVisible && !cliVisible) return null;
+
+  const downloadingPercent =
+    typeof desktopUpdate?.progress?.percent === "number"
+      ? `${Math.round(desktopUpdate.progress.percent)}%`
+      : null;
+  const desktopVersion = desktopUpdate?.info?.version
+    ? `v${desktopUpdate.info.version}`
+    : "A new app version";
+  const updateBehind = cliUpdateStatus?.behind ?? 0;
+
+  let title = "Update available";
+  let detail = updateBehind > 0
+    ? `${updateBehind} backend change${updateBehind === 1 ? "" : "s"} ready`
+    : "Backend update ready";
+  let action = "Click here to update";
+  let icon: ComponentType<{ className?: string }> = Download;
+  let busy = updateBusy;
+  let error = false;
+  let blocked = disabled || updateBusy;
+
+  if (desktopVisible) {
+    if (desktopStatus === "ready") {
+      title = "Update ready";
+      detail = `${desktopVersion} is downloaded.`;
+      action = "Click here to update";
+      blocked = false;
+    } else if (desktopStatus === "error") {
+      title = "Update failed";
+      detail = desktopUpdate?.error || "Check again when you are online.";
+      action = "Check again";
+      icon = AlertTriangle;
+      error = true;
+      blocked = false;
+    } else {
+      title = desktopStatus === "downloading" ? "Downloading update" : "Update available";
+      detail = downloadingPercent ? `${downloadingPercent} downloaded` : "Preparing the app update.";
+      action = "Preparing";
+      icon = RefreshCw;
+      busy = true;
+      blocked = true;
+    }
+  } else if (updateBusy) {
+    title = "Updating Elevate";
+    detail = "Applying the backend update now.";
+    action = "Updating";
+    icon = RefreshCw;
+    busy = true;
+    blocked = true;
+  }
+
+  const Icon = icon;
+  return (
+    <button
+      type="button"
+      className={cn("sidebar-update-card", busy && "busy", error && "error")}
+      disabled={blocked}
+      onClick={onClick}
+    >
+      <Icon className={cn("update-icon", busy && "animate-spin")} />
+      <span className="update-copy">
+        <span className="update-title">{title}</span>
+        <span className="update-detail">{detail}</span>
+      </span>
+      <span className="update-action">{action}</span>
+    </button>
   );
 }
 

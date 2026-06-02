@@ -193,7 +193,91 @@ html .font-courier {
 
 .sidebar-foot {
   border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px;
+}
+
+.sidebar-update-card {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 120ms var(--ease-out),
+    border-color 120ms var(--ease-out);
+}
+
+.sidebar-update-card:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 17%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+}
+
+.sidebar-update-card:disabled {
+  cursor: default;
+  opacity: 0.86;
+}
+
+.sidebar-update-card.error {
+  border-color: color-mix(in srgb, var(--status-error) 45%, var(--border));
+  background: color-mix(in srgb, var(--status-error) 12%, var(--bg-2));
+}
+
+.sidebar-update-card .update-icon {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.sidebar-update-card.error .update-icon {
+  color: var(--status-error);
+}
+
+.sidebar-update-card .update-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sidebar-update-card .update-title {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-update-card .update-detail {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-update-card .update-action {
+  max-width: 68px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.15;
+  text-align: right;
 }
 
 .user-pill-wrap {

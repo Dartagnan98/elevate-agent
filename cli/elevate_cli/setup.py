@@ -1535,10 +1535,10 @@ def setup_terminal_backend(config: dict):
 def _apply_default_agent_settings(config: dict):
     """Apply recommended defaults for all agent settings without prompting."""
     agent_config = config.setdefault("agent", {})
-    agent_config["max_turns"] = 90
+    agent_config["max_turns"] = 150
     agent_config.setdefault("gateway_tool_profile", "auto")
     agent_config.setdefault("api_turn_deadline", 0)
-    save_env_value("ELEVATE_MAX_ITERATIONS", "90")
+    save_env_value("ELEVATE_MAX_ITERATIONS", "150")
 
     display = config.setdefault("display", {})
     display["tool_progress"] = "all"
@@ -1558,7 +1558,7 @@ def _apply_default_agent_settings(config: dict):
 
     save_config(config)
     print_success("Applied recommended defaults:")
-    print_info("  Max iterations: 90")
+    print_info("  Max iterations: 150")
     print_info("  Tool progress: all (Telegram quiet)")
     print_info("  Compression threshold: 0.50")
     print_info("  Session reset: inactivity (1440 min) + daily (4:00)")
@@ -1574,12 +1574,12 @@ def setup_agent_settings(config: dict):
 
     # ── Max Iterations ──
     current_max = get_env_value("ELEVATE_MAX_ITERATIONS") or str(
-        config.get("agent", {}).get("max_turns", 90)
+        config.get("agent", {}).get("max_turns", 150)
     )
     print_info("Maximum tool-calling iterations per conversation.")
     print_info("Higher = more complex tasks, but costs more tokens.")
     print_info(
-        f"Press Enter to keep {current_max}. Use 90 for most tasks or 150+ for open exploration."
+        f"Press Enter to keep {current_max}. Use 150 for most tasks or higher for open exploration."
     )
 
     max_iter_str = prompt("Max iterations", current_max)
@@ -3257,7 +3257,7 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
         return f"backend: {backend}"
 
     elif section_key == "agent":
-        max_turns = config.get("agent", {}).get("max_turns", 90)
+        max_turns = config.get("agent", {}).get("max_turns", 150)
         return f"max turns: {max_turns}"
 
     elif section_key == "gateway":

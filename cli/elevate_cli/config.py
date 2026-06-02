@@ -503,7 +503,7 @@ DEFAULT_CONFIG = {
         "max_turns": 20,
     },
     "agent": {
-        "max_turns": 90,
+        "max_turns": 150,
         # Gateway tool routing. "auto" keeps chat turns lightweight and only
         # loads heavier code/browser/cron tools when the message asks for them.
         "gateway_tool_profile": "auto",
@@ -2417,7 +2417,7 @@ OPTIONAL_ENV_VARS = {
         "category": "setting",
     },
     "ELEVATE_MAX_ITERATIONS": {
-        "description": "Maximum tool-calling iterations per conversation (default: 90)",
+        "description": "Maximum tool-calling iterations per conversation (default: 150)",
         "prompt": "Max iterations",
         "url": None,
         "password": False,
