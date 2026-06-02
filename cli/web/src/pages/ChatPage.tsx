@@ -699,6 +699,20 @@ function getSharedChatGateway(version: number): GatewayClient {
     SHARED_CHAT_GATEWAY?.close();
     SHARED_CHAT_GATEWAY = new GatewayClient();
     SHARED_CHAT_GATEWAY_VERSION = version;
+    // Debug affordance, OFF by default (prod-safe): set
+    //   localStorage.__elevate_expose_gw = "1"
+    // then reload to expose the live chat gateway on window for event-
+    // injection testing (e.g. verifying the compaction banner end-to-end).
+    if (typeof window !== "undefined") {
+      try {
+        if (window.localStorage?.getItem("__elevate_expose_gw") === "1") {
+          (window as unknown as { __elevateChatGateway?: GatewayClient }).__elevateChatGateway =
+            SHARED_CHAT_GATEWAY;
+        }
+      } catch {
+        /* localStorage unavailable — ignore */
+      }
+    }
   }
   return SHARED_CHAT_GATEWAY;
 }
