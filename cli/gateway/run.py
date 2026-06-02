@@ -9338,9 +9338,11 @@ class GatewayRunner:
             except Exception:
                 pass
 
-            # Context window and compressions
+            # Context window and compressions. last_prompt_tokens is parked at
+            # the -1 sentinel right after a compaction (awaiting real usage);
+            # -1 is truthy, so guard on > 0 or it renders "Context: -1 / (-0%)".
             ctx = agent.context_compressor
-            if ctx.last_prompt_tokens:
+            if ctx.last_prompt_tokens and ctx.last_prompt_tokens > 0:
                 pct = min(100, ctx.last_prompt_tokens / ctx.context_length * 100) if ctx.context_length else 0
                 lines.append(f"Context: {ctx.last_prompt_tokens:,} / {ctx.context_length:,} ({pct:.0f}%)")
             if ctx.compression_count:

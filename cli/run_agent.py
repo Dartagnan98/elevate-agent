@@ -9781,7 +9781,7 @@ class AIAgent:
                     f"{_compressor.threshold_tokens:,}",
                     f"{_compressor.last_real_prompt_tokens:,}",
                 )
-            elif _preflight_tokens >= self.context_compressor.threshold_tokens:
+            elif self.context_compressor.should_compress(_preflight_tokens):
                 logger.info(
                     "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                     f"{_preflight_tokens:,}",
