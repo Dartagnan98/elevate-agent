@@ -103,6 +103,8 @@ export function SidebarUserPill() {
   const activeSessions = status?.active_sessions ?? 0;
   const hasUpdate = Boolean(updateStatus?.available);
   const updateBehind = updateStatus?.behind ?? 0;
+  const desktopManagedUpdate =
+    updateStatus?.error === "desktop_app_managed_update";
   const themeIsDark = themeName !== "light";
   const themeLabel = themeIsDark ? "Dark" : "Light";
   const localeLabel = locale === "zh" ? "中文" : "EN";
@@ -238,21 +240,23 @@ export function SidebarUserPill() {
               <RotateCw className={cn(restartBusy && "animate-spin")} />
               <span>{restartBusy ? "Restarting gateway" : "Restart gateway"}</span>
             </button>
-            <button
-              type="button"
-              className="user-menu-row"
-              disabled={isBusy && !updateBusy}
-              role="menuitem"
-              onClick={() => runSystemAction("update")}
-            >
-              <Download className={cn(updateBusy && "animate-pulse")} />
-              <span>{updateBusy ? "Updating Elevate" : "Update Elevate"}</span>
-              {hasUpdate && !updateBusy && (
-                <span className="user-menu-tag">
-                  {updateBehind > 0 ? updateBehind : "new"}
-                </span>
-              )}
-            </button>
+            {!desktopManagedUpdate && (
+              <button
+                type="button"
+                className="user-menu-row"
+                disabled={isBusy && !updateBusy}
+                role="menuitem"
+                onClick={() => runSystemAction("update")}
+              >
+                <Download className={cn(updateBusy && "animate-pulse")} />
+                <span>{updateBusy ? "Updating Elevate" : "Update Elevate"}</span>
+                {hasUpdate && !updateBusy && (
+                  <span className="user-menu-tag">
+                    {updateBehind > 0 ? updateBehind : "new"}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
 
           {license?.authenticated && (

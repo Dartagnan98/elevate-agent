@@ -70,6 +70,18 @@ def _init_workspace_root() -> Path:
 
 WORKSPACE_ROOT = _init_workspace_root()
 
+
+def _is_packaged_desktop_runtime() -> bool:
+    """True when this API is running from the immutable Electron app bundle."""
+    if os.environ.get("ELEVATE_DESKTOP_APP") == "1":
+        return True
+    parts = PROJECT_ROOT.parts
+    return (
+        any(part.endswith(".app") for part in parts)
+        and "Contents" in parts
+        and "Resources" in parts
+    )
+
 from elevate_cli import __version__, __release_date__
 from elevate_cli.config import (
     DEFAULT_CONFIG,
@@ -1898,6 +1910,11 @@ async def whatsapp_pair_stream(request: Request):
 @app.post("/api/elevate/update")
 async def update_elevate():
     """Kick off ``elevate update`` in the background."""
+    if _is_packaged_desktop_runtime():
+        raise HTTPException(
+            status_code=400,
+            detail="Desktop app updates are managed by the built-in app updater.",
+        )
     try:
         proc = _spawn_elevate_action(["update"], "elevate-update")
     except Exception as exc:
@@ -2449,6 +2466,21 @@ async def get_elevate_update_status(refresh: bool = False):
     available" before the user runs ``elevate update``.
     """
     try:
+        if _is_packaged_desktop_runtime():
+            return {
+                "available": False,
+                "behind": None,
+                "ahead": 0,
+                "branch": None,
+                "checked_at": time.time(),
+                "command": "desktop updater",
+                "local": None,
+                "origin_url": None,
+                "repo_dir": str(PROJECT_ROOT),
+                "upstream": None,
+                "error": "desktop_app_managed_update",
+            }
+
         from elevate_cli.banner import (
             _resolve_repo_dir,
             check_for_updates,

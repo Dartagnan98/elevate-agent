@@ -534,7 +534,10 @@ async function ensureBackend() {
     return false;
   }
 
-  const baseEnv = EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {};
+  const baseEnv = {
+    ELEVATE_DESKTOP_APP: "1",
+    ...(EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
+  };
   markStartup("backend:spawn", path.basename(launcher.command));
   backendProcess = spawn(launcher.command, launcher.args, {
     cwd: launcher.cwd,
