@@ -300,9 +300,12 @@ async function performLogin({ email, password }) {
 }
 
 function envWithPath(extra = {}) {
+  const pythonCacheDir = path.join(HOME, "Library", "Caches", "Elevate", "python-pycache");
   return {
     ...process.env,
     PATH: process.env.PATH ? `${DEFAULT_PATH}:${process.env.PATH}` : DEFAULT_PATH,
+    PYTHONDONTWRITEBYTECODE: process.env.PYTHONDONTWRITEBYTECODE || "1",
+    PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX || pythonCacheDir,
     ...extra,
   };
 }

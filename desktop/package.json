@@ -33,7 +33,12 @@
       {
         "from": "runtime/${arch}/python",
         "to": "runtime/python",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo"
+        ]
       },
       {
         "from": "../cli",
