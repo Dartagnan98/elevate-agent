@@ -1150,8 +1150,21 @@ function kickoffUpdates() {
   };
 
   check("startup");
-  const timer = setInterval(() => check("poll"), 2 * 60 * 60 * 1000);
+  // Poll frequently so a freshly-shipped build reaches the device within
+  // minutes. autoDownload pulls it silently; the user still applies it via the
+  // one-click "Restart to update" card — no auto-relaunch, no forced install.
+  const timer = setInterval(() => check("poll"), 3 * 60 * 1000);
   if (typeof timer.unref === "function") timer.unref();
+  // Also check the instant the app regains focus, so an update that shipped
+  // while you were away shows up right when you come back. Debounced so rapid
+  // focus changes don't hammer the feed.
+  let lastFocusCheck = 0;
+  app.on("browser-window-focus", () => {
+    const now = Date.now();
+    if (now - lastFocusCheck < 60 * 1000) return;
+    lastFocusCheck = now;
+    check("focus");
+  });
 }
 
 // Renderer can ask "what's the latest status?" on mount so it doesn't miss
