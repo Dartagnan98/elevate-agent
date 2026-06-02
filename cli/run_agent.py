@@ -10353,6 +10353,53 @@ class AIAgent:
                     except Exception:
                         pass  # Never let rate guard break the agent loop
 
+                # ── Generic provider usage-cap breaker ────────────────
+                # If this provider was usage-capped (recorded by this or
+                # another session), skip the call — retrying a capped
+                # provider just burns more quota and deepens the hole. Nous
+                # has its own specialized guard above; this covers everyone
+                # else (openai-codex, anthropic, ...).
+                if self.provider and self.provider != "nous":
+                    try:
+                        from agent.provider_health import (
+                            provider_rate_limit_remaining,
+                            format_remaining as _fmt_prov_remaining,
+                        )
+                        _prov_remaining = provider_rate_limit_remaining(self.provider)
+                        if _prov_remaining is not None and _prov_remaining > 0:
+                            _prov_msg = (
+                                f"{self.provider} usage limit reached — "
+                                f"resets in {_fmt_prov_remaining(_prov_remaining)}."
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}⏳ {_prov_msg} Trying fallback...",
+                                force=True,
+                            )
+                            self._emit_status(f"⏳ {_prov_msg}")
+                            if self._try_activate_fallback():
+                                retry_count = 0
+                                compression_attempts = 0
+                                primary_recovery_attempted = False
+                                continue
+                            self._persist_session(messages, conversation_history)
+                            return {
+                                "final_response": (
+                                    f"⏳ {_prov_msg}\n\n"
+                                    "No fallback provider available. Try again "
+                                    "after the reset, or add a fallback provider "
+                                    "in config.yaml."
+                                ),
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "failed": True,
+                                "error": _prov_msg,
+                            }
+                    except ImportError:
+                        pass
+                    except Exception:
+                        pass  # Never let the breaker break the agent loop
+
                 try:
                     self._reset_stream_delivery_tracking()
                     api_kwargs = self._build_api_kwargs(api_messages)
@@ -11026,6 +11073,14 @@ class AIAgent:
                             clear_nous_rate_limit()
                         except Exception:
                             pass
+                    elif self.provider:
+                        # Clear the generic usage-cap breaker on success — the
+                        # cap has reset, so this and other sessions can resume.
+                        try:
+                            from agent.provider_health import clear_provider_rate_limit
+                            clear_provider_rate_limit(self.provider)
+                        except Exception:
+                            pass
                     self._touch_activity(f"API call #{api_call_count} completed")
                     break  # Success, exit retry loop
 
@@ -11532,6 +11587,42 @@ class AIAgent:
                         FailoverReason.rate_limit,
                         FailoverReason.billing,
                     )
+
+                    # ── Generic provider usage-cap breaker (record) ───────
+                    # A 429 always classifies as rate_limit (see
+                    # error_classifier.py:728), so we re-test the message for a
+                    # GENUINE usage cap ("usage limit reached"/"quota", with no
+                    # "try again/resets in" transient language). Only then trip
+                    # the cross-session breaker so this and other sessions skip
+                    # the dead provider instead of retrying into the wall.
+                    # Transient throttling 429s never reach here as a cap, so a
+                    # healthy provider is never blocked. Nous keeps its own
+                    # specialized guard below.
+                    if (
+                        is_rate_limited
+                        and self.provider
+                        and self.provider != "nous"
+                        and not recovered_with_pool
+                    ):
+                        try:
+                            from agent.provider_health import (
+                                is_genuine_usage_cap,
+                                record_provider_rate_limit,
+                            )
+                            if is_genuine_usage_cap(str(api_error)):
+                                _err_resp = getattr(api_error, "response", None)
+                                _err_hdrs = (
+                                    getattr(_err_resp, "headers", None)
+                                    if _err_resp else None
+                                )
+                                record_provider_rate_limit(
+                                    self.provider,
+                                    headers=_err_hdrs,
+                                    error_context=error_context,
+                                )
+                        except Exception:
+                            pass  # Never let the breaker break the agent loop
+
                     if is_rate_limited and self._fallback_index < len(self._fallback_chain):
                         # Don't eagerly fallback if credential pool rotation may
                         # still recover.  See _pool_may_recover_from_rate_limit
