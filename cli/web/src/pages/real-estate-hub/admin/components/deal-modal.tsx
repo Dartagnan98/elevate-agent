@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   Home,
@@ -19,7 +19,19 @@ import {
   ADMIN_CONDITION_TOGGLES,
 } from "../admin-data";
 import { api } from "@/lib/api";
-import type { DealContext } from "@/lib/api-types";
+import type {
+  DealContext,
+  AdminDealToggleValue,
+  DealAttachmentCreateRequest,
+  DealContactCreateRequest,
+} from "@/lib/api-types";
+
+// A deal id is persisted (backed by a real saved file) when it's a 32-char hex.
+// Seed/demo cards (d1, b2, local-...) are not persisted, so their action buttons
+// stay inert rather than firing 404s at the backend.
+function isPersistedDealId(id: string): boolean {
+  return /^[a-f0-9]{32}$/i.test(id);
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +73,11 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   // documents, conditional docs). Falls back to seed data when a deal has no
   // saved file yet (demo/placeholder cards), so this never regresses.
   const [ctx, setCtx] = useState<DealContext | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionMode, setActionMode] = useState<"dates" | "doc" | "contact" | null>(null);
+  const persisted = isPersistedDealId(deal.id);
+
   useEffect(() => {
     if (!deal.id) return;
     let active = true;
@@ -76,6 +93,102 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       active = false;
     };
   }, [deal.id]);
+
+  // Refetch context after a successful mutation so the modal reflects new state.
+  const refetch = useCallback(async () => {
+    if (!deal.id) return;
+    const c = await api.getDealContext(deal.id);
+    setCtx(c);
+  }, [deal.id]);
+
+  // Wrap a mutation: gate on a persisted deal, track busy + surface errors,
+  // then refetch so the panel updates in place.
+  const runAction = useCallback(
+    async (fn: () => Promise<unknown>) => {
+      if (!persisted || busy) return;
+      setBusy(true);
+      setActionError(null);
+      try {
+        await fn();
+        await refetch();
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "Action failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [persisted, busy, refetch],
+  );
+
+  const handleAdvance = useCallback(
+    (force = false) => runAction(() => api.advanceDeal(deal.id, force)),
+    [runAction, deal.id],
+  );
+
+  const handleConditionChange = useCallback(
+    (field: string, value: AdminDealToggleValue) =>
+      runAction(() => api.setAdminDealToggle(deal.id, field, value)),
+    [runAction, deal.id],
+  );
+
+  // Current condition values come from the backend context (keyed by API field).
+  const conditions = ctx?.conditions ?? {};
+
+  // Inline add-form drafts (ported from the legacy AdminDealContextSection).
+  const [fieldDraft, setFieldDraft] = useState({
+    listingDate: "",
+    offerDate: "",
+    subjectRemovalDate: "",
+    depositDueDate: "",
+    completionDate: "",
+    possessionDate: "",
+    mlsNumber: "",
+    listPrice: "",
+    offerPrice: "",
+  });
+  const [docDraft, setDocDraft] = useState({ kind: "cma_report", filePath: "", summary: "" });
+  const [contactDraft, setContactDraft] = useState({ role: "lawyer", contactId: "", notes: "" });
+
+  const submitDates = (e: React.FormEvent) => {
+    e.preventDefault();
+    const fields = Object.fromEntries(
+      Object.entries(fieldDraft).filter(([, value]) => value.trim()),
+    );
+    if (Object.keys(fields).length === 0) return;
+    void runAction(() => api.updateDealFields(deal.id, fields)).then(() => {
+      setFieldDraft({
+        listingDate: "", offerDate: "", subjectRemovalDate: "", depositDueDate: "",
+        completionDate: "", possessionDate: "", mlsNumber: "", listPrice: "", offerPrice: "",
+      });
+      setActionMode(null);
+    });
+  };
+
+  const submitDoc = (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: DealAttachmentCreateRequest = {
+      kind: docDraft.kind,
+      filePath: docDraft.filePath,
+      summary: docDraft.summary || null,
+    };
+    void runAction(() => api.addDealAttachment(deal.id, body)).then(() => {
+      setDocDraft({ kind: "cma_report", filePath: "", summary: "" });
+      setActionMode(null);
+    });
+  };
+
+  const submitContact = (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: DealContactCreateRequest = {
+      role: contactDraft.role,
+      contactId: contactDraft.contactId,
+      notes: contactDraft.notes || null,
+    };
+    void runAction(() => api.addDealContact(deal.id, body)).then(() => {
+      setContactDraft({ role: "lawyer", contactId: "", notes: "" });
+      setActionMode(null);
+    });
+  };
 
   const guide = ctx?.provinceGuide ?? null;
   const conditionalDocs = ctx?.conditionalDocs ?? [];
@@ -214,13 +327,28 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                     </li>
                   </ul>
                   <div className="abm-actions">
-                    <button className="abm-btn primary" type="button">
-                      Advance phase
+                    <button
+                      className="abm-btn primary"
+                      type="button"
+                      disabled={!persisted || busy}
+                      onClick={() => void handleAdvance(false)}
+                    >
+                      {busy ? "Working..." : "Advance phase"}
                     </button>
-                    <button className="abm-btn ghost" type="button">
+                    <button
+                      className="abm-btn ghost"
+                      type="button"
+                      disabled={!persisted || busy}
+                      onClick={() => void handleAdvance(true)}
+                    >
                       Force advance
                     </button>
                   </div>
+                  {actionError && (
+                    <div className="abm-tag warn" style={{ display: "block", marginTop: 8, padding: "6px 8px" }}>
+                      {actionError}
+                    </div>
+                  )}
                 </div>
 
                 {/* Background automations */}
@@ -378,19 +506,118 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                 <div className="abm-source-actions">
                   <span className="abm-section-label mono">SOURCE ACTIONS</span>
                   <div className="abm-source-buttons">
-                    <button className="abm-btn ghost">
+                    <button
+                      type="button"
+                      className={"abm-btn " + (actionMode === "dates" ? "primary" : "ghost")}
+                      disabled={!persisted}
+                      onClick={() => setActionMode(actionMode === "dates" ? null : "dates")}
+                    >
                       <Calendar />
                       <span>Dates</span>
                     </button>
-                    <button className="abm-btn ghost">
+                    <button
+                      type="button"
+                      className={"abm-btn " + (actionMode === "doc" ? "primary" : "ghost")}
+                      disabled={!persisted}
+                      onClick={() => setActionMode(actionMode === "doc" ? null : "doc")}
+                    >
                       <Paperclip />
                       <span>Attach</span>
                     </button>
-                    <button className="abm-btn ghost">
+                    <button
+                      type="button"
+                      className={"abm-btn " + (actionMode === "contact" ? "primary" : "ghost")}
+                      disabled={!persisted}
+                      onClick={() => setActionMode(actionMode === "contact" ? null : "contact")}
+                    >
                       <Users />
                       <span>Co-contact</span>
                     </button>
                   </div>
+
+                  {actionMode === "dates" && (
+                    <form className="abm-action-form abm-grid-2" onSubmit={submitDates}>
+                      {(["listingDate", "offerDate", "subjectRemovalDate", "depositDueDate", "completionDate", "possessionDate", "mlsNumber", "listPrice", "offerPrice"] as const).map((field) => (
+                        <label key={field} className="abm-field-label mono">
+                          {field}
+                          <input
+                            className="abm-input"
+                            value={fieldDraft[field]}
+                            onChange={(ev) => setFieldDraft((prev) => ({ ...prev, [field]: ev.target.value }))}
+                          />
+                        </label>
+                      ))}
+                      <div style={{ gridColumn: "1 / -1" }}>
+                        <button className="abm-btn primary" type="submit" disabled={busy}>
+                          Update file fields
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {actionMode === "doc" && (
+                    <form className="abm-action-form" onSubmit={submitDoc}>
+                      <div className="abm-grid-2">
+                        <input
+                          className="abm-input"
+                          value={docDraft.kind}
+                          onChange={(ev) => setDocDraft((prev) => ({ ...prev, kind: ev.target.value }))}
+                          placeholder="kind, e.g. cma_report"
+                        />
+                        <input
+                          className="abm-input"
+                          value={docDraft.filePath}
+                          onChange={(ev) => setDocDraft((prev) => ({ ...prev, filePath: ev.target.value }))}
+                          placeholder="/path/to/file.pdf"
+                        />
+                      </div>
+                      <input
+                        className="abm-input"
+                        value={docDraft.summary}
+                        onChange={(ev) => setDocDraft((prev) => ({ ...prev, summary: ev.target.value }))}
+                        placeholder="summary"
+                      />
+                      <button
+                        className="abm-btn primary"
+                        type="submit"
+                        disabled={busy || !docDraft.kind.trim() || !docDraft.filePath.trim()}
+                      >
+                        Attach document
+                      </button>
+                    </form>
+                  )}
+
+                  {actionMode === "contact" && (
+                    <form className="abm-action-form" onSubmit={submitContact}>
+                      <div className="abm-grid-2">
+                        <input
+                          className="abm-input"
+                          value={contactDraft.role}
+                          onChange={(ev) => setContactDraft((prev) => ({ ...prev, role: ev.target.value }))}
+                          placeholder="role, e.g. lawyer"
+                        />
+                        <input
+                          className="abm-input"
+                          value={contactDraft.contactId}
+                          onChange={(ev) => setContactDraft((prev) => ({ ...prev, contactId: ev.target.value }))}
+                          placeholder="contact id"
+                        />
+                      </div>
+                      <input
+                        className="abm-input"
+                        value={contactDraft.notes}
+                        onChange={(ev) => setContactDraft((prev) => ({ ...prev, notes: ev.target.value }))}
+                        placeholder="notes"
+                      />
+                      <button
+                        className="abm-btn primary"
+                        type="submit"
+                        disabled={busy || !contactDraft.role.trim() || !contactDraft.contactId.trim()}
+                      >
+                        Add co-contact
+                      </button>
+                    </form>
+                  )}
                 </div>
               </section>
             </div>
@@ -520,28 +747,57 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
             <div className="abm-conditions-sub mono">ENUMS</div>
 
             <div className="abm-enums">
-              {ADMIN_CONDITION_ENUMS.map((field) => (
-                <div className="abm-enum-row" key={field.id}>
-                  <span className="abm-enum-label">{field.label}</span>
-                  <button className="abm-enum-select" type="button">
-                    <span>Not set</span>
-                    <ChevDown />
-                  </button>
-                </div>
-              ))}
+              {ADMIN_CONDITION_ENUMS.map((field) => {
+                const current = conditions[field.field];
+                const value = typeof current === "string" ? current : "";
+                const hasCustomValue =
+                  value !== "" && !field.options.some((o) => o.value === value);
+                return (
+                  <div className="abm-enum-row" key={field.id}>
+                    <span className="abm-enum-label">{field.label}</span>
+                    <select
+                      className="abm-enum-select"
+                      value={value}
+                      disabled={!persisted || busy}
+                      onChange={(e) =>
+                        void handleConditionChange(field.field, e.currentTarget.value || null)
+                      }
+                    >
+                      <option value="">Not set</option>
+                      {hasCustomValue && <option value={value}>{value}</option>}
+                      {field.options.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="abm-conditions-sub mono">YES / NO</div>
             <div className="abm-toggles">
-              {ADMIN_CONDITION_TOGGLES.map((t, i) => (
-                <div className="abm-toggle-row" key={i}>
-                  <label className="abm-toggle-check">
-                    <span className="abm-check-box" />
-                    <span>{t}</span>
-                  </label>
-                  <span className="abm-toggle-unset mono">UNSET</span>
-                </div>
-              ))}
+              {ADMIN_CONDITION_TOGGLES.map((t) => {
+                const current = conditions[t.field];
+                const checked = current === true;
+                const label = current == null ? "UNSET" : checked ? "YES" : "NO";
+                return (
+                  <div className="abm-toggle-row" key={t.field}>
+                    <button
+                      type="button"
+                      className="abm-toggle-check"
+                      aria-pressed={checked}
+                      disabled={!persisted || busy}
+                      onClick={() => void handleConditionChange(t.field, !checked)}
+                    >
+                      <span className={"abm-check-box" + (checked ? " checked" : "")} />
+                      <span>{t.label}</span>
+                    </button>
+                    <span className="abm-toggle-unset mono">{label}</span>
+                  </div>
+                );
+              })}
             </div>
           </section>
         </div>

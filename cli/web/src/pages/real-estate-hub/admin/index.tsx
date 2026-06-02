@@ -1971,7 +1971,7 @@ function AdminOnboardingConnectors({
   );
 }
 
-type CoachMessage = { role: "user" | "assistant"; content: string };
+export type CoachMessage = { role: "user" | "assistant"; content: string };
 
 const COACH_URL_REGEX = /(https?:\/\/[^\s<>"')]+)/g;
 
@@ -2000,7 +2000,7 @@ function renderCoachContent(text: string): React.ReactNode {
   });
 }
 
-function AdminOnboardingCoach({
+export function AdminOnboardingCoach({
   initialQuestion,
   onClose,
   onReset,
@@ -5341,16 +5341,9 @@ function AdminKanbanBoard() {
   );
 }
 
-function RealEstateAdminPageLegacy() {
-  const data = useRealEstateHubData();
-  const adminSetup = useAdminSetup();
-  const [forceOnboarding, setForceOnboarding] = useState(false);
-  const [coachOpen, setCoachOpen] = useState(false);
-  const [coachMention, setCoachMention] = useState<string | null>(null);
-  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
-  const openCoach = useCallback(() => setCoachOpen(true), []);
-  const initialCoachQuestion = useMemo(() => {
-    const snap = adminSetup.setup;
+// Build the coach's opening message from a setup snapshot. Exported so the new
+// AdminDesignShell can render the same coach without the legacy page tree.
+export function computeCoachInitialQuestion(snap: AdminSetupSnapshot | null): string {
     if (!snap) return "Loading your setup snapshot — one sec.";
     const province = (snap.profile?.province || "").toUpperCase();
     const pct = snap.completionPct ?? 0;
@@ -5402,7 +5395,20 @@ function RealEstateAdminPageLegacy() {
       lines.push(`Everything required is in. Anything else you want to tighten up?`);
     }
     return lines.join("\n\n");
-  }, [adminSetup.setup]);
+}
+
+function RealEstateAdminPageLegacy() {
+  const data = useRealEstateHubData();
+  const adminSetup = useAdminSetup();
+  const [forceOnboarding, setForceOnboarding] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
+  const [coachMention, setCoachMention] = useState<string | null>(null);
+  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
+  const openCoach = useCallback(() => setCoachOpen(true), []);
+  const initialCoachQuestion = useMemo(
+    () => computeCoachInitialQuestion(adminSetup.setup),
+    [adminSetup.setup],
+  );
 
   const resetCoach = useCallback(() => {
     setCoachMessages([{ role: "assistant", content: initialCoachQuestion }]);

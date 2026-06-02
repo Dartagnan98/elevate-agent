@@ -33,6 +33,16 @@ export function LeadsDesignShell() {
   const [templatesRaw, setTemplatesRaw] = useState<OutreachTemplate[] | null>(null);
   const [sentRaw, setSentRaw] = useState<SourceInboxSentItem[] | null>(null);
 
+  const refreshTemplates = useCallback(async () => {
+    const res = await api.getOutreachTemplates();
+    setTemplatesRaw(res.templates ?? []);
+  }, []);
+
+  const refreshSent = useCallback(async (includePending = false) => {
+    const res = await api.getSourceInboxSent(100, includePending);
+    setSentRaw(res.items ?? []);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -45,6 +55,33 @@ export function LeadsDesignShell() {
       .catch(() => { if (!cancelled) setSentRaw([]); });
     return () => { cancelled = true; };
   }, []);
+
+  const templateMutations = useMemo(
+    () => ({
+      onCreate: async (laneId: string, name: string, body: string) => {
+        await api.createOutreachTemplate({ lane: laneId, name, body });
+        await refreshTemplates();
+      },
+      onSave: async (id: string, name: string, body: string) => {
+        await api.updateOutreachTemplate(id, { name, body });
+        await refreshTemplates();
+      },
+      onTogglePause: async (id: string, active: boolean) => {
+        await api.updateOutreachTemplate(id, { active });
+        await refreshTemplates();
+      },
+      onDelete: async (id: string) => {
+        await api.deleteOutreachTemplate(id);
+        await refreshTemplates();
+      },
+      onSuggest: async (laneId: string) => {
+        const res = await api.suggestOutreachTemplate({ lane: laneId });
+        await refreshTemplates();
+        return { name: res.template.name, body: res.template.body };
+      },
+    }),
+    [refreshTemplates],
+  );
 
   const sources = useMemo(
     () =>
@@ -127,6 +164,9 @@ export function LeadsDesignShell() {
           sent={sent && sent.length > 0 ? sent : undefined}
           onDraftAction={handleDraftAction}
           onReRunOnboarding={() => setForceOnboarding(true)}
+          onRefresh={() => void data.refresh({ force: true })}
+          templateMutations={templateMutations}
+          onSentRefresh={refreshSent}
         />
       )}
     </div>

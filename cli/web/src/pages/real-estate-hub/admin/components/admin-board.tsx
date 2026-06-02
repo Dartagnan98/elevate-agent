@@ -24,6 +24,8 @@ import type { BuyerDeal } from "../admin-data";
 import type { AdminKpi } from "../compute-admin-kpis";
 import type { AdminEvent } from "../compute-admin-events";
 import DealDetailModal from "./deal-modal";
+import { api } from "@/lib/api";
+import type { AdminDealCreateRequest, AdminDealSide } from "@/lib/api-types";
 
 export interface AdminBoardProps {
   deals?: Deal[];
@@ -187,6 +189,12 @@ function DealCard({ deal, onOpen }: { deal: Deal; onOpen?: (deal: Deal) => void 
     <div
       className={"ab-deal" + (deal.blocked ? " blocked" : "")}
       onClick={() => onOpen?.(deal)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen?.(deal);
+        }
+      }}
       role="button"
       tabIndex={0}
     >
@@ -679,6 +687,160 @@ function WorkRow({ item }: { item: WorkItem }) {
 }
 
 /* ─────────────────────────────────────────────────────────────────
+   NewDealModal — minimal create form wired to api.createAdminDeal
+   ───────────────────────────────────────────────────────────────── */
+
+function NewDealModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [side, setSide] = useState<AdminDealSide>("listing");
+  const [title, setTitle] = useState("");
+  const [province, setProvince] = useState("");
+  const [listingAddress, setListingAddress] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canSubmit = title.trim().length > 0 && province.trim().length > 0 && !submitting;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError(null);
+    const cleanAddress = listingAddress.trim();
+    const request: AdminDealCreateRequest = {
+      title: title.trim(),
+      side,
+      province: province.trim().toUpperCase(),
+      currentStage: 0,
+      listingAddress: side === "listing" ? cleanAddress || null : null,
+    };
+    try {
+      await api.createAdminDeal(request);
+      onCreated();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create deal");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="ab-modal-backdrop" onClick={onClose}>
+      <div
+        className="ab-modal"
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+        role="dialog"
+        style={{ maxWidth: "30rem" }}
+      >
+        <button className="ab-modal-close" onClick={onClose} aria-label="Close">
+          <span className="x">&times;</span>
+        </button>
+        <header className="abm-head">
+          <div className="abm-crumbs mono">
+            <span>NEW DEAL</span>
+          </div>
+          <h2 className="abm-title">Add a card to the board</h2>
+        </header>
+        <div className="ab-modal-scroll">
+          <form onSubmit={handleSubmit} className="abm-newdeal-form">
+            <div className="abm-section">
+              <span className="abm-section-label mono">SIDE</span>
+              <div className="ab-tabs" style={{ marginTop: 6 }}>
+                <button
+                  type="button"
+                  className={"ab-tab" + (side === "listing" ? " active" : "")}
+                  onClick={() => setSide("listing")}
+                >
+                  <span>Listing</span>
+                </button>
+                <button
+                  type="button"
+                  className={"ab-tab" + (side === "buyer" ? " active" : "")}
+                  onClick={() => setSide("buyer")}
+                >
+                  <span>Buyer</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="abm-section">
+              <label className="abm-section-label mono" htmlFor="nd-title">
+                CLIENT / TITLE
+              </label>
+              <input
+                id="nd-title"
+                className="abm-input"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="Client name or deal title"
+                autoFocus
+              />
+            </div>
+
+            <div className="abm-section">
+              <label className="abm-section-label mono" htmlFor="nd-province">
+                PROVINCE
+              </label>
+              <input
+                id="nd-province"
+                className="abm-input"
+                value={province}
+                onChange={(e) => setProvince(e.target.value)}
+                placeholder="e.g. BC"
+              />
+            </div>
+
+            {side === "listing" && (
+              <div className="abm-section">
+                <label className="abm-section-label mono" htmlFor="nd-address">
+                  LISTING ADDRESS
+                </label>
+                <input
+                  id="nd-address"
+                  className="abm-input"
+                  value={listingAddress}
+                  onChange={(e) => setListingAddress(e.target.value)}
+                  placeholder="123 Sample Lane, Vancouver, BC"
+                />
+              </div>
+            )}
+
+            {error && (
+              <div className="abm-tag warn" style={{ display: "block", padding: "6px 8px" }}>
+                {error}
+              </div>
+            )}
+
+            <div className="abm-actions">
+              <button className="abm-btn primary" type="submit" disabled={!canSubmit}>
+                {submitting ? "Creating..." : "Create deal"}
+              </button>
+              <button className="abm-btn ghost" type="button" onClick={onClose}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
    AdminBoard (main)
    ───────────────────────────────────────────────────────────────── */
 
@@ -686,13 +848,28 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const [tab, setTab] = useState("listing");
   const [query, setQuery] = useState("");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
+  const [showNewDeal, setShowNewDeal] = useState(false);
 
   const listingDeals = deals ?? ADMIN_DEALS;
   const buyerDealsResolved = buyerDeals ?? ADMIN_BUYER_DEALS;
 
   const isBuyer = tab === "buyer";
   const activePipeline = isBuyer ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
-  const activeDeals    = isBuyer ? buyerDealsResolved   : listingDeals;
+  const allDeals       = isBuyer ? buyerDealsResolved   : listingDeals;
+
+  // FIX 1: filter rendered deals by the search query (addr / line2 / mls)
+  // before they get grouped into the kanban columns.
+  const activeDeals = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return allDeals;
+    return allDeals.filter((d) => {
+      const haystack = [d.addr, d.line2, (d as Deal).mls]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [allDeals, query]);
 
   const handleOpenDeal = (deal: Deal) => {
     setActiveDeal(deal);
@@ -718,7 +895,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
             <Refresh /><span>{loading ? "Refreshing..." : "Refresh"}</span>
           </button>
           <button className="ab-btn ghost" type="button" onClick={onReRunOnboarding}><Sparkles /><span>Re-run onboarding</span></button>
-          <button className="ab-btn primary" type="button"><Plus /><span>New deal</span></button>
+          <button className="ab-btn primary" type="button" onClick={() => setShowNewDeal(true)}><Plus /><span>New deal</span></button>
         </div>
       </header>
 
@@ -798,6 +975,12 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
         </section>
       </div>
       {activeDeal && <DealDetailModal deal={activeDeal} onClose={() => setActiveDeal(null)} />}
+      {showNewDeal && (
+        <NewDealModal
+          onClose={() => setShowNewDeal(false)}
+          onCreated={() => { onRefresh?.(); }}
+        />
+      )}
     </main>
   );
 }

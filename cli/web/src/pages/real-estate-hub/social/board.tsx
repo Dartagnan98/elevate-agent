@@ -176,8 +176,8 @@ function IdeaQueue({
               <div className="sm-empty-sub">The engine queues 5–10 fresh concepts every Monday morning.</div>
             </div>
             <button className="ab-btn ghost" type="button" onClick={onRefresh}>
-              <IcoSparkles width="13" height="13" />
-              Generate now
+              <IcoRefresh width="13" height="13" />
+              Check for new ideas
             </button>
           </div>
         ) : (
@@ -420,7 +420,6 @@ function Analytics({ data }: { data: AnalyticsVM }) {
         <div className="sm-section-actions">
           <span className="sm-select">
             {data.range}
-            <IcoChevDown width="11" height="11" />
           </span>
         </div>
       </div>

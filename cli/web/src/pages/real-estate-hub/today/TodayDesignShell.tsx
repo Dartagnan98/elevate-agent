@@ -547,6 +547,7 @@ export function TodayDesignShell() {
   const sources = useMemo(() => mapSources(data.sourceInbox, data.cronJobs), [data.sourceInbox, data.cronJobs]);
   const runs = useMemo(() => mapAgentRuns(today?.running ?? data.actionRuns), [today?.running, data.actionRuns]);
   const dealCards = useMemo(() => mapDeals(deals), [deals]);
+  const adminDealsById = useMemo(() => new Map(deals.map((d) => [d.id, d])), [deals]);
   const wins = useMemo(() => mapWins(pulse, drafts, events, deals), [pulse, drafts, events, deals]);
   const sourceBreakdown = useMemo(() => mapSourceBreakdown(threads), [threads]);
 
@@ -602,6 +603,7 @@ export function TodayDesignShell() {
         sources={sources}
         runs={runs}
         deals={dealCards}
+        adminDealsById={adminDealsById}
         wins={wins}
         sourceBreakdown={sourceBreakdown}
         loading={todayLoading || data.loading}

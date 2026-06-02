@@ -1,11 +1,17 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import AdminBoard from "./components/admin-board";
 import { useAdminDeals } from "./use-admin-deals";
 import { adminDealToDeal, adminDealToBuyerDeal } from "./admin-mappers";
 import { computeAdminKpis } from "./compute-admin-kpis";
 import { computeAdminEvents } from "./compute-admin-events";
 import { useAdminEvents } from "./use-admin-events";
-import { AdminSetupLaunch, useAdminSetup } from "./index";
+import {
+  AdminSetupLaunch,
+  AdminOnboardingCoach,
+  computeCoachInitialQuestion,
+  useAdminSetup,
+  type CoachMessage,
+} from "./index";
 import "./admin.css";
 
 export function AdminDesignShell() {
@@ -24,6 +30,22 @@ export function AdminDesignShell() {
   const adminSetup = useAdminSetup();
   const [forceOnboarding, setForceOnboarding] = useState(false);
   const setupSnapshot = adminSetup.setup;
+
+  // Coach state — mirrors the legacy page so the "Ask the coach" connector
+  // buttons (and the floating launcher) open a real, working coach panel.
+  const [coachOpen, setCoachOpen] = useState(false);
+  const [coachMention, setCoachMention] = useState<string | null>(null);
+  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
+  const openCoach = useCallback(() => setCoachOpen(true), []);
+  const initialCoachQuestion = useMemo(
+    () => computeCoachInitialQuestion(setupSnapshot),
+    [setupSnapshot],
+  );
+  const resetCoach = useCallback(() => {
+    setCoachMessages([{ role: "assistant", content: initialCoachQuestion }]);
+    setCoachMention(null);
+    setCoachOpen(true);
+  }, [initialCoachQuestion]);
   const showOnboarding =
     !adminSetup.loading && !!setupSnapshot && (!setupSnapshot.complete || forceOnboarding);
 
@@ -54,9 +76,28 @@ export function AdminDesignShell() {
             onSetupUpdated={(next) => adminSetup.setSetup(next)}
             forceOnboarding={forceOnboarding}
             onForceOnboardingDone={() => setForceOnboarding(false)}
-            openCoach={() => {}}
-            setCoachMention={() => {}}
+            openCoach={openCoach}
+            setCoachMention={setCoachMention}
           />
+          {coachOpen ? (
+            <AdminOnboardingCoach
+              initialQuestion={initialCoachQuestion}
+              onClose={() => setCoachOpen(false)}
+              onReset={resetCoach}
+              externalMention={coachMention}
+              messages={coachMessages}
+              setMessages={setCoachMessages}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={openCoach}
+              aria-label="Open onboarding coach"
+              className="fixed bottom-6 right-6 z-[110] inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-[12.5px] text-foreground shadow-md hover:border-primary"
+            >
+              Ask the coach
+            </button>
+          )}
         </div>
       ) : (
         <AdminBoard

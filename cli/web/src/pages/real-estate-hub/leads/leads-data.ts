@@ -57,12 +57,16 @@ export interface LeadsHotEntry {
   name: string;
   signal: string;
   age: string;
+  sourceId?: string;
+  threadId?: string;
 }
 
 export interface LeadsSkippedEntry {
   id: string;
   name: string;
   reason: string;
+  sourceId?: string;
+  taskId?: string;
 }
 
 export interface LeadsPipeline {
@@ -109,10 +113,12 @@ export interface LeadsTemplateItem {
   used: number;
   replies: number;
   replyRate: number | null;
+  active: boolean;
 }
 
 export interface LeadsTemplateLane {
   lane: string;
+  laneId: string;
   icon: string;
   active: number;
   sent: number;
@@ -225,38 +231,41 @@ export const LEADS_PROFILES: LeadsProfile[] = [
 export const LEADS_TEMPLATES: LeadsTemplateLane[] = [
   {
     lane: "New Outreach",
+    laneId: "new-outreach",
     icon: "✨",
     active: 3, sent: 1, replyRate: 0,
     needMore: "Need 5+ more sends to rank.",
     templates: [
-      { id: "t1", name: "Warm intro", body: "Hey {first_name}, saw you came through {source}. I help folks in {city} find the right place without the usual back and forth. What are you trying to figure out first?", used: 1, replies: 0, replyRate: 0 },
-      { id: "t2", name: "Buyer fit", body: "Hey {first_name}, you mentioned {topic} on {source}. Quick question: are you looking to be in by a date or still figuring out timing?", used: 0, replies: 0, replyRate: null },
-      { id: "t3", name: "Listing alert", body: "Hi {first_name}, a couple new {area} listings just hit that match what you flagged. Want me to send the short list?", used: 0, replies: 0, replyRate: null },
+      { id: "t1", name: "Warm intro", body: "Hey {first_name}, saw you came through {source}. I help folks in {city} find the right place without the usual back and forth. What are you trying to figure out first?", used: 1, replies: 0, replyRate: 0, active: true },
+      { id: "t2", name: "Buyer fit", body: "Hey {first_name}, you mentioned {topic} on {source}. Quick question: are you looking to be in by a date or still figuring out timing?", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t3", name: "Listing alert", body: "Hi {first_name}, a couple new {area} listings just hit that match what you flagged. Want me to send the short list?", used: 0, replies: 0, replyRate: null, active: true },
     ],
   },
   {
     lane: "Hot Leads Watcher",
+    laneId: "hot-leads-watcher",
     icon: "🔥",
     active: 3, sent: 0, replyRate: 0,
     needMore: "Need 5+ more sends to rank.",
     templates: [
-      { id: "t4", name: "Live nudge", body: "{first_name}, just saw your {signal}. Want me to set up a viewing this week?", used: 0, replies: 0, replyRate: null },
-      { id: "t5", name: "Open house live", body: "{first_name}, open house going on now at {address}. I can hold a slot for you in the next hour — want me to?", used: 0, replies: 0, replyRate: null },
-      { id: "t6", name: "Just-listed match", body: "Hot off MLS — {address} just hit and matches your {criteria}. Showings booking fast. Tonight or tomorrow morning easier?", used: 0, replies: 0, replyRate: null },
+      { id: "t4", name: "Live nudge", body: "{first_name}, just saw your {signal}. Want me to set up a viewing this week?", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t5", name: "Open house live", body: "{first_name}, open house going on now at {address}. I can hold a slot for you in the next hour — want me to?", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t6", name: "Just-listed match", body: "Hot off MLS — {address} just hit and matches your {criteria}. Showings booking fast. Tonight or tomorrow morning easier?", used: 0, replies: 0, replyRate: null, active: true },
     ],
   },
   {
     lane: "Follow-ups",
+    laneId: "follow-ups",
     icon: "↻",
     active: 6, sent: 0, replyRate: 0,
     needMore: "Need 5+ more sends to rank.",
     templates: [
-      { id: "t7", name: "7 day check-in", body: "Hey {first_name}, circling back on {topic}. Anything change on your end? Happy to send fresh options.", used: 0, replies: 0, replyRate: null },
-      { id: "t8", name: "Soft close", body: "Hi {first_name}, no pressure, just want to make sure I'm not missing anything. What would make the next step easy for you?", used: 0, replies: 0, replyRate: null },
-      { id: "t9", name: "GIF nudge", body: "Hey {first_name}, still on the hunt? [[gif:waving-hello]]\n\nIf timing shifted, no stress — just say the word and I'll pause the alerts.", used: 0, replies: 0, replyRate: null },
-      { id: "t10", name: "Market update", body: "{first_name}, quick one: median in {area} moved {delta} this month. Want a 30-second voice note breaking down what that means for your search?", used: 0, replies: 0, replyRate: null },
-      { id: "t11", name: "Breakup", body: "Hey {first_name}, I'll close out the file for now so you're not getting noise. Door's open whenever — just text and I'll pick right back up.", used: 0, replies: 0, replyRate: null },
-      { id: "t12", name: "Referral ask", body: "{first_name}, since timing's not right for you — anyone in your circle thinking about a move in the next 6 months? Happy to be a no-pressure resource for them too.", used: 0, replies: 0, replyRate: null },
+      { id: "t7", name: "7 day check-in", body: "Hey {first_name}, circling back on {topic}. Anything change on your end? Happy to send fresh options.", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t8", name: "Soft close", body: "Hi {first_name}, no pressure, just want to make sure I'm not missing anything. What would make the next step easy for you?", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t9", name: "GIF nudge", body: "Hey {first_name}, still on the hunt? [[gif:waving-hello]]\n\nIf timing shifted, no stress — just say the word and I'll pause the alerts.", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t10", name: "Market update", body: "{first_name}, quick one: median in {area} moved {delta} this month. Want a 30-second voice note breaking down what that means for your search?", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t11", name: "Breakup", body: "Hey {first_name}, I'll close out the file for now so you're not getting noise. Door's open whenever — just text and I'll pick right back up.", used: 0, replies: 0, replyRate: null, active: true },
+      { id: "t12", name: "Referral ask", body: "{first_name}, since timing's not right for you — anyone in your circle thinking about a move in the next 6 months? Happy to be a no-pressure resource for them too.", used: 0, replies: 0, replyRate: null, active: true },
     ],
   },
 ];

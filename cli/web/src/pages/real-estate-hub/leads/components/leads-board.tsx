@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
+import { Link } from "react-router-dom";
 import {
   Clock,
   Plus,
@@ -131,9 +132,9 @@ function SourcesHealthPill({
             <div className="lb-health-available-label mono">Connect more</div>
             <div className="lb-health-available-chips">
               {available.map(a => (
-                <button key={a.id} type="button" className="lb-avail-chip">
+                <Link key={a.id} to="/config#connectors" className="lb-avail-chip">
                   <span>+</span><span>{a.label}</span>
-                </button>
+                </Link>
               ))}
             </div>
           </div>
@@ -237,7 +238,7 @@ function LbSourceAlert({ blocked }: { blocked: LeadsChannel[] }) {
       <span className="lb-alert-detail">
         <strong>{blocked[0].name}:</strong> {blocked[0].note}
       </span>
-      <button type="button" className="lb-alert-action">Open Settings</button>
+      <Link to="/config#connectors" className="lb-alert-action">Open Settings</Link>
     </div>
   );
 }
@@ -246,7 +247,7 @@ function LbSourceAlert({ blocked }: { blocked: LeadsChannel[] }) {
 // DraftRow
 // ─────────────────────────────────────────────────────────────────
 function DraftRow({
-  draft, selected, expanded, onToggle, onExpand, onAction, busy,
+  draft, selected, expanded, onToggle, onExpand, onAction, busy, onEditTemplate,
 }: {
   draft: LeadsDraft;
   selected: boolean;
@@ -255,6 +256,7 @@ function DraftRow({
   onExpand: () => void;
   onAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void;
   busy?: boolean;
+  onEditTemplate?: () => void;
 }) {
   const [editText, setEditText] = useState(draft.body);
   useEffect(() => { setEditText(draft.body); }, [draft.id, draft.body]);
@@ -284,7 +286,7 @@ function DraftRow({
             />
             <div className="lb-draft-expand-foot">
               <span className="lb-draft-template-link">
-                Generated from <strong>Warm intro</strong> template · <button type="button" className="lb-link" onClick={(e) => e.stopPropagation()}>edit template</button>
+                Generated from <strong>Warm intro</strong> template · <button type="button" className="lb-link" onClick={(e) => { e.stopPropagation(); onEditTemplate?.(); }}>edit template</button>
               </span>
             </div>
           </div>
@@ -320,12 +322,14 @@ function DraftRow({
 type QueueTab = "approve" | "hot" | "followups" | "skipped";
 
 function ActionQueue({
-  drafts, pipeline, sourceFilter, onDraftAction,
+  drafts, pipeline, sourceFilter, onDraftAction, onEditTemplate, onOpenHotLead,
 }: {
   drafts: LeadsDraft[];
   pipeline: LeadsPipeline;
   sourceFilter: string;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
+  onEditTemplate?: () => void;
+  onOpenHotLead?: (entry: LeadsHotEntry) => void;
 }) {
   const [tab, setTab] = useState<QueueTab>("approve");
   const [page, setPage] = useState(0);
@@ -342,6 +346,15 @@ function ActionQueue({
       await onDraftAction(action, draft);
     } finally {
       setBusy((b) => { const n = new Set(b); n.delete(draft.id); return n; });
+    }
+  };
+
+  const handleBulkAction = async (action: LeadsDraftAction) => {
+    if (!onDraftAction) return;
+    const targets = filteredDrafts.filter((d) => selected.has(d.id));
+    setSelected(new Set());
+    for (const draft of targets) {
+      await handleDraftAction(action, draft);
     }
   };
 
@@ -417,8 +430,8 @@ function ActionQueue({
               <>
                 <span className="lb-replies-selected mono">{selected.size} selected</span>
                 <button type="button" className="lb-btn ghost sm" onClick={() => setSelected(new Set())}>Clear</button>
-                <button type="button" className="lb-btn ghost sm">Skip</button>
-                <button type="button" className="lb-btn primary sm">Approve {selected.size}</button>
+                <button type="button" className="lb-btn ghost sm" disabled={!onDraftAction} onClick={() => void handleBulkAction("skip")}>Skip</button>
+                <button type="button" className="lb-btn primary sm" disabled={!onDraftAction} onClick={() => void handleBulkAction("approve")}>Approve {selected.size}</button>
               </>
             ) : (
               <>
@@ -449,6 +462,7 @@ function ActionQueue({
                   onExpand={() => setExpanded(e => e === d.id ? null : d.id)}
                   onAction={onDraftAction ? handleDraftAction : undefined}
                   busy={busy.has(d.id)}
+                  onEditTemplate={onEditTemplate}
                 />
               ))
         )}
@@ -462,8 +476,8 @@ function ActionQueue({
                     <div className="lb-q-name">{p.name}</div>
                     <div className="lb-q-meta">{p.signal} · {p.age}</div>
                   </div>
-                  <button type="button" className="lb-btn ghost sm">Draft reply</button>
-                  <button type="button" className="lb-btn ghost sm">Open thread</button>
+                  <button type="button" className="lb-btn ghost sm" disabled={!onOpenHotLead} onClick={() => onOpenHotLead?.(p)}>Draft reply</button>
+                  <button type="button" className="lb-btn ghost sm" disabled={!onOpenHotLead} onClick={() => onOpenHotLead?.(p)}>Open thread</button>
                 </div>
               ))
         )}
@@ -483,7 +497,24 @@ function ActionQueue({
                     <div className="lb-q-name">{p.name}</div>
                     <div className="lb-q-meta">{p.reason}</div>
                   </div>
-                  <button type="button" className="lb-btn ghost sm">Undo</button>
+                  <button
+                    type="button"
+                    className="lb-btn ghost sm"
+                    disabled={busy.has(p.id) || !onDraftAction || !p.sourceId || !p.taskId}
+                    onClick={() => void handleDraftAction("restore", {
+                      id: p.id,
+                      name: p.name,
+                      source: "",
+                      channel: "",
+                      age: "",
+                      body: "",
+                      heat: "warm",
+                      sourceId: p.sourceId,
+                      taskId: p.taskId,
+                    })}
+                  >
+                    {busy.has(p.id) ? "…" : "Undo"}
+                  </button>
                 </div>
               ))
         )}
@@ -787,9 +818,74 @@ function ProfilesList({
 // ─────────────────────────────────────────────────────────────────
 // TemplatesView
 // ─────────────────────────────────────────────────────────────────
-function TemplateRow({ template }: { template: LeadsTemplateItem }) {
+export interface TemplateMutations {
+  // Create a template in a lane. Returns once the list is refreshed.
+  onCreate: (laneId: string, name: string, body: string) => Promise<void>;
+  // Save name/body edits to an existing template.
+  onSave: (id: string, name: string, body: string) => Promise<void>;
+  // Toggle a template's active flag (Pause / Resume).
+  onTogglePause: (id: string, active: boolean) => Promise<void>;
+  // Delete a template.
+  onDelete: (id: string) => Promise<void>;
+  // Ask the backend for a suggested variant for a lane. Resolves to the
+  // suggested name/body so the caller can open a prefilled editor.
+  onSuggest: (laneId: string) => Promise<{ name: string; body: string }>;
+}
+
+type TplEditor =
+  | { mode: "create"; laneId: string; name: string; body: string }
+  | { mode: "edit"; id: string; laneId: string; name: string; body: string };
+
+function TemplateEditorRow({
+  editor, onChange, onSave, onCancel, busy,
+}: {
+  editor: TplEditor;
+  onChange: (patch: Partial<{ name: string; body: string }>) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  busy: boolean;
+}) {
   return (
-    <div className="lb-tpl-row">
+    <div className="lb-tpl-row lb-tpl-editor">
+      <div className="lb-tpl-row-body">
+        <input
+          type="text"
+          className="lb-tpl-edit-name"
+          value={editor.name}
+          placeholder="Template name"
+          onChange={(e) => onChange({ name: e.target.value })}
+          disabled={busy}
+        />
+        <textarea
+          className="lb-draft-edit"
+          value={editor.body}
+          placeholder="Body. Use {first_name}, {area}, {topic}, etc."
+          rows={4}
+          onChange={(e) => onChange({ body: e.target.value })}
+          disabled={busy}
+        />
+      </div>
+      <div className="lb-tpl-row-actions">
+        <button type="button" className="lb-btn ghost sm" onClick={onCancel} disabled={busy}>Cancel</button>
+        <button type="button" className="lb-btn primary sm" onClick={onSave} disabled={busy}>
+          {busy ? "…" : editor.mode === "create" ? "Add" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TemplateRow({
+  template, onPause, onEdit, onDelete, busy,
+}: {
+  template: LeadsTemplateItem;
+  onPause?: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  busy?: boolean;
+}) {
+  return (
+    <div className={"lb-tpl-row" + (template.active ? "" : " paused")}>
       <div className="lb-tpl-row-body">
         <div className="lb-tpl-row-name">{template.name}</div>
         <div className="lb-tpl-row-text">{template.body}</div>
@@ -803,20 +899,99 @@ function TemplateRow({ template }: { template: LeadsTemplateItem }) {
               <span>{template.replyRate}% reply rate</span>
             </>
           )}
+          {!template.active && (
+            <>
+              <span className="lb-tpl-meta-sep">·</span>
+              <span>paused</span>
+            </>
+          )}
         </div>
       </div>
       <div className="lb-tpl-row-actions">
-        <button type="button" className="lb-tpl-icon-btn" aria-label="Pause">‖</button>
-        <button type="button" className="lb-tpl-icon-btn" aria-label="Edit">✎</button>
-        <button type="button" className="lb-tpl-icon-btn danger" aria-label="Delete">🗑</button>
+        <button type="button" className="lb-tpl-icon-btn" aria-label={template.active ? "Pause" : "Resume"} title={template.active ? "Pause" : "Resume"} disabled={busy || !onPause} onClick={onPause}>{template.active ? "‖" : "▸"}</button>
+        <button type="button" className="lb-tpl-icon-btn" aria-label="Edit" disabled={busy || !onEdit} onClick={onEdit}>✎</button>
+        <button type="button" className="lb-tpl-icon-btn danger" aria-label="Delete" disabled={busy || !onDelete} onClick={onDelete}>🗑</button>
       </div>
     </div>
   );
 }
 
-function TemplatesView({ groups }: { groups: LeadsTemplateLane[] }) {
+function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mutations?: TemplateMutations }) {
   const total = groups.reduce((n, g) => n + g.templates.length, 0);
   const active = groups.reduce((n, g) => n + g.active, 0);
+
+  const [editor, setEditor] = useState<TplEditor | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const openCreate = (laneId: string) => {
+    setError(null);
+    setEditor({ mode: "create", laneId, name: "", body: "" });
+  };
+  const openEdit = (laneId: string, t: LeadsTemplateItem) => {
+    setError(null);
+    setEditor({ mode: "edit", id: t.id, laneId, name: t.name, body: t.body });
+  };
+  const closeEditor = () => { setEditor(null); setError(null); };
+
+  const saveEditor = async () => {
+    if (!editor || !mutations) return;
+    const name = editor.name.trim();
+    const body = editor.body.trim();
+    if (!name || !body) { setError("Name and body are both required."); return; }
+    setBusy(true);
+    setError(null);
+    try {
+      if (editor.mode === "create") await mutations.onCreate(editor.laneId, name, body);
+      else await mutations.onSave(editor.id, name, body);
+      setEditor(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save template.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const suggest = async (laneId: string) => {
+    if (!mutations) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const variant = await mutations.onSuggest(laneId);
+      setEditor({ mode: "create", laneId, name: variant.name, body: variant.body });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not suggest a variant.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const togglePause = async (t: LeadsTemplateItem) => {
+    if (!mutations) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await mutations.onTogglePause(t.id, !t.active);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update template.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (t: LeadsTemplateItem) => {
+    if (!mutations) return;
+    if (!window.confirm(`Delete "${t.name}"? This can't be undone.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await mutations.onDelete(t.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete template.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="lb-templates">
@@ -831,13 +1006,15 @@ function TemplatesView({ groups }: { groups: LeadsTemplateLane[] }) {
           <span className="lb-tpl-overview-total mono">{total} total · {active} active</span>
         </header>
 
+        {error && <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{error}</div>}
+
         <div className="lb-tpl-summary">
           {groups.map(g => (
             <div key={g.lane} className="lb-tpl-summary-card">
               <div className="lb-tpl-summary-head">
                 <span className="lb-tpl-summary-icon" aria-hidden="true">{g.icon}</span>
                 <span className="lb-tpl-summary-name">{g.lane}</span>
-                <button type="button" className="lb-btn ghost sm">✦ Suggest variant</button>
+                <button type="button" className="lb-btn ghost sm" disabled={busy || !mutations} onClick={() => void suggest(g.laneId)}>✦ Suggest variant</button>
               </div>
               <div className="lb-tpl-summary-stats">
                 <span><strong className="mono">{g.active}</strong> <span className="lb-tpl-stat-label">active</span></span>
@@ -858,10 +1035,39 @@ function TemplatesView({ groups }: { groups: LeadsTemplateLane[] }) {
             <span className="lb-tpl-group-icon" aria-hidden="true">{g.icon}</span>
             <span className="lb-tpl-group-name">{g.lane}</span>
             <span className="lb-tpl-group-count mono">{g.templates.length} templates</span>
-            <button type="button" className="lb-btn ghost sm" style={{ marginLeft: "auto" }}>+ New template</button>
+            <button type="button" className="lb-btn ghost sm" style={{ marginLeft: "auto" }} disabled={busy || !mutations} onClick={() => openCreate(g.laneId)}>+ New template</button>
           </header>
           <div className="lb-tpl-list">
-            {g.templates.map(t => <TemplateRow key={t.id} template={t} />)}
+            {g.templates.map(t => (
+              editor?.mode === "edit" && editor.id === t.id ? (
+                <TemplateEditorRow
+                  key={t.id}
+                  editor={editor}
+                  onChange={(patch) => setEditor((prev) => (prev ? { ...prev, ...patch } : prev))}
+                  onSave={saveEditor}
+                  onCancel={closeEditor}
+                  busy={busy}
+                />
+              ) : (
+                <TemplateRow
+                  key={t.id}
+                  template={t}
+                  onPause={mutations ? () => void togglePause(t) : undefined}
+                  onEdit={mutations ? () => openEdit(g.laneId, t) : undefined}
+                  onDelete={mutations ? () => void remove(t) : undefined}
+                  busy={busy}
+                />
+              )
+            ))}
+            {editor?.mode === "create" && editor.laneId === g.laneId && (
+              <TemplateEditorRow
+                editor={editor}
+                onChange={(patch) => setEditor((prev) => (prev ? { ...prev, ...patch } : prev))}
+                onSave={saveEditor}
+                onCancel={closeEditor}
+                busy={busy}
+              />
+            )}
           </div>
         </section>
       ))}
@@ -872,8 +1078,39 @@ function TemplatesView({ groups }: { groups: LeadsTemplateLane[] }) {
 // ─────────────────────────────────────────────────────────────────
 // SentView
 // ─────────────────────────────────────────────────────────────────
-function SentView({ messages }: { messages: LeadsSentMessage[] }) {
+function SentView({
+  messages, onRefresh,
+}: {
+  messages: LeadsSentMessage[];
+  // Refetch sent messages. includePending=true asks the gateway for queued /
+  // retrying / failed rows too. Returns once the parent has the new list.
+  onRefresh?: (includePending: boolean) => Promise<void>;
+}) {
   const [includeQueued, setIncludeQueued] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async (includePending: boolean) => {
+    if (!onRefresh) return;
+    setBusy(true);
+    try {
+      await onRefresh(includePending);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleQueued = () => {
+    const next = !includeQueued;
+    setIncludeQueued(next);
+    // Refetch with the new flag so the list reflects the toggle. If the parent
+    // didn't pass onRefresh (static demo data) we fall back to client-side
+    // filtering below.
+    void refresh(next);
+  };
+
+  // Client-side fallback filter for when no refetch is wired: hide non-sent rows
+  // unless "include queued" is on.
+  const visible = onRefresh || includeQueued ? messages : messages.filter(m => m.status === "sent");
 
   return (
     <section className="ab-card lb-sent">
@@ -885,14 +1122,16 @@ function SentView({ messages }: { messages: LeadsSentMessage[] }) {
           </p>
         </div>
         <div className="lb-sent-controls">
-          <span className="lb-sent-count mono">{messages.length} messages</span>
+          <span className="lb-sent-count mono">{visible.length} messages</span>
           <label className="lb-sent-toggle">
-            <span className={"lb-checkbox" + (includeQueued ? " checked" : "")} onClick={() => setIncludeQueued(v => !v)}>
+            <span className={"lb-checkbox" + (includeQueued ? " checked" : "")} onClick={toggleQueued}>
               {includeQueued && <span className="lb-check">✓</span>}
             </span>
             <span>Include queued / retrying / failed</span>
           </label>
-          <button type="button" className="lb-btn ghost sm">Refresh</button>
+          <button type="button" className="lb-btn ghost sm" disabled={busy || !onRefresh} onClick={() => void refresh(includeQueued)}>
+            {busy ? "…" : "Refresh"}
+          </button>
         </div>
       </header>
 
@@ -904,7 +1143,7 @@ function SentView({ messages }: { messages: LeadsSentMessage[] }) {
           <span className="lb-sent-h mono">Message</span>
           <span className="lb-sent-h mono">Status</span>
         </div>
-        {messages.map(m => (
+        {visible.map(m => (
           <div key={m.id} className="lb-sent-row">
             <span className="lb-sent-when mono">{m.when}</span>
             <span className="lb-sent-recipient">{m.recipient}</span>
@@ -916,7 +1155,7 @@ function SentView({ messages }: { messages: LeadsSentMessage[] }) {
               <div>{m.message}</div>
               <div className="lb-sent-msg-id mono">id: {m.msgId}</div>
             </span>
-            <span className="lb-sent-status sent">SENT</span>
+            <span className={"lb-sent-status " + (m.status === "sent" ? "sent" : m.status === "failed" ? "failed" : "queued")}>{(m.status || "sent").toUpperCase()}</span>
           </div>
         ))}
       </div>
@@ -1179,6 +1418,8 @@ export interface LeadsBoardProps {
   error?: string | null;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
   onReRunOnboarding?: () => void;
+  templateMutations?: TemplateMutations;
+  onSentRefresh?: (includePending: boolean) => Promise<void>;
 }
 
 export function LeadsBoard(props: LeadsBoardProps) {
@@ -1188,6 +1429,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
 
   const handleStatusChange = (id: string, value: string) => {
+    // TODO: no persist endpoint — status lives in local state only for now.
     setStatusOverrides(o => ({ ...o, [id]: value }));
   };
   const activeProfileStatus = activeProfile
@@ -1202,6 +1444,37 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const pipeline = props.pipeline ?? DEFAULT_PIPELINE;
   const activity = props.activity ?? DEFAULT_ACTIVITY;
   const profiles = props.profiles ?? DEFAULT_PROFILES;
+
+  // Open the profile drawer for a hot-lead queue entry. Prefer a real profile
+  // match (carries full thread context); otherwise synthesize a minimal one
+  // from the entry's sourceId/threadId so the drawer can still load the thread.
+  const openHotLead = (entry: LeadsHotEntry) => {
+    const match = profiles.find((p) => p.name === entry.name);
+    if (match) {
+      setActiveProfile(match);
+      return;
+    }
+    setActiveProfile({
+      id: entry.id,
+      name: entry.name,
+      heat: 80,
+      group: "active",
+      verified: false,
+      status: "",
+      source: entry.sourceId || "—",
+      email: "",
+      phone: "",
+      contact: "",
+      threads: 1,
+      age: entry.age,
+      tags: [],
+      sub: entry.signal,
+      lastMsg: entry.signal,
+      lastTouch: entry.age,
+      sourceId: entry.sourceId,
+      threadId: entry.threadId,
+    });
+  };
   const templates = props.templates ?? DEFAULT_TEMPLATES;
   const sent = props.sent ?? DEFAULT_SENT;
   const blocked = channels.filter(c => c.status === "blocked");
@@ -1233,7 +1506,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
           <SourcesHealthPill channels={channels} schedules={schedules} available={available} />
           <button className="ab-btn ghost" type="button" onClick={props.onRefresh}><Refresh /><span>Refresh</span></button>
           <button className="ab-btn ghost" type="button" onClick={props.onReRunOnboarding}><Sparkles /><span>Re-run onboarding</span></button>
-          <button className="ab-btn primary" type="button"><Plus /><span>New lead</span></button>
+          <Link className="ab-btn primary" to="/config#connectors"><Plus /><span>New lead</span></Link>
         </div>
       </header>
 
@@ -1270,7 +1543,14 @@ export function LeadsBoard(props: LeadsBoardProps) {
             </section>
 
             <LbSourceAlert blocked={blocked} />
-            <ActionQueue drafts={drafts} pipeline={pipeline} sourceFilter={sourceFilter} onDraftAction={props.onDraftAction} />
+            <ActionQueue
+              drafts={drafts}
+              pipeline={pipeline}
+              sourceFilter={sourceFilter}
+              onDraftAction={props.onDraftAction}
+              onEditTemplate={() => setTab("templates")}
+              onOpenHotLead={openHotLead}
+            />
           </>
         )}
 
@@ -1285,11 +1565,11 @@ export function LeadsBoard(props: LeadsBoardProps) {
         )}
 
         {tab === "templates" && (
-          <TemplatesView groups={templates} />
+          <TemplatesView groups={templates} mutations={props.templateMutations} />
         )}
 
         {tab === "sent" && (
-          <SentView messages={sent} />
+          <SentView messages={sent} onRefresh={props.onSentRefresh} />
         )}
       </div>
 

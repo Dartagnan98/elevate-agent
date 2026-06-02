@@ -162,6 +162,8 @@ export function mapLeadsPipeline(
       name: d.personName || "Unknown",
       signal: d.scoreReason || "Hot signal",
       age: ageLabel(d.latestAt),
+      sourceId: d.sourceId,
+      threadId: d.threadId,
     }));
 
   const followups: LeadsHotEntry[] = drafts
@@ -172,12 +174,16 @@ export function mapLeadsPipeline(
       name: d.personName || "Unknown",
       signal: d.scoreReason || "Follow-up cadence",
       age: ageLabel(d.latestAt),
+      sourceId: d.sourceId,
+      threadId: d.threadId,
     }));
 
   const skippedOut: LeadsSkippedEntry[] = skipped.slice(0, 12).map((d) => ({
     id: d.id,
     name: d.personName || "Unknown",
     reason: d.scoreReason || "Skipped",
+    sourceId: d.sourceId,
+    taskId: d.taskId,
   }));
 
   return { hot, followups, buyers: buyers.length, skipped: skippedOut };
@@ -268,9 +274,11 @@ export function mapLeadsTemplates(templates: OutreachTemplate[]): LeadsTemplateL
       used: t.uses || 0,
       replies: t.replies || 0,
       replyRate: typeof t.replyRate === "number" ? Math.round(t.replyRate * 100) : null,
+      active: Boolean(t.active && t.status === "active"),
     }));
     result.push({
       lane: LANE_LABELS[lane] || lane,
+      laneId: lane,
       icon: LANE_ICONS[lane] || "sparkles",
       active,
       sent,

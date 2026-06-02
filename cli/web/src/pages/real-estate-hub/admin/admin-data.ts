@@ -95,6 +95,15 @@ export type PhaseDetail = {
 export type ConditionEnum = {
   id: string;
   label: string;
+  // API field key on AdminDeal (what setAdminDealToggle expects) + select options.
+  field: string;
+  options: Array<{ value: string; label: string }>;
+};
+
+export type ConditionToggle = {
+  // API field key on AdminDeal (what setAdminDealToggle expects).
+  field: string;
+  label: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -375,30 +384,106 @@ export const ADMIN_BUYER_PHASE_DETAILS: Record<string, PhaseDetail> = {
 // ---------------------------------------------------------------------------
 
 export const ADMIN_CONDITION_ENUMS: ConditionEnum[] = [
-  { id: "signing-authority", label: "Signing authority" },
-  { id: "fintrac-form",     label: "FINTRAC form type" },
-  { id: "listing-track",    label: "Listing track" },
-  { id: "property-subtype", label: "Property subtype" },
-  { id: "estate-status",    label: "Estate status" },
-  { id: "transaction-type", label: "Transaction type" },
-  { id: "listing-type",     label: "Listing type" },
+  {
+    id: "signing-authority",
+    label: "Signing authority",
+    field: "signing_authority",
+    options: [
+      { value: "seller", label: "Seller" },
+      { value: "buyer", label: "Buyer" },
+      { value: "both", label: "Both clients" },
+      { value: "poa", label: "Power of attorney" },
+      { value: "corporate", label: "Corporate signer" },
+      { value: "estate_executor", label: "Estate executor" },
+    ],
+  },
+  {
+    id: "fintrac-form",
+    label: "FINTRAC form type",
+    field: "fintrac_form_type",
+    options: [
+      { value: "individual", label: "Individual" },
+      { value: "corporation", label: "Corporation" },
+      { value: "estate", label: "Estate" },
+      { value: "poa", label: "Power of attorney" },
+      { value: "third_party", label: "Third party" },
+    ],
+  },
+  {
+    id: "listing-track",
+    label: "Listing track",
+    field: "listing_track",
+    options: [
+      { value: "standard", label: "Standard" },
+      { value: "rush", label: "Rush" },
+      { value: "pre_market", label: "Pre-market" },
+      { value: "relist", label: "Relist" },
+    ],
+  },
+  {
+    id: "property-subtype",
+    label: "Property subtype",
+    field: "property_subtype",
+    options: [
+      { value: "detached", label: "Detached" },
+      { value: "townhouse", label: "Townhouse" },
+      { value: "condo", label: "Condo" },
+      { value: "strata", label: "Strata" },
+      { value: "acreage", label: "Acreage" },
+      { value: "land", label: "Land" },
+      { value: "multifamily", label: "Multifamily" },
+    ],
+  },
+  {
+    id: "estate-status",
+    label: "Estate status",
+    field: "estate_status",
+    options: [
+      { value: "none", label: "None" },
+      { value: "estate_sale", label: "Estate sale" },
+      { value: "probate_pending", label: "Probate pending" },
+      { value: "probate_granted", label: "Probate granted" },
+    ],
+  },
+  {
+    id: "transaction-type",
+    label: "Transaction type",
+    field: "transaction_type",
+    options: [
+      { value: "residential", label: "Residential" },
+      { value: "commercial", label: "Commercial" },
+      { value: "referral", label: "Referral" },
+      { value: "assignment", label: "Assignment" },
+    ],
+  },
+  {
+    id: "listing-type",
+    label: "Listing type",
+    field: "listing_type",
+    options: [
+      { value: "mls", label: "MLS" },
+      { value: "exclusive", label: "Exclusive" },
+      { value: "coming_soon", label: "Coming soon" },
+      { value: "mere_posting", label: "Mere posting" },
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
 // Condition toggles (boolean fields)
 // ---------------------------------------------------------------------------
 
-export const ADMIN_CONDITION_TOGGLES: string[] = [
-  "PEP",
-  "Tenanted",
-  "POA signing",
-  "Corporate",
-  "Has suite",
-  "Multiple offers",
-  "Family member",
-  "Dual representation",
-  "Unrepresented other side",
-  "Lockbox",
-  "Delayed offer",
-  "Sale of buyer's property",
+export const ADMIN_CONDITION_TOGGLES: ConditionToggle[] = [
+  { field: "pep", label: "PEP" },
+  { field: "tenanted", label: "Tenanted" },
+  { field: "poa_signing", label: "POA signing" },
+  { field: "corporate", label: "Corporate" },
+  { field: "has_suite", label: "Has suite" },
+  { field: "multiple_offers", label: "Multiple offers" },
+  { field: "family_member", label: "Family member" },
+  { field: "dual_rep", label: "Dual representation" },
+  { field: "unrepresented_other_side", label: "Unrepresented other side" },
+  { field: "lockbox", label: "Lockbox" },
+  { field: "delayed_offer", label: "Delayed offer" },
+  { field: "sale_of_buyers_property", label: "Sale of buyer's property" },
 ];

@@ -1,4 +1,44 @@
 import { Fragment, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import DealDetailModal, { type Deal as AdminModalDeal } from "../../admin/components/deal-modal";
+import { ADMIN_PIPELINE, ADMIN_BUYER_PIPELINE } from "../../admin/admin-data";
+import type { AdminDeal } from "@/lib/api-types";
+
+// Build the Admin DealDetailModal `Deal` from a raw AdminDeal. `currentStage`
+// is 0-based; the modal does pipeline.find(p => p.id === deal.phase), so phase
+// MUST be a real pipeline id, not a display label, or it always opens stage 1.
+function adminDealToModalDeal(d: AdminDeal): AdminModalDeal {
+  const isBuyer = d.side === "buyer";
+  const pipeline = isBuyer ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
+  const idx = Math.max(0, Math.min(pipeline.length - 1, d.currentStage ?? 0));
+  const phase = pipeline[idx]?.id || pipeline[0].id;
+  const addr = d.listingAddress || d.title || "Untitled deal";
+  return {
+    id: d.id,
+    phase,
+    addr,
+    line2: d.listingAddress && d.title && d.listingAddress !== d.title ? d.title : (d.province || ""),
+    badge: pipeline[idx]?.name || "Stage",
+    next: pipeline[idx]?.next || "",
+    side: d.side, // "listing" | "buyer" — modal only branches on === "buyer"
+  };
+}
+
+// Fallback when a TodayDeal has no matching AdminDeal: build a minimal modal
+// Deal from the TodayDeal fields, defaulting to the first pipeline phase.
+function todayDealToModalDeal(d: TodayDeal): AdminModalDeal {
+  const modalSide = d.side === "seller" ? "listing" : "buyer";
+  const pipeline = modalSide === "buyer" ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
+  return {
+    id: d.id,
+    phase: pipeline[0].id,
+    addr: d.address,
+    line2: d.client,
+    badge: d.phase,
+    next: d.next,
+    side: modalSide,
+  };
+}
 
 export type TodayPulseStat = {
   id: string;
@@ -114,6 +154,7 @@ export type TodayBoardProps = {
   sources: TodaySources;
   runs: TodayAgentRun[];
   deals: TodayDeal[];
+  adminDealsById?: Map<string, AdminDeal>;
   wins: TodayWin[];
   sourceBreakdown: TodaySourceBreakdown;
   loading?: boolean;
@@ -270,10 +311,10 @@ function PriorityQueue({ items }: { items: TodayPriorityItem[] }) {
           <h3 className="td-card-title">Needs you now</h3>
           <p className="td-card-sub">{items.length === 0 ? "Inbox is clear" : items.length + " waiting"}</p>
         </div>
-        <a href="#/leads" className="td-card-link mono">
+        <Link to="/leads" className="td-card-link mono">
           Open leads
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       {items.length === 0 ? (
         <div className="td-priority-empty">Nothing waiting on you. Drafts auto-approve when nothing is flagged.</div>
@@ -433,7 +474,7 @@ function ScheduledCard({ jobs }: { jobs: TodayScheduledJob[] }) {
           </h3>
           <p className="td-card-sub">{jobs.length} upcoming</p>
         </div>
-        <a href="#" className="td-card-link mono">Open</a>
+        <Link to="/admin" className="td-card-link mono">Open</Link>
       </header>
       <ul className="td-running-list">
         {jobs.map((j) => (
@@ -463,7 +504,7 @@ function InFlightCard({ live }: { live: TodayLiveItem[] }) {
           </h3>
           <p className="td-card-sub">{total === 0 ? "Idle" : total + " running"}</p>
         </div>
-        <a href="#" className="td-card-link mono">Open</a>
+        <Link to="/admin" className="td-card-link mono">Open</Link>
       </header>
       {total === 0 ? (
         <div className="td-priority-empty">No live sessions or running actions.</div>
@@ -502,9 +543,9 @@ function PipelineVelocity({ stages }: { stages: TodayPipelineStage[] }) {
           <h3 className="td-card-title">Pipeline velocity · today</h3>
           <p className="td-card-sub">Movement through each stage in the last 24h</p>
         </div>
-        <a href="#" className="td-card-link mono">7-day trend
+        <Link to="/admin" className="td-card-link mono">7-day trend
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       <div className="td-pipeline-track">
         {stages.map((s, i) => {
@@ -570,10 +611,17 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
           </p>
         </div>
         <div className="td-card-link-group">
-          <button type="button" className="td-card-link mono">Approve all</button>
-          <a href="#/leads" className="td-card-link mono">Open queue
+          <button
+            type="button"
+            className="td-card-link mono"
+            disabled={visible.length === 0 || busy.size > 0}
+            onClick={() => { for (const d of visible) void handle("approve", d.id); }}
+          >
+            Approve all
+          </button>
+          <Link to="/leads" className="td-card-link mono">Open queue
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-          </a>
+          </Link>
         </div>
       </header>
       {visible.length === 0 ? (
@@ -612,7 +660,7 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
                   <button type="button" className="td-btn ghost" disabled={busy.has(d.id)} onClick={() => handle("skip", d.id)}>
                     {busy.has(d.id) ? "…" : "Skip"}
                   </button>
-                  <button type="button" className="td-btn ghost" disabled={busy.has(d.id)}>Edit</button>
+                  <Link to="/leads" className="td-btn ghost">Edit</Link>
                   <button type="button" className="td-btn primary" disabled={busy.has(d.id)} onClick={() => handle("approve", d.id)}>
                     {busy.has(d.id) ? "…" : "Approve & send"}
                   </button>
@@ -643,9 +691,9 @@ function TodayCalendar({ events }: { events: TodayCalendarEvent[] }) {
           <h3 className="td-card-title">Today's schedule</h3>
           <p className="td-card-sub">{events.length} events{last ? ` · ends ${last.time}` : ""}</p>
         </div>
-        <a href="#" className="td-card-link mono">Full calendar
+        <Link to="/admin" className="td-card-link mono">Full calendar
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       <ul className="td-cal-list">
         {events.map((e) => (
@@ -699,9 +747,9 @@ function SourcesHealth({ sources }: { sources: TodaySources }) {
             {errored.length === 0 ? "All channels live" : `${errored.length} need attention · ${total - errored.length} live`}
           </p>
         </div>
-        <a href="#" className="td-card-link mono">Settings
+        <Link to="/config#connectors" className="td-card-link mono">Settings
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       <div className="td-sources-body">
         <SourcesGroup label="Channels" items={sources.channels} />
@@ -719,9 +767,9 @@ function AgentRuns({ runs }: { runs: TodayAgentRun[] }) {
           <h3 className="td-card-title">Recent agent activity</h3>
           <p className="td-card-sub">{runs.length} runs in last 24h</p>
         </div>
-        <a href="#" className="td-card-link mono">View all
+        <Link to="/admin" className="td-card-link mono">View all
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       <ul className="td-runs-list">
         {runs.map((r) => (
@@ -739,9 +787,20 @@ function AgentRuns({ runs }: { runs: TodayAgentRun[] }) {
   );
 }
 
-function DealCard({ deal }: { deal: TodayDeal }) {
+function DealCard({ deal, onOpen }: { deal: TodayDeal; onOpen?: (deal: TodayDeal) => void }) {
   return (
-    <article className={"td-deal td-tone-" + (deal.tone || "muted")}>
+    <article
+      className={"td-deal td-tone-" + (deal.tone || "muted")}
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen?.(deal)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen?.(deal);
+        }
+      }}
+    >
       <header className="td-deal-head">
         <span className={"td-deal-side mono " + deal.side}>{deal.side}</span>
         <span className="td-deal-phase mono">{deal.phaseIdx}/{deal.phaseTotal}</span>
@@ -767,7 +826,14 @@ function DealCard({ deal }: { deal: TodayDeal }) {
   );
 }
 
-function ActiveDeals({ deals }: { deals: TodayDeal[] }) {
+function ActiveDeals({ deals, adminDealsById }: { deals: TodayDeal[]; adminDealsById?: Map<string, AdminDeal> }) {
+  const [active, setActive] = useState<AdminModalDeal | null>(null);
+
+  const openDeal = (d: TodayDeal) => {
+    const adminDeal = adminDealsById?.get(d.id);
+    setActive(adminDeal ? adminDealToModalDeal(adminDeal) : todayDealToModalDeal(d));
+  };
+
   return (
     <section className="td-card td-deals" aria-label="Active deals">
       <header className="td-card-head">
@@ -775,13 +841,14 @@ function ActiveDeals({ deals }: { deals: TodayDeal[] }) {
           <h3 className="td-card-title">Active deals</h3>
           <p className="td-card-sub">{deals.length} in flight · phase progress + next step</p>
         </div>
-        <a href="#/admin" className="td-card-link mono">Open admin
+        <Link to="/admin" className="td-card-link mono">Open admin
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       <div className="td-deals-track">
-        {deals.map((d) => <DealCard key={d.id} deal={d} />)}
+        {deals.map((d) => <DealCard key={d.id} deal={d} onOpen={openDeal} />)}
       </div>
+      {active && <DealDetailModal deal={active} onClose={() => setActive(null)} />}
     </section>
   );
 }
@@ -851,9 +918,9 @@ function LeadSourceBreakdown({ data }: { data: TodaySourceBreakdown }) {
           <h3 className="td-card-title">Where leads came from</h3>
           <p className="td-card-sub">{data.total} new leads today</p>
         </div>
-        <a href="#/leads" className="td-card-link mono">All sources
+        <Link to="/leads" className="td-card-link mono">All sources
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="11" height="11"><path d="M7 17L17 7M9 7h8v8" /></svg>
-        </a>
+        </Link>
       </header>
       <div className="td-mix-body">
         <div className="td-mix-donut">
@@ -890,7 +957,7 @@ export function TodayBoard(props: TodayBoardProps) {
       <div className="td-board-body">
         <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} />
         <PipelineVelocity stages={props.pipeline} />
-        <ActiveDeals deals={props.deals} />
+        <ActiveDeals deals={props.deals} adminDealsById={props.adminDealsById} />
         <div className="td-two">
           <PriorityQueue items={props.priority} />
           <QuickApprovals drafts={props.drafts} onDraftAction={props.onDraftAction} />

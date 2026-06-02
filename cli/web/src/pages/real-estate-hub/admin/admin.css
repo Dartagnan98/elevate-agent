@@ -1332,6 +1332,24 @@
   color: var(--fg-muted);
 }
 .abm-btn.ghost:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); }
+.abm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* New deal form + inline action inputs */
+.abm-newdeal-form { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; }
+.abm-input {
+  appearance: none; outline: 0;
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  color: var(--fg);
+  font: 400 12.5px/1.2 "Geist", sans-serif;
+  transition: border-color 120ms var(--ease-out);
+}
+.abm-input:focus { border-color: var(--border); }
+.abm-input::placeholder { color: var(--fg-faint); }
 
 /* Background automation cards */
 .abm-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -1503,6 +1521,10 @@
   background: transparent;
   flex-shrink: 0;
 }
+.abm-check-box.checked {
+  background: var(--fg);
+  border-color: var(--fg);
+}
 
 .abm-province { margin-top: 6px; }
 .abm-doc-list {
@@ -1556,6 +1578,19 @@
   justify-content: space-between;
 }
 .abm-enum-select svg { width: 12px; height: 12px; }
+.abm-enum-select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Inline source-action add forms (Dates / Attach / Co-contact) */
+.abm-action-form {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px;
+}
+.abm-action-form.abm-grid-2 { display: grid; gap: 8px; }
+.abm-field-label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 10.5px; color: var(--fg-faint);
+  letter-spacing: 0.04em;
+}
 
 .abm-toggles {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1568,10 +1603,12 @@
 }
 .abm-toggle-row:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
 .abm-toggle-check {
+  appearance: none; border: 0; background: transparent;
   display: inline-flex; align-items: center; gap: 10px;
-  font-size: 13px; color: var(--fg);
-  cursor: pointer;
+  font: 400 13px/1.2 "Geist", sans-serif; color: var(--fg);
+  cursor: pointer; padding: 0; text-align: left;
 }
+.abm-toggle-check:disabled { cursor: not-allowed; opacity: 0.6; }
 .abm-toggle-unset {
   font-size: 10.5px;
   color: var(--fg-faint);
