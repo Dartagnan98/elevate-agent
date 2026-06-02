@@ -4665,6 +4665,50 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
     return response
 
 
+def _apply_codex_compression_reasoning_default(
+    task: Optional[str],
+    resolved_provider: Optional[str],
+    extra_body: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Default Codex compression summaries to LOW reasoning effort.
+
+    Codex/ChatGPT reasoning models (provider ``openai-codex``) perform FULL
+    reasoning by default. For the compression task that means a single summary
+    of a near-full context window routinely exceeds the auxiliary stream
+    timeout, so the compaction silently fails — context never shrinks, and each
+    subsequent turn re-sends a ballooning context until the account's quota is
+    burned into usage-cap lockouts (observed on a ChatGPT 20x plan: a gpt-5.5
+    default-effort summary of ~190k tokens hung >120s every time → the
+    "Failed to generate context summary ... exceeded total timeout" loop).
+
+    A compaction summary is structured extraction, not deep reasoning: low
+    effort returns the same result in well under 10s with no meaningful quality
+    loss (measured: a 65k-token summary took 6.7s at low effort vs a >120s
+    timeout at default effort on the same Codex account).
+
+    This is the runtime companion to the Phase-5 ``_resolve_codex_aux_model``
+    fix: once the aux model tracks the active model, ``summary_model`` equals
+    the main model, so context_compressor's "fall back to the main model"
+    escape hatch becomes a no-op — the only durable fix is to make the summary
+    call itself fast.
+
+    No-op unless ``task`` is ``compression`` on the ``openai-codex`` provider
+    and the caller/config has not already set an explicit reasoning effort.
+    Returns ``extra_body`` (a copy when augmented) so callers can assign back.
+    """
+    if task != "compression":
+        return extra_body
+    if (resolved_provider or "").strip().lower() != "openai-codex":
+        return extra_body
+    existing = extra_body.get("reasoning") if isinstance(extra_body, dict) else None
+    if isinstance(existing, dict) and existing.get("effort"):
+        return extra_body
+    augmented = dict(extra_body or {})
+    # Merge so any sibling reasoning keys (e.g. "summary") are preserved.
+    augmented["reasoning"] = {**(existing if isinstance(existing, dict) else {}), "effort": "low"}
+    return augmented
+
+
 def call_llm(
     task: str = None,
     *,
@@ -4708,6 +4752,8 @@ def call_llm(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
+    effective_extra_body = _apply_codex_compression_reasoning_default(
+        task, resolved_provider, effective_extra_body)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -5110,6 +5156,8 @@ async def async_call_llm(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
+    effective_extra_body = _apply_codex_compression_reasoning_default(
+        task, resolved_provider, effective_extra_body)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
