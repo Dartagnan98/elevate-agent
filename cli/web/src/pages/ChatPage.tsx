@@ -2587,6 +2587,12 @@ export default function ChatPage() {
   const [micDevices, setMicDevices] = useState<MicDevice[]>([]);
   const [selectedMicId, setSelectedMicId] = useState<string>("");
   const [statusText, setStatusText] = useState("Connecting...");
+  // True only during the blocking context-compaction summary call. The agent
+  // emits a "Compacting context…" lifecycle status, then the turn stalls for
+  // ~24-36s with nothing to stream — without a visible indicator the chat
+  // looks frozen. Set on that status; cleared by the first resume signal
+  // (delta/thinking/tool) and a !busy safety net below.
+  const [compacting, setCompacting] = useState(false);
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
@@ -3153,6 +3159,14 @@ export default function ChatPage() {
     }
   }, [activityTrace, busy, messages, sessionId, tools]);
 
+  // Safety net: the compaction banner must never outlive an active turn. The
+  // resume-signal clears (delta/thinking/tool) cover the normal path; this
+  // catches the rest (errors, stop, interrupt, disconnect) so a stale
+  // "Compacting…" banner can't get stuck on screen.
+  useEffect(() => {
+    if (!busy && compacting) setCompacting(false);
+  }, [busy, compacting]);
+
   useEffect(() => {
     const persisted = persistedSessionIdRef.current ?? sessionId;
     if (!persisted) return;
@@ -3324,6 +3338,8 @@ export default function ChatPage() {
       const payload = compactToolPayload(ev.payload);
       const at = eventMillis(ev);
       lastToolActivityAtRef.current = Math.max(lastToolActivityAtRef.current, at);
+      // Any tool event means the model resumed after compaction.
+      setCompacting(false);
 
       if (ev.type === "tool.start") {
         const toolId = String(payload.tool_id ?? "");
@@ -3576,6 +3592,7 @@ export default function ChatPage() {
         // out exactly this turn's count.
         turnOutputBaselineRef.current = usageRef.current?.output ?? null;
         setBusy(true);
+        setCompacting(false);
         setStatusText("Working...");
         addActivityTrace("status", "Working...", at);
       }),
@@ -3592,6 +3609,7 @@ export default function ChatPage() {
         }
         const text = eventText(ev);
         if (!text) return;
+        setCompacting(false);
         ensureAssistant(eventMillis(ev));
         enqueueAssistantDelta(text);
       }),
@@ -3699,6 +3717,9 @@ export default function ChatPage() {
           const at = eventMillis(ev);
           setStatusText(displayStatusText(text));
           addActivityTrace("status", text, at);
+          // Compaction is the one status that maps to a long blocking stall.
+          // Latch the banner on; resume signals (below) clear it.
+          if (/compacting context/i.test(text)) setCompacting(true);
         }
       }),
     );
@@ -3708,6 +3729,7 @@ export default function ChatPage() {
         const text = eventText(ev);
         if (text) {
           const at = eventMillis(ev);
+          setCompacting(false);
           setStatusText("Thinking...");
           ensureAssistant(at);
           addActivityTrace("thinking", text, at);
@@ -3720,6 +3742,7 @@ export default function ChatPage() {
         const text = eventText(ev);
         if (text) {
           const at = eventMillis(ev);
+          setCompacting(false);
           setStatusText("Reasoning...");
           ensureAssistant(at);
           addActivityTrace("reasoning", text, at);
@@ -5544,6 +5567,7 @@ export default function ChatPage() {
                     }}
                   />
                 )}
+                {compacting && <CompactingBanner />}
                 <div ref={endRef} />
               </div>
             )}
@@ -5825,6 +5849,33 @@ export default function ChatPage() {
           sessionId={sessionId}
         />
       )}
+    </div>
+  );
+}
+
+// Shown at the bottom of the transcript while the agent runs its blocking
+// context-compaction summary (~24-36s with nothing to stream). Without it the
+// chat looks frozen. The pulsing ring + spinner make it unmistakably "working,
+// not stuck." Cleared by the first post-compaction resume signal in ChatPage.
+function CompactingBanner() {
+  return (
+    <div
+      aria-live="polite"
+      className="mx-auto my-3 flex w-full max-w-[var(--chat-layout-width)] items-center gap-3 rounded-[10px] border border-[var(--chat-border)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-surface))] px-4 py-3"
+    >
+      <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--chat-accent)] opacity-40" />
+        <span className="relative text-[13px] leading-none">🗜️</span>
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-[var(--chat-text)]">
+          Compacting context…
+        </div>
+        <div className="text-[12px] leading-snug text-[var(--chat-muted)]">
+          Summarizing earlier messages so nothing important is lost. This takes a few seconds.
+        </div>
+      </div>
+      <span className="ml-auto inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--chat-border)] border-t-[var(--chat-accent)]" />
     </div>
   );
 }
