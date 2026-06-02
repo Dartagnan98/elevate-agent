@@ -5557,6 +5557,7 @@ export default function ChatPage() {
                       activityTrace={turnTraces}
                       artifacts={turnArtifacts ?? []}
                       busy={isStreaming && busy}
+                      compacting={isStreaming && compacting}
                       message={message}
                       onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
@@ -5581,7 +5582,6 @@ export default function ChatPage() {
                     }}
                   />
                 )}
-                {compacting && <CompactingBanner />}
                 <div ref={endRef} />
               </div>
             )}
@@ -5863,33 +5863,6 @@ export default function ChatPage() {
           sessionId={sessionId}
         />
       )}
-    </div>
-  );
-}
-
-// Shown at the bottom of the transcript while the agent runs its blocking
-// context-compaction summary (~24-36s with nothing to stream). Without it the
-// chat looks frozen. The pulsing ring + spinner make it unmistakably "working,
-// not stuck." Cleared by the first post-compaction resume signal in ChatPage.
-function CompactingBanner() {
-  return (
-    <div
-      aria-live="polite"
-      className="mx-auto my-3 flex w-full max-w-[var(--chat-layout-width)] items-center gap-3 rounded-[10px] border border-[var(--chat-border)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-surface))] px-4 py-3"
-    >
-      <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--chat-accent)] opacity-40" />
-        <span className="relative text-[13px] leading-none">🗜️</span>
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="text-[13px] font-medium text-[var(--chat-text)]">
-          Compacting context…
-        </div>
-        <div className="text-[12px] leading-snug text-[var(--chat-muted)]">
-          Summarizing earlier messages so nothing important is lost. This takes a few seconds.
-        </div>
-      </div>
-      <span className="ml-auto inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--chat-border)] border-t-[var(--chat-accent)]" />
     </div>
   );
 }
@@ -6731,6 +6704,7 @@ function MessageRow({
   activityTrace,
   artifacts,
   busy,
+  compacting,
   message,
   onEditMessage,
   onOpenArtifact,
@@ -6740,6 +6714,7 @@ function MessageRow({
   activityTrace?: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy?: boolean;
+  compacting?: boolean;
   message: ChatMessage;
   onEditMessage?(message: ChatMessage): void;
   onOpenArtifact(artifact: ArtifactEntry): void;
@@ -6847,6 +6822,7 @@ function MessageRow({
             activityTrace={activityTrace ?? []}
             artifacts={turnArtifacts ?? []}
             busy={!!busy}
+            compacting={!!compacting}
             completedAt={message.completedAt}
             liveTokens={liveTokens}
             startedAt={message.createdAt}
@@ -7264,6 +7240,7 @@ function useRotatingVerb(busy: boolean): string {
 function ChatActivityDigest({
   activityTrace,
   busy,
+  compacting,
   completedAt,
   liveTokens,
   startedAt,
@@ -7273,6 +7250,7 @@ function ChatActivityDigest({
   activityTrace: ActivityTrace[];
   artifacts: ArtifactEntry[];
   busy: boolean;
+  compacting?: boolean;
   completedAt?: number;
   liveTokens?: number;
   startedAt?: number;
@@ -7339,7 +7317,9 @@ function ChatActivityDigest({
         )}
         <span className="processing-label min-w-0 truncate">
           {busy
-            ? `${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)}`
+            ? compacting
+              ? "Compacting context"
+              : `${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)}`
             : `Worked for ${duration}`}
         </span>
         <span className="processing-meta">
