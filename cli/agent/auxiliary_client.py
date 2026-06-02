@@ -780,14 +780,37 @@ class _CodexCompletionsAdapter:
         tool_calls_raw: List[Any] = []
         usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
-        deadline = time.monotonic() + float(total_timeout) if total_timeout else None
+        # INACTIVITY guard, NOT a total wall-clock cap. ``last_activity`` is
+        # reset on every stream event below, so a summary that is slowly-but-
+        # actively streaming is never killed — only a stream that goes silent
+        # for ``total_timeout`` seconds (a real hang / dead connection) trips
+        # it. A compaction summary of a near-full context can legitimately run
+        # a while; a total cap would kill a working summary and force the lossy
+        # drop-the-window-without-a-summary fallback.
+        last_activity = [time.monotonic()]
         timed_out = threading.Event()
         timeout_timer: Optional[threading.Timer] = None
 
         def _timeout_message() -> str:
-            return f"Codex auxiliary Responses stream exceeded {float(total_timeout):.1f}s total timeout"
+            return (
+                "Codex auxiliary Responses stream stalled — no output for "
+                f"{float(total_timeout):.1f}s"
+            )
 
         def _close_client_on_timeout() -> None:
+            nonlocal timeout_timer
+            # Only fire if the stream has truly gone silent for the full
+            # window. If an event arrived recently the summary is still
+            # working — reschedule for the remaining time instead of killing it.
+            if total_timeout:
+                idle = time.monotonic() - last_activity[0]
+                if idle < float(total_timeout):
+                    timeout_timer = threading.Timer(
+                        float(total_timeout) - idle, _close_client_on_timeout
+                    )
+                    timeout_timer.daemon = True
+                    timeout_timer.start()
+                    return
             timed_out.set()
             close = getattr(self._client, "close", None)
             if callable(close):
@@ -807,7 +830,7 @@ class _CodexCompletionsAdapter:
                 logger.debug("Codex auxiliary: cache eviction on timeout failed", exc_info=True)
 
         def _check_cancelled() -> None:
-            if deadline is not None and time.monotonic() >= deadline:
+            if total_timeout and time.monotonic() - last_activity[0] >= float(total_timeout):
                 if not timed_out.is_set():
                     _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
@@ -838,6 +861,10 @@ class _CodexCompletionsAdapter:
                 try:
                     for _event in stream:
                         _check_cancelled()
+                        # Any event = the stream is alive and progressing; reset
+                        # the inactivity window so a slow-but-working summary is
+                        # never killed. Only true silence trips the guard.
+                        last_activity[0] = time.monotonic()
                         _etype = getattr(_event, "type", "")
                         if _etype == "response.output_item.done":
                             _done = getattr(_event, "item", None)
