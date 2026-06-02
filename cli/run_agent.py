@@ -8321,36 +8321,73 @@ class AIAgent:
             focus_topic,
         )
         # Surface compaction to the UI. The summary call blocks the turn for
-        # ~24-36s with nothing to stream, so without this the chat looks frozen.
-        # Shows a "Compacting context…" indicator until the loop resumes.
+        # ~24-36s with nothing to stream. Without a keepalive the dashboard
+        # WebSocket goes completely silent for that whole window; the idle
+        # socket gets dropped somewhere in the chain and — because the web
+        # client does not auto-reconnect — every post-compaction frame (the
+        # final answer + message.complete) lands on a dead socket. The turn
+        # still finishes and persists server-side, but the chat stays blank.
+        # A lightweight status tick every few seconds keeps real frames on the
+        # wire (so nothing idles out) AND shows live "Compacting…" progress
+        # until the loop resumes.
         try:
             self._emit_status("🗜️ Compacting context…")
         except Exception:
             pass
-        # Pre-compression memory flush: let the model save memories before they're lost
-        self.flush_memories(messages, min_turns=0)
 
-        # Notify external memory provider before compression discards context
-        if self._memory_manager:
-            try:
-                self._memory_manager.on_pre_compress(messages)
-            except Exception:
-                pass
+        _compact_hb_stop = threading.Event()
 
+        def _compaction_heartbeat() -> None:
+            # Call status_callback DIRECTLY rather than _emit_status: the latter
+            # throttles same-category messages within a window, which would
+            # suppress every tick after the first and re-open the silent gap
+            # this heartbeat exists to close. We want a real frame on the wire
+            # on every tick, unconditionally.
+            secs = 0
+            while not _compact_hb_stop.wait(4.0):
+                secs += 4
+                cb = getattr(self, "status_callback", None)
+                if cb:
+                    try:
+                        cb("lifecycle", f"🗜️ Compacting context… {secs}s")
+                    except Exception:
+                        pass
+
+        _compact_hb = threading.Thread(
+            target=_compaction_heartbeat,
+            name="compaction-heartbeat",
+            daemon=True,
+        )
+        _compact_hb.start()
         try:
-            if focus_topic == "context-limit recovery" and hasattr(self.context_compressor, "compact_for_retry"):
-                compressed, _compact_applied, _compact_meta = self.context_compressor.compact_for_retry(
-                    messages,
-                    "context_length exceeded: context-limit recovery",
-                )
-                if not _compact_applied:
+            # Pre-compression memory flush: let the model save memories before they're lost
+            self.flush_memories(messages, min_turns=0)
+
+            # Notify external memory provider before compression discards context
+            if self._memory_manager:
+                try:
+                    self._memory_manager.on_pre_compress(messages)
+                except Exception:
+                    pass
+
+            try:
+                if focus_topic == "context-limit recovery" and hasattr(self.context_compressor, "compact_for_retry"):
+                    compressed, _compact_applied, _compact_meta = self.context_compressor.compact_for_retry(
+                        messages,
+                        "context_length exceeded: context-limit recovery",
+                    )
+                    if not _compact_applied:
+                        compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+                else:
                     compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
-            else:
-                compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
-        except TypeError:
-            # Plugin context engine with strict signature that doesn't accept
-            # focus_topic — fall back to calling without it.
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+            except TypeError:
+                # Plugin context engine with strict signature that doesn't accept
+                # focus_topic — fall back to calling without it.
+                compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+        finally:
+            # Stop the keepalive the instant compaction returns (or raises).
+            _compact_hb_stop.set()
+            _compact_hb.join(timeout=1.0)
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
