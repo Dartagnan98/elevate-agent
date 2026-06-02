@@ -248,6 +248,25 @@ def setup_logging(
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gateway"]),
         )
 
+    # --- forensics.log — shutdown/process diagnostics only -----------------
+    # Process-list dumps (ps aux) and shutdown forensics are verbose and were
+    # polluting errors.log (the Electron "Elevate Helper" fleet matches the
+    # "elevate" filter, so every restart dumped dozens of giant argv lines).
+    # Route them to a dedicated, non-propagating logger so they never reach
+    # the root handlers (agent.log / errors.log).
+    _forensics = logging.getLogger("elevate.forensics")
+    _forensics.setLevel(logging.INFO)
+    _forensics.propagate = False
+    if not _forensics.handlers:
+        _add_rotating_handler(
+            _forensics,
+            log_dir / "forensics.log",
+            level=logging.INFO,
+            max_bytes=2 * 1024 * 1024,
+            backup_count=2,
+            formatter=RedactingFormatter(_LOG_FORMAT),
+        )
+
     # Ensure root logger level is low enough for the handlers to fire.
     if root.level == logging.NOTSET or root.level > level:
         root.setLevel(level)

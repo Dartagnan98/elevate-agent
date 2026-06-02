@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import has_binary_extension
+from tools.file_materialize import FileNotReadyError, materialize_if_dataless
 from tools.file_operations import (
     ShellFileOperations,
     normalize_read_pagination,
@@ -472,6 +473,20 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             })
 
         _resolved = _resolve_path_for_task(path, task_id)
+
+        # ── iCloud placeholder guard ──────────────────────────────────
+        # Files offloaded to iCloud are dataless placeholders; reading one
+        # can return EDEADLK ("Resource deadlock avoided") until macOS faults
+        # it in. Materialize first so the read below doesn't deadlock.
+        try:
+            materialize_if_dataless(_resolved)
+        except FileNotReadyError as exc:
+            return json.dumps({
+                "error": (
+                    f"Cannot read '{path}': file is stored in iCloud and could "
+                    f"not be downloaded in time ({exc})."
+                ),
+            })
 
         # ── Binary file guard ─────────────────────────────────────────
         # Block binary files by extension (no I/O).

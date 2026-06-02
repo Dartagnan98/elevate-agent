@@ -13619,17 +13619,21 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 capture_output=True, text=True, timeout=3,
             )
             _elevate_procs = [
-                line for line in _ps.stdout.splitlines()
+                line[:200] for line in _ps.stdout.splitlines()
                 if ("elevate" in line.lower() or "gateway" in line.lower())
+                and "Elevate Helper" not in line  # skip the Electron helper fleet
                 and str(os.getpid()) not in line.split()[1:2]  # exclude self
             ]
+            # Route to the dedicated forensics logger (non-propagating) so these
+            # verbose process dumps never pollute agent.log / errors.log.
+            _forensics_log = logging.getLogger("elevate.forensics")
             if _elevate_procs:
-                logger.warning(
+                _forensics_log.warning(
                     "Shutdown diagnostic — other elevate processes running:\n  %s",
                     "\n  ".join(_elevate_procs),
                 )
             else:
-                logger.info("Shutdown diagnostic — no other elevate processes found")
+                _forensics_log.info("Shutdown diagnostic — no other elevate processes found")
         except Exception:
             pass
         asyncio.create_task(runner.stop())

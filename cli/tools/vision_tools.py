@@ -40,6 +40,7 @@ import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 from elevate_constants import get_elevate_dir
 from tools.debug_helpers import DebugSession
+from tools.file_materialize import FileNotReadyError, materialize_if_dataless
 from tools.website_policy import check_website_access
 import sys
 
@@ -567,6 +568,14 @@ async def _vision_analyze_native(
         if local_path.is_file():
             temp_image_path = local_path
             should_cleanup = False
+            try:
+                materialize_if_dataless(temp_image_path)
+            except FileNotReadyError as exc:
+                return tool_error(
+                    f"Image is stored in iCloud and could not be downloaded "
+                    f"in time: {exc}",
+                    success=False,
+                )
         elif _validate_image_url(image_url):
             blocked = check_website_access(image_url)
             if blocked:
@@ -707,6 +716,7 @@ async def vision_analyze_tool(
             logger.info("Using local image file: %s", image_url)
             temp_image_path = local_path
             should_cleanup = False  # Don't delete cached/local files
+            materialize_if_dataless(temp_image_path)
         elif _validate_image_url(image_url):
             # Remote URL -- download to a temporary location
             blocked = check_website_access(image_url)
@@ -1207,6 +1217,7 @@ async def video_analyze_tool(
             logger.info("Using local video file: %s", video_url)
             temp_video_path = local_path
             should_cleanup = False
+            materialize_if_dataless(temp_video_path)
         elif _validate_image_url(video_url):
             blocked = check_website_access(video_url)
             if blocked:
