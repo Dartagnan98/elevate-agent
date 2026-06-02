@@ -634,6 +634,7 @@ def _build_anthropic_client_with_bearer_hook(
     if common_betas:
         kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
+    kwargs.setdefault("max_retries", 0)  # Elevate's loop owns retry policy
     return _anthropic_sdk.Anthropic(**kwargs)
 
 
@@ -754,6 +755,7 @@ def build_anthropic_client(
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
+    kwargs.setdefault("max_retries", 0)  # Elevate's loop owns retry policy
     return _anthropic_sdk.Anthropic(**kwargs)
 
 
@@ -789,6 +791,7 @@ def build_anthropic_bedrock_client(region: str):
     return _anthropic_sdk.AnthropicBedrock(
         aws_region=region,
         timeout=Timeout(timeout=900.0, connect=10.0),
+        max_retries=0,  # Elevate's loop owns retry policy
         default_headers={"anthropic-beta": ",".join([*_COMMON_BETAS, _CONTEXT_1M_BETA])},
     )
 

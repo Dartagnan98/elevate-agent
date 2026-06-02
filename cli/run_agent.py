@@ -805,7 +805,7 @@ class AIAgent:
         args: list[str] | None = None,
         model: str = "",
         max_iterations: int = 300,
-        tool_delay: float = 1.0,
+        tool_delay: float = 0.0,
         enabled_toolsets: List[str] = None,
         disabled_toolsets: List[str] = None,
         save_trajectories: bool = False,
@@ -870,7 +870,8 @@ class AIAgent:
             api_mode (str): API mode override: "chat_completions" or "codex_responses"
             model (str): Model name to use (default: "anthropic/claude-opus-4.6")
             max_iterations (int): Maximum number of tool calling iterations (default: 150 from the Elevate CLI)
-            tool_delay (float): Delay between tool calls in seconds (default: 1.0)
+            tool_delay (float): Delay between tool calls in seconds (default: 0.0;
+                per-request provider pacing already handles rate limits)
             enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
             disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
             save_trajectories (bool): Whether to save conversation trajectories to JSONL files (default: False)
@@ -1698,25 +1699,28 @@ class AIAgent:
         self._api_max_retries = _api_retries
 
         # Absolute cumulative wall-clock budget for ONE API-call sequence
-        # (all retries for a single turn). DISABLED BY DEFAULT (0): heavy
-        # agentic workflows (full CMA runs, multi-phase marketing pipelines)
-        # legitimately run far past any fixed ceiling, and a dumb total
-        # wall-clock cap cannot tell a productive long turn from a dead one.
-        # Per-request hangs are already caught by the non-stream stale
-        # detector, and api_max_retries bounds retry storms. Set a positive
-        # value via agent.api_turn_deadline in config.yaml or the
-        # ELEVATE_API_TURN_DEADLINE env (seconds) to re-enable the backstop.
+        # (a single model response + all of ITS retries — NOT the whole
+        # agentic loop, which legitimately runs long across many calls).
+        # Defaults to 600s as a backstop: one response sequence taking >10min
+        # is pathological (a hung stream the stale detector missed, or a
+        # retry sequence that should have bailed to fallback). Generous enough
+        # for a few retries with backoff. Set agent.api_turn_deadline in
+        # config.yaml or ELEVATE_API_TURN_DEADLINE env (seconds); set it to 0
+        # to disable the backstop entirely.
+        _DEFAULT_TURN_DEADLINE_S = 600.0
         _raw_turn_deadline = _agent_section.get("api_turn_deadline", None)
         if _raw_turn_deadline is None:
             _raw_turn_deadline = os.getenv("ELEVATE_API_TURN_DEADLINE")
         try:
             self._api_turn_deadline_s = (
-                0.0 if _raw_turn_deadline is None else float(_raw_turn_deadline)
+                _DEFAULT_TURN_DEADLINE_S
+                if _raw_turn_deadline is None
+                else float(_raw_turn_deadline)
             )
         except (TypeError, ValueError):
-            self._api_turn_deadline_s = 0.0
+            self._api_turn_deadline_s = _DEFAULT_TURN_DEADLINE_S
         if self._api_turn_deadline_s <= 0:
-            self._api_turn_deadline_s = 0.0  # disabled
+            self._api_turn_deadline_s = 0.0  # explicitly disabled
 
         # Minimum interval (seconds) between gateway-bound lifecycle status
         # heartbeats of the *same category*.  _emit_status fans every
@@ -5300,6 +5304,12 @@ class AIAgent:
             keepalive_http = self._build_keepalive_http_client(client_kwargs.get("base_url", ""))
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
+        # Disable the SDK's own retries (default 2) on the standard path so
+        # Elevate's loop is the single owner of retry policy — stops the
+        # SDK x stream x app retry multiplication that turns one 429 into a
+        # storm. The ACP runtimes (command/args) use a different client.
+        if "command" not in client_kwargs:
+            client_kwargs.setdefault("max_retries", 0)
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",

@@ -30,14 +30,13 @@ def _make_agent(api_turn_deadline=None):
         )
 
 
-def test_default_turn_deadline_is_disabled(monkeypatch):
-    """Elevate intentionally defaults to disabled (0.0) — heavy agentic
-    workflows can't tolerate a wall-clock cap that can't distinguish a
-    productive long turn from a dead one. Per-request hangs are caught by
-    the non-stream stale detector; api_max_retries bounds retry storms.
-    See run_agent.py lines 1690-1700."""
+def test_default_turn_deadline_is_600(monkeypatch):
+    """Defaults to 600s as a backstop for ONE API-call sequence (a single
+    response + its retries — not the whole agentic loop). A response sequence
+    past 10min is pathological. Explicit 0 still disables it (see
+    test_zero_or_negative_disables). See run_agent.py ~1700-1721."""
     monkeypatch.delenv("ELEVATE_API_TURN_DEADLINE", raising=False)
-    assert _make_agent()._api_turn_deadline_s == 0.0
+    assert _make_agent()._api_turn_deadline_s == 600.0
 
 
 def test_config_override(monkeypatch):
@@ -66,4 +65,4 @@ def test_config_beats_env(monkeypatch):
 
 def test_invalid_value_falls_back_to_default(monkeypatch):
     monkeypatch.delenv("ELEVATE_API_TURN_DEADLINE", raising=False)
-    assert _make_agent(api_turn_deadline="not-a-number")._api_turn_deadline_s == 0.0
+    assert _make_agent(api_turn_deadline="not-a-number")._api_turn_deadline_s == 600.0

@@ -1289,6 +1289,11 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         keepalive_http = agent._build_keepalive_http_client(client_kwargs.get("base_url", ""))
         if keepalive_http is not None:
             client_kwargs["http_client"] = keepalive_http
+    # Disable the SDK's own retries (default 2) on the standard path so
+    # Elevate's loop is the single owner of retry policy (stops the
+    # SDK x stream x app retry multiplication). ACP runtimes use command/args.
+    if "command" not in client_kwargs:
+        client_kwargs.setdefault("max_retries", 0)
     # Uses the module-level `OpenAI` name, resolved lazily on first
     # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
     client = _ra().OpenAI(**client_kwargs)
