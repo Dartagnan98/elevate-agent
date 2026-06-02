@@ -14,6 +14,7 @@ Usage:
 """
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -1368,6 +1369,45 @@ def _preserve_queued_followup_history_offset(
     merged = dict(followup_result)
     merged["history_offset"] = current_offset
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Dedicated thread pool for agent conversation runs (G1).
+#
+# Agent runs (`agent.run_conversation`) can take many minutes — up to
+# ELEVATE_AGENT_TIMEOUT (default 1800s). Dispatching them onto asyncio's
+# DEFAULT executor (`run_in_executor(None, ...)`) means a handful of slow or
+# hung turns hold every thread in the shared pool — the SAME pool used for
+# vision enrichment, MCP discovery, status checks, uploads and dashboard
+# offloads. The pool drains, aux work head-of-line blocks, and the whole
+# gateway "times out a lot" while one turn is stuck.
+#
+# Isolating agent runs on their own bounded executor means a stuck turn can
+# only consume agent-run capacity; aux work keeps flowing on the default pool.
+_AGENT_RUN_EXECUTOR: "concurrent.futures.ThreadPoolExecutor | None" = None
+_AGENT_RUN_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_agent_run_executor() -> "concurrent.futures.ThreadPoolExecutor":
+    """Return the process-wide, bounded executor reserved for agent runs.
+
+    Size via ELEVATE_AGENT_RUN_WORKERS (default 6). Lazily created so import
+    stays cheap and the worker count reflects env at first use.
+    """
+    global _AGENT_RUN_EXECUTOR
+    if _AGENT_RUN_EXECUTOR is None:
+        with _AGENT_RUN_EXECUTOR_LOCK:
+            if _AGENT_RUN_EXECUTOR is None:
+                try:
+                    workers = int(os.getenv("ELEVATE_AGENT_RUN_WORKERS", "6"))
+                except (TypeError, ValueError):
+                    workers = 6
+                workers = max(1, workers)
+                _AGENT_RUN_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix="elevate-agent-run",
+                )
+    return _AGENT_RUN_EXECUTOR
 
 
 class GatewayRunner:
@@ -10241,10 +10281,17 @@ class GatewayRunner:
         clear_session_vars(tokens)
 
     async def _run_in_executor_with_context(self, func, *args):
-        """Run blocking work in the thread pool while preserving session contextvars."""
+        """Run an agent conversation on the dedicated agent pool, preserving session contextvars.
+
+        Uses the bounded agent-run executor (see ``_get_agent_run_executor``)
+        rather than asyncio's default pool, so a long or hung turn cannot
+        starve vision/MCP/status/dashboard work (G1). All callers of this
+        helper are ``run_conversation`` dispatches; aux work uses
+        ``run_in_executor(None, ...)`` directly and stays on the default pool.
+        """
         loop = asyncio.get_running_loop()
         ctx = copy_context()
-        return await loop.run_in_executor(None, ctx.run, func, *args)
+        return await loop.run_in_executor(_get_agent_run_executor(), ctx.run, func, *args)
 
     async def _enrich_message_with_vision(
         self,

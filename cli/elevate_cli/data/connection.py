@@ -16,6 +16,7 @@ The shim also translates legacy ``?``-style placeholders to psycopg's
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from contextlib import contextmanager
@@ -42,6 +43,30 @@ _schema_lock = threading.Lock()
 _schema_ready: bool = False
 
 
+def _pool_sizing() -> tuple[int, float]:
+    """Resolve ``(max_size, checkout_timeout_s)`` for the operational pool.
+
+    ``max_size`` must comfortably exceed the agent-run thread pool
+    (ELEVATE_AGENT_RUN_WORKERS) PLUS the dashboard's request workers. FastAPI
+    now runs the de-async'd DB handlers (G2) on its anyio thread pool, so
+    several can hold a connection at once; with the old cap of 10 a few
+    concurrent dashboard scans + an active turn could exhaust the pool and
+    block. The explicit checkout timeout turns exhaustion into a fast,
+    retryable error instead of an indefinite hang (G3). Both knobs are
+    env-overridable: ELEVATE_PG_POOL_MAX_SIZE, ELEVATE_PG_POOL_TIMEOUT_S.
+    """
+    try:
+        max_size = int(os.getenv("ELEVATE_PG_POOL_MAX_SIZE", "20"))
+    except (TypeError, ValueError):
+        max_size = 20
+    max_size = max(4, max_size)
+    try:
+        checkout_timeout = float(os.getenv("ELEVATE_PG_POOL_TIMEOUT_S", "10"))
+    except (TypeError, ValueError):
+        checkout_timeout = 10.0
+    return max_size, checkout_timeout
+
+
 def _get_pool() -> ConnectionPool:
     global _pool
     if _pool is not None:
@@ -51,10 +76,12 @@ def _get_pool() -> ConnectionPool:
             return _pool
         pg_server.ensure_database(_APP_DB_NAME)
         uri = pg_server.get_uri(_APP_DB_NAME)
+        max_size, checkout_timeout = _pool_sizing()
         _pool = ConnectionPool(
             uri,
             min_size=1,
-            max_size=10,
+            max_size=max_size,
+            timeout=checkout_timeout,
             kwargs={
                 "row_factory": dict_row,
                 "autocommit": False,
@@ -367,8 +394,10 @@ def connect() -> Iterator[PgConnection]:
     """
     pool = _get_pool()
     with pool.connection() as raw:
-        with raw.cursor() as cur:
-            cur.execute("SET max_parallel_workers_per_gather = 0")
+        # max_parallel_workers_per_gather=0 is already applied pool-wide via
+        # the connection ``options`` in ``_get_pool`` (a startup parameter that
+        # holds for the whole session), so re-issuing it on every checkout was
+        # a wasted round-trip + cursor on the hot path (G4).
         conn = PgConnection(raw)
         try:
             _ensure_schema(conn)

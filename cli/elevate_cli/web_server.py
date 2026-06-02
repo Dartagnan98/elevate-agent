@@ -4987,7 +4987,7 @@ app.include_router(
 
 
 @app.post("/api/contacts/{contact_id}/classify")
-async def post_contact_classify(contact_id: str, body: _ContactClassifyBody):
+def post_contact_classify(contact_id: str, body: _ContactClassifyBody):
     try:
         from elevate_cli.data import classify_contact, connect, get_contact
 
@@ -5005,7 +5005,7 @@ async def post_contact_classify(contact_id: str, body: _ContactClassifyBody):
 
 
 @app.post("/api/contacts/{contact_id}/park")
-async def post_contact_park(contact_id: str, body: _ContactParkBody):
+def post_contact_park(contact_id: str, body: _ContactParkBody):
     if not body.reason or not body.reason.strip():
         raise HTTPException(status_code=400, detail="reason is required")
     try:
@@ -5023,7 +5023,7 @@ async def post_contact_park(contact_id: str, body: _ContactParkBody):
 
 
 @app.post("/api/contacts/{contact_id}/unpark")
-async def post_contact_unpark(contact_id: str):
+def post_contact_unpark(contact_id: str):
     try:
         from elevate_cli.data import connect, get_contact, unpark_contact
 
@@ -5039,7 +5039,7 @@ async def post_contact_unpark(contact_id: str):
 
 
 @app.get("/api/contacts/active")
-async def get_contacts_active(limit: int = 100):
+def get_contacts_active(limit: int = 100):
     """Active leads section — stage in ('first_touched', 'active'),
     sorted by ``last_activity_at`` desc."""
     try:
@@ -5059,7 +5059,7 @@ async def get_contacts_active(limit: int = 100):
 
 
 @app.get("/api/admin/contacts")
-async def get_admin_contacts(
+def get_admin_contacts(
     type: Optional[str] = None,
     stage: Optional[str] = None,
     tab: Optional[str] = None,
@@ -5108,7 +5108,7 @@ async def get_admin_contacts(
 
 
 @app.get("/api/admin/conflicts")
-async def get_admin_conflicts():
+def get_admin_conflicts():
     try:
         from elevate_cli.data import connect, list_open_conflicts
 
@@ -5121,7 +5121,7 @@ async def get_admin_conflicts():
 
 
 @app.post("/api/admin/conflicts/{conflict_id}/resolve")
-async def post_admin_conflict_resolve(conflict_id: str, body: _ConflictResolveBody):
+def post_admin_conflict_resolve(conflict_id: str, body: _ConflictResolveBody):
     try:
         from elevate_cli.data import connect, resolve_identity_conflict
 
@@ -5146,7 +5146,7 @@ async def post_admin_conflict_resolve(conflict_id: str, body: _ConflictResolveBo
 
 
 @app.get("/api/admin/signals")
-async def get_admin_signals(sourceId: Optional[str] = None, limit: int = 200):
+def get_admin_signals(sourceId: Optional[str] = None, limit: int = 200):
     try:
         from elevate_cli.data import connect, list_open_signals
 
@@ -5160,7 +5160,7 @@ async def get_admin_signals(sourceId: Optional[str] = None, limit: int = 200):
 
 
 @app.post("/api/admin/signals/{signal_id}/graduate")
-async def post_admin_signal_graduate(signal_id: str, body: _SignalGraduateBody):
+def post_admin_signal_graduate(signal_id: str, body: _SignalGraduateBody):
     if not body.contactId or not body.contactId.strip():
         raise HTTPException(status_code=400, detail="contactId is required")
     try:
@@ -5200,7 +5200,7 @@ async def get_admin_jurisdiction():
 
 
 @app.put("/api/admin/jurisdiction")
-async def put_admin_jurisdiction(body: _AdminJurisdictionBody):
+def put_admin_jurisdiction(body: _AdminJurisdictionBody):
     """Persist the workspace default province/package for Admin Hub deals."""
     try:
         from elevate_cli.admin_deal_flow import package_key_from_jurisdiction
@@ -5258,7 +5258,7 @@ async def put_admin_jurisdiction(body: _AdminJurisdictionBody):
 
 
 @app.get("/api/admin/setup")
-async def get_admin_setup_endpoint():
+def get_admin_setup_endpoint():
     """Return the Admin first-run readiness profile."""
     try:
         from elevate_cli.data import connect, get_admin_setup
@@ -5271,7 +5271,7 @@ async def get_admin_setup_endpoint():
 
 
 @app.put("/api/admin/setup")
-async def put_admin_setup_endpoint(body: _AdminSetupUpdateBody):
+def put_admin_setup_endpoint(body: _AdminSetupUpdateBody):
     """Update Admin setup profile/items while the launch gate is open."""
     try:
         from elevate_cli.data import connect, update_admin_setup
@@ -5313,7 +5313,7 @@ async def put_admin_setup_endpoint(body: _AdminSetupUpdateBody):
 
 
 @app.post("/api/admin/setup/complete")
-async def post_admin_setup_complete_endpoint():
+def post_admin_setup_complete_endpoint():
     """Mark Admin setup complete after all required readiness items are filled."""
     try:
         from elevate_cli.data import complete_admin_setup, connect
@@ -5330,7 +5330,7 @@ async def post_admin_setup_complete_endpoint():
 
 
 @app.post("/api/admin/setup/verify")
-async def post_admin_setup_verify_endpoint():
+def post_admin_setup_verify_endpoint():
     """Check setup items against local runtime connectors and imported guides."""
     warnings: List[str] = []
     try:
@@ -5394,7 +5394,7 @@ async def post_admin_setup_verify_endpoint():
 
 
 @app.get("/api/leads/setup")
-async def get_leads_setup_endpoint():
+def get_leads_setup_endpoint():
     """Return the Leads onboarding readiness snapshot."""
     try:
         from elevate_cli.data import connect, get_leads_setup
@@ -5407,7 +5407,7 @@ async def get_leads_setup_endpoint():
 
 
 @app.put("/api/leads/setup")
-async def put_leads_setup_endpoint(body: _LeadsSetupUpdateBody):
+def put_leads_setup_endpoint(body: _LeadsSetupUpdateBody):
     """Update Leads setup items while the gate is open."""
     try:
         from elevate_cli.data import connect, update_leads_setup
@@ -5427,7 +5427,7 @@ async def put_leads_setup_endpoint(body: _LeadsSetupUpdateBody):
 
 
 @app.post("/api/leads/setup/complete")
-async def post_leads_setup_complete_endpoint():
+def post_leads_setup_complete_endpoint():
     """Mark Leads onboarding complete once CRM + at least one lead source + auto-reply are ready."""
     try:
         from elevate_cli.data import complete_leads_setup, connect
@@ -5442,7 +5442,7 @@ async def post_leads_setup_complete_endpoint():
 
 
 @app.post("/api/leads/setup/reset")
-async def post_leads_setup_reset_endpoint():
+def post_leads_setup_reset_endpoint():
     """Re-open the Leads onboarding gate without wiping item state."""
     try:
         from elevate_cli.data import connect, reset_leads_setup
@@ -5455,7 +5455,7 @@ async def post_leads_setup_reset_endpoint():
 
 
 @app.get("/api/agent/setup")
-async def get_agent_setup_endpoint():
+def get_agent_setup_endpoint():
     """Return the top-level Agent onboarding readiness snapshot."""
     try:
         from elevate_cli.data import connect, get_agent_setup
@@ -5468,7 +5468,7 @@ async def get_agent_setup_endpoint():
 
 
 @app.put("/api/agent/setup")
-async def put_agent_setup_endpoint(body: _AgentSetupUpdateBody):
+def put_agent_setup_endpoint(body: _AgentSetupUpdateBody):
     """Update Agent setup items while the gate is open."""
     try:
         from elevate_cli.data import connect, update_agent_setup
@@ -5590,7 +5590,7 @@ def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
 
 
 @app.post("/api/agent/setup/complete")
-async def post_agent_setup_complete_endpoint():
+def post_agent_setup_complete_endpoint():
     """Mark Agent onboarding complete once primary LLM + embedding + memory store are ready.
 
     On success, materialize the wizard's model/embedding/memory selections into
@@ -5616,7 +5616,7 @@ async def post_agent_setup_complete_endpoint():
 
 
 @app.post("/api/agent/setup/reset")
-async def post_agent_setup_reset_endpoint():
+def post_agent_setup_reset_endpoint():
     """Re-open the Agent onboarding gate without wiping item state."""
     try:
         from elevate_cli.data import connect, reset_agent_setup
@@ -5896,7 +5896,7 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
 
 
 @app.post("/api/admin/onboarding/chat")
-async def post_admin_onboarding_chat(body: _OnboardingChatBody):
+def post_admin_onboarding_chat(body: _OnboardingChatBody):
     """LLM-backed onboarding coach. Falls back to deterministic guidance when no auxiliary client is configured."""
     try:
         from elevate_cli.data import connect, get_admin_setup
@@ -5960,7 +5960,7 @@ def _browser_use_api_key() -> Optional[str]:
 
 
 @app.post("/api/admin/onboarding/browser-use/launch")
-async def post_admin_onboarding_browser_use_launch(body: _OnboardingBrowserUseBody):
+def post_admin_onboarding_browser_use_launch(body: _OnboardingBrowserUseBody):
     """Fire a browser-use cloud task against a portal saved in admin_setup."""
     portal_key = (body.portalKey or "").strip().lower()
     if portal_key not in {"mls", "compliance", "showing"}:
@@ -6044,7 +6044,7 @@ async def post_admin_onboarding_browser_use_launch(body: _OnboardingBrowserUseBo
 
 
 @app.get("/api/pack-onboarding")
-async def get_pack_onboarding_endpoint():
+def get_pack_onboarding_endpoint():
     """Return pack-specific onboarding contracts for unlocked real estate packs."""
     try:
         from elevate_cli.data import connect, get_pack_onboarding
@@ -6057,7 +6057,7 @@ async def get_pack_onboarding_endpoint():
 
 
 @app.put("/api/pack-onboarding/{pack_id}")
-async def put_pack_onboarding_endpoint(pack_id: str, body: _PackOnboardingUpdateBody):
+def put_pack_onboarding_endpoint(pack_id: str, body: _PackOnboardingUpdateBody):
     """Save onboarding answers for one paid pack."""
     try:
         from elevate_cli.data import connect, update_pack_onboarding
@@ -6081,7 +6081,7 @@ async def put_pack_onboarding_endpoint(pack_id: str, body: _PackOnboardingUpdate
 
 
 @app.post("/api/pack-onboarding/{pack_id}/complete")
-async def post_pack_onboarding_complete_endpoint(pack_id: str):
+def post_pack_onboarding_complete_endpoint(pack_id: str):
     """Mark one pack onboarding complete once required fields are ready."""
     try:
         from elevate_cli.data import complete_pack_onboarding, connect
@@ -6100,7 +6100,7 @@ async def post_pack_onboarding_complete_endpoint(pack_id: str):
 
 
 @app.get("/api/admin/province-guides")
-async def get_admin_province_guides(province: Optional[str] = None):
+def get_admin_province_guides(province: Optional[str] = None):
     """Return SQLite-backed province guide coverage/reference material."""
     try:
         from elevate_cli.data import connect, province_coverage, province_guide_summary
@@ -6121,7 +6121,7 @@ async def get_admin_province_guides(province: Optional[str] = None):
 
 
 @app.post("/api/admin/province-guides/import")
-async def post_admin_province_guides_import(body: Optional[_ProvinceGuideImportBody] = None):
+def post_admin_province_guides_import(body: Optional[_ProvinceGuideImportBody] = None):
     """Import local eXp Agent Centre scrape output into SQLite."""
     try:
         from elevate_cli.data import connect, import_exp_agent_centre
@@ -6147,7 +6147,7 @@ async def post_admin_province_guides_import(body: Optional[_ProvinceGuideImportB
 
 
 @app.get("/api/admin/deals")
-async def get_admin_deals(
+def get_admin_deals(
     side: Optional[str] = None,
     current_stage: Optional[int] = None,
     status: Optional[str] = "active",
@@ -6184,7 +6184,7 @@ async def get_admin_deals(
 
 
 @app.get("/api/admin/upcoming-events")
-async def get_admin_upcoming_events(days: int = 21):
+def get_admin_upcoming_events(days: int = 21):
     """Return merged Admin calendar feed: Google Calendar + deal milestone dates."""
     try:
         from elevate_cli.data import connect
@@ -6203,7 +6203,7 @@ async def get_admin_upcoming_events(days: int = 21):
 
 
 @app.post("/api/admin/deals")
-async def post_admin_deal(body: _DealCreateBody):
+def post_admin_deal(body: _DealCreateBody):
     """Create one Admin Hub deal card."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6243,7 +6243,7 @@ async def post_admin_deal(body: _DealCreateBody):
 
 
 @app.post("/api/admin/profile-promotions")
-async def post_admin_profile_promotion(body: _ProfilePromotionBody):
+def post_admin_profile_promotion(body: _ProfilePromotionBody):
     """Create or update an Admin Hub deal from a verified lead profile."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6286,7 +6286,7 @@ async def post_admin_profile_promotion(body: _ProfilePromotionBody):
 
 
 @app.post("/api/admin/deals/{deal_id}/move")
-async def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
+def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
     """Move one Admin Hub deal card to another stage."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6322,7 +6322,7 @@ async def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
 
 
 @app.post("/api/admin/deals/{deal_id}/toggle")
-async def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
+def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
     """Update one checklist, toggle, or enum field on an Admin Hub deal."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6355,7 +6355,7 @@ async def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
 
 
 @app.get("/api/deals/{deal_id}/context")
-async def get_deal_source_context(deal_id: str):
+def get_deal_source_context(deal_id: str):
     """Return the single source-of-truth blob every admin skill starts from."""
     try:
         from elevate_cli.data import connect, get_deal_context
@@ -6376,7 +6376,7 @@ async def get_deal_source_context(deal_id: str):
 
 
 @app.post("/api/deals/{deal_id}/fields")
-async def post_deal_fields(deal_id: str, body: _DealFieldsBody):
+def post_deal_fields(deal_id: str, body: _DealFieldsBody):
     """Patch durable date/money/property fields on the deal source of truth."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6398,7 +6398,7 @@ async def post_deal_fields(deal_id: str, body: _DealFieldsBody):
 
 
 @app.post("/api/deals/{deal_id}/advance")
-async def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
+def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
     """Advance a deal to the next package phase when its gate is clear."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6441,7 +6441,7 @@ async def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
 
 
 @app.post("/api/deals/{deal_id}/contacts")
-async def post_deal_contact(deal_id: str, body: _DealContactBody):
+def post_deal_contact(deal_id: str, body: _DealContactBody):
     """Attach a co-contact role (lawyer/lender/inspector/etc.) to a deal."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6470,7 +6470,7 @@ async def post_deal_contact(deal_id: str, body: _DealContactBody):
 
 
 @app.post("/api/deals/{deal_id}/attachments")
-async def post_deal_attachment(deal_id: str, body: _DealAttachmentBody):
+def post_deal_attachment(deal_id: str, body: _DealAttachmentBody):
     """Attach an artifact/file to the deal source of truth."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6501,7 +6501,7 @@ async def post_deal_attachment(deal_id: str, body: _DealAttachmentBody):
 
 
 @app.post("/api/deals/{deal_id}/runs/{run_id}/result")
-async def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
+def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
     """Standard callback for admin skills to close action_runs and attach outputs."""
     try:
         from elevate_cli.data import connect, record_run_result
@@ -6544,7 +6544,7 @@ async def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
 
 
 @app.get("/api/admin/actions")
-async def get_admin_actions(
+def get_admin_actions(
     trigger: Optional[str] = None,
     side: Optional[str] = None,
     enabled: Optional[bool] = None,
@@ -6577,7 +6577,7 @@ async def get_admin_actions(
 
 
 @app.post("/api/admin/actions")
-async def post_admin_action(body: _AdminActionCreateBody):
+def post_admin_action(body: _AdminActionCreateBody):
     """Create a new registry row."""
     try:
         from elevate_cli.data import connect, create_action
@@ -6609,7 +6609,7 @@ async def post_admin_action(body: _AdminActionCreateBody):
 
 
 @app.post("/api/admin/actions/defaults")
-async def post_admin_actions_defaults():
+def post_admin_actions_defaults():
     """Idempotently seed the default listing phase action registry."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6623,7 +6623,7 @@ async def post_admin_actions_defaults():
 
 
 @app.patch("/api/admin/actions/{action_id}")
-async def patch_admin_action(action_id: str, body: _AdminActionUpdateBody):
+def patch_admin_action(action_id: str, body: _AdminActionUpdateBody):
     """Update an existing registry row, bumping its version."""
     try:
         from elevate_cli.data import connect, update_action
@@ -6658,7 +6658,7 @@ async def patch_admin_action(action_id: str, body: _AdminActionUpdateBody):
 
 
 @app.delete("/api/admin/actions/{action_id}")
-async def delete_admin_action(action_id: str):
+def delete_admin_action(action_id: str):
     """Delete a registry row. Cascades to its queued runs."""
     try:
         from elevate_cli.data import connect, delete_action
@@ -6676,7 +6676,7 @@ async def delete_admin_action(action_id: str):
 
 
 @app.get("/api/admin/action-runs")
-async def get_admin_action_runs(
+def get_admin_action_runs(
     deal_id: Optional[str] = None,
     registry_id: Optional[str] = None,
     status: Optional[str] = None,
@@ -6707,7 +6707,7 @@ async def get_admin_action_runs(
 
 
 @app.post("/api/admin/action-runs/drain")
-async def post_admin_action_runs_drain(limit: int = 50):
+def post_admin_action_runs_drain(limit: int = 50):
     """Drain queued Admin action runs into cron."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6728,7 +6728,7 @@ async def post_admin_action_runs_drain(limit: int = 50):
 
 
 @app.post("/api/admin/action-runs/{run_id}/approve")
-async def post_admin_action_run_approve(run_id: str, body: _ActionRunApproveBody):
+def post_admin_action_run_approve(run_id: str, body: _ActionRunApproveBody):
     """Approve or cancel a human-gated Admin action run."""
     try:
         _require_admin_setup_ready_for_launch()
@@ -6752,7 +6752,7 @@ async def post_admin_action_run_approve(run_id: str, body: _ActionRunApproveBody
 
 
 @app.get("/api/admin/tasks")
-async def get_admin_tasks(
+def get_admin_tasks(
     status: Optional[str] = "open",
     limit: int = 100,
     offset: int = 0,
@@ -6779,7 +6779,7 @@ async def get_admin_tasks(
 
 
 @app.post("/api/admin/tasks/run")
-async def post_admin_task_run(body: _AdminTaskRunBody):
+def post_admin_task_run(body: _AdminTaskRunBody):
     """Queue an AI-capable task from the task board against its deal file."""
     if not body.dealId or not body.dealId.strip():
         raise HTTPException(status_code=400, detail="dealId is required")
@@ -6820,7 +6820,7 @@ async def post_admin_task_run(body: _AdminTaskRunBody):
 
 
 @app.get("/api/admin/templates")
-async def get_admin_templates(
+def get_admin_templates(
     tab: str = "live",
     lane: Optional[str] = None,
     channel: Optional[str] = None,
@@ -6870,7 +6870,7 @@ async def get_admin_templates(
 
 
 @app.post("/api/admin/templates/{template_id}/approve")
-async def post_admin_template_approve(template_id: str):
+def post_admin_template_approve(template_id: str):
     """Flip a proposed template to status='live'. Records audit fields."""
     try:
         from elevate_cli.data import approve_template, connect, get_template
@@ -6891,7 +6891,7 @@ async def post_admin_template_approve(template_id: str):
 
 
 @app.post("/api/admin/templates/{template_id}/reject")
-async def post_admin_template_reject(template_id: str, body: _TemplateRejectBody):
+def post_admin_template_reject(template_id: str, body: _TemplateRejectBody):
     """Mark a proposed template ``status='retired'`` with a reason note."""
     if not body.reason or not body.reason.strip():
         raise HTTPException(status_code=400, detail="reason is required")
@@ -6912,7 +6912,7 @@ async def post_admin_template_reject(template_id: str, body: _TemplateRejectBody
 
 
 @app.post("/api/admin/templates/{template_id}/edit")
-async def post_admin_template_edit(template_id: str, body: _TemplateEditBody):
+def post_admin_template_edit(template_id: str, body: _TemplateEditBody):
     """Bump version: parent → ``superseded``, new live row with ``version+1``."""
     if not body.body or not body.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
@@ -6937,7 +6937,7 @@ async def post_admin_template_edit(template_id: str, body: _TemplateEditBody):
 
 
 @app.post("/api/admin/templates/{template_id}/retire")
-async def post_admin_template_retire(template_id: str):
+def post_admin_template_retire(template_id: str):
     """Soft-deprecate a live template. Counters stay queryable."""
     try:
         from elevate_cli.data import connect, get_template, retire_template
@@ -8631,7 +8631,7 @@ async def update_config_raw(body: RawConfigUpdate):
 
 
 @app.get("/api/analytics/usage")
-async def get_usage_analytics(days: int = 30):
+def get_usage_analytics(days: int = 30):
     from elevate_state import SessionDB
     from agent.insights import InsightsEngine
 
