@@ -4797,6 +4797,44 @@ export default function ChatPage() {
     setVersion((value) => value + 1);
   };
 
+  // --- Stream liveness watchdog + mid-turn auto-reconnect -----------------
+  // The agent loop runs server-side independently of the websocket. If the
+  // socket silently stalls (frames stop arriving while it stays "open") or
+  // drops mid-turn, the UI would otherwise sit dark forever while the turn
+  // keeps running on the server. Detect that and bump `version`, which
+  // re-runs the connect effect -> session.resume: it replays the server-side
+  // ring buffer and restores running tools (the exact proven path used when
+  // reattaching to a still-running session). Conservative by design: only
+  // armed during an active turn, fires at most once per window, and a
+  // spurious reconnect is harmless (resume just re-syncs).
+  const lastFrameAtRef = useRef(Date.now());
+  const stallReconnectAtRef = useRef(0);
+
+  useEffect(() => {
+    // Mark stream activity on every inbound frame.
+    return gw.onAny(() => {
+      lastFrameAtRef.current = Date.now();
+    });
+  }, [gw]);
+
+  useEffect(() => {
+    if (!busy) return;
+    const STALL_MS = 45_000;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      if (now - stallReconnectAtRef.current < STALL_MS) return; // cooldown
+      const droppedMidTurn = state === "closed" || state === "error";
+      const stalledMidTurn =
+        state === "open" && now - lastFrameAtRef.current > STALL_MS;
+      if (droppedMidTurn || stalledMidTurn) {
+        stallReconnectAtRef.current = now;
+        lastFrameAtRef.current = now;
+        setVersion((value) => value + 1); // reconnect -> session.resume
+      }
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [busy, state]);
+
   const respondToPrompt = async (value: string) => {
     if (!pendingPrompt) return;
 

@@ -874,9 +874,18 @@ def _get_usage(agent) -> dict:
     }
     comp = getattr(agent, "context_compressor", None)
     if comp:
-        ctx_used = getattr(comp, "last_prompt_tokens", 0) or usage["total"] or 0
+        # CURRENT context occupancy only — never the cumulative session total.
+        # ``last_prompt_tokens`` is the size of the most recent prompt (the live
+        # context window usage). The old ``or usage["total"]`` fallback used the
+        # SUM of tokens across every API call this session, which climbs
+        # monotonically into the millions on a long turn and made the context
+        # ring falsely drain to "0% left / out of context" while the real
+        # context was a small fraction of the window. If there's no current
+        # measurement yet, omit the percentage (UI shows "--") instead of
+        # reporting a wrong one.
+        ctx_used = getattr(comp, "last_prompt_tokens", 0) or 0
         ctx_max = getattr(comp, "context_length", 0) or 0
-        if ctx_max:
+        if ctx_max and ctx_used:
             usage["context_used"] = ctx_used
             usage["context_max"] = ctx_max
             usage["context_percent"] = max(0, min(100, round(ctx_used / ctx_max * 100)))
