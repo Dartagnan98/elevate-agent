@@ -1,6 +1,11 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
+// Self-contained styling: the modal is portaled to <body> and opened from
+// multiple tabs (Admin + Today). Import the styles here so they always load
+// with the modal, even when AdminDesignShell (which also imports this) never
+// mounts — e.g. a fresh load straight into Today.
+import "../admin.css";
 import {
   Home,
   Clock,
@@ -131,8 +136,19 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
     [runAction, deal.id],
   );
 
+  // Per-stage checklist items persist as free-form toggles in the deal's
+  // extra_toggles bag (returned by getDealContext as `ctx.checklist`). Each
+  // item gets a stable key derived from its phase id + label slug.
+  const handleChecklistToggle = useCallback(
+    (key: string, next: boolean) =>
+      runAction(() => api.setAdminDealToggle(deal.id, key, next)),
+    [runAction, deal.id],
+  );
+
   // Current condition values come from the backend context (keyed by API field).
   const conditions = ctx?.conditions ?? {};
+  // Current checklist completion bag (free-form toggles), keyed per item.
+  const checklistState = ctx?.checklist ?? {};
 
   // Inline add-form drafts (ported from the legacy AdminDealContextSection).
   const [fieldDraft, setFieldDraft] = useState({
@@ -199,6 +215,14 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
     const n = Number((stageLabel || "").replace(/[^0-9]/g, ""));
     return ctx?.stageDocuments?.stages?.[String(n)] ?? [];
   };
+  // Stable persisted key for a per-phase checklist item.
+  const checklistKey = (phaseId: string, label: string) =>
+    "checklist:" +
+    phaseId +
+    ":" +
+    label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const isChecked = (phaseId: string, label: string) =>
+    checklistState[checklistKey(phaseId, label)] === true;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -679,7 +703,8 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                         </div>
                       </div>
                       <span className="abm-phase-count mono">
-                        0/{detail.checklist.length}
+                        {detail.checklist.filter((c) => isChecked(p.id, c)).length}/
+                        {detail.checklist.length}
                       </span>
                       <ChevDown
                         className={
@@ -708,12 +733,32 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                         </div>
 
                         <ul className="abm-checklist">
-                          {detail.checklist.map((c, i) => (
-                            <li key={i}>
-                              <span className="abm-check-box" />
-                              {c}
-                            </li>
-                          ))}
+                          {detail.checklist.map((c, i) => {
+                            const checked = isChecked(p.id, c);
+                            return (
+                              <li key={i}>
+                                <button
+                                  type="button"
+                                  className="abm-checklist-item"
+                                  aria-pressed={checked}
+                                  disabled={!persisted || busy}
+                                  onClick={() =>
+                                    void handleChecklistToggle(
+                                      checklistKey(p.id, c),
+                                      !checked,
+                                    )
+                                  }
+                                >
+                                  <span
+                                    className={
+                                      "abm-check-box" + (checked ? " checked" : "")
+                                    }
+                                  />
+                                  <span>{c}</span>
+                                </button>
+                              </li>
+                            );
+                          })}
                         </ul>
 
                         {docsToShow.length > 0 && (

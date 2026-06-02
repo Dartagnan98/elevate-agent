@@ -957,6 +957,11 @@
   display: grid; place-items: center;
   padding: 32px 24px;
   animation: ab-modal-fade 180ms var(--ease-out) both;
+  /* The frameless Electron window has a draggable title band (~46px) at the
+     top. Its OS-level drag hit-testing swallows clicks on anything overlapping
+     that band — including this modal's close button (top: 10px). Force the
+     whole overlay to no-drag so every control inside stays clickable. */
+  -webkit-app-region: no-drag;
 }
 @keyframes ab-modal-fade {
   from { opacity: 0; }
@@ -1507,13 +1512,25 @@
   display: flex; flex-direction: column;
 }
 .abm-checklist li {
+  border-bottom: 1px solid var(--border-soft);
+}
+.abm-checklist li:last-child { border-bottom: 0; }
+.abm-checklist-item {
+  width: 100%;
   display: flex; align-items: center; gap: 12px;
   padding: 9px 4px;
   font-size: 13px;
   color: var(--fg);
-  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  appearance: none; background: transparent; border: 0;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 120ms var(--ease-out);
 }
-.abm-checklist li:last-child { border-bottom: 0; }
+.abm-checklist-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.abm-checklist-item:disabled { cursor: default; }
 .abm-check-box {
   width: 18px; height: 18px;
   border-radius: 3px;
@@ -1658,7 +1675,7 @@
 .abm-phase-motion-head { font-size: 11.5px; margin-bottom: 3px; gap: 6px; }
 .abm-phase-motion-line { font-size: 12px; margin-bottom: 4px; }
 .abm-phase-motion-gate { font-size: 12px; }
-.abm-checklist li    { padding: 6px 4px; font-size: 12.5px; gap: 10px; }
+.abm-checklist-item  { padding: 6px 4px; font-size: 12.5px; gap: 10px; }
 .abm-check-box       { width: 16px; height: 16px; border-radius: 2px; }
 .abm-doc-list        { font-size: 12.5px; gap: 2px; margin: 6px 0 0; }
 .abm-doc-list li     { gap: 7px; padding: 2px 0; }
