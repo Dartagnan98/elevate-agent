@@ -644,7 +644,16 @@ class ShellFileOperations(FileOperations):
         return ext in IMAGE_EXTENSIONS
     
     def _add_line_numbers(self, content: str, start_line: int = 1) -> str:
-        """Add line numbers to content in LINE_NUM|CONTENT format."""
+        """Add line numbers to content in ``LINE_NUM|CONTENT`` format.
+
+        Uses a compact ``<n>|`` gutter (``34|foo``) rather than a fixed-width
+        space-padded one (``    34|foo``). The padding was pure token overhead:
+        the leading spaces tokenize into extra tokens on every single line, and
+        read_file output is the un-shrinkable active tail that drives compaction
+        pressure. Measured ~14% fewer tokens per read with zero accuracy change
+        (the model still uses the line numbers to reference/patch lines; only
+        the padding was dropped). Ported from Hermes ea6eaabd8 / b1a25404b.
+        """
         from tools.tool_output_limits import get_max_line_length
         max_line_length = get_max_line_length()
         lines = content.split('\n')
@@ -653,7 +662,7 @@ class ShellFileOperations(FileOperations):
             # Truncate long lines
             if len(line) > max_line_length:
                 line = line[:max_line_length] + "... [truncated]"
-            numbered.append(f"{i:6d}|{line}")
+            numbered.append(f"{i}|{line}")
         return '\n'.join(numbered)
     
     def _expand_path(self, path: str) -> str:

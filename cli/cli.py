@@ -2228,8 +2228,17 @@ class ElevateCLI:
 
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
+            # last_prompt_tokens is parked at the -1 sentinel right after a
+            # compression, until the next real API call reports a prompt count
+            # (awaiting_real_usage_after_compression). -1 is truthy, so the
+            # plain "or 0" guard let it through and rendered "-1/200K" / "-1%"
+            # for that one transitional turn. Clamp negatives to 0.
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
+            if context_tokens < 0:
+                context_tokens = 0
             context_length = getattr(compressor, "context_length", 0) or 0
+            if context_length < 0:
+                context_length = 0
             snapshot["context_tokens"] = context_tokens
             snapshot["context_length"] = context_length or None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
@@ -7216,6 +7225,8 @@ class ElevateCLI:
 
         compressor = agent.context_compressor
         last_prompt = compressor.last_prompt_tokens
+        if last_prompt < 0:  # -1 sentinel parked right after compaction
+            last_prompt = 0
         ctx_len = compressor.context_length
         pct = min(100, (last_prompt / ctx_len * 100)) if ctx_len else 0
         compressions = compressor.compression_count

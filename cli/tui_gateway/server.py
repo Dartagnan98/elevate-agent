@@ -884,6 +884,11 @@ def _get_usage(agent) -> dict:
         # measurement yet, omit the percentage (UI shows "--") instead of
         # reporting a wrong one.
         ctx_used = getattr(comp, "last_prompt_tokens", 0) or 0
+        # -1 is the post-compaction sentinel ("awaiting real usage") — that IS
+        # the no-measurement case, so clamp to 0 and let the guard below show
+        # "--" instead of rendering "-1 tokens".
+        if ctx_used < 0:
+            ctx_used = 0
         ctx_max = getattr(comp, "context_length", 0) or 0
         if ctx_max and ctx_used:
             usage["context_used"] = ctx_used

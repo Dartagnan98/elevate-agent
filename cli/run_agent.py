@@ -8400,14 +8400,22 @@ class AIAgent:
                 force=True,
             )
 
-        # Update token estimate after compaction so pressure calculations
-        # use the post-compression count, not the stale pre-compression one.
+        # Keep a post-compression rough estimate for diagnostics, but do NOT
+        # treat it as provider-reported prompt usage. A schema-heavy rough
+        # estimate can stay above threshold even after the next real request
+        # fits, which made preflight re-fire compaction forever. Park the -1
+        # sentinel and let update_from_response adopt the real prompt_tokens.
+        # (Matches Hermes e38b0b55d.)
         _compressed_est = (
             estimate_tokens_rough(new_system_prompt)
             + estimate_messages_tokens_rough(compressed)
         )
-        self.context_compressor.last_prompt_tokens = _compressed_est
+        self.context_compressor.last_compression_rough_tokens = estimate_request_tokens_rough(
+            compressed, system_prompt=new_system_prompt or "", tools=self.tools or None
+        )
+        self.context_compressor.last_prompt_tokens = -1
         self.context_compressor.last_completion_tokens = 0
+        self.context_compressor.awaiting_real_usage_after_compression = True
 
         # Clear the file-read dedup cache.  After compression the original
         # read content is summarised away — if the model re-reads the same
@@ -9754,8 +9762,26 @@ class AIAgent:
                 system_prompt=active_system_prompt or "",
                 tools=self.tools or None,
             )
+            _compressor = self.context_compressor
+            _defer_preflight = getattr(
+                _compressor,
+                "should_defer_preflight_to_real_usage",
+                lambda _tokens: False,
+            )
 
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
+            if _defer_preflight(_preflight_tokens):
+                # Rough estimate is over threshold, but a compressed request
+                # already fit at the provider and the estimate has only grown
+                # a little — trust real usage instead of re-firing compaction
+                # from schema-inflated rough tokens. (Matches Hermes e38b0b55d.)
+                logger.info(
+                    "Skipping preflight compression: rough estimate ~%s >= %s, "
+                    "but last real provider prompt was %s after compression",
+                    f"{_preflight_tokens:,}",
+                    f"{_compressor.threshold_tokens:,}",
+                    f"{_compressor.last_real_prompt_tokens:,}",
+                )
+            elif _preflight_tokens >= self.context_compressor.threshold_tokens:
                 logger.info(
                     "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                     f"{_preflight_tokens:,}",
@@ -9800,8 +9826,8 @@ class AIAgent:
                         system_prompt=active_system_prompt or "",
                         tools=self.tools or None,
                     )
-                    if _preflight_tokens < self.context_compressor.threshold_tokens:
-                        break  # Under threshold
+                    if not self.context_compressor.should_compress(_preflight_tokens):
+                        break  # Under threshold, or anti-thrash guard stopped it
 
         # Plugin hook: pre_llm_call
         # Fired once per turn before the tool-calling loop.  Plugins can
@@ -12619,6 +12645,12 @@ class AIAgent:
                         # inflate completion_tokens with reasoning,
                         # causing premature compression.  (#12026)
                         _real_tokens = _compressor.last_prompt_tokens
+                    elif _compressor.last_prompt_tokens == -1:
+                        # Compression just ran and no API-reported prompt count
+                        # has arrived yet — don't recompute pressure from the
+                        # schema-heavy rough estimate (it would re-fire
+                        # compaction immediately). (Matches Hermes e38b0b55d.)
+                        _real_tokens = 0
                     else:
                         _real_tokens = estimate_messages_tokens_rough(messages)
 

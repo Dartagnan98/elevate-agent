@@ -6419,10 +6419,11 @@ class GatewayRunner:
             
             # Token counts and model are now persisted by the agent directly.
             # Keep only last_prompt_tokens here for context-window tracking and
-            # compression decisions.
+            # compression decisions. Clamp the -1 post-compaction sentinel to 0
+            # so it never persists into the dashboard ring or pressure math.
             self.session_store.update_session(
                 session_entry.session_key,
-                last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                last_prompt_tokens=max(0, agent_result.get("last_prompt_tokens", 0) or 0),
             )
 
             # Auto voice reply: send TTS audio before the text response
