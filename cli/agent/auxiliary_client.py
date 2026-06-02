@@ -455,6 +455,30 @@ _CODEX_AUX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_AUX_MODEL = "gpt-5.2-codex"
 
 
+def _resolve_codex_aux_model() -> str:
+    """Model for Codex when it sits in the auto auxiliary chain.
+
+    The ChatGPT-account Codex allow-list rotates, so the hardcoded
+    ``_CODEX_AUX_MODEL`` goes stale and gets rejected ("model is not supported
+    when using Codex with a ChatGPT account") — which silently breaks
+    compaction/summary and lets context balloon. Prefer the user's ACTIVE
+    codex model (config ``model.default``): if it's allow-listed for their
+    turns, it's allow-listed for auxiliary too. Only adopt it when their
+    primary provider IS openai-codex (otherwise a non-codex primary model
+    would be wrong for this endpoint); fall back to the constant otherwise.
+    """
+    try:
+        from elevate_cli.config import load_config
+        model_cfg = (load_config() or {}).get("model") or {}
+        active = (model_cfg.get("default") or "").strip()
+        provider = (model_cfg.get("provider") or "").strip().lower()
+        if active and provider == "openai-codex":
+            return active
+    except Exception:
+        pass
+    return _CODEX_AUX_MODEL
+
+
 def _codex_cloudflare_headers(access_token: str) -> Dict[str, str]:
     """Headers required to avoid Cloudflare 403s on chatgpt.com/backend-api/codex.
 
@@ -1967,13 +1991,14 @@ def _try_codex() -> Tuple[Optional[Any], Optional[str]]:
         if not codex_token:
             return None, None
         base_url = _CODEX_AUX_BASE_URL
-    logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", _CODEX_AUX_MODEL)
+    _aux_model = _resolve_codex_aux_model()
+    logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", _aux_model)
     real_client = OpenAI(
         api_key=codex_token,
         base_url=base_url,
         default_headers=_codex_cloudflare_headers(codex_token),
     )
-    return CodexAuxiliaryClient(real_client, _CODEX_AUX_MODEL), _CODEX_AUX_MODEL
+    return CodexAuxiliaryClient(real_client, _aux_model), _aux_model
 
 
 def _try_azure_foundry(
@@ -3290,8 +3315,9 @@ def resolve_provider_client(
             # through Codex without an explicit per-call model.  Hermes
             # upstream returns None here (drifting allow-list concern),
             # but we accept the staleness risk in exchange for keeping
-            # Codex usable as an auxiliary backstop.
-            model = _CODEX_AUX_MODEL
+            # Codex usable as an auxiliary backstop. Resolver prefers the
+            # user's active codex model so it tracks the rotating allow-list.
+            model = _resolve_codex_aux_model()
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
             # access to responses.stream() (e.g., the main agent loop).
