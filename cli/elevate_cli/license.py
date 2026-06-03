@@ -179,16 +179,29 @@ def sync_license_entitlements(lic: License) -> None:
     if lic.entitlements is None:
         return
     try:
-        from elevate_cli.access import REAL_ESTATE_ENTITLEMENTS, update_entitlement
+        from elevate_cli.access import (
+            REAL_ESTATE_ENTITLEMENTS,
+            update_affiliation,
+            update_entitlement,
+        )
 
         granted = set(lic.entitlements)
+        any_real_estate = False
         for entitlement in REAL_ESTATE_ENTITLEMENTS:
             allowed = entitlement in granted
+            if allowed:
+                any_real_estate = True
             update_entitlement(
                 entitlement,
                 status="active" if allowed else "locked",
                 owned_snapshot=allowed,
             )
+        # Real-estate packs carry requires_active_affiliation, so they stay
+        # "locked" (and the dashboards stay hidden) even when owned unless an
+        # affiliation is active. An HQ grant IS that affiliation — the realtor
+        # is a paid customer — so activate it whenever any pack is granted.
+        if any_real_estate:
+            update_affiliation(status="active")
     except Exception:
         # Access sync should never make an otherwise valid login unusable.
         return
