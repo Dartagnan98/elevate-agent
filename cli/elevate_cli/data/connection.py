@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional, Sequence
@@ -28,19 +29,78 @@ from psycopg_pool import ConnectionPool
 
 from elevate_cli.data import migrations
 from elevate_cli.data import pg_server
+from elevate_constants import get_account_key, get_elevate_home
 
 
-# Application DB inside the embedded Postgres instance. One DB per
-# Elevate install — matches the old single ``operational.db`` file.
-_APP_DB_NAME = "elevate_operational"
+# Legacy single-install operational DB (pre per-account scoping). Still the
+# on-disk name for installs that migrated SQLite→PG before scoping landed; the
+# boot-time migration adopts it into the first account's DB.
+LEGACY_APP_DB_NAME = "elevate_operational"
 
-# Module-level connection pool. Embedded Postgres is single-host, so one
-# pool is plenty. Sized to handle the dashboard + a few sync jobs hitting
-# the DB concurrently.
+
+def _app_db_name() -> str:
+    """Operational DB for the logged-in account: ``elevate_op_<account_key>``.
+
+    One Postgres database per account inside the shared embedded server, so
+    chats + dashboard data are isolated per login. ``get_account_key()`` reads
+    the active ``license.json`` live, so switching accounts switches the DB.
+    """
+    return f"elevate_op_{get_account_key()}"
+
+
+def _maybe_adopt_legacy(target_db: str, key: str) -> None:
+    """One-time migration so a pre-scoping install doesn't lose data on upgrade.
+
+    Before per-account scoping there was a single ``elevate_operational`` DB.
+    The first real account to log in after the upgrade adopts it: the database
+    is renamed to that account's ``elevate_op_<key>`` and the legacy cron jobs
+    are copied into its account dir. Guarded by an ``accounts/.legacy_adopted``
+    sentinel so it runs exactly once. Best-effort — never blocks ``connect()``.
+    """
+    if key == "default":
+        return
+    sentinel = get_elevate_home() / "accounts" / ".legacy_adopted"
+    if sentinel.exists():
+        return
+    try:
+        with psycopg.connect(pg_server.get_uri("postgres"), autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_db,))
+                if cur.fetchone() is not None:
+                    return  # account DB already exists — nothing to adopt
+                cur.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s",
+                    (LEGACY_APP_DB_NAME,),
+                )
+                if cur.fetchone() is None:
+                    return  # no legacy DB — fresh install
+                # Safe: scoped code never opens LEGACY_APP_DB_NAME, so there are
+                # no active connections blocking the rename.
+                cur.execute(
+                    f'ALTER DATABASE "{LEGACY_APP_DB_NAME}" RENAME TO "{target_db}"'
+                )
+        legacy_cron = get_elevate_home() / "cron" / "jobs.json"
+        if legacy_cron.exists():
+            acct_cron = get_elevate_home() / "accounts" / key / "cron"
+            acct_cron.mkdir(parents=True, exist_ok=True)
+            dest = acct_cron / "jobs.json"
+            if not dest.exists():
+                shutil.copy2(legacy_cron, dest)
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(key)
+    except Exception:
+        # Adoption is best-effort; a failure just means a fresh per-account DB.
+        pass
+
+
+# Module-level connection pool, bound to one account's DB at a time. When the
+# logged-in account changes (``_pool_account`` mismatch) the pool is torn down
+# and rebuilt against the new account's database — no process restart needed.
 _pool: Optional[ConnectionPool] = None
+_pool_account: Optional[str] = None
 _pool_lock = threading.Lock()
 _schema_lock = threading.Lock()
-_schema_ready: bool = False
+_schema_ready_for: Optional[str] = None
 
 
 def _pool_sizing() -> tuple[int, float]:
@@ -68,14 +128,26 @@ def _pool_sizing() -> tuple[int, float]:
 
 
 def _get_pool() -> ConnectionPool:
-    global _pool
-    if _pool is not None:
-        return _pool
+    global _pool, _pool_account
+    key = get_account_key()
+    pool = _pool
+    if pool is not None and _pool_account == key:
+        return pool
     with _pool_lock:
-        if _pool is not None:
+        if _pool is not None and _pool_account == key:
             return _pool
-        pg_server.ensure_database(_APP_DB_NAME)
-        uri = pg_server.get_uri(_APP_DB_NAME)
+        # Account switched (or first build): tear down the stale pool so the
+        # next checkout targets the new account's database.
+        if _pool is not None:
+            try:
+                _pool.close()
+            except Exception:
+                pass
+            _pool = None
+        db = _app_db_name()
+        _maybe_adopt_legacy(db, key)
+        pg_server.ensure_database(db)
+        uri = pg_server.get_uri(db)
         max_size, checkout_timeout = _pool_sizing()
         _pool = ConnectionPool(
             uri,
@@ -97,6 +169,7 @@ def _get_pool() -> ConnectionPool:
             },
             open=True,
         )
+        _pool_account = key
         return _pool
 
 
@@ -109,49 +182,45 @@ def _ensure_schema(conn: "PgConnection") -> None:
     in-process flag spares us the round-trip on every subsequent
     connection.
     """
-    global _schema_ready
-    if _schema_ready:
+    global _schema_ready_for
+    key = get_account_key()
+    if _schema_ready_for == key:
         return
     with _schema_lock:
-        if _schema_ready:
+        if _schema_ready_for == key:
             return
         migrations.run_pending(conn)
-        # Import here to break a circular import: _pg_data_migrate
-        # imports `_APP_DB_NAME` and `_Row` from this module.
-        from elevate_cli.data import _pg_data_migrate
-        _pg_data_migrate.maybe_migrate_sqlite_to_pg(conn)
-        # Memory-store SQLite → PG one-shot import. Runs after the
-        # operational copy so the FK targets it cares about (none cross
-        # the boundary today, but if we ever link memory_facts to a
-        # contact, that's the safe order).
-        from elevate_cli.data import _pg_memory_migrate
-        _pg_memory_migrate.maybe_migrate_memory_store(conn)
-        # Gateway Responses-API LRU cache one-shot import. Tiny (20KB on
-        # average), runs after memory because it depends on nothing.
-        from elevate_cli.data import _pg_response_migrate
-        _pg_response_migrate.maybe_migrate_response_store(conn)
-        # Kanban board (~/.elevate/kanban.db) SQLite → PG. Usually a
-        # no-op on installs with an empty kanban.db at cutover, but
-        # the migrator handles populated boards on other installs.
-        from elevate_cli.data import _pg_kanban_migrate
-        _pg_kanban_migrate.maybe_migrate_kanban_store(conn)
-        # Outreach store (~/.elevate/tools/data/outreach/outreach.db)
-        # SQLite → PG. Also remaps events.template_id from the stale
-        # 0001-era seed UUIDs to the freshly-imported live ones via
-        # _outreach_template_remap_stash (populated by 0011 SQL).
-        from elevate_cli.data import _pg_outreach_migrate
-        _pg_outreach_migrate.maybe_migrate_outreach_store(conn)
-        _schema_ready = True
+        # The legacy SQLite→PG one-shot imports only ever applied to the
+        # original single-install ``elevate_operational`` DB. Per-account
+        # databases are either fresh (start empty) or adopted from the legacy
+        # DB by the boot-time migration (which carries the already-imported
+        # data + sentinels), so the imports are skipped for them. This branch
+        # is unreachable in per-account mode (``_app_db_name()`` is always
+        # ``elevate_op_<key>``) and is kept only for a legacy single-DB install
+        # that somehow reaches ``connect()`` before adoption runs.
+        if _app_db_name() == LEGACY_APP_DB_NAME:
+            from elevate_cli.data import _pg_data_migrate
+            _pg_data_migrate.maybe_migrate_sqlite_to_pg(conn)
+            from elevate_cli.data import _pg_memory_migrate
+            _pg_memory_migrate.maybe_migrate_memory_store(conn)
+            from elevate_cli.data import _pg_response_migrate
+            _pg_response_migrate.maybe_migrate_response_store(conn)
+            from elevate_cli.data import _pg_kanban_migrate
+            _pg_kanban_migrate.maybe_migrate_kanban_store(conn)
+            from elevate_cli.data import _pg_outreach_migrate
+            _pg_outreach_migrate.maybe_migrate_outreach_store(conn)
+        _schema_ready_for = key
 
 
 def _reset_schema_cache() -> None:
     """Test helper — drop cached schema, pool, and embedded server state."""
-    global _pool, _schema_ready
+    global _pool, _pool_account, _schema_ready_for
     with _schema_lock:
-        _schema_ready = False
+        _schema_ready_for = None
     with _pool_lock:
         pool = _pool
         _pool = None
+        _pool_account = None
     if pool is not None:
         pool.close()
     pg_server._reset_server_for_tests()

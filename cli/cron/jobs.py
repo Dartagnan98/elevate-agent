@@ -16,7 +16,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from elevate_constants import get_elevate_home
+from elevate_constants import get_elevate_home, get_account_data_dir
 from typing import Optional, Dict, List, Any, Union
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,22 @@ OPERATIONAL_FRESHNESS_SCRIPT = "operational-freshness-snapshot.py"
 _jobs_file_lock = threading.Lock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+
+
+def _sync_account_cron_paths() -> None:
+    """Re-point CRON_DIR/JOBS_FILE/OUTPUT_DIR at the logged-in account's dir.
+
+    Cron jobs (automations + heartbeats) are scoped per account: switching
+    accounts (which rewrites ``license.json`` → new ``get_account_key()``) moves
+    the cron store to ``accounts/<key>/cron`` on the next op, no restart needed.
+    Called from ``ensure_dirs()`` — which every read/write path runs first — so
+    the module-level path constants always reflect the active account.
+    """
+    global CRON_DIR, JOBS_FILE, OUTPUT_DIR
+    base = get_account_data_dir() / "cron"
+    CRON_DIR = base
+    JOBS_FILE = base / "jobs.json"
+    OUTPUT_DIR = base / "output"
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -158,7 +174,8 @@ def _secure_file(path: Path):
 
 
 def ensure_dirs():
-    """Ensure cron directories exist with secure permissions."""
+    """Ensure the active account's cron directories exist with secure perms."""
+    _sync_account_cron_paths()
     CRON_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _secure_dir(CRON_DIR)

@@ -413,13 +413,16 @@ def _open_persistent_pg():
     from elevate_cli.data import pg_server
     from elevate_cli.data.connection import (
         PgConnection,
-        _APP_DB_NAME,
+        _app_db_name,
         _ensure_schema,
     )
     from psycopg.rows import dict_row
 
-    pg_server.ensure_database(_APP_DB_NAME)
-    uri = pg_server.get_uri(_APP_DB_NAME)
+    # Per-account operational DB — keeps holographic memory in the same
+    # database as chats/dashboards for the logged-in account (no split-brain).
+    db = _app_db_name()
+    pg_server.ensure_database(db)
+    uri = pg_server.get_uri(db)
     raw = psycopg.connect(uri, row_factory=dict_row, autocommit=False)
     conn = PgConnection(raw)
     # Make sure migrations + memory data import have run. _ensure_schema

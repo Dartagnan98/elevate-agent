@@ -4,6 +4,8 @@ Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
 """
 
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -55,6 +57,66 @@ def get_default_elevate_root() -> Path:
 
     # Not a profile path — ELEVATE_HOME itself is the root
     return env_path
+
+
+# ─── Per-account data scoping ─────────────────────────────────────────────────
+# Chats, automations/heartbeats (cron), and dashboards are scoped to the
+# logged-in account so switching accounts switches the data context. The home
+# folder, config, skills, auth, and license stay shared at the root.
+
+_account_key_cache: tuple[float, str] | None = None  # (license.json mtime, key)
+
+
+def get_account_key() -> str:
+    """Return a stable, identifier-safe key for the logged-in account.
+
+    Derived from the email in ``license.json`` (the active login):
+    ``acct_<sha1(email)[:16]>``. Returns ``"default"`` when no account is
+    logged in (fresh install / logged out). Matches Postgres identifier rules
+    (alphanumeric + underscore, ≤63 chars) so it doubles as a database name.
+
+    Cached against ``license.json``'s mtime, so an account switch (which
+    rewrites ``license.json``) is picked up on the next call without a process
+    restart — callers re-resolve their store live.
+    """
+    global _account_key_cache
+    lic = get_elevate_home() / "license.json"
+    try:
+        mtime = lic.stat().st_mtime_ns
+    except OSError:
+        _account_key_cache = None
+        return "default"
+    cached = _account_key_cache
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    email = ""
+    try:
+        with open(lic, "r", encoding="utf-8") as f:
+            email = str((json.load(f) or {}).get("email") or "").strip().lower()
+    except Exception:
+        email = ""
+    if email:
+        key = "acct_" + hashlib.sha1(email.encode("utf-8")).hexdigest()[:16]
+    else:
+        key = "default"
+    _account_key_cache = (mtime, key)
+    return key
+
+
+def get_account_data_dir() -> Path:
+    """Return the per-account data directory under the shared Elevate home.
+
+    ``<ELEVATE_HOME>/accounts/<account_key>/`` — holds the account's cron
+    jobs, chat-session files, and local ``state.db``. Created on demand with
+    ``0700`` perms. Config, skills, auth, and license stay at the shared root.
+    """
+    d = get_elevate_home() / "accounts" / get_account_key()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
 
 
 def get_optional_skills_dir(default: Path | None = None) -> Path:
