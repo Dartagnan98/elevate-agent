@@ -51,6 +51,10 @@ _jobs_file_lock = threading.Lock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
 
+# Test seam: when False, ``_sync_account_cron_paths()`` is a no-op so tests can
+# pin CRON_DIR/JOBS_FILE/OUTPUT_DIR directly. Always True in production.
+_account_scoping_enabled = True
+
 
 def _sync_account_cron_paths() -> None:
     """Re-point CRON_DIR/JOBS_FILE/OUTPUT_DIR at the logged-in account's dir.
@@ -61,6 +65,8 @@ def _sync_account_cron_paths() -> None:
     Called from ``ensure_dirs()`` — which every read/write path runs first — so
     the module-level path constants always reflect the active account.
     """
+    if not _account_scoping_enabled:
+        return
     global CRON_DIR, JOBS_FILE, OUTPUT_DIR
     base = get_account_data_dir() / "cron"
     CRON_DIR = base

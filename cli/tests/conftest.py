@@ -60,6 +60,24 @@ def _raise_nofile_limit_for_tests() -> None:
 _raise_nofile_limit_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _freeze_cron_account_scoping():
+    """Disable per-account cron path scoping during tests.
+
+    In production ``cron.jobs._sync_account_cron_paths()`` re-points
+    CRON_DIR/JOBS_FILE/OUTPUT_DIR at the logged-in account's dir. Tests pin
+    those constants directly (and ELEVATE_HOME is already an isolated tempdir),
+    so the seam is turned off here and restored afterward.
+    """
+    import cron.jobs as _cron_jobs
+    prev = _cron_jobs._account_scoping_enabled
+    _cron_jobs._account_scoping_enabled = False
+    try:
+        yield
+    finally:
+        _cron_jobs._account_scoping_enabled = prev
+
+
 def _optional_dependency_available(module_name: str) -> bool:
     """Return True when an optional test dependency is importable."""
     try:
