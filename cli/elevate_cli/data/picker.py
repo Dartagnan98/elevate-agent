@@ -238,6 +238,17 @@ def pick_template(
     enriched = dict(chosen)
     enriched["thompsonScores"] = thompson_scores
     enriched["pickRationale"] = rationale
+    # Fill the realtor's identity placeholders ({agent_name}/{brokerage}) from
+    # the setup profile so first-touch copy isn't hardcoded to one realtor.
+    # Lead-side variables stay for the drafting agent. Best-effort: any failure
+    # leaves the body untouched.
+    try:
+        from elevate_cli.outreach_db import apply_realtor_identity
+
+        if enriched.get("body"):
+            enriched["body"] = apply_realtor_identity(enriched["body"], conn)
+    except Exception:
+        pass
     return enriched
 
 

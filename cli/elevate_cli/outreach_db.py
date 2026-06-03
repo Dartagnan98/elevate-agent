@@ -37,58 +37,50 @@ LANES = ("new-outreach", "hot-leads-watcher", "follow-ups")
 # to a GIF attachment when rendering. The UI shows a "GIF" badge for any
 # template whose body contains the marker.
 SEED_TEMPLATES: dict[str, list[dict[str, str]]] = {
+    # First-touch (NEPQ). The intro carries the realtor's identity via the
+    # {agent_name}/{brokerage} placeholders, which are filled from the
+    # realtor's setup profile at draft time (see ``apply_realtor_identity``)
+    # — NOT hardcoded — so the same seed ships to every install.
     "new-outreach": [
         {
-            "name": "Warm intro",
-            "body": "Hey {first_name}, saw you came through {source}. I help folks in {city} find the right place without the usual back and forth. What are you trying to figure out first?",
+            "name": "NEPQ buyer activity context",
+            "body": "Hi {first_name} ! It's {agent_name} from {brokerage} :)\n\nSaw you were looking at {activity_context}. I don't want to send stuff that misses the mark.\n\nAre you focused on {area}, or still narrowing things down ?",
         },
         {
-            "name": "Buyer fit",
-            "body": "Hey {first_name}, you mentioned {topic} on {source}. Quick question: are you looking to be in by a date or still figuring out timing?",
+            "name": "NEPQ property view agency check",
+            "body": "Hi {first_name} ! It's {agent_name} from {brokerage} :)\n\nSaw you were looking at {viewed_property}. Are you already working with an agent on that one, or are you still unrepresented ?",
         },
         {
-            "name": "Listing alert",
-            "body": "Hi {first_name}, a couple new {area} listings just hit that match what you flagged. Want me to send the short list?",
+            "name": "NEPQ seller value split",
+            "body": "Hi {first_name} ! It's {agent_name} from {brokerage} :)\n\nSaw you came through about {seller_topic}. Are you mainly trying to get a ballpark number, or are you actually thinking about making a move ?",
+        },
+        {
+            "name": "NEPQ unknown context",
+            "body": "Hi {first_name} ! It's {agent_name} from {brokerage} :)\n\nYour name came through from {source}, but I don't have much context on what you were searching for.\n\nAre you looking around {area}, or did you land there by accident ?",
         },
     ],
     "hot-leads-watcher": [
         {
-            "name": "Live nudge",
-            "body": "{first_name}, just saw your {signal}. Want me to set up a viewing this week?",
+            "name": "NEPQ hot property view",
+            "body": "{first_name}, saw you were back looking at {viewed_property}.\n\nIs that one actually worth a closer look, or was it more of a maybe ?",
         },
         {
-            "name": "Open house live",
-            "body": "{first_name}, open house going on now at {address}. I can hold a slot for you in the next hour — want me to?",
-        },
-        {
-            "name": "Just-listed match",
-            "body": "Hot off MLS — {address} just hit and matches your {criteria}. Showings booking fast. Tonight or tomorrow morning easier?",
+            "name": "NEPQ hot search activity",
+            "body": "{first_name}, I saw {search_activity} around {criteria}.\n\nAre those still the kind of places you want to see, or should I adjust what you're getting ?",
         },
     ],
     "follow-ups": [
         {
-            "name": "7 day check-in",
-            "body": "Hey {first_name}, circling back on {topic}. Anything change on your end? Happy to send fresh options.",
+            "name": "NEPQ no-context cleanup",
+            "body": "Hi {first_name}, I'm cleaning up my system and don't want to keep sending noise.\n\nAre you still keeping an eye on {area}, or should I pause things for now ?",
         },
         {
-            "name": "GIF nudge",
-            "body": "Hey {first_name}, still on the hunt? [[gif:waving-hello]]\n\nIf timing shifted, no stress — just say the word and I'll pause the alerts.",
+            "name": "NEPQ search still useful",
+            "body": "Hey {first_name}, circling back on {criteria}.\n\nAre the matches still useful, or has the search gone on the back burner for now ?",
         },
         {
-            "name": "Market update",
-            "body": "{first_name}, quick one: median in {area} moved {delta} this month. Want a 30-second voice note breaking down what that means for your search?",
-        },
-        {
-            "name": "Soft close",
-            "body": "Hi {first_name}, no pressure, just want to make sure I'm not missing anything. What would make the next step easy for you?",
-        },
-        {
-            "name": "Breakup",
-            "body": "Hey {first_name}, I'll close out the file for now so you're not getting noise. Door's open whenever — just text and I'll pick right back up.",
-        },
-        {
-            "name": "Referral ask",
-            "body": "{first_name}, since timing's not right for you — anyone in your circle thinking about a move in the next 6 months? Happy to be a no-pressure resource for them too.",
+            "name": "NEPQ seller timing",
+            "body": "Hi {first_name}, circling back on {seller_topic}.\n\nAre you still curious what the number looks like, or has the idea of moving gone quiet for now ?",
         },
     ],
 }
@@ -203,6 +195,55 @@ def _write_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
         "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
+
+
+def _realtor_identity(conn=None) -> dict[str, str]:
+    """Best-effort read of the realtor's public identity from the admin setup
+    profile, used to fill the ``{agent_name}``/``{brokerage}`` placeholders in
+    outreach templates so first-touch copy carries THIS realtor's name instead
+    of a hardcoded one. Returns blanks when identity isn't set yet (a fresh
+    install before setup, or the table not yet created) so the placeholder is
+    simply left in place.
+    """
+
+    def _query(c) -> dict[str, str]:
+        try:
+            row = c.execute(
+                "SELECT license_name, realtor_legal_name, brokerage_name "
+                "FROM admin_setup_profile LIMIT 1"
+            ).fetchone()
+        except Exception:
+            return {"agent_name": "", "brokerage": ""}
+        if not row:
+            return {"agent_name": "", "brokerage": ""}
+        name = (row["license_name"] or row["realtor_legal_name"] or "").strip()
+        return {"agent_name": name, "brokerage": (row["brokerage_name"] or "").strip()}
+
+    if conn is not None:
+        return _query(conn)
+    try:
+        with _data_connection.connect() as c:
+            return _query(c)
+    except Exception:
+        return {"agent_name": "", "brokerage": ""}
+
+
+def apply_realtor_identity(body: str, conn=None) -> str:
+    """Fill identity placeholders (``{agent_name}``, ``{brokerage}``) in a
+    template body from the realtor's saved setup profile. Lead-context
+    variables (e.g. ``{first_name}``) are intentionally left for the drafting
+    agent. No-op when the body has no identity placeholder or identity isn't
+    set yet — keeping the seed identical for every install while resolving to
+    the right name at draft time.
+    """
+    if not body or ("{agent_name}" not in body and "{brokerage}" not in body):
+        return body
+    ident = _realtor_identity(conn)
+    if ident.get("agent_name"):
+        body = body.replace("{agent_name}", ident["agent_name"])
+    if ident.get("brokerage"):
+        body = body.replace("{brokerage}", ident["brokerage"])
+    return body
 
 
 def _insert_template(
@@ -380,11 +421,18 @@ def pick_template(lane: str, *, channel: str = "any", epsilon: float = 0.2) -> d
 
     untried = [t for t in templates if t["uses"] == 0]
     if untried:
-        return random.choice(untried)
-    if random.random() < epsilon:
-        return random.choice(templates)
-    templates.sort(key=lambda t: (t["winRate"], t["replyRate"], -t["uses"]), reverse=True)
-    return templates[0]
+        chosen = random.choice(untried)
+    elif random.random() < epsilon:
+        chosen = random.choice(templates)
+    else:
+        templates.sort(key=lambda t: (t["winRate"], t["replyRate"], -t["uses"]), reverse=True)
+        chosen = templates[0]
+    # Fill the realtor's identity ({agent_name}/{brokerage}) so first-touch copy
+    # isn't hardcoded to one realtor. Lead-side vars stay for the drafting agent.
+    if chosen and chosen.get("body"):
+        chosen = dict(chosen)
+        chosen["body"] = apply_realtor_identity(chosen["body"])
+    return chosen
 
 
 def record_use_in_transaction(

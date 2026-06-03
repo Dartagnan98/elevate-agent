@@ -116,7 +116,7 @@ OUTREACH_TEMPLATES_SCHEMA = {
         "\n\nActions:"
         "\n- list: list templates, optionally filtered by lane"
         "\n- grouped: all lanes in one shot, keyed by lane"
-        "\n- create: add a template (lane + name + body required; supports {first_name}, {city}, {topic}, {source}, {area}, {signal})"
+        "\n- create: add a template (lane + name + body required; lead vars {first_name}, {city}, {topic}, {source}, {area}, {signal} are filled by the agent; {agent_name}/{brokerage} fill automatically from the realtor's setup profile)"
         "\n- update: change name/body/channel/active by template_id"
         "\n- delete: remove by template_id"
         "\n- pick: epsilon-greedy choose a template for a lane (untried first, then best win-rate, sometimes random)"
@@ -141,7 +141,7 @@ OUTREACH_TEMPLATES_SCHEMA = {
             },
             "template_id": {"type": "string"},
             "name": {"type": "string"},
-            "body": {"type": "string", "description": "Message body. Variables in {curly_braces} get filled by the agent."},
+            "body": {"type": "string", "description": "Message body. Lead variables in {curly_braces} get filled by the agent; {agent_name}/{brokerage} fill automatically from the realtor's setup profile."},
             "channel": {"type": "string", "description": "any | sms | email | dm. Defaults to any."},
             "active": {"type": "boolean"},
             "epsilon": {"type": "number", "description": "Exploration rate for pick. Default 0.2."},
