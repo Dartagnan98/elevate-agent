@@ -108,8 +108,8 @@ export default function AdminUsers() {
     });
   }
 
-  async function load() {
-    setLoading(true);
+  async function load(silent = false) {
+    if (!silent) setLoading(true);
     setErr(null);
     try {
       const [usersRes, orgsRes] = await Promise.all([
@@ -135,14 +135,26 @@ export default function AdminUsers() {
       }
       setOrgDetails(detailMap);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : "load failed");
+      if (!silent) setErr(e instanceof Error ? e.message : "load failed");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
     load();
+    // Surface new sign-ups in near-real-time: poll in the background + refetch
+    // on focus, so an account created in the app appears here without a manual
+    // reload. Silent so it doesn't flash the loading state every few seconds.
+    const interval = window.setInterval(() => {
+      void load(true);
+    }, 5000);
+    const onFocus = () => void load(true);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
