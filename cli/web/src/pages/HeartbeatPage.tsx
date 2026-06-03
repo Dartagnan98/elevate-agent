@@ -14,9 +14,11 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { CronJob } from "@/lib/api";
+import type { AgentHubAgent } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectOption } from "@/components/ui/select";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
@@ -57,6 +59,8 @@ interface FormValues {
   dailyTime: string; // "HH:MM"
   customSchedule: string;
   instructions: string;
+  agent: string; // Agent Hub agent id that runs it ("" = default agent)
+  deliver: string; // result routing: local | telegram | discord | slack | email
 }
 
 const EMPTY_FORM: FormValues = {
@@ -65,7 +69,17 @@ const EMPTY_FORM: FormValues = {
   dailyTime: "08:00",
   customSchedule: "",
   instructions: "",
+  agent: "",
+  deliver: "local",
 };
+
+const DELIVER_OPTIONS: { value: string; label: string }[] = [
+  { value: "local", label: "In-app (this feed)" },
+  { value: "telegram", label: "Telegram" },
+  { value: "discord", label: "Discord" },
+  { value: "slack", label: "Slack" },
+  { value: "email", label: "Email" },
+];
 
 function isHeartbeat(job: CronJob): boolean {
   return !!job.origin && job.origin.type === "heartbeat";
@@ -115,6 +129,8 @@ function formFromJob(job: CronJob): FormValues {
     dailyTime,
     customSchedule,
     instructions: job.prompt || "",
+    agent: job.agent || "",
+    deliver: job.deliver || "local",
   };
 }
 
@@ -176,6 +192,7 @@ function HeartbeatForm({
   onCancel,
   submitLabel,
   busy,
+  agents,
 }: {
   value: FormValues;
   onChange: (next: FormValues) => void;
@@ -183,6 +200,7 @@ function HeartbeatForm({
   onCancel?: () => void;
   submitLabel: string;
   busy: boolean;
+  agents: AgentHubAgent[];
 }) {
   const set = (patch: Partial<FormValues>) => onChange({ ...value, ...patch });
 
@@ -265,6 +283,56 @@ function HeartbeatForm({
         />
       </div>
 
+      <div className="flex flex-col gap-3 sm:flex-row">
+        <div className="flex-1 space-y-1.5">
+          <Label htmlFor="hb-agent">Run as agent</Label>
+          <Select
+            id="hb-agent"
+            value={value.agent}
+            onValueChange={(v) => set({ agent: v })}
+          >
+            <SelectOption value="">Default agent</SelectOption>
+            {agents
+              .filter((a) => a.enabled)
+              .map((a) => (
+                <SelectOption key={a.id} value={a.id}>
+                  {a.name}
+                </SelectOption>
+              ))}
+          </Select>
+        </div>
+        <div className="flex-1 space-y-1.5">
+          <Label htmlFor="hb-deliver">Deliver to</Label>
+          <Select
+            id="hb-deliver"
+            value={value.deliver}
+            onValueChange={(v) => set({ deliver: v })}
+          >
+            {DELIVER_OPTIONS.map((d) => (
+              <SelectOption key={d.value} value={d.value}>
+                {d.label}
+              </SelectOption>
+            ))}
+          </Select>
+        </div>
+      </div>
+      {value.deliver !== "local" && (
+        <p className="text-[11px] text-muted-foreground">
+          {(() => {
+            const a = agents.find((x) => x.id === value.agent);
+            const who = a?.name || "the default agent";
+            if (
+              value.deliver === "telegram" &&
+              a?.telegramLane &&
+              !a.telegramLane.configured
+            ) {
+              return `${who} has no Telegram bot wired yet — set it up in Agent Hub, or it falls back to this feed.`;
+            }
+            return `The result is handed to ${who}, then sent to ${value.deliver}.`;
+          })()}
+        </p>
+      )}
+
       <div className="flex items-center gap-2">
         <Button onClick={onSubmit} disabled={busy}>
           {busy ? (
@@ -291,6 +359,7 @@ function HeartbeatForm({
 export default function HeartbeatPage() {
   const { toast, showToast } = useToast();
   const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [agents, setAgents] = useState<AgentHubAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [createForm, setCreateForm] = useState<FormValues>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
@@ -317,6 +386,15 @@ export default function HeartbeatPage() {
     const id = window.setInterval(refresh, 20000);
     return () => window.clearInterval(id);
   }, [refresh]);
+
+  // Agent Hub agents power the "Run as agent" picker. Telegram delivery routes
+  // to the chosen agent's own bot (per-agent ELEVATE_AGENT_<id>_TELEGRAM_*).
+  useEffect(() => {
+    api
+      .getAgentHub({ lite: true })
+      .then((snap) => setAgents(snap.agents || []))
+      .catch(() => setAgents([]));
+  }, []);
 
   const markBusy = (id: string, on: boolean) =>
     setBusyIds((prev) => {
@@ -350,7 +428,8 @@ export default function HeartbeatPage() {
         prompt: createForm.instructions.trim(),
         schedule,
         name: createForm.name.trim() || createForm.instructions.trim().slice(0, 40),
-        deliver: "local",
+        deliver: createForm.deliver || "local",
+        agent: createForm.agent || undefined,
         origin: HEARTBEAT_ORIGIN,
       });
       showToast("Heartbeat created ✓", "success");
@@ -385,6 +464,8 @@ export default function HeartbeatPage() {
         name: editForm.name.trim() || editForm.instructions.trim().slice(0, 40),
         prompt: editForm.instructions.trim(),
         schedule,
+        deliver: editForm.deliver || "local",
+        agent: editForm.agent || null,
       });
       showToast("Saved ✓", "success");
       setEditingId(null);
@@ -473,6 +554,7 @@ export default function HeartbeatPage() {
           onSubmit={handleCreate}
           submitLabel="Create heartbeat"
           busy={creating}
+          agents={agents}
         />
       </section>
 
@@ -527,6 +609,7 @@ export default function HeartbeatPage() {
                       onCancel={() => setEditingId(null)}
                       submitLabel="Save"
                       busy={busy}
+                      agents={agents}
                     />
                   </div>
                 ) : (
@@ -548,6 +631,14 @@ export default function HeartbeatPage() {
                             <Clock className="h-3 w-3" />
                             {prettySchedule(job)}
                           </span>
+                          {job.deliver && job.deliver !== "local" && (
+                            <span className="text-foreground/70">
+                              → {job.deliver}
+                              {job.agent
+                                ? ` · ${agents.find((a) => a.id === job.agent)?.name || job.agent}`
+                                : ""}
+                            </span>
+                          )}
                           <span>
                             last run{" "}
                             <span className={statusTone(job.last_status)}>
