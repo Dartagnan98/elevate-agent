@@ -3260,10 +3260,19 @@ export default function ChatPage() {
     const prev = prevMessagesForTraceRef.current;
     prevMessagesForTraceRef.current = messages;
     try {
+      // Content fingerprint: an id remap (cache `stored-N` id -> server id for
+      // the SAME answer, which happens on every resume) must NOT count as a
+      // vanish. We only care that the rendered CONTENT survives, not which id
+      // carries it. Without this, ~every resume logs false "vanished" events
+      // (listBefore == listAfter) that drown out the real-blank signal.
+      const cfp = (m: ChatMessage) =>
+        `${m.role}:${(m.content ?? "").replace(/\s+/g, " ").trim().slice(0, 160)}`;
+      const nowContent = new Set(messages.map(cfp));
       for (const pm of prev) {
         if (pm.role !== "assistant") continue;
         const prevLen = (pm.content ?? "").replace(/\s+/g, "").length;
         if (prevLen <= 80) continue;
+        if (nowContent.has(cfp(pm))) continue; // content preserved (id remap) -> not a vanish
         const now = messages.find((m) => m.id === pm.id);
         const nowLen = now ? (now.content ?? "").replace(/\s+/g, "").length : -1;
         if (nowLen === -1 || nowLen < prevLen * 0.5) {
