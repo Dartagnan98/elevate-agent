@@ -2564,6 +2564,11 @@ export default function ChatPage() {
     Boolean(resumeId || newChatId),
   );
   const [version, setVersion] = useState(0);
+  // The chat key (resume/new/seed) that the currently-displayed messages were
+  // loaded under. Used to tell a same-chat re-run (reconnect / liveness
+  // watchdog -> version bump) apart from genuinely entering a different chat,
+  // so the connect effect never wipes a conversation it just rendered.
+  const renderedChatKeyRef = useRef<string | null>(null);
   const gw = useMemo(
     () => getSharedChatGateway(version),
     [version],
@@ -3374,6 +3379,8 @@ export default function ChatPage() {
       const restoredCached = mergeActiveTurnSnapshot(cached ?? [], activeTurnSnapshot);
       if (restoredCached.length) {
         historyHydratedRef.current = true;
+        renderedChatKeyRef.current =
+          resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
         setMessages(restoredCached);
         hydrateArtifactsFromMessages(restoredCached);
         if (activeTurnSnapshot || hasPendingTurn(restoredCached)) {
@@ -3428,7 +3435,21 @@ export default function ChatPage() {
         });
     } else {
       persistedSessionIdRef.current = null;
-      setMessages([]);
+      const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+      setMessages((prev) => {
+        // A reconnect / liveness-watchdog re-run for THIS same chat must not
+        // wipe the conversation it already rendered. Only blank when the chat
+        // key actually changed (genuinely a different chat).
+        if (prev.length && renderedChatKeyRef.current === _chatKey) {
+          blankTrace("blocked same-chat list wipe (connect else)", {
+            count: prev.length,
+            chatKey: _chatKey,
+          });
+          return prev;
+        }
+        renderedChatKeyRef.current = _chatKey;
+        return [];
+      });
     }
 
     const accepts = (ev: GatewayEvent) => {
@@ -4071,14 +4092,40 @@ export default function ChatPage() {
             );
             const cached = resumeId ? restoreTranscript(resumeId) : null;
             const merged = mergeServerWithCache(hydrated, cached);
-            setMessages(merged);
+            const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+            setMessages((prev) => {
+              if (
+                merged.length === 0 &&
+                prev.length &&
+                renderedChatKeyRef.current === _chatKey
+              ) {
+                blankTrace("blocked same-chat empty-merge wipe", {
+                  count: prev.length,
+                  chatKey: _chatKey,
+                });
+                return prev;
+              }
+              renderedChatKeyRef.current = _chatKey;
+              return merged;
+            });
             hydrateArtifactsFromMessages(merged);
             if (persistedSessionIdRef.current) {
               rememberTranscript(persistedSessionIdRef.current, merged);
             }
           }
         } else if (!resumeId && !historyHydratedRef.current) {
-          setMessages([]);
+          const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+          setMessages((prev) => {
+            if (prev.length && renderedChatKeyRef.current === _chatKey) {
+              blankTrace("blocked same-chat list wipe (fresh branch)", {
+                count: prev.length,
+                chatKey: _chatKey,
+              });
+              return prev;
+            }
+            renderedChatKeyRef.current = _chatKey;
+            return [];
+          });
         }
         const stillRunning =
           "running" in created &&
