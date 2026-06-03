@@ -3721,6 +3721,38 @@ export default function ChatPage() {
           setQueuedInputs([]);
         }
         setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
+
+        // Blank-render backstop. On a long turn the live assistant row can be
+        // lost mid-stream (e.g. a transcript merge during a reconnect, or a
+        // dropped delta after a mid-turn compaction), leaving the chat blank
+        // even though the gateway emitted the answer and the server persisted
+        // the full turn. The turn is over and persisted now, so reconcile the
+        // visible transcript against the saved server copy. mergeServerWithCache
+        // is fingerprint-deduped, so this is a no-op when the answer already
+        // painted and a backfill when it didn't.
+        if (status !== "interrupted") {
+          const reconcileId = persistedSessionIdRef.current ?? resumeId;
+          if (reconcileId) {
+            window.setTimeout(() => {
+              void api
+                .getSessionMessages(reconcileId)
+                .then((response) => {
+                  const hydrated = normalizeStoredTranscript(response.messages);
+                  if (!hydrated.length) return;
+                  setMessages((prev) => {
+                    const merged = mergeServerWithCache(hydrated, prev);
+                    rememberTranscript(response.session_id || reconcileId, merged);
+                    rememberTranscript(reconcileId, merged);
+                    hydrateArtifactsFromMessages(merged);
+                    return merged;
+                  });
+                })
+                .catch(() => {
+                  /* best-effort backfill; the live copy already stands */
+                });
+            }, 400);
+          }
+        }
       }),
     );
     unsubs.push(
