@@ -2213,6 +2213,7 @@ export interface CronJob {
   last_status?: string | null;
   last_summary?: string | null;
   last_session_id?: string | null;
+  origin?: { type?: string; source?: string; [k: string]: unknown } | null;
 }
 
 export interface CronAttention {
@@ -2248,6 +2249,7 @@ export interface CronJobCreateRequest {
   workdir?: string | null;
   expected_readiness_version?: string | null;
   backfill_pending?: boolean;
+  origin?: { type?: string; source?: string; [k: string]: unknown } | null;
 }
 
 export interface SkillInfo {

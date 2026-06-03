@@ -100,6 +100,7 @@ const loadSessionsPage = () => import("@/pages/SessionsPage");
 const loadLogsPage = () => import("@/pages/LogsPage");
 const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
 const loadCronPage = () => import("@/pages/CronPage");
+const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
 const loadSkillsPage = () => import("@/pages/SkillsPage");
 const loadChatPage = () => import("@/pages/ChatPage");
 const loadAgentHubPage = () => import("@/pages/AgentHubPage");
@@ -126,6 +127,7 @@ const SessionsPage = lazy(loadSessionsPage);
 const LogsPage = lazy(loadLogsPage);
 const AnalyticsPage = lazy(loadAnalyticsPage);
 const CronPage = lazy(loadCronPage);
+const HeartbeatPage = lazy(loadHeartbeatPage);
 const SkillsPage = lazy(loadSkillsPage);
 const ChatPage = lazy(loadChatPage);
 const AgentHubPage = lazy(loadAgentHubPage);
@@ -155,6 +157,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/analytics": loadAnalyticsPage,
   "/logs": loadLogsPage,
   "/cron": loadCronPage,
+  "/heartbeat": loadHeartbeatPage,
   "/skills": loadSkillsPage,
   "/config": loadConfigPage,
   "/env": loadEnvPage,
@@ -400,6 +403,7 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/analytics": AnalyticsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
+  "/heartbeat": HeartbeatPage,
   "/skills": SkillsPage,
   "/config": ConfigPage,
   "/env": EnvPage,
@@ -1585,6 +1589,8 @@ function DesktopSidebar({
   if (realEstatePacks.realEstateMarketing) {
     realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
+  // Heartbeat = the simple scheduled check-in surface; Automations = power cron.
+  realEstateNavItems.push({ icon: Activity, label: "Heartbeat", path: "/heartbeat" });
   // Automations lives in this (now "Agent") section — always shown.
   realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const toolsNavItems: NavItem[] = [
