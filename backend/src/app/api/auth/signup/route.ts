@@ -25,6 +25,8 @@ export const runtime = "nodejs";
 const Body = z.object({
   email: z.string().email(),
   password: z.string().min(8),
+  first_name: z.string().trim().min(1).max(100).optional(),
+  last_name: z.string().trim().min(1).max(100).optional(),
   device_label: z.string().optional(),
 });
 
@@ -58,7 +60,13 @@ export async function POST(req: NextRequest) {
   const password_hash = await bcrypt.hash(password, 12);
   // Defaults: status "active", entitlements []. Active so login passes; empty
   // so the admin controls which packs each realtor gets.
-  const user = await createUser({ email, password_hash, entitlements: [] });
+  const user = await createUser({
+    email,
+    password_hash,
+    entitlements: [],
+    first_name: parsed.data.first_name ?? null,
+    last_name: parsed.data.last_name ?? null,
+  });
 
   const access_info = await effectiveAccess(user.id);
   const refresh = generateRefreshToken();

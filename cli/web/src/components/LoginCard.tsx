@@ -31,6 +31,8 @@ export function LoginCard({ onAuthChange }: Props) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [activationResult, setActivationResult] = useState<LicenseActivateResponse | null>(null);
@@ -140,6 +142,11 @@ export function LoginCard({ onAuthChange }: Props) {
   };
 
   const handleCreateAccount = async () => {
+    if (!firstName.trim() || !lastName.trim()) {
+      setPhase("error");
+      setError("Enter your first and last name.");
+      return;
+    }
     if (!email.trim() || !password) return;
     if (password.length < 8) {
       setPhase("error");
@@ -154,7 +161,14 @@ export function LoginCard({ onAuthChange }: Props) {
     setPhase("signing_in");
     setError(null);
     try {
-      const result = await api.createAccount(email.trim(), password, undefined, true);
+      const result = await api.createAccount(
+        email.trim(),
+        password,
+        firstName.trim(),
+        lastName.trim(),
+        undefined,
+        true,
+      );
       await completeActivation(result);
     } catch (err: unknown) {
       setPhase("error");
@@ -171,6 +185,8 @@ export function LoginCard({ onAuthChange }: Props) {
     setCode("");
     setPassword("");
     setConfirmPassword("");
+    setFirstName("");
+    setLastName("");
     if (phase === "error") setPhase("logged_out");
   };
 
@@ -383,6 +399,39 @@ export function LoginCard({ onAuthChange }: Props) {
           }}
           className="space-y-3"
         >
+          {mode === "create" && (
+            <div className="flex gap-2">
+              <div className="flex-1 space-y-1.5">
+                <label htmlFor="login-firstname" className="text-xs font-medium text-muted-foreground">
+                  First name
+                </label>
+                <Input
+                  id="login-firstname"
+                  type="text"
+                  placeholder="First"
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  disabled={phase === "signing_in" || phase === "syncing"}
+                  autoComplete="given-name"
+                />
+              </div>
+              <div className="flex-1 space-y-1.5">
+                <label htmlFor="login-lastname" className="text-xs font-medium text-muted-foreground">
+                  Last name
+                </label>
+                <Input
+                  id="login-lastname"
+                  type="text"
+                  placeholder="Last"
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  disabled={phase === "signing_in" || phase === "syncing"}
+                  autoComplete="family-name"
+                />
+              </div>
+            </div>
+          )}
+
           <div className="space-y-1.5">
             <label htmlFor="login-email" className="text-xs font-medium text-muted-foreground">
               Email
@@ -489,7 +538,8 @@ export function LoginCard({ onAuthChange }: Props) {
               requestingCode ||
               !email.trim() ||
               (mode === "password" && !password) ||
-              (mode === "create" && (!password || !confirmPassword)) ||
+              (mode === "create" &&
+                (!firstName.trim() || !lastName.trim() || !password || !confirmPassword)) ||
               (mode === "code" && codeSent && !code.trim())
             }
           >

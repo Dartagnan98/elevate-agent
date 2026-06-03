@@ -24,6 +24,8 @@ type User = {
   status: string;
   role: "owner" | "admin" | "user";
   is_developer: boolean;
+  first_name: string | null;
+  last_name: string | null;
   entitlements: string[];
   blocked_entitlements: string[];
   stripe_customer: string | null;
@@ -661,7 +663,9 @@ function MemberRow(props: {
           <Avatar email={u.email} size={36} />
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{u.email}</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                {[u.first_name, u.last_name].filter(Boolean).join(" ") || u.email}
+              </div>
               {u.is_developer && <Badge tone="dev" size="sm">dev</Badge>}
               {membershipRole && (
                 <Badge tone={membershipRole === "owner" ? "amber" : "neutral"} size="sm">
@@ -673,6 +677,12 @@ function MemberRow(props: {
               display: "flex", alignItems: "center", gap: 10, marginTop: 4,
               fontSize: 11, color: "var(--text-dim)", flexWrap: "wrap",
             }}>
+              {(u.first_name || u.last_name) && (
+                <>
+                  <span>{u.email}</span>
+                  <span style={{ color: "var(--text-faint)" }}>·</span>
+                </>
+              )}
               <span style={{ display: "inline-flex", alignItems: "center" }}>
                 <StatusDot status={u.status} />{u.status}
               </span>

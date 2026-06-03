@@ -16,6 +16,8 @@ export type StoreUser = {
   blocked_entitlements: string[];
   role: "owner" | "admin" | "user";
   is_developer: boolean;
+  first_name: string | null;
+  last_name: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -327,6 +329,8 @@ export async function createUser(input: {
   status?: StoreUser["status"];
   role?: StoreUser["role"];
   entitlements?: string[];
+  first_name?: string | null;
+  last_name?: string | null;
 }): Promise<StoreUser> {
   const { data, error } = await supabase()
     .from("users")
@@ -337,6 +341,8 @@ export async function createUser(input: {
       status: input.status ?? "active",
       role: input.role ?? "user",
       entitlements: input.entitlements ?? [],
+      first_name: input.first_name ?? null,
+      last_name: input.last_name ?? null,
     })
     .select("*")
     .single();

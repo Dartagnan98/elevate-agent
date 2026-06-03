@@ -263,7 +263,13 @@ def login(email: str, password: str, device_label: Optional[str] = None) -> Lice
     return lic
 
 
-def create_account(email: str, password: str, device_label: Optional[str] = None) -> License:
+def create_account(
+    email: str,
+    password: str,
+    device_label: Optional[str] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+) -> License:
     """POST /api/auth/signup (open self-serve account creation), persist license.
 
     Mirrors :func:`login` but hits the signup endpoint, which creates the
@@ -278,6 +284,8 @@ def create_account(email: str, password: str, device_label: Optional[str] = None
             json={
                 "email": email,
                 "password": password,
+                "first_name": first_name,
+                "last_name": last_name,
                 "device_label": device_label or os.uname().nodename,
             },
         )

@@ -17,6 +17,8 @@ export async function GET(req: NextRequest) {
       status: u.status,
       role: u.role,
       is_developer: u.is_developer,
+      first_name: u.first_name,
+      last_name: u.last_name,
       entitlements: u.entitlements,
       blocked_entitlements: u.blocked_entitlements || [],
       stripe_customer: u.stripe_customer,

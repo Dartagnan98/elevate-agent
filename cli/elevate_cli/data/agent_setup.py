@@ -52,8 +52,8 @@ _DEFAULT_ITEMS: list[dict[str, Any]] = [
         "key": "model_embedding",
         "category": "model",
         "label": "Embedding model",
-        "description": "Used for memory recall and retrieval. Usually the same provider as your primary LLM.",
-        "required": True,
+        "description": "Optional. Sharpens semantic recall; memory falls back to keyword search without it.",
+        "required": False,
         "sort_order": 20,
     },
     {
@@ -414,6 +414,39 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     overlays: dict[str, dict[str, Any]] = {}
 
+    # A primary model is "ready" if it's pinned in config.yaml OR a supported
+    # OAuth provider is signed in. OAuth flows (gpt-5.5 via Codex — the bundled
+    # realtor default) carry NO API key in the env, so the key probes below miss
+    # them and a realtor gets stuck at "Missing: model_primary". Recognize both
+    # so onboarding completes for OAuth-only setups.
+    try:
+        from elevate_cli.config import load_config as _load_cfg
+
+        _cfg_model = (_load_cfg() or {}).get("model") or {}
+    except Exception:
+        _cfg_model = {}
+    _cfg_provider = str(_cfg_model.get("provider") or "").strip()
+    _cfg_default = str(_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
+    _codex_logged_in = False
+    try:
+        from elevate_cli import auth as _auth
+
+        _codex_logged_in = bool(_auth.get_codex_auth_status().get("logged_in"))
+    except Exception:
+        _codex_logged_in = False
+    if _cfg_provider and _cfg_default:
+        overlays["model_primary"] = {
+            "status": "configured",
+            "provider": _cfg_provider,
+            "value": {"model": _cfg_default, "apiKey": "", "secretPresent": True, "secretSource": "config"},
+        }
+    elif _codex_logged_in:
+        overlays["model_primary"] = {
+            "status": "configured",
+            "provider": "openai-codex",
+            "value": {"model": _cfg_default or "gpt-5.5", "apiKey": "", "secretPresent": True, "secretSource": "oauth"},
+        }
+
     anthropic_token = _get("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     openai_key = _get("OPENAI_API_KEY")
     gemini_key = _get("GEMINI_API_KEY", "GOOGLE_API_KEY", "NANO_BANANA_API_KEY")
@@ -673,6 +706,19 @@ def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
         merged["detected"] = True
         return merged
 
+    # Mode 1c: item has a persisted provider but is still flagged missing —
+    # e.g. the wizard saved an OAuth provider choice (gpt-5.5 via Codex) that
+    # carries no API key, so the save couldn't prove a credential. If the
+    # runtime now detects a ready credential for it (config-pinned model, OAuth
+    # login, or env key), promote the STATUS only and keep the operator's
+    # provider/model. Without this the readiness gate reports the chosen primary
+    # as "missing" forever for OAuth-only setups.
+    if status in {"missing", "skipped"} and overlay.get("status") in READY_STATUSES:
+        merged = dict(item)
+        merged["status"] = overlay["status"]
+        merged["detected"] = True
+        return merged
+
     # Mode 2: enrich an already-saved item with secret previews so re-run
     # wizards know the env still has the key. Never overwrite what the
     # operator actually typed.
@@ -709,13 +755,19 @@ def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+# Canonical required-ness lives in code (_DEFAULT_ITEMS), not the seeded DB
+# rows — so flipping an item required→optional (e.g. model_embedding) takes
+# effect on existing installs without a re-seed/migration.
+_REQUIRED_BY_KEY = {it["key"]: bool(it["required"]) for it in _DEFAULT_ITEMS}
+
+
 def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "key": row["key"],
         "category": row["category"],
         "label": row["label"],
         "description": row["description"],
-        "required": bool(row["required"]),
+        "required": _REQUIRED_BY_KEY.get(row["key"], bool(row["required"])),
         "status": row["status"],
         "provider": row["provider"],
         "value": _decode_json(row["value_json"]),

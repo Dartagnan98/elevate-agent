@@ -1050,6 +1050,9 @@ class LicenseActivateBody(BaseModel):
     password: str
     backend_url: Optional[str] = None
     skip_skill_sync: bool = False
+    # Collected at "Create account" (signup only); ignored by activate/login.
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
 
 
 class LoginCodeRequestBody(BaseModel):
@@ -1149,7 +1152,9 @@ async def signup_license(body: LicenseActivateBody, request: Request):
             pass
 
     try:
-        lic = lic_mod.create_account(body.email, body.password)
+        lic = lic_mod.create_account(
+            body.email, body.password, first_name=body.first_name, last_name=body.last_name
+        )
     except lic_mod.LicenseError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

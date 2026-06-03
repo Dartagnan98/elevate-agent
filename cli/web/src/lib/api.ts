@@ -237,6 +237,8 @@ export const api = {
   createAccount: (
     email: string,
     password: string,
+    firstName: string,
+    lastName: string,
     backendUrl?: string,
     skipSkillSync?: boolean,
   ) =>
@@ -246,6 +248,8 @@ export const api = {
       body: JSON.stringify({
         email,
         password,
+        first_name: firstName || undefined,
+        last_name: lastName || undefined,
         backend_url: backendUrl || undefined,
         skip_skill_sync: skipSkillSync || undefined,
       }),

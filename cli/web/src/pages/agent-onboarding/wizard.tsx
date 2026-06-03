@@ -446,6 +446,10 @@ export function AgentOnboardingWizard({
       // the user pasted one in this session.
       const providerConnected =
         connectedProviderIds.has(draft.primaryProvider) ||
+        // The grouped value ("openai"/"qwen") resolves to the concrete OAuth id
+        // ("openai-codex"/"qwen-oauth") — that live OAuth session IS the
+        // credential, so no pasted key is needed.
+        connectedProviderIds.has(catalogProviderId) ||
         // claude-code subscription credentials count as anthropic access
         (draft.primaryProvider === "anthropic" && connectedProviderIds.has("claude-code"));
       const primaryHasKey =
@@ -489,7 +493,7 @@ export function AgentOnboardingWizard({
       }
     }
     return null;
-  }, [step.id, draft]);
+  }, [step.id, draft, anyProviderConnected, connectedProviderIds, catalogProviderId]);
 
   const canAdvance = missingMessage == null;
 
