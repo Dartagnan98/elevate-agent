@@ -2625,7 +2625,29 @@ export default function ChatPage() {
   const dismissedArtifactsRef = useRef<Set<string>>(new Set());
   const previewAutoOpenDisabledRef = useRef(false);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessagesRaw] = useState<ChatMessage[]>([]);
+  // Wrap the setter so ANY call that wipes a populated list to empty is caught
+  // with its call stack. This is how we pin the exact eraser of the blank bug
+  // (a reconnect/watchdog re-run clearing the conversation) regardless of which
+  // setMessages site does it.
+  const setMessages = useCallback(
+    (updater: Parameters<typeof setMessagesRaw>[0]) => {
+      setMessagesRaw((prev) => {
+        const next =
+          typeof updater === "function"
+            ? (updater as (p: ChatMessage[]) => ChatMessage[])(prev)
+            : updater;
+        if (prev.length >= 2 && (next?.length ?? 0) === 0) {
+          blankTrace("LIST WIPED to empty", {
+            prevCount: prev.length,
+            stack: new Error().stack?.split("\n").slice(1, 14).join(" || "),
+          });
+        }
+        return next;
+      });
+    },
+    [],
+  );
   const [tools, setTools] = useState<ToolEntry[]>([]);
   // Subagent panel is no longer rendered (consolidated into the assistant
   // activity digest), but event handlers still call setSubagents so we
