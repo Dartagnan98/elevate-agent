@@ -1305,14 +1305,22 @@ function DesktopSidebar({
     };
   }, [desktopUpdater]);
 
+  const [installing, setInstalling] = useState(false);
   const updateBusy =
-    pendingAction === "update" || (activeAction === "update" && systemActionRunning);
+    installing ||
+    pendingAction === "update" ||
+    (activeAction === "update" && systemActionRunning);
 
   const handleSidebarUpdate = useCallback(async () => {
     const desktopStatus = desktopUpdate?.status;
     if (desktopUpdater && desktopStatus === "ready") {
+      // Acknowledge the click INSTANTLY. quitAndInstall has a couple-second
+      // handoff before the window closes; without this the UI looks dead and
+      // users click again.
+      setInstalling(true);
       const result = await desktopUpdater.install();
       if (!result?.ok) {
+        setInstalling(false);
         showToast(result?.message || "Update is not ready yet", "error");
       }
       return;
