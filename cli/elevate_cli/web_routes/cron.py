@@ -13,6 +13,10 @@ class CronJobCreate(BaseModel):
     schedule: str
     name: str = ""
     deliver: str = "local"
+    # Provenance tag (e.g. {"type": "heartbeat"}) so a feature surface can
+    # filter its own jobs out of the general cron list. create_job already
+    # accepts ``origin``; this just lets the HTTP layer forward it.
+    origin: Optional[dict] = None
     # Phase 3 (/leads): universal cron form fields. All optional so existing
     # callers keep working. Skill-bound mode = pass `skill`. Per-job model is
     # the explicit override; tier is the harness-resolved fallback.
@@ -132,6 +136,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
                 schedule=body.schedule,
                 name=body.name,
                 deliver=body.deliver,
+                origin=body.origin,
                 skill=body.skill,
                 skills=body.skills,
                 agent=body.agent,
