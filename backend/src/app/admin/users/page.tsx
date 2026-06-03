@@ -9,6 +9,7 @@ import {
   Button,
   Card,
   ErrorBanner,
+  Input,
   Label,
   LoadingRow,
   PageHeader,
@@ -78,6 +79,17 @@ export default function AdminUsers() {
   const [sessionsByUser, setSessionsByUser] = useState<Record<string, SessionRow[]>>({});
   const [sessionsLoading, setSessionsLoading] = useState<Record<string, boolean>>({});
   const [expandedSessions, setExpandedSessions] = useState<Record<string, boolean>>({});
+  // Invite / provision a member into an org. Wires POST /members, which creates
+  // an account-by-invitation (invite-only model) and returns a shareable accept
+  // link. An already-existing email is added to the team directly.
+  const [inviteOrgId, setInviteOrgId] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<MembershipRole>("member");
+  const [inviting, setInviting] = useState(false);
+  const [inviteResult, setInviteResult] = useState<
+    { orgId: string; email: string; url?: string; emailed?: boolean; added?: boolean } | null
+  >(null);
+  const [copied, setCopied] = useState(false);
 
   function token() {
     if (typeof window === "undefined") return null;
@@ -184,6 +196,36 @@ export default function AdminUsers() {
       setErr(e instanceof Error ? e.message : "remove failed");
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function inviteMember(orgId: string, e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setInviting(true);
+    setInviteResult(null);
+    try {
+      const res = await authedFetch(`/api/admin/orgs/${orgId}/members`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: inviteEmail.trim().toLowerCase(), role: inviteRole }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "invite failed");
+      setInviteResult({
+        orgId,
+        email: inviteEmail.trim().toLowerCase(),
+        url: data.accept_url,
+        emailed: data.emailed,
+        added: data.added,
+      });
+      setInviteEmail("");
+      setCopied(false);
+      await load();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "invite failed");
+    } finally {
+      setInviting(false);
     }
   }
 
@@ -374,6 +416,115 @@ export default function AdminUsers() {
                     </div>
                   )}
                 </div>
+              </div>
+
+              {/* Invite / provision a member */}
+              <div style={{ marginBottom: 14 }}>
+                {inviteOrgId === o.id ? (
+                  <form
+                    onSubmit={(e) => inviteMember(o.id, e)}
+                    className="stack-mobile"
+                    style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+                  >
+                    <div style={{ flex: "1 1 220px" }}>
+                      <Label>Invite by email</Label>
+                      <Input
+                        type="email"
+                        placeholder="realtor@brokerage.com"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div style={{ flex: "0 0 120px" }}>
+                      <Label>Role</Label>
+                      <Select
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value as MembershipRole)}
+                      >
+                        <option value="member">member</option>
+                        <option value="admin">admin</option>
+                        <option value="owner">owner</option>
+                      </Select>
+                    </div>
+                    <Button type="submit" variant="primary" size="sm" loading={inviting}>
+                      Send invite
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setInviteOrgId(null);
+                        setInviteResult(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </form>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setInviteOrgId(o.id);
+                      setInviteResult(null);
+                      setInviteEmail("");
+                    }}
+                  >
+                    + Invite member
+                  </Button>
+                )}
+
+                {inviteResult?.orgId === o.id && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 12px",
+                      borderRadius: 8,
+                      border: "1px solid #3a5a44",
+                      background: "var(--sage-bg, rgba(60,120,80,0.08))",
+                      fontSize: 12,
+                    }}
+                  >
+                    {inviteResult.added ? (
+                      <span>
+                        ✓ <strong>{inviteResult.email}</strong> already had an account — added to
+                        this team.
+                      </span>
+                    ) : (
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <span>
+                          ✓ Invited <strong>{inviteResult.email}</strong>.{" "}
+                          {inviteResult.emailed
+                            ? "Invite emailed."
+                            : "Email is off — copy the link below and send it."}
+                        </span>
+                        {inviteResult.url && (
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <Input
+                              readOnly
+                              value={inviteResult.url}
+                              onFocus={(e) => e.currentTarget.select()}
+                              style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(inviteResult.url!);
+                                setCopied(true);
+                              }}
+                            >
+                              {copied ? "Copied" : "Copy"}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Members */}
