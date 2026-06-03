@@ -67,9 +67,10 @@ export default defineConfig({
   build: {
     outDir: "../elevate_cli/web_dist",
     emptyOutDir: true,
-    // Temporary: emit source maps so the blank-trace stack resolves to real
-    // source lines if the wipe still escapes (no more minified guessing).
-    sourcemap: true,
+    // Blank-bug debugging done (fresh-mount wipe fixed + verified, watcher
+    // content-aware). Source maps off for realtor releases — re-enable only if
+    // a wild blank ever needs stack resolution again.
+    sourcemap: false,
     rollupOptions: {
       output: {
         manualChunks(id) {
