@@ -1451,7 +1451,49 @@ function mergeServerWithCache(
     seen.add(key);
     out.push(m);
   }
+  blankTraceIfDropped(cached, out, fp, serverMessages.length);
   return out;
+}
+
+// Debug tracer: forwarded to the gateway (debug.trace -> blank-trace.log) and
+// the console. Set window.__elevateBlankTraceSink from the component.
+function blankTrace(message: string, data: Record<string, unknown>): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.error("[BLANK-TRACE]", message, data);
+    (window as unknown as {
+      __elevateBlankTraceSink?: (m: string, d: Record<string, unknown>) => void;
+    }).__elevateBlankTraceSink?.(message, data);
+  } catch {
+    /* tracing must never break the app */
+  }
+}
+
+// Flags when a substantial assistant message present in `cached` is absent from
+// the merge output `out` — i.e. the merge erased a rendered answer.
+function blankTraceIfDropped(
+  cached: ChatMessage[] | null,
+  out: ChatMessage[],
+  fp: (m: ChatMessage) => string,
+  serverLen: number,
+): void {
+  try {
+    const big = (m: ChatMessage) =>
+      m.role === "assistant" && (m.content ?? "").replace(/\s+/g, "").length > 80;
+    const outFps = new Set(out.map(fp));
+    const dropped = (cached ?? []).filter((m) => big(m) && !outFps.has(fp(m)));
+    if (dropped.length) {
+      blankTrace("merge dropped a rendered assistant answer", {
+        serverLen,
+        cachedLen: (cached ?? []).length,
+        outLen: out.length,
+        droppedLens: dropped.map((m) => (m.content ?? "").length),
+        stack: new Error().stack?.split("\n").slice(2, 7).join(" | "),
+      });
+    }
+  } catch {
+    /* never break merge */
+  }
 }
 
 // Detect whether the cached transcript ends with a user message that has no
@@ -3143,6 +3185,60 @@ export default function ChatPage() {
     };
   }, [startRange]);
 
+  // Debug: forward [BLANK-TRACE] events to the gateway (-> ~/.elevate/logs/
+  // blank-trace.log) so a vanished-answer render bug can be diagnosed without
+  // opening devtools.
+  useEffect(() => {
+    (
+      window as unknown as {
+        __elevateBlankTraceSink?: (m: string, d: Record<string, unknown>) => void;
+      }
+    ).__elevateBlankTraceSink = (m, d) => {
+      try {
+        void gw.request("debug.trace", {
+          session_id: sessionId ?? "",
+          payload: { msg: m, ...d },
+        });
+      } catch {
+        /* best effort */
+      }
+    };
+    return () => {
+      (
+        window as unknown as { __elevateBlankTraceSink?: unknown }
+      ).__elevateBlankTraceSink = undefined;
+    };
+  }, [gw, sessionId]);
+
+  // Debug: catch the moment a rendered assistant answer disappears from the
+  // on-screen list (the "render then vanish" bug). Reports what it was and how
+  // many messages were in the list before/after.
+  const prevMessagesForTraceRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    const prev = prevMessagesForTraceRef.current;
+    prevMessagesForTraceRef.current = messages;
+    try {
+      for (const pm of prev) {
+        if (pm.role !== "assistant") continue;
+        const prevLen = (pm.content ?? "").replace(/\s+/g, "").length;
+        if (prevLen <= 80) continue;
+        const now = messages.find((m) => m.id === pm.id);
+        const nowLen = now ? (now.content ?? "").replace(/\s+/g, "").length : -1;
+        if (nowLen === -1 || nowLen < prevLen * 0.5) {
+          blankTrace("rendered assistant answer vanished from list", {
+            id: pm.id,
+            wasChars: (pm.content ?? "").length,
+            nowChars: now ? (now.content ?? "").length : "REMOVED",
+            listBefore: prev.length,
+            listAfter: messages.length,
+          });
+        }
+      }
+    } catch {
+      /* never break render */
+    }
+  }, [messages]);
+
   // Persist the transcript + active-turn snapshot — THROTTLED. Both do a full
   // JSON.stringify of the (growing) transcript + a localStorage write; running
   // them on every streamed delta and tool event jammed the main thread during
@@ -3721,38 +3817,6 @@ export default function ChatPage() {
           setQueuedInputs([]);
         }
         setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
-
-        // Blank-render backstop. On a long turn the live assistant row can be
-        // lost mid-stream (e.g. a transcript merge during a reconnect, or a
-        // dropped delta after a mid-turn compaction), leaving the chat blank
-        // even though the gateway emitted the answer and the server persisted
-        // the full turn. The turn is over and persisted now, so reconcile the
-        // visible transcript against the saved server copy. mergeServerWithCache
-        // is fingerprint-deduped, so this is a no-op when the answer already
-        // painted and a backfill when it didn't.
-        if (status !== "interrupted") {
-          const reconcileId = persistedSessionIdRef.current ?? resumeId;
-          if (reconcileId) {
-            window.setTimeout(() => {
-              void api
-                .getSessionMessages(reconcileId)
-                .then((response) => {
-                  const hydrated = normalizeStoredTranscript(response.messages);
-                  if (!hydrated.length) return;
-                  setMessages((prev) => {
-                    const merged = mergeServerWithCache(hydrated, prev);
-                    rememberTranscript(response.session_id || reconcileId, merged);
-                    rememberTranscript(reconcileId, merged);
-                    hydrateArtifactsFromMessages(merged);
-                    return merged;
-                  });
-                })
-                .catch(() => {
-                  /* best-effort backfill; the live copy already stands */
-                });
-            }, 400);
-          }
-        }
       }),
     );
     unsubs.push(
