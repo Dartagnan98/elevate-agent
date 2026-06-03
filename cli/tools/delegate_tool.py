@@ -1925,6 +1925,19 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     parent_agent=None,
+    # Agent-handoff / orchestration metadata: these are forwarded unconditionally
+    # by AIAgent._dispatch_delegate_task (run_agent.py). They are accepted here so
+    # the dispatch binds cleanly — previously they raised "unexpected keyword
+    # argument 'agent_id'" and blocked all spawning. Not yet wired into child
+    # routing (advisory until the handoff layer consumes them); ``**_extra`` guards
+    # against any future schema field re-breaking the call.
+    agent_id: Optional[str] = None,
+    expected_return: Optional[str] = None,
+    handoff_reason: Optional[str] = None,
+    priority: Optional[str] = None,
+    artifacts: Optional[Any] = None,
+    parent_run_id: Optional[str] = None,
+    **_extra: Any,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
