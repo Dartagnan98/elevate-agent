@@ -458,13 +458,23 @@ export function AgentOnboardingWizard({
       if (!draft.primaryProvider.trim() || !draft.primaryModel.trim() || !primaryHasKey) {
         return "Pick a provider and model the agent should think with.";
       }
-      if (!draft.embeddingProvider.trim() || !draft.embeddingModel.trim()) {
-        return "Pick an embedding provider and model — memory recall needs it.";
-      }
-      const embeddingHasKey =
-        Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
-      if (!draft.embeddingShareKey && !embeddingHasKey) {
-        return "Paste an embedding API key, or check 'share the primary key.'";
+      // Embedding is OPTIONAL — without it, memory recall falls back to the
+      // Postgres full-text (tsvector) keyword search, so it degrades rather
+      // than breaks. Realtors on OAuth-only model providers (the bundled
+      // gpt-5.5 via Codex) have no embedding key, so never hard-block
+      // onboarding on it. Only enforce a key when a *cloud* embedding is fully
+      // configured; keyless providers (local/ollama) and the empty case pass.
+      const embeddingConfigured = Boolean(
+        draft.embeddingProvider.trim() && draft.embeddingModel.trim(),
+      );
+      const keylessEmbedding =
+        draft.embeddingProvider === "local" || draft.embeddingProvider === "ollama";
+      if (embeddingConfigured && !keylessEmbedding) {
+        const embeddingHasKey =
+          Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
+        if (!draft.embeddingShareKey && !embeddingHasKey) {
+          return "Paste an embedding API key, or check 'share the primary key.'";
+        }
       }
     }
     if (step.id === "memory") {
@@ -662,7 +672,7 @@ export function AgentOnboardingWizard({
                   </p>
                 </WizardSection>
 
-                <WizardSection title="Embedding model" hint="Powers memory recall + semantic search.">
+                <WizardSection title="Embedding model (optional)" hint="Sharpens semantic recall. Skip it and memory uses keyword search — fine for most realtors.">
                   <div className="grid gap-4 md:grid-cols-2">
                     <WizardSelect
                       label="Provider"

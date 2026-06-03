@@ -697,7 +697,8 @@ export function AgentSetupLaunch({
           <div>
             <h2 className="text-[14px] font-semibold text-foreground">Agent onboarding</h2>
             <p className="mt-1 text-[12px] text-muted-foreground">
-              Bring the runtime up. Required: primary LLM, embedding model, memory store. Everything
+              Bring the runtime up. Required: primary LLM + memory store. Embedding model is optional
+              — it sharpens recall, but memory falls back to keyword search without it. Everything
               else (image gen, Composio, operator channels, sub-agents) is opt-in and can be added
               later. The database schema is created automatically on completion; backend connectors
               backfill once you hit launch.

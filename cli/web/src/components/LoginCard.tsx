@@ -30,6 +30,7 @@ export function LoginCard({ onAuthChange }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [activationResult, setActivationResult] = useState<LicenseActivateResponse | null>(null);
@@ -145,6 +146,11 @@ export function LoginCard({ onAuthChange }: Props) {
       setError("Password must be at least 8 characters.");
       return;
     }
+    if (password !== confirmPassword) {
+      setPhase("error");
+      setError("Passwords don't match.");
+      return;
+    }
     setPhase("signing_in");
     setError(null);
     try {
@@ -164,6 +170,7 @@ export function LoginCard({ onAuthChange }: Props) {
     setCodeSent(false);
     setCode("");
     setPassword("");
+    setConfirmPassword("");
     if (phase === "error") setPhase("logged_out");
   };
 
@@ -400,11 +407,28 @@ export function LoginCard({ onAuthChange }: Props) {
               <Input
                 id="login-password"
                 type="password"
-                placeholder="Password"
+                placeholder={mode === "create" ? "Create a password (8+ characters)" : "Password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 disabled={phase === "signing_in" || phase === "syncing"}
-                autoComplete="current-password"
+                autoComplete={mode === "create" ? "new-password" : "current-password"}
+              />
+            </div>
+          )}
+
+          {mode === "create" && (
+            <div className="space-y-1.5">
+              <label htmlFor="login-confirm" className="text-xs font-medium text-muted-foreground">
+                Confirm password
+              </label>
+              <Input
+                id="login-confirm"
+                type="password"
+                placeholder="Re-enter password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                disabled={phase === "signing_in" || phase === "syncing"}
+                autoComplete="new-password"
               />
             </div>
           )}
@@ -464,7 +488,8 @@ export function LoginCard({ onAuthChange }: Props) {
               phase === "syncing" ||
               requestingCode ||
               !email.trim() ||
-              ((mode === "password" || mode === "create") && !password) ||
+              (mode === "password" && !password) ||
+              (mode === "create" && (!password || !confirmPassword)) ||
               (mode === "code" && codeSent && !code.trim())
             }
           >
