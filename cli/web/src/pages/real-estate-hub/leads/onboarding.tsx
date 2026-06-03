@@ -269,7 +269,7 @@ function isBrandNewLeadsSetup(setup: LeadsSetupSnapshot): boolean {
 
 function LeadsOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
   return (
-    <section className="onboarding-overlay relative -mx-6 -my-6 flex min-h-[calc(100vh-9rem)] items-center justify-center overflow-hidden px-6 py-10">
+    <section className="onboarding-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-background px-6 py-10">
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
       <div className="relative flex max-w-md flex-col items-center text-center">
         <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
