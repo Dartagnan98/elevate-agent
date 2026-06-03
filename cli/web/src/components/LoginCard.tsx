@@ -33,7 +33,7 @@ export function LoginCard({ onAuthChange }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [activationResult, setActivationResult] = useState<LicenseActivateResponse | null>(null);
-  const [mode, setMode] = useState<"password" | "code">("password");
+  const [mode, setMode] = useState<"password" | "code" | "create">("password");
   const [code, setCode] = useState("");
   const [codeSent, setCodeSent] = useState(false);
   const [requestingCode, setRequestingCode] = useState(false);
@@ -136,6 +136,35 @@ export function LoginCard({ onAuthChange }: Props) {
     } catch (err: unknown) {
       showAuthError(err, "Invalid email or password.");
     }
+  };
+
+  const handleCreateAccount = async () => {
+    if (!email.trim() || !password) return;
+    if (password.length < 8) {
+      setPhase("error");
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    setPhase("signing_in");
+    setError(null);
+    try {
+      const result = await api.createAccount(email.trim(), password, undefined, true);
+      await completeActivation(result);
+    } catch (err: unknown) {
+      setPhase("error");
+      const message = err instanceof Error ? err.message : String(err);
+      // The dashboard surfaces the real reason as "<status>: <detail>".
+      setError(message.replace(/^\d+:\s*/, "") || "Could not create the account.");
+    }
+  };
+
+  const switchMode = (next: "password" | "code" | "create") => {
+    setMode(next);
+    setError(null);
+    setCodeSent(false);
+    setCode("");
+    setPassword("");
+    if (phase === "error") setPhase("logged_out");
   };
 
   const handleRequestCode = async () => {
@@ -331,14 +360,17 @@ export function LoginCard({ onAuthChange }: Props) {
           />
         </div>
         <CardDescription className="pt-1">
-          Enter your Elevation Real Estate HQ credentials to unlock your skill packs.
+          {mode === "create"
+            ? "Create your Elevation account. You'll set up your profile right after."
+            : "Enter your Elevation Real Estate HQ credentials to unlock your skill packs."}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (mode === "password") handleSignIn();
+            if (mode === "create") handleCreateAccount();
+            else if (mode === "password") handleSignIn();
             else if (!codeSent) handleRequestCode();
             else handleVerifyCode();
           }}
@@ -360,7 +392,7 @@ export function LoginCard({ onAuthChange }: Props) {
             />
           </div>
 
-          {mode === "password" && (
+          {(mode === "password" || mode === "create") && (
             <div className="space-y-1.5">
               <label htmlFor="login-password" className="text-xs font-medium text-muted-foreground">
                 Password
@@ -432,14 +464,14 @@ export function LoginCard({ onAuthChange }: Props) {
               phase === "syncing" ||
               requestingCode ||
               !email.trim() ||
-              (mode === "password" && !password) ||
+              ((mode === "password" || mode === "create") && !password) ||
               (mode === "code" && codeSent && !code.trim())
             }
           >
             {phase === "signing_in" ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Signing in...
+                {mode === "create" ? "Creating account..." : "Signing in..."}
               </>
             ) : phase === "syncing" ? (
               <>
@@ -455,26 +487,42 @@ export function LoginCard({ onAuthChange }: Props) {
               "Send code"
             ) : phase === "error" ? (
               "Try again"
+            ) : mode === "create" ? (
+              "Create account"
             ) : (
               "Sign in"
             )}
           </Button>
 
-          <div className="text-center">
-            <button
-              type="button"
-              onClick={() => {
-                setMode((m) => (m === "password" ? "code" : "password"));
-                setError(null);
-                setCodeSent(false);
-                setCode("");
-                setPassword("");
-                if (phase === "error") setPhase("logged_out");
-              }}
-              className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
-            >
-              {mode === "password" ? "Sign in with a code instead" : "Use password instead"}
-            </button>
+          <div className="space-y-2 text-center">
+            {mode === "create" ? (
+              <button
+                type="button"
+                onClick={() => switchMode("password")}
+                className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+              >
+                Already have an account? Sign in
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => switchMode("create")}
+                  className="text-[0.72rem] font-medium text-foreground/80 transition-colors hover:text-foreground"
+                >
+                  Create an account
+                </button>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => switchMode(mode === "password" ? "code" : "password")}
+                    className="text-[0.72rem] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+                  >
+                    {mode === "password" ? "Sign in with a code instead" : "Use password instead"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </form>
       </CardContent>

@@ -1133,6 +1133,41 @@ async def activate_license(body: LicenseActivateBody, request: Request):
     }
 
 
+@app.post("/api/license/signup")
+async def signup_license(body: LicenseActivateBody, request: Request):
+    _require_token(request)
+
+    from elevate_cli import license as lic_mod
+
+    if body.backend_url:
+        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
+        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
+        try:
+            from elevate_cli.config import save_env_value
+            save_env_value("ELEVATE_BACKEND_URL", lic_mod.BACKEND_URL)
+        except Exception:
+            pass
+
+    try:
+        lic = lic_mod.create_account(body.email, body.password)
+    except lic_mod.LicenseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    activation = lic_mod.activate_install(lic, sync_skills=not body.skip_skill_sync)
+    return {
+        "authenticated": True,
+        "email": lic.email,
+        "tier": lic.tier,
+        "license_id": lic.license_id,
+        "entitlements": list(lic.entitlements or []),
+        "expires_at": lic.expires_at,
+        "packs": activation.get("packs", {}),
+        "skill_count": activation.get("skill_count", 0),
+        "skill_names": activation.get("skill_names", []),
+        "skill_error": activation.get("skill_error"),
+    }
+
+
 @app.post("/api/license/request-code")
 async def request_license_code(body: LoginCodeRequestBody, request: Request):
     _require_token(request)

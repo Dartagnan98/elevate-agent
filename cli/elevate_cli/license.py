@@ -263,6 +263,48 @@ def login(email: str, password: str, device_label: Optional[str] = None) -> Lice
     return lic
 
 
+def create_account(email: str, password: str, device_label: Optional[str] = None) -> License:
+    """POST /api/auth/signup (open self-serve account creation), persist license.
+
+    Mirrors :func:`login` but hits the signup endpoint, which creates the
+    account ACTIVE with no entitlements and returns the same token pair — so the
+    realtor is signed straight in. Paid packs stay locked until an admin grants
+    them per person from the control panel.
+    """
+    base_url = backend_url()
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{base_url}/api/auth/signup",
+            json={
+                "email": email,
+                "password": password,
+                "device_label": device_label or os.uname().nodename,
+            },
+        )
+    if resp.status_code == 409:
+        raise LicenseError("An account with this email already exists — sign in instead.")
+    if resp.status_code == 400:
+        raise LicenseError("Enter a valid email and a password of at least 8 characters.")
+    if resp.status_code == 429:
+        raise LicenseError("Too many attempts. Please wait a few minutes and try again.")
+    if not resp.is_success:
+        raise LicenseError(f"Account creation failed ({resp.status_code}): {resp.text[:200]}")
+
+    data = resp.json()
+    lic = License(
+        access_token=data["access_token"],
+        refresh_token=data["refresh_token"],
+        license_id=data["license_id"],
+        tier=data.get("tier", "pro"),
+        email=email,
+        expires_at=_decode_jwt_exp(data["access_token"]),
+        entitlements=_extract_entitlements(data),
+    )
+    save(lic)
+    sync_license_entitlements(lic)
+    return lic
+
+
 def request_login_code(email: str) -> None:
     """POST /api/auth/login-code/request — HQ emails a one-time sign-in code."""
     base_url = backend_url()

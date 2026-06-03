@@ -234,6 +234,22 @@ export const api = {
         skip_skill_sync: skipSkillSync || undefined,
       }),
     }),
+  createAccount: (
+    email: string,
+    password: string,
+    backendUrl?: string,
+    skipSkillSync?: boolean,
+  ) =>
+    fetchJSON<LicenseActivateResponse>("/api/license/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password,
+        backend_url: backendUrl || undefined,
+        skip_skill_sync: skipSkillSync || undefined,
+      }),
+    }),
   requestLoginCode: (email: string) =>
     fetchJSON<{ ok: boolean }>("/api/license/request-code", {
       method: "POST",
