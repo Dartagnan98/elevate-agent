@@ -7,6 +7,68 @@
 
 ---
 
+## UPDATE 2026-06-03 (session 2) — candidate fix applied, deployed, no regression in 35 mounts
+
+- **Applied the doc's candidate else-branch patch** in `ChatPage.tsx` (~3494). New guard
+  blocks the populated→empty wipe when `prev.length >= 2 && _chatKey === "__fresh_chat__"
+  && renderedChatKeyRef.current != null && renderedChatKeyRef.current !== "__fresh_chat__"`
+  — i.e. resumeId transiently fell to nothing on a fresh mount while we still hold a real
+  rendered chat. Logs `"blocked fresh-mount transient-null wipe (connect else)"`.
+- **Safety confirmed:** every deliberate new chat navigates with `?new=<id>` (App.tsx:1612
+  `startNewChat`, plus hub/config/onboarding seeds), so `_chatKey` is never `"__fresh_chat__"`
+  for a real new chat → the guard can't strand a genuine fresh start.
+- **Built + hot-swapped + LIVE:** chunk `ChatPage-D9EGzdAO.js` → `ChatPage-DriP2QUo.js`,
+  rsync'd into the running app, served (200; old chunk 404).
+- **Verification run: 35 quit+relaunch cycles** auto-resuming a 6-message chat
+  (`20260603_143249_3f492b`). Result: **0 `LIST WIPED`, 0 `vanished`, 0 regressions** —
+  transcript survived every relaunch. **BUT also 0 `blocked` events** → the else-branch
+  transient-null race did **not reproduce** in 35 rapid mounts, so the guard was never
+  observed actively catching it. The original only fired ~2x across a full DAY of real
+  working churn (busy/active-turn sessions); rapid relaunches of a COMPLETED session don't
+  replicate that timing. Verdict: logic-correct fix, no regression, **race not re-triggered
+  → not yet positively proven.** Leave scaffolding IN and watch `blank-trace.log` during
+  normal use to confirm `"blocked fresh-mount..."` fires (or that `LIST WIPED` never does).
+- **STILL OPEN — separate bug:** the 14:33 partial drops (`listBefore:4 → listAfter:2`,
+  no accompanying `LIST WIPED`) are NOT a full wipe and NOT touched by this fix. They come
+  from a merge path (`mergeServerWithCache` / `mergeActiveTurnSnapshot`, sites ~4124–4179)
+  dropping already-rendered turns. Needs its own investigation.
+- **Do NOT strip scaffolding yet** (step "Strip the scaffolding" stays pending) — the
+  3-trigger matrix is not green; the diagnostics are still earning their keep.
+
+---
+
+## UPDATE 2026-06-03 (session 3) — partial-drop pinned + fixed; watcher false-positive found
+
+- **Pinned the partial-drop (4→2) to ONE site:** the `session.resume` handler at
+  `ChatPage.tsx` ~4161. It builds `merged = mergeServerWithCache(hydrated,
+  restoreTranscript(resumeId))` — i.e. from the **localStorage cache**, which can lag
+  the live `prev` (a turn that just rendered isn't cached yet). Its setter only guarded
+  the full-empty case (`merged.length === 0`), so a shorter-but-non-empty `merged` was
+  returned raw and partial-dropped the live list. `mergeServerWithCache`'s own
+  `blankTraceIfDropped` did NOT fire because its `cached` arg (the localStorage copy) was
+  itself short — which is why session 2 saw "vanished" (3270 watcher) but no "merge dropped".
+- **Fix applied (~4178):** same-chat partial-drop guard — when `merged.length <
+  prev.length` for the same chat, return `mergeServerWithCache(merged, prev)` (prev as the
+  cache) so prev's rendered tail is recovered. Logs `"recovered same-chat partial drop
+  (resume merge)"`. Gated to same-chat (`renderedChatKeyRef === _chatKey` / minted) so a
+  real chat switch still replaces. Built + hot-swapped: **ChatPage-BDQbfCIA.js, served 200.**
+- **CRITICAL — the 3270 "vanished" watcher has FALSE POSITIVES.** It tracks rendered
+  answers by **id**. On resume, the merge swaps cache ids (`stored-N`) for server ids for
+  the SAME content, so it logs `"rendered assistant answer vanished"` with **`listBefore ==
+  listAfter`** (content preserved, just remapped). NOT blanks. Verified: a post-fix relaunch
+  produced three such events, all `listBefore:6 → listAfter:6`. **Real drops = `listAfter <
+  listBefore`. Equal-count "vanished" events are id-remap noise — ignore them.**
+- **Still open / next:**
+  - The id-remap also forces a React remount (key change) of those answers → a flicker.
+    Refinement: in `mergeServerWithCache`, keep the cached id when a server message matches
+    by fingerprint (kills the remount + the watcher noise).
+  - Positive proof of both guards still pending (race hard to trigger on demand). Watch
+    `blank-trace.log` in real use for `"recovered same-chat partial drop"` /
+    `"blocked fresh-mount transient-null wipe"` firing, and for any `listAfter < listBefore`.
+  - Scaffolding still IN; don't strip until a count-drop never appears across real use.
+
+---
+
 ## TL;DR
 
 - **Symptom:** an on-screen chat transcript suddenly goes **blank** — the message

@@ -3451,6 +3451,16 @@ export default function ChatPage() {
             rememberTranscript(response.session_id || resumeId, merged);
             rememberTranscript(resumeId, merged);
             hydrateArtifactsFromMessages(merged);
+            // Cold-load path (no warm cache): the IF-branch above only set
+            // renderedChatKeyRef when restoredCached was non-empty. A chat
+            // hydrated purely from the DB fetch would otherwise render with
+            // renderedChatKeyRef still null, leaving the fresh-mount guard in
+            // the connect else-branch unable to recognize this as a real chat
+            // -> a transient-null re-run would wipe it. Stamp the key here too.
+            if (merged.length) {
+              renderedChatKeyRef.current =
+                resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+            }
             if (!latestActiveSnapshot && !hasPendingTurn(merged)) {
               // Cache heuristic flagged this as pending (last msg = user
               // with no assistant follow-up) so busy was set true above. The
@@ -3486,6 +3496,27 @@ export default function ChatPage() {
           blankTrace("blocked same-chat list wipe (connect else)", {
             count: prev.length,
             chatKey: _chatKey,
+          });
+          return prev;
+        }
+        // Fresh-mount transient-null race (the open gap from 1.1.2->1.1.8).
+        // On app relaunch / page reload the connect effect can re-run with
+        // resumeId momentarily null BEFORE the cache restore settles. With
+        // every URL param null, _chatKey collapses to "__fresh_chat__" while
+        // renderedChatKeyRef still points at the real chat we just rendered,
+        // so the same-chat guard above misses and we'd wipe a live transcript.
+        // A deliberate new chat ALWAYS carries ?new= (App.tsx startNewChat +
+        // hub/config seeds), so _chatKey is never "__fresh_chat__" there.
+        // Keep what's on screen; the next run with the real resumeId re-hydrates.
+        if (
+          prev.length >= 2 &&
+          _chatKey === "__fresh_chat__" &&
+          renderedChatKeyRef.current != null &&
+          renderedChatKeyRef.current !== "__fresh_chat__"
+        ) {
+          blankTrace("blocked fresh-mount transient-null wipe (connect else)", {
+            count: prev.length,
+            renderedKey: renderedChatKeyRef.current,
           });
           return prev;
         }
@@ -4153,6 +4184,45 @@ export default function ChatPage() {
                 });
                 return prev;
               }
+              // Fresh-mount transient-null race: an empty server merge during a
+              // bare-/chat re-run must not wipe a live transcript we already
+              // rendered for a real chat. Deliberate new chats carry ?new=.
+              if (
+                merged.length === 0 &&
+                prev.length >= 2 &&
+                _chatKey === "__fresh_chat__" &&
+                renderedChatKeyRef.current != null &&
+                renderedChatKeyRef.current !== "__fresh_chat__"
+              ) {
+                blankTrace("blocked fresh-mount transient-null wipe (empty-merge)", {
+                  count: prev.length,
+                  renderedKey: renderedChatKeyRef.current,
+                });
+                return prev;
+              }
+              // Same-chat partial-drop guard. `merged` is built from the
+              // localStorage cache (`restoreTranscript`), which can lag the live
+              // `prev` — a turn that just rendered may not be cached yet.
+              // Returning the shorter `merged` raw vanishes those rendered
+              // answers (listBefore > listAfter, the 4->2 render-then-vanish).
+              // For the SAME chat, recover prev's content through the same
+              // fingerprint merge (prev as the cache) so nothing on screen is
+              // lost; a genuine chat switch (different key) still replaces.
+              if (
+                prev.length &&
+                merged.length < prev.length &&
+                (renderedChatKeyRef.current === _chatKey ||
+                  (mintedSessionIdRef.current != null &&
+                    mintedSessionIdRef.current === resumeId))
+              ) {
+                blankTrace("recovered same-chat partial drop (resume merge)", {
+                  prevLen: prev.length,
+                  mergedLen: merged.length,
+                  chatKey: _chatKey,
+                });
+                renderedChatKeyRef.current = _chatKey;
+                return mergeServerWithCache(merged, prev);
+              }
               renderedChatKeyRef.current = _chatKey;
               return merged;
             });
@@ -4173,6 +4243,22 @@ export default function ChatPage() {
               blankTrace("blocked same-chat list wipe (fresh branch)", {
                 count: prev.length,
                 chatKey: _chatKey,
+              });
+              return prev;
+            }
+            // Fresh-mount transient-null race (same as the connect else-branch).
+            // A bare-/chat re-run that minted no real chat key must not wipe a
+            // live transcript. Deliberate new chats carry ?new=, so _chatKey is
+            // never "__fresh_chat__" there.
+            if (
+              prev.length >= 2 &&
+              _chatKey === "__fresh_chat__" &&
+              renderedChatKeyRef.current != null &&
+              renderedChatKeyRef.current !== "__fresh_chat__"
+            ) {
+              blankTrace("blocked fresh-mount transient-null wipe (fresh branch)", {
+                count: prev.length,
+                renderedKey: renderedChatKeyRef.current,
               });
               return prev;
             }
