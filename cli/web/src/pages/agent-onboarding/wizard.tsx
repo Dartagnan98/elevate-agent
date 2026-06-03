@@ -1116,9 +1116,11 @@ export function AgentOnboardingWizard({
         </div>
 
         <div className="mt-9 flex items-center justify-between gap-3 border-t border-border/60 pt-5">
-          <div className="min-h-[18px] flex-1 text-[12px] leading-5 text-muted-foreground/80">
-            {showMissing && missingMessage && (
-              <span className="text-destructive">{missingMessage}</span>
+          <div className="min-h-[18px] flex-1 text-[12px] leading-5">
+            {missingMessage && (
+              <span className={showMissing ? "text-destructive" : "text-muted-foreground/80"}>
+                {showMissing ? missingMessage : `To continue: ${missingMessage}`}
+              </span>
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
