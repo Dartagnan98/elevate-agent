@@ -37,6 +37,57 @@
 
 ---
 
+## UPDATE 2026-06-03 (session 4) — race RELIABLY REPRODUCED + fix VERIFIED (0 blanks / 170 flips)
+
+The session-2 else-branch guard was logic-correct but **incomplete** — two more wipe
+sites + a missing ref-stamp let blanks still slip. Built a real reproducer, closed all
+of them, and proved it.
+
+- **Reproducer (the key unlock):** `~/claudeclaw/scripts/blank-nav-churn.mjs` — Playwright
+  drives the LIVE renderer (`http://127.0.0.1:9120`, server injects the session token so a
+  fresh browser auths) and client-side flips the URL `?resume=A` → bare `/chat`
+  (resumeId→null) → `?resume=B`, dwelling a jittered 40–400ms on bare so the connect effect
+  runs with a populated list still in React state. This is the exact `X→null→X` transient.
+  **Pure app relaunches NEVER reproduce it** (135 cold-start relaunches = 0 events) because
+  cold start settles straight to `?resume=X` and never re-enters the else-branch with a
+  populated list. The race only lives in *client-side* nav while a transcript is mounted.
+- **3 wipe sites needed the fresh-mount transient-null guard, not 1:**
+  1. Connect else-branch (~3494) — session-2 fix. ✓
+  2. **createSession "fresh branch" (~4234)** — `else if (!resumeId &&
+     !historyHydratedRef.current)` returned `[]`; its `renderedChatKeyRef === _chatKey`
+     guard missed on `_chatKey === "__fresh_chat__"`. Added the same guard. ✓
+  3. **empty-merge branch (~4180)** — same blind spot when `merged.length === 0`. ✓
+- **Plus a missing ref-stamp (the cold-load hole):** the async DB-hydrate branch (~3453)
+  rendered a cold chat (no warm cache) but never set `renderedChatKeyRef`, so the very
+  first transient-null flip slipped past every guard (they all require `renderedChatKeyRef
+  != null`). Added `renderedChatKeyRef.current = resumeId ?? … ?? "__fresh_chat__"` after
+  `merged` when `merged.length`. ✓
+- **Why the per-site guard, not the wrapped setter:** a blanket "block populated→empty when
+  renderedChatKeyRef is real" in the wrapped setter would wrongly block a **deliberate new
+  chat** (clicking new-chat legitimately wipes A→empty while renderedChatKeyRef still points
+  at A). Only the `_chatKey === "__fresh_chat__"` test distinguishes transient-null (block)
+  from new-chat (allow), and the wrapped setter doesn't have `_chatKey`.
+- **Verification (chunk `ChatPage-D0LBa_hH.js`, hot-swapped + app relaunched onto it):**
+  | run | scenario | flips | LIST WIPED | blocked | real drops |
+  |---|---|---|---|---|---|
+  | 1 (pre-fix) | cross-chat | 40 | **1** | 21 | — |
+  | 2 (cold-load fix) | cross-chat | 40 | **2** | 24 | — |
+  | 3 (all 3 sites) | cross-chat | 50 | **0** | 32 | — |
+  | 4 (all 3 sites) | single-chat | 50 | **0** | 38 | **0** |
+  | 5 (final) | cross-chat | 70 | **0** | 47 | — |
+  Post-fix total: **0 LIST WIPED across 170 flips, 117 guard-blocks, `minRenderedSeen` never
+  below the chat's real length** (never blanked, not even momentarily).
+- **"vanished" watcher noise reconfirmed:** in cross-chat runs, `listAfter < listBefore`
+  events are mostly **legit chat switches** (A has 4 msgs, B has 6 — every B→A correctly
+  shrinks 6→4). Single-chat run 4 (where the list must stay 4) showed **0** `listAfter <
+  listBefore` events → no real partial drops. Combined with session-3's id-remap note: trust
+  `LIST WIPED` + single-chat `listAfter<listBefore`, not raw cross-chat "vanished".
+- **Status:** fresh-mount blank = **CLOSED & verified.** Scaffolding still IN (don't strip
+  until real-use confirms; then strip per the existing section and ship 1.1.14). Reproducer
+  kept at `scripts/blank-nav-churn.mjs` for regression re-runs.
+
+---
+
 ## UPDATE 2026-06-03 (session 3) — partial-drop pinned + fixed; watcher false-positive found
 
 - **Pinned the partial-drop (4→2) to ONE site:** the `session.resume` handler at
@@ -66,6 +117,25 @@
     `blank-trace.log` in real use for `"recovered same-chat partial drop"` /
     `"blocked fresh-mount transient-null wipe"` firing, and for any `listAfter < listBefore`.
   - Scaffolding still IN; don't strip until a count-drop never appears across real use.
+
+---
+
+## UPDATE 2026-06-03 (session 5) — watcher made content-aware (id-remap noise eliminated)
+
+- **Did NOT do the merge id-preservation** floated in session 3. On resume the server
+  streams deltas to the **server** id; forcing the rendered message to keep the cache id
+  would break streaming-on-resume, and the merge is session-4-verified — not worth it.
+- **Instead made the 3270 watcher content-aware** (`ChatPage.tsx` ~3262): it now skips a
+  "vanished" flag when the same answer's CONTENT is present under any id (the cache-id →
+  server-id remap that fires on every resume). Only true content loss is flagged. Kills
+  the `listBefore == listAfter` false positives session 3 found, so the trace becomes a
+  reliable green/red signal. Diagnostic-only; merge + id/streaming path untouched.
+- **Committed `ecd7c3d67`, built `ChatPage-CsPds3P8.js`, staged into the bundle** (live on
+  next reload). Verify with `scripts/blank-nav-churn.mjs`: post-fix, a single-chat run
+  should log ~zero "vanished"; any remaining are real `listAfter < listBefore`.
+- **Net blank-bug state:** fresh-mount wipe = fixed + verified (session 4, 0/170);
+  partial-drop = guarded (session 3); watcher noise = gone (this). Remaining: confirm in
+  real use, then strip scaffolding + ship 1.1.14.
 
 ---
 
