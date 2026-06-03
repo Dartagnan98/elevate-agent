@@ -2569,6 +2569,11 @@ export default function ChatPage() {
   // watchdog -> version bump) apart from genuinely entering a different chat,
   // so the connect effect never wipes a conversation it just rendered.
   const renderedChatKeyRef = useRef<string | null>(null);
+  // True for a short window after a liveness-watchdog / manual reconnect bumps
+  // `version`. A reconnect re-runs the connect effect to RESTORE the in-flight
+  // turn, so any populated-list -> empty during that window is the spurious
+  // wipe (the render-then-vanish blank) and is blocked in the setter below.
+  const reconnectRunRef = useRef(false);
   const gw = useMemo(
     () => getSharedChatGateway(version),
     [version],
@@ -2638,6 +2643,16 @@ export default function ChatPage() {
             ? (updater as (p: ChatMessage[]) => ChatMessage[])(prev)
             : updater;
         if (prev.length >= 2 && (next?.length ?? 0) === 0) {
+          if (reconnectRunRef.current) {
+            // A reconnect/liveness-watchdog re-run must RESTORE the turn, not
+            // erase it. Block the wipe and keep what's on screen — the real
+            // fix for the render-then-vanish blank, independent of which
+            // connect-effect path tried to clear the list.
+            blankTrace("blocked list wipe during reconnect window", {
+              prevCount: prev.length,
+            });
+            return prev;
+          }
           blankTrace("LIST WIPED to empty", {
             prevCount: prev.length,
             stack: new Error().stack?.split("\n").slice(1, 14).join(" || "),
@@ -5003,6 +5018,10 @@ export default function ChatPage() {
   };
 
   const reconnect = () => {
+    reconnectRunRef.current = true;
+    window.setTimeout(() => {
+      reconnectRunRef.current = false;
+    }, 6000);
     setVersion((value) => value + 1);
   };
 
@@ -5038,6 +5057,10 @@ export default function ChatPage() {
       if (droppedMidTurn || stalledMidTurn) {
         stallReconnectAtRef.current = now;
         lastFrameAtRef.current = now;
+        reconnectRunRef.current = true;
+        window.setTimeout(() => {
+          reconnectRunRef.current = false;
+        }, 6000);
         setVersion((value) => value + 1); // reconnect -> session.resume
       }
     }, 5_000);
@@ -7503,7 +7526,12 @@ function ChatActivityDigest({
           {(busy || tokens > 0) && (
             <>
               <span className="dot-sep">·</span>
-              <span className="num">{tokens.toLocaleString()} tokens</span>
+              <span
+                className="num"
+                title="Tokens this turn generated (output). Not the same as context fill — that's the % ring."
+              >
+                {tokens.toLocaleString()} out
+              </span>
             </>
           )}
         </span>
