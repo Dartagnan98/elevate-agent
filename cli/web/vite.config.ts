@@ -67,6 +67,9 @@ export default defineConfig({
   build: {
     outDir: "../elevate_cli/web_dist",
     emptyOutDir: true,
+    // Temporary: emit source maps so the blank-trace stack resolves to real
+    // source lines if the wipe still escapes (no more minified guessing).
+    sourcemap: true,
     rollupOptions: {
       output: {
         manualChunks(id) {

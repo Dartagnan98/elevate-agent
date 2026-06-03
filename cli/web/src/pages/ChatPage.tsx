@@ -3477,7 +3477,12 @@ export default function ChatPage() {
         // A reconnect / liveness-watchdog re-run for THIS same chat must not
         // wipe the conversation it already rendered. Only blank when the chat
         // key actually changed (genuinely a different chat).
-        if (prev.length && renderedChatKeyRef.current === _chatKey) {
+        if (
+          prev.length &&
+          (renderedChatKeyRef.current === _chatKey ||
+            (mintedSessionIdRef.current != null &&
+              mintedSessionIdRef.current === resumeId))
+        ) {
           blankTrace("blocked same-chat list wipe (connect else)", {
             count: prev.length,
             chatKey: _chatKey,
@@ -4090,6 +4095,10 @@ export default function ChatPage() {
             // it so the re-run triggered by this URL change skips the REST
             // transcript fetch (nothing saved yet) and the title stays "New chat".
             mintedSessionIdRef.current = pinnedId;
+            // Keep the rendered-chat-key in sync with the minted identity so
+            // the connect-effect guards recognize the post-mint re-run as the
+            // SAME conversation and don't wipe what's on screen.
+            renderedChatKeyRef.current = pinnedId;
             setSearchParams(
               (prev) => {
                 const next = new URLSearchParams(prev);
@@ -4134,7 +4143,9 @@ export default function ChatPage() {
               if (
                 merged.length === 0 &&
                 prev.length &&
-                renderedChatKeyRef.current === _chatKey
+                (renderedChatKeyRef.current === _chatKey ||
+                  (mintedSessionIdRef.current != null &&
+                    mintedSessionIdRef.current === resumeId))
               ) {
                 blankTrace("blocked same-chat empty-merge wipe", {
                   count: prev.length,
@@ -4153,7 +4164,12 @@ export default function ChatPage() {
         } else if (!resumeId && !historyHydratedRef.current) {
           const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
           setMessages((prev) => {
-            if (prev.length && renderedChatKeyRef.current === _chatKey) {
+            if (
+          prev.length &&
+          (renderedChatKeyRef.current === _chatKey ||
+            (mintedSessionIdRef.current != null &&
+              mintedSessionIdRef.current === resumeId))
+        ) {
               blankTrace("blocked same-chat list wipe (fresh branch)", {
                 count: prev.length,
                 chatKey: _chatKey,
