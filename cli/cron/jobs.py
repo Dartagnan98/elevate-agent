@@ -428,6 +428,100 @@ def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
     return out
 
 
+# ─── Surface automations ──────────────────────────────────────────────────────
+# The lead/admin "kit" that pairs with each surface heartbeat: the recurring
+# automations a realtor can turn on per surface. Seeded OFF (opt-in), same as the
+# heartbeats. Prompts are generic — each realtor's OWN connected sources, no
+# hardcoded identity/data; skills are bundled (cli/skills/...). Region-specific jobs
+# (Xposure/AOIR MLS, market-stats) are intentionally NOT here — not universal defaults.
+SURFACE_AUTOMATION_DEFAULTS: List[Dict[str, Any]] = [
+    {
+        "name": "New Outreach", "surface": "leads", "schedule": "0 8 * * *",
+        "skill": "local/outreach-lanes",
+        "prompt": (
+            "Run the outreach skill. Pull fresh leads from every connected source "
+            "(CRM, SMS, email, social via Composio) that have not yet received a "
+            "first-touch in the last 14 days. For each one: enrich from CRM + "
+            "property-lookup, draft a personalized first message on the channel they "
+            "came in from, and write the draft to the source inbox for approval. Do "
+            "not send. Mark each lead as touched only after the human approves."
+        ),
+    },
+    {
+        "name": "Hot Leads Watcher", "surface": "leads", "schedule": "15 8 * * *",
+        "skill": "local/outreach-lanes",
+        "prompt": (
+            "Run the outreach skill in monitor mode. Scan every connected source "
+            "(CRM, Messages, email, SMS, social via Composio) for hot signals since "
+            "the last run: inbound replies, viewing requests, repeat opens, CRM stage "
+            "moves, listing alerts. Re-score heat across the inbox and surface the top "
+            "10 hottest leads. For any lead with a brand-new inbound message that needs "
+            "a reply, draft a same-channel response and queue it for approval. Do not send."
+        ),
+    },
+    {
+        "name": "Follow-ups", "surface": "leads", "schedule": "0 10,15 * * *",
+        "skill": "local/outreach-lanes",
+        "prompt": (
+            "Run the outreach skill in nurture mode. For every lead with an open thread "
+            "whose last outbound was 3+ days ago without a reply (or whose CRM stage is "
+            "in nurture), draft a context-aware follow-up on the same channel they were "
+            "last contacted. Use the relationship history, last touch, and CRM stage to "
+            "pick the angle. Queue every draft for approval. Do not send."
+        ),
+    },
+    {
+        "name": "Gmail Doc Router", "surface": "admin", "schedule": "0 9 * * 1",
+        "skill": "real-estate-admin/gmail-doc-router",
+        "prompt": (
+            "Run the gmail-doc-router skill. Check the last 7 days of Gmail attachments, "
+            "match listing documents to active Elevate deals with deal-matcher, file "
+            "documents to the correct Drive folder, and write artifacts/checklist "
+            "evidence back to the deal with admin-result-writer. Do not send messages."
+        ),
+    },
+    {
+        "name": "Seller Update", "surface": "admin", "schedule": "0 16 * * 1-5",
+        "skill": "real-estate-admin/seller-update",
+        "prompt": (
+            "Run the seller-update skill. Pull ShowingTime feedback/activity for active "
+            "listings, match each listing to an Elevate deal, write the digest back to "
+            "the operational deal store, and create Gmail seller-update drafts. Never "
+            "send directly."
+        ),
+    },
+]
+
+
+def ensure_surface_automations() -> List[Dict[str, Any]]:
+    """Idempotently seed the per-surface lead/admin automations (the 'kit' that pairs
+    with each surface heartbeat) for the active account — OFF by default (opt-in),
+    exactly like ensure_surface_heartbeats().
+
+    New seeds are created then paused (enabled=False / state="paused"). A job that
+    already exists (matched by name) is left EXACTLY as-is, so a realtor's own
+    already-on automations keep their enabled state, schedule, and skill ref.
+    """
+    out: List[Dict[str, Any]] = []
+    for spec in SURFACE_AUTOMATION_DEFAULTS:
+        name = spec["name"]
+        existing = next(
+            (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
+            None,
+        )
+        if existing:
+            out.append(existing)
+            continue
+        job = create_job(
+            prompt=spec["prompt"], schedule=spec["schedule"], name=name,
+            skill=spec["skill"], deliver="local",
+            origin={"type": "surface-automation", "surface": spec["surface"], "source": "system"},
+        )
+        paused = pause_job(job["id"], reason="surface automation is opt-in (seeded off)")
+        out.append(paused or job)
+    return out
+
+
 def ensure_system_jobs() -> List[Dict[str, Any]]:
     """Ensure repo-backed system cron jobs exist for the active Elevate home."""
     return [
@@ -435,6 +529,7 @@ def ensure_system_jobs() -> List[Dict[str, Any]]:
         ensure_operational_maintenance_job(),
         ensure_operational_freshness_job(),
         *ensure_surface_heartbeats(),
+        *ensure_surface_automations(),
     ]
 
 
