@@ -5894,16 +5894,18 @@ export default function ChatPage() {
                 </button>
               ) : null}
             </div>
-            <div className="toggle-rail">
-              <button
-                type="button"
-                className="icon-btn"
-                title="Toggle artifacts panel"
-                onClick={() => setMobilePanelOpen((value) => !value)}
-              >
-                <PanelLeftOpen className="h-3.5 w-3.5" />
-              </button>
-            </div>
+            {narrow && (
+              <div className="toggle-rail">
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title="Toggle artifacts panel"
+                  onClick={() => setMobilePanelOpen((value) => !value)}
+                >
+                  <PanelLeftOpen className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
           </div>
           <div ref={chatScrollRef} className="chat-scroll" onScroll={handleChatScroll}>
             {visibleMessages.length === 0 ? (
