@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  Target,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -775,6 +776,162 @@ function SurfaceSettingsForm({
   );
 }
 
+/* --------------------------- surface goals ------------------------ */
+
+type GoalItem = { id: string; title: string; progress: number; order: number };
+
+function SurfaceGoalsForm({
+  surface,
+  onClose,
+}: {
+  surface: string;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [bottleneck, setBottleneck] = useState("");
+  const [dailyFocus, setDailyFocus] = useState("");
+  const [goals, setGoals] = useState<GoalItem[]>([]);
+  const [newGoal, setNewGoal] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const g = await api.getHeartbeatSurfaceGoals(surface);
+        if (!alive) return;
+        setBottleneck(g.bottleneck || "");
+        setDailyFocus(g.daily_focus || "");
+        setGoals(g.goals || []);
+      } catch (e) {
+        if (alive) setErr(String(e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [surface]);
+
+  const addGoal = () => {
+    const t = newGoal.trim();
+    if (!t) return;
+    setGoals((gs) => [...gs, { id: `tmp_${gs.length}`, title: t, progress: 0, order: gs.length }]);
+    setNewGoal("");
+  };
+  const updateGoal = (i: number, patch: Partial<GoalItem>) =>
+    setGoals((gs) => gs.map((g, j) => (j === i ? { ...g, ...patch } : g)));
+  const removeGoal = (i: number) => setGoals((gs) => gs.filter((_, j) => j !== i));
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.patchHeartbeatSurfaceGoals(surface, {
+        bottleneck: bottleneck.trim(),
+        daily_focus: dailyFocus.trim(),
+        goals: goals.map((g, i) => ({
+          id: g.id.startsWith("tmp_") ? undefined : g.id,
+          title: g.title,
+          progress: g.progress,
+          order: i,
+        })),
+      });
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading goals…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <Field label="Daily focus">
+        <Input
+          value={dailyFocus}
+          onChange={(e) => setDailyFocus(e.target.value)}
+          placeholder="The one thing that matters today"
+        />
+      </Field>
+      <Field label="Bottleneck">
+        <Input
+          value={bottleneck}
+          onChange={(e) => setBottleneck(e.target.value)}
+          placeholder="What's blocking progress right now"
+        />
+      </Field>
+      <Field label="Goals">
+        <div className="space-y-2">
+          {goals.length === 0 && (
+            <p className="text-xs italic text-muted-foreground/70">No goals yet.</p>
+          )}
+          {goals.map((g, i) => (
+            <div key={g.id} className="space-y-1 rounded-md bg-secondary/30 p-2">
+              <div className="flex items-center gap-2">
+                <Input
+                  value={g.title}
+                  onChange={(e) => updateGoal(i, { title: e.target.value })}
+                  className="h-7 text-xs"
+                />
+                <span className="w-9 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+                  {g.progress}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeGoal(i)}
+                  className="shrink-0 text-muted-foreground/60 hover:text-destructive"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={g.progress}
+                onChange={(e) => updateGoal(i, { progress: Number(e.target.value) })}
+                className="w-full accent-foreground"
+              />
+            </div>
+          ))}
+          <div className="flex items-center gap-2">
+            <Input
+              value={newGoal}
+              onChange={(e) => setNewGoal(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addGoal())}
+              placeholder="Add a goal…"
+              className="h-7 text-xs"
+            />
+            <Button variant="ghost" className="h-7 px-2 text-[11px]" onClick={addGoal}>
+              <Plus className="h-3 w-3" /> Add
+            </Button>
+          </div>
+        </div>
+      </Field>
+      {err && <p className="text-xs text-destructive">{err}</p>}
+      <div className="flex justify-end gap-2 pt-1">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+          Save goals
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------- surface card --------------------------- */
 
 function SurfaceCard({
@@ -787,6 +944,7 @@ function SurfaceCard({
   const [open, setOpen] = useState(false);
   const [showNewCycle, setShowNewCycle] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showGoals, setShowGoals] = useState(false);
   const stats = surface.stats;
   const decided = stats.kept + stats.discarded;
   const tone = keepRateTone(stats.keepRate, decided);
@@ -837,6 +995,13 @@ function SurfaceCard({
                 Research Cycles
               </span>
               <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={() => setShowGoals(true)}
+                >
+                  <Target className="h-3 w-3" /> Goals
+                </Button>
                 <Button
                   variant="ghost"
                   className="h-6 px-2 text-[11px]"
@@ -892,6 +1057,18 @@ function SurfaceCard({
               <SurfaceSettingsForm
                 surface={surface.surface}
                 onClose={() => setShowSettings(false)}
+              />
+            </Modal>
+          )}
+
+          {showGoals && (
+            <Modal
+              title={`Goals · ${titleCase(surface.surface)}`}
+              onClose={() => setShowGoals(false)}
+            >
+              <SurfaceGoalsForm
+                surface={surface.surface}
+                onClose={() => setShowGoals(false)}
               />
             </Modal>
           )}

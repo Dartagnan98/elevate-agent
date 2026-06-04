@@ -697,6 +697,31 @@ export const api = {
       "/api/models/available",
       60_000,
     ),
+  // Per-surface goals (north-star focus + bottleneck + rich goal list w/ progress).
+  getHeartbeatSurfaceGoals: (surface: string) =>
+    fetchJSON<{
+      surface: string;
+      bottleneck: string;
+      daily_focus: string;
+      goals: { id: string; title: string; progress: number; order: number }[];
+      updated_at?: string | null;
+    }>(`/api/heartbeats/surfaces/${encodeURIComponent(surface)}/goals`),
+  patchHeartbeatSurfaceGoals: (
+    surface: string,
+    body: {
+      bottleneck?: string;
+      daily_focus?: string;
+      goals?: { id?: string; title: string; progress?: number; order?: number }[];
+    },
+  ) =>
+    fetchJSON<{ surface: string; goals: unknown[] }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/goals`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {

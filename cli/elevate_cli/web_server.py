@@ -6884,6 +6884,125 @@ def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody
         raise HTTPException(status_code=500, detail=f"Update surface config failed: {exc}")
 
 
+def _read_surface_goals(surface_key: str) -> Dict[str, Any]:
+    """Read + normalize a surface's goals.json. Tolerant: coerces legacy string goal
+    entries into the rich {id,title,progress,order} shape."""
+    from elevate_constants import get_account_data_dir
+
+    path = get_account_data_dir() / "heartbeats" / surface_key / "goals.json"
+    data: Dict[str, Any] = {}
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    raw_goals = data.get("goals") if isinstance(data.get("goals"), list) else []
+    goals: List[Dict[str, Any]] = []
+    for i, g in enumerate(raw_goals):
+        if isinstance(g, str):
+            goals.append({"id": f"g{i}", "title": g, "progress": 0, "order": i})
+        elif isinstance(g, dict) and g.get("title"):
+            goals.append({
+                "id": str(g.get("id") or f"g{i}"),
+                "title": str(g["title"])[:200],
+                "progress": max(0, min(100, int(g.get("progress") or 0))),
+                "order": int(g.get("order") if g.get("order") is not None else i),
+            })
+    goals.sort(key=lambda x: x["order"])
+    return {
+        "bottleneck": str(data.get("bottleneck") or ""),
+        "daily_focus": str(data.get("daily_focus") or ""),
+        "daily_focus_set_at": data.get("daily_focus_set_at"),
+        "goals": goals,
+        "updated_at": data.get("updated_at"),
+    }
+
+
+@app.get("/api/heartbeats/surfaces/{surface}/goals")
+def get_heartbeat_surface_goals(surface: str):
+    """Return a surface's goals (north-star focus + bottleneck + rich goal list)."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        return {"surface": surface_key, **_read_surface_goals(surface_key)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/heartbeats/surfaces/%s/goals failed", surface)
+        raise HTTPException(status_code=500, detail=f"Get goals failed: {exc}")
+
+
+class _HeartbeatGoalItem(BaseModel):
+    id: Optional[str] = None
+    title: str
+    progress: Optional[int] = None
+    order: Optional[int] = None
+
+
+class _HeartbeatGoalsPatchBody(BaseModel):
+    bottleneck: Optional[str] = None
+    daily_focus: Optional[str] = None
+    goals: Optional[List[_HeartbeatGoalItem]] = None
+
+
+@app.patch("/api/heartbeats/surfaces/{surface}/goals")
+def patch_heartbeat_surface_goals(surface: str, body: _HeartbeatGoalsPatchBody):
+    """Replace goals[] / set bottleneck / set daily_focus. Validates title length,
+    clamps progress 0-100, mints ids + order, stamps updated_at. Appends a history row."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from elevate_constants import get_account_data_dir
+        from datetime import datetime, timezone
+
+        current = _read_surface_goals(surface_key)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if body.bottleneck is not None:
+            current["bottleneck"] = body.bottleneck.strip()
+        if body.daily_focus is not None:
+            new_focus = body.daily_focus.strip()
+            if new_focus != current.get("daily_focus"):
+                current["daily_focus_set_at"] = now_iso
+            current["daily_focus"] = new_focus
+        if body.goals is not None:
+            cleaned: List[Dict[str, Any]] = []
+            for i, g in enumerate(body.goals):
+                title = (g.title or "").strip()
+                if not title:
+                    continue
+                if len(title) > 200:
+                    raise HTTPException(status_code=400, detail="goal title max 200 chars")
+                cleaned.append({
+                    "id": str(g.id or f"g{int(time.time())}_{secrets.token_hex(2)}"),
+                    "title": title,
+                    "progress": max(0, min(100, int(g.progress or 0))),
+                    "order": int(g.order if g.order is not None else i),
+                })
+            cleaned.sort(key=lambda x: x["order"])
+            for i, g in enumerate(cleaned):
+                g["order"] = i
+            current["goals"] = cleaned
+        current["updated_at"] = now_iso
+
+        path = get_account_data_dir() / "heartbeats" / surface_key / "goals.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        # Append-only history (Elevate has no event bus).
+        try:
+            hist = path.parent / "goals_history.jsonl"
+            with hist.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"at": now_iso, "goals": current["goals"],
+                                     "bottleneck": current["bottleneck"],
+                                     "daily_focus": current["daily_focus"]}) + "\n")
+        except Exception:
+            _log.warning("goals history append failed for %s", surface_key, exc_info=True)
+        return {"surface": surface_key, **current}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("PATCH /api/heartbeats/surfaces/%s/goals failed", surface)
+        raise HTTPException(status_code=500, detail=f"Update goals failed: {exc}")
+
+
 class _HeartbeatAutomationEnabledBody(BaseModel):
     enabled: bool
 
