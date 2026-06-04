@@ -656,6 +656,45 @@ def ensure_surface_automations() -> List[Dict[str, Any]]:
     return out
 
 
+# ─── Day / night mode (port of cortextOS detectDayNightMode) ──────────────────
+def _parse_hhmm(val: Any, default: tuple) -> tuple:
+    """Parse 'HH:MM' → (h, m); fall back to default on anything malformed."""
+    try:
+        h, m = str(val).strip().split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return (h, m)
+    except Exception:
+        pass
+    return default
+
+
+def day_night_mode(config: Dict[str, Any], *, now=None) -> str:
+    """Return 'day' or 'night' for a surface config's day window. Defaults 08:00–22:00,
+    honors config.timezone when zoneinfo resolves it. Faithful port of cortextOS
+    detectDayNightMode, incl. windows that wrap past midnight."""
+    start = _parse_hhmm(config.get("day_mode_start"), (8, 0))
+    end = _parse_hhmm(config.get("day_mode_end"), (22, 0))
+    n = now or _hermes_now()
+    tz = config.get("timezone")
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            n = n.astimezone(ZoneInfo(str(tz)))
+        except Exception:
+            pass
+    cur = n.hour * 60 + n.minute
+    s = start[0] * 60 + start[1]
+    e = end[0] * 60 + end[1]
+    if s <= e:
+        return "day" if s <= cur < e else "night"
+    return "day" if (cur >= s or cur < e) else "night"  # wraps midnight
+
+
+def is_day_mode(config: Dict[str, Any], *, now=None) -> bool:
+    return day_night_mode(config, now=now) == "day"
+
+
 # ─── Theta Wave — fleet self-improvement reviewer ─────────────────────────────
 # The system-level analyst: the ONLY actor that creates/modifies/removes surface
 # experiment cycles. Runs nightly (quiet window), scans every surface, classifies

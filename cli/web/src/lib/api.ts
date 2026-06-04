@@ -677,6 +677,26 @@ export const api = {
       `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/cycles/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+  // Per-surface settings (model picker, day/night, comms style, approval rules).
+  getHeartbeatSurfaceConfig: (surface: string) =>
+    fetchJSON<{ surface: string; config: Record<string, unknown>; mode: string }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/config`,
+    ),
+  patchHeartbeatSurfaceConfig: (surface: string, body: Record<string, unknown>) =>
+    fetchJSON<{ surface: string; config: Record<string, unknown>; mode: string }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/config`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  // Available models for the per-surface model picker ({models:[{id,...}], default}).
+  getAvailableModels: () =>
+    cachedFetchJSON<{ models: { id: string; label?: string }[]; default?: string }>(
+      "/api/models/available",
+      60_000,
+    ),
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {

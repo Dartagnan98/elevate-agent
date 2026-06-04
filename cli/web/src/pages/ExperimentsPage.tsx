@@ -10,6 +10,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Settings2,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -591,6 +592,189 @@ function NewCycleForm({
   );
 }
 
+/* --------------------------- surface settings --------------------- */
+
+const APPROVAL_CATEGORIES = [
+  "external-comms",
+  "financial",
+  "deployment",
+  "data-deletion",
+] as const;
+
+function SurfaceSettingsForm({
+  surface,
+  onClose,
+}: {
+  surface: string;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [models, setModels] = useState<{ id: string; label?: string }[]>([]);
+  const [model, setModel] = useState("");
+  const [timezone, setTimezone] = useState("");
+  const [dayStart, setDayStart] = useState("08:00");
+  const [dayEnd, setDayEnd] = useState("22:00");
+  const [commStyle, setCommStyle] = useState("");
+  const [rules, setRules] = useState<Record<string, "always" | "never" | "">>({});
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [cfgResp, modelsResp] = await Promise.all([
+          api.getHeartbeatSurfaceConfig(surface),
+          api.getAvailableModels().catch(() => ({ models: [] as { id: string }[] })),
+        ]);
+        if (!alive) return;
+        const c = (cfgResp.config || {}) as Record<string, unknown>;
+        setModel(typeof c.model === "string" ? c.model : "");
+        setTimezone(typeof c.timezone === "string" ? c.timezone : "");
+        setDayStart(typeof c.day_mode_start === "string" ? c.day_mode_start : "08:00");
+        setDayEnd(typeof c.day_mode_end === "string" ? c.day_mode_end : "22:00");
+        setCommStyle(typeof c.communication_style === "string" ? c.communication_style : "");
+        const ar = (c.approval_rules || {}) as { always_ask?: string[]; never_ask?: string[] };
+        const next: Record<string, "always" | "never" | ""> = {};
+        for (const cat of APPROVAL_CATEGORIES) {
+          next[cat] = (ar.always_ask || []).includes(cat)
+            ? "always"
+            : (ar.never_ask || []).includes(cat)
+              ? "never"
+              : "";
+        }
+        setRules(next);
+        setModels(modelsResp.models || []);
+      } catch (e) {
+        if (alive) setErr(String(e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [surface]);
+
+  const setRule = (cat: string, val: "always" | "never") =>
+    setRules((r) => ({ ...r, [cat]: r[cat] === val ? "" : val }));
+
+  const valid =
+    /^([01]\d|2[0-3]):[0-5]\d$/.test(dayStart) && /^([01]\d|2[0-3]):[0-5]\d$/.test(dayEnd);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const always_ask = APPROVAL_CATEGORIES.filter((c) => rules[c] === "always");
+      const never_ask = APPROVAL_CATEGORIES.filter((c) => rules[c] === "never");
+      await api.patchHeartbeatSurfaceConfig(surface, {
+        model: model || "",
+        timezone: timezone.trim(),
+        day_mode_start: dayStart,
+        day_mode_end: dayEnd,
+        communication_style: commStyle.trim(),
+        approval_rules: { always_ask, never_ask },
+      });
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <Field label="Model">
+        <Select value={model} onValueChange={setModel}>
+          <SelectOption value="">Harness default</SelectOption>
+          {models.map((m) => (
+            <SelectOption key={m.id} value={m.id}>
+              {m.label || m.id}
+            </SelectOption>
+          ))}
+        </Select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Day starts">
+          <Input value={dayStart} onChange={(e) => setDayStart(e.target.value)} placeholder="08:00" className="font-mono-ui" />
+        </Field>
+        <Field label="Day ends">
+          <Input value={dayEnd} onChange={(e) => setDayEnd(e.target.value)} placeholder="22:00" className="font-mono-ui" />
+        </Field>
+      </div>
+      <Field label="Timezone (optional)">
+        <Input value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="America/Vancouver" />
+      </Field>
+      <Field label="Communication style (optional)">
+        <textarea
+          value={commStyle}
+          onChange={(e) => setCommStyle(e.target.value)}
+          rows={2}
+          placeholder="How this surface should sound in its summaries."
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
+        />
+      </Field>
+      <Field label="Approval rules">
+        <div className="space-y-1.5">
+          {APPROVAL_CATEGORIES.map((cat) => (
+            <div
+              key={cat}
+              className="flex items-center justify-between rounded-md bg-secondary/30 px-2.5 py-1.5"
+            >
+              <span className="text-xs text-foreground/90">{cat}</span>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setRule(cat, "always")}
+                  className={cn(
+                    "h-6 rounded px-2 text-[11px] font-medium transition-colors",
+                    rules[cat] === "always"
+                      ? "bg-warning/20 text-warning"
+                      : "bg-card text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  Always ask
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRule(cat, "never")}
+                  className={cn(
+                    "h-6 rounded px-2 text-[11px] font-medium transition-colors",
+                    rules[cat] === "never"
+                      ? "bg-success/20 text-success"
+                      : "bg-card text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  Never ask
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Field>
+      {err && <p className="text-xs text-destructive">{err}</p>}
+      <div className="flex justify-end gap-2 pt-1">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={!valid || busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+          Save settings
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------- surface card --------------------------- */
 
 function SurfaceCard({
@@ -602,6 +786,7 @@ function SurfaceCard({
 }) {
   const [open, setOpen] = useState(false);
   const [showNewCycle, setShowNewCycle] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const stats = surface.stats;
   const decided = stats.kept + stats.discarded;
   const tone = keepRateTone(stats.keepRate, decided);
@@ -651,13 +836,22 @@ function SurfaceCard({
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
                 Research Cycles
               </span>
-              <Button
-                variant="ghost"
-                className="h-6 px-2 text-[11px]"
-                onClick={() => setShowNewCycle(true)}
-              >
-                <Plus className="h-3 w-3" /> New cycle
-              </Button>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={() => setShowSettings(true)}
+                >
+                  <Settings2 className="h-3 w-3" /> Settings
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={() => setShowNewCycle(true)}
+                >
+                  <Plus className="h-3 w-3" /> New cycle
+                </Button>
+              </div>
             </div>
             {surface.cycles.length > 0 ? (
               <ul className="space-y-1.5">
@@ -686,6 +880,18 @@ function SurfaceCard({
                 surface={surface.surface}
                 onClose={() => setShowNewCycle(false)}
                 onCreated={onChanged}
+              />
+            </Modal>
+          )}
+
+          {showSettings && (
+            <Modal
+              title={`Settings · ${titleCase(surface.surface)}`}
+              onClose={() => setShowSettings(false)}
+            >
+              <SurfaceSettingsForm
+                surface={surface.surface}
+                onClose={() => setShowSettings(false)}
               />
             </Modal>
           )}

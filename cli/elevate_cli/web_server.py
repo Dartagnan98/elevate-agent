@@ -6792,6 +6792,98 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
         raise HTTPException(status_code=500, detail=f"Heartbeat toggle failed: {exc}")
 
 
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Allowlist of per-surface settings the dashboard may edit (cortextOS settings-tab
+# parity). goal/cadence/experiment/cycles/playbook are NOT here — they're owned by
+# the seeder + the autoresearch loop, never the settings panel.
+_SURFACE_CONFIG_EDITABLE = {
+    "model",
+    "timezone",
+    "day_mode_start",
+    "day_mode_end",
+    "communication_style",
+    "approval_rules",
+    "max_session_seconds",
+}
+
+
+@app.get("/api/heartbeats/surfaces/{surface}/config")
+def get_heartbeat_surface_config(surface: str):
+    """Return a surface's config.json plus its current day/night mode. Read-only."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from elevate_constants import get_account_data_dir
+        from cron.jobs import day_night_mode
+
+        cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
+        cfg: Dict[str, Any] = {}
+        if cfg_path.is_file():
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+        return {"surface": surface_key, "config": cfg, "mode": day_night_mode(cfg)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/heartbeats/surfaces/%s/config failed", surface)
+        raise HTTPException(status_code=500, detail=f"Get surface config failed: {exc}")
+
+
+class _HeartbeatConfigPatchBody(BaseModel):
+    model: Optional[str] = None
+    timezone: Optional[str] = None
+    day_mode_start: Optional[str] = None
+    day_mode_end: Optional[str] = None
+    communication_style: Optional[str] = None
+    approval_rules: Optional[Dict[str, Any]] = None
+    max_session_seconds: Optional[int] = None
+
+
+@app.patch("/api/heartbeats/surfaces/{surface}/config")
+def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody):
+    """Allowlist-merge editable settings into a surface's config.json. Preserves
+    goal/cadence/experiment/cycles/playbook. Validates HH:MM + approval shape."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from elevate_constants import get_account_data_dir
+        from cron.jobs import day_night_mode
+
+        patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        # Validate time windows.
+        for k in ("day_mode_start", "day_mode_end"):
+            if k in patch and not _HHMM_RE.match(str(patch[k])):
+                raise HTTPException(status_code=400, detail=f"{k} must be HH:MM (00:00–23:59)")
+        # Validate approval_rules shape: {always_ask:[...], never_ask:[...]}.
+        if "approval_rules" in patch:
+            ar = patch["approval_rules"]
+            if not isinstance(ar, dict):
+                raise HTTPException(status_code=400, detail="approval_rules must be an object")
+            for bucket in ("always_ask", "never_ask"):
+                if bucket in ar and not isinstance(ar[bucket], list):
+                    raise HTTPException(
+                        status_code=400, detail=f"approval_rules.{bucket} must be a list"
+                    )
+        # Only allowlisted keys survive (belt-and-suspenders over the typed body).
+        patch = {k: v for k, v in patch.items() if k in _SURFACE_CONFIG_EDITABLE}
+
+        cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
+        cfg: Dict[str, Any] = {}
+        if cfg_path.is_file():
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+        cfg.update(patch)
+        tmp = cfg_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        tmp.replace(cfg_path)
+        return {"surface": surface_key, "config": cfg, "mode": day_night_mode(cfg)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("PATCH /api/heartbeats/surfaces/%s/config failed", surface)
+        raise HTTPException(status_code=500, detail=f"Update surface config failed: {exc}")
+
+
 class _HeartbeatAutomationEnabledBody(BaseModel):
     enabled: bool
 
