@@ -1621,7 +1621,6 @@ function DesktopSidebar({
   // Automations lives in this (now "Agent") section — always shown.
   realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const toolsNavItems: NavItem[] = [
-    { icon: Bot, label: "Agent Hub", path: "/hub" },
     { icon: Puzzle, label: "Skills", path: "/skills" },
     { icon: Brain, label: "Memory graph", path: "/memory" },
   ];
