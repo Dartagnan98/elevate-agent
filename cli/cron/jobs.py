@@ -345,9 +345,15 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _seed_surface_heartbeat_workspace(surface: str, spec: Dict[str, Any]) -> Path:
+def _seed_surface_heartbeat_workspace(
+    surface: str, spec: Dict[str, Any], *, enabled: bool = True
+) -> Path:
     """Create accounts/<key>/heartbeats/<surface>/{config.json, learnings.md, history/,
-    experiments/history/} from defaults if absent. Returns the workspace Path."""
+    experiments/history/} from defaults if absent. Returns the workspace Path.
+
+    ``enabled`` only governs a BRAND-NEW config.json — an existing config.json is
+    never rewritten, so a surface the realtor has already turned on stays on.
+    """
     from elevate_constants import get_account_data_dir
     ws = get_account_data_dir() / "heartbeats" / surface
     (ws / "history").mkdir(parents=True, exist_ok=True)
@@ -356,7 +362,7 @@ def _seed_surface_heartbeat_workspace(surface: str, spec: Dict[str, Any]) -> Pat
     if not cfg.exists():
         cfg.write_text(json.dumps({
             "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
-            "enabled": True, "experiment": spec["experiment"],
+            "enabled": bool(enabled), "experiment": spec["experiment"],
             "created_by": "system", "created_at": _hermes_now().date().isoformat(),
         }, indent=2))
     learn = ws / "learnings.md"
@@ -371,30 +377,54 @@ def _seed_surface_heartbeat_workspace(surface: str, spec: Dict[str, Any]) -> Pat
 
 def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
     """Idempotently seed the Admin + Leads surface heartbeats (workspace + cron job) for
-    the active account, so every realtor gets them. Mirrors the system-job seeders."""
+    the active account, so every realtor GETS them — but OFF by default (opt-in).
+
+    Surface heartbeats run agent passes on the realtor's box, so a fresh install
+    must not auto-fire them. New seeds are created DISABLED (config.json
+    ``enabled: false`` + the cron job paused). The realtor turns a surface on from
+    the Heartbeat page (POST /api/heartbeats/surfaces/<surface>/enabled).
+
+    Idempotency: a surface whose cron job already exists (matched by name) is left
+    EXACTLY as-is via the early ``continue`` — its enabled/paused state, schedule,
+    and run history are never touched. Only brand-new seeds get the disabled
+    default. Mirrors the system-job seeders.
+    """
     out: List[Dict[str, Any]] = []
     for surface, spec in SURFACE_HEARTBEAT_DEFAULTS.items():
-        ws = _seed_surface_heartbeat_workspace(surface, spec)
         name = spec["name"]
         existing = next(
             (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
             None,
         )
         if existing:
+            # Already seeded for this account — never re-seed or flip its state.
+            # (Seed the workspace dirs only if the config is also already present;
+            # passing the existing job's enabled keeps a freshly-recreated
+            # config.json consistent without overwriting an existing one.)
+            _seed_surface_heartbeat_workspace(
+                surface, spec, enabled=bool(existing.get("enabled", False))
+            )
             out.append(existing)
             continue
+        # Brand-new seed: workspace + job both OFF by default.
+        ws = _seed_surface_heartbeat_workspace(surface, spec, enabled=False)
         prompt = (
             f"You are the {surface.upper()} surface-heartbeat. Surface: {surface}. "
             f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read config.json "
             f"+ learnings.md, do the {surface} work, log to history/, distill learnings, and run "
             f"the experiment loop when due. Drafts only — never act on the realtor's behalf."
         )
-        out.append(create_job(
+        job = create_job(
             prompt=prompt, schedule=spec["schedule"], name=name,
             skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
             origin={"type": "surface-heartbeat", "surface": surface, "source": "system"},
             workdir=str(ws),
-        ))
+        )
+        # create_job() always returns an enabled+scheduled job; flip it off
+        # through the canonical disable path so it carries the same
+        # enabled=False / state="paused" / cleared next_run as any paused job.
+        paused = pause_job(job["id"], reason="surface heartbeat is opt-in (seeded off)")
+        out.append(paused or job)
     return out
 
 

@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Markdown } from "@/components/Markdown";
 import { Toast } from "@/components/Toast";
@@ -238,7 +239,15 @@ function keepRateTone(rate: number, total: number): "outline" | "success" | "war
   return "outline";
 }
 
-function SurfaceCard({ surface }: { surface: HeartbeatSurface }) {
+function SurfaceCard({
+  surface,
+  onToggle,
+  busy,
+}: {
+  surface: HeartbeatSurface;
+  onToggle: (surface: string, enabled: boolean) => void;
+  busy: boolean;
+}) {
   const [showLearnings, setShowLearnings] = useState(false);
   const cfg = surface.config;
   const last = surface.lastRun;
@@ -255,17 +264,52 @@ function SurfaceCard({ surface }: { surface: HeartbeatSurface }) {
 
   const recentExperiments = exp.history.slice(0, 3);
 
+  const toggle = (
+    <div className="flex shrink-0 items-center gap-2">
+      {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+      <Switch
+        checked={enabled}
+        disabled={busy}
+        onCheckedChange={(next) => onToggle(surface.surface, next)}
+        aria-label={enabled ? "Disable this heartbeat" : "Enable this heartbeat"}
+      />
+    </div>
+  );
+
+  // OFF state: surface heartbeats ship opt-in. Show a muted, paused card with a
+  // one-line nudge and the toggle to turn it on — no run/experiment detail.
+  if (!enabled) {
+    return (
+      <Card className="opacity-80">
+        <CardHeader>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <CardTitle className="text-muted-foreground">
+                  {titleCase(surface.surface)}
+                </CardTitle>
+                <Badge variant="secondary">off</Badge>
+              </div>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                Off — enable to run on cadence ({prettyCron(cfg?.cadence)}).
+              </p>
+            </div>
+            {toggle}
+          </div>
+          {cfg?.goal && (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground/80">{cfg.goal}</p>
+          )}
+        </CardHeader>
+      </Card>
+    );
+  }
+
   return (
-    <Card className={cn(!enabled && "opacity-70")}>
+    <Card>
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <CardTitle>{titleCase(surface.surface)}</CardTitle>
-              {!enabled && (
-                <Badge variant="secondary">paused</Badge>
-              )}
-            </div>
+            <CardTitle>{titleCase(surface.surface)}</CardTitle>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
               <span className="inline-flex items-center gap-1">
                 <Clock className="h-3 w-3" />
@@ -283,11 +327,14 @@ function SurfaceCard({ surface }: { surface: HeartbeatSurface }) {
               ) : null}
             </div>
           </div>
-          <Badge variant={keepRateTone(exp.stats.keepRate, exp.stats.kept + exp.stats.discarded)}>
-            {exp.stats.kept + exp.stats.discarded > 0
-              ? `${exp.stats.keepRate}% kept`
-              : "no experiments"}
-          </Badge>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge variant={keepRateTone(exp.stats.keepRate, exp.stats.kept + exp.stats.discarded)}>
+              {exp.stats.kept + exp.stats.discarded > 0
+                ? `${exp.stats.keepRate}% kept`
+                : "no experiments"}
+            </Badge>
+            {toggle}
+          </div>
         </div>
         {cfg?.goal && (
           <p className="mt-1 text-xs leading-5 text-muted-foreground">{cfg.goal}</p>
@@ -580,6 +627,7 @@ export default function HeartbeatPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<FormValues>(EMPTY_FORM);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const [togglingSurfaces, setTogglingSurfaces] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const pollRef = useRef<number | null>(null);
 
@@ -628,6 +676,39 @@ export default function HeartbeatPage() {
     const id = window.setInterval(refreshSurfaces, 30000);
     return () => window.clearInterval(id);
   }, [refreshSurfaces]);
+
+  // Opt-in toggle: surface heartbeats ship OFF; the realtor turns one on here.
+  // Optimistic flip on the local config, then reconcile with the authoritative
+  // server state (the cron job) on refetch.
+  const handleSurfaceToggle = useCallback(
+    async (surfaceName: string, enabled: boolean) => {
+      setTogglingSurfaces((prev) => new Set(prev).add(surfaceName));
+      setSurfaces((prev) =>
+        prev.map((s) =>
+          s.surface === surfaceName
+            ? { ...s, config: { ...(s.config || {}), enabled } }
+            : s,
+        ),
+      );
+      try {
+        await api.setHeartbeatSurfaceEnabled(surfaceName, enabled);
+        showToast(
+          `${titleCase(surfaceName)} heartbeat ${enabled ? "on" : "off"}`,
+          "success",
+        );
+      } catch (e) {
+        showToast(`Couldn't update: ${e}`, "error");
+      } finally {
+        setTogglingSurfaces((prev) => {
+          const next = new Set(prev);
+          next.delete(surfaceName);
+          return next;
+        });
+        await refreshSurfaces();
+      }
+    },
+    [refreshSurfaces, showToast],
+  );
 
   const markBusy = (id: string, on: boolean) =>
     setBusyIds((prev) => {
@@ -790,7 +871,12 @@ export default function HeartbeatPage() {
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             {surfaces.map((s) => (
-              <SurfaceCard key={s.surface} surface={s} />
+              <SurfaceCard
+                key={s.surface}
+                surface={s}
+                onToggle={handleSurfaceToggle}
+                busy={togglingSurfaces.has(s.surface)}
+              />
             ))}
           </div>
         </section>

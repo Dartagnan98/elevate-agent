@@ -593,6 +593,16 @@ export const api = {
       ? fetchJSON<HeartbeatSurfacesResponse>(url)
       : cachedFetchJSON<HeartbeatSurfacesResponse>(url, 5_000);
   },
+  // Opt-in toggle: surface heartbeats ship OFF and the realtor turns them on here.
+  setHeartbeatSurfaceEnabled: (surface: string, enabled: boolean) =>
+    fetchJSON<{ surface: string; enabled: boolean }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/enabled`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    ),
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {

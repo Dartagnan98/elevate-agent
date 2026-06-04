@@ -6261,6 +6261,24 @@ def get_heartbeat_surfaces():
         if not heartbeats_dir.is_dir():
             return {"surfaces": surfaces}
 
+        # Authoritative enabled state lives on the cron job, not config.json — a
+        # paused/resumed toggle updates the job first. Map surface -> job.enabled
+        # so a card reflects whether the heartbeat will actually fire, even if a
+        # stale config.json copy disagrees.
+        job_enabled_by_surface: Dict[str, bool] = {}
+        try:
+            from cron.jobs import list_jobs as _list_jobs
+
+            for _job in _list_jobs(include_disabled=True):
+                _origin = _job.get("origin") or {}
+                if _origin.get("type") == "surface-heartbeat":
+                    _surf = _origin.get("surface")
+                    if isinstance(_surf, str) and _surf:
+                        job_enabled_by_surface[_surf] = bool(_job.get("enabled", True))
+        except Exception:
+            # No cron access -> fall back to config.json's own enabled below.
+            job_enabled_by_surface = {}
+
         def _read_json(path: Path) -> Optional[Any]:
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
@@ -6274,6 +6292,13 @@ def get_heartbeat_surfaces():
 
             # Config
             config = _read_json(surface_dir / "config.json")
+            # Overlay the AUTHORITATIVE enabled from the cron job so the card
+            # never shows a stale config.json value (the toggle writes the job
+            # first). Falls back to config.json's own enabled when no job exists.
+            if surface_name in job_enabled_by_surface:
+                if not isinstance(config, dict):
+                    config = {}
+                config["enabled"] = job_enabled_by_surface[surface_name]
 
             # Work-run history (history/*.json), newest first.
             history_files: List[Path] = []
@@ -6357,6 +6382,74 @@ def get_heartbeat_surfaces():
     except Exception as exc:
         _log.exception("GET /api/heartbeats/surfaces failed")
         raise HTTPException(status_code=500, detail=f"Heartbeat surfaces failed: {exc}")
+
+
+class _HeartbeatSurfaceEnabledBody(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/heartbeats/surfaces/{surface}/enabled")
+def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBody):
+    """Turn a surface heartbeat ON or OFF (opt-in) for the CURRENT account.
+
+    Surface heartbeats are seeded OFF (they run agent passes on the realtor's
+    box). The realtor opts in here. This flips the AUTHORITATIVE cron job via the
+    canonical resume/pause paths — ``resume_job`` recomputes a fresh future
+    ``next_run_at`` so an enabled heartbeat actually schedules and never gets
+    stuck — then mirrors ``enabled`` into the workspace ``config.json``.
+    """
+    try:
+        from elevate_constants import get_account_data_dir
+        from cron.jobs import list_jobs, pause_job, resume_job
+
+        want = bool(body.enabled)
+        surface_key = (surface or "").strip()
+        if not surface_key:
+            raise HTTPException(status_code=400, detail="surface is required")
+
+        # Find this surface's heartbeat cron job (account-scoped).
+        job = next(
+            (
+                j
+                for j in list_jobs(include_disabled=True)
+                if (j.get("origin") or {}).get("type") == "surface-heartbeat"
+                and (j.get("origin") or {}).get("surface") == surface_key
+            ),
+            None,
+        )
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No heartbeat job for surface '{surface_key}'",
+            )
+
+        # Flip via the canonical cron paths (resume recomputes next_run_at).
+        if want:
+            updated = resume_job(job["id"])
+        else:
+            updated = pause_job(job["id"], reason="surface heartbeat disabled by realtor")
+        if not updated:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        # Keep the workspace config.json in sync so it never drifts from the job.
+        try:
+            cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
+            if cfg_path.is_file():
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                cfg["enabled"] = want
+                cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        except Exception:
+            # Job state is authoritative; a config.json write hiccup is non-fatal.
+            _log.warning("heartbeat %s: config.json enabled sync failed", surface_key, exc_info=True)
+
+        return {"surface": surface_key, "enabled": bool(updated.get("enabled", want))}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/heartbeats/surfaces/%s/enabled failed", surface)
+        raise HTTPException(status_code=500, detail=f"Heartbeat toggle failed: {exc}")
 
 
 @app.post("/api/admin/deals")
