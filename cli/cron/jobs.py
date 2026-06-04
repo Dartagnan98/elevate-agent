@@ -360,9 +360,31 @@ def _seed_surface_heartbeat_workspace(
     (ws / "experiments" / "history").mkdir(parents=True, exist_ok=True)
     cfg = ws / "config.json"
     if not cfg.exists():
+        # Build the new agent-creatable cycles[] from the spec's experiment block
+        # ADDITIVELY: keep the legacy single ``experiment`` key for back-compat
+        # (every reader tolerates both), and seed exactly one cycle from it so a
+        # brand-new surface already carries a real cycle.
+        exp = spec["experiment"]
+        _every_n = exp.get("every_n_runs", 7)
+        _seed_cycle = {
+            "name": exp.get("metric") or f"{surface} self-improvement",
+            "metric": exp.get("metric"),
+            "metric_type": exp.get("metric_type", "qualitative"),
+            "surface": "playbook",
+            "direction": exp.get("direction", "higher"),
+            "window": exp.get("window"),
+            "measurement": exp.get("measurement"),
+            "every_n_runs": _every_n,
+            "loop_interval": f"every {_every_n} runs",
+            "approval_required": bool(exp.get("approval_required", False)),
+            "enabled": True,
+            "created_by": "system",
+            "created_at": _hermes_now().isoformat(),
+        }
         cfg.write_text(json.dumps({
             "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
             "enabled": bool(enabled), "experiment": spec["experiment"],
+            "cycles": [_seed_cycle],
             "created_by": "system", "created_at": _hermes_now().date().isoformat(),
         }, indent=2))
     learn = ws / "learnings.md"

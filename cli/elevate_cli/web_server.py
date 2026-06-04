@@ -6479,26 +6479,20 @@ def get_heartbeat_experiments():
             exp_cfg = config.get("experiment") if isinstance(config, dict) else None
             exp_cfg = exp_cfg if isinstance(exp_cfg, dict) else {}
 
-            # One cycle per surface = the config.experiment block (the recurring loop).
-            cycles: List[Dict[str, Any]] = []
-            if exp_cfg:
-                every_n = exp_cfg.get("every_n_runs")
-                cycles.append({
-                    "name": f"{surface_name} self-improvement",
-                    "surface": surface_name,
-                    "metric": exp_cfg.get("metric"),
-                    "metric_type": exp_cfg.get("metric_type"),
-                    "direction": exp_cfg.get("direction"),
-                    "window": exp_cfg.get("window"),
-                    "measurement": exp_cfg.get("measurement"),
-                    "every_n_runs": every_n,
-                    "loop_interval": (f"every {every_n} runs" if every_n else None),
-                    "approval_required": bool(exp_cfg.get("approval_required", False)),
-                    "enabled": True,
-                })
-            c_metric = exp_cfg.get("metric")
-            c_direction = exp_cfg.get("direction")
-            c_window = exp_cfg.get("window")
+            # Cycles are agent-creatable DATA: the real config.cycles[] array,
+            # falling back (read-only) to the migrated legacy ``experiment`` block.
+            try:
+                from cron.cycles import list_cycles as _list_cycles
+                cycles: List[Dict[str, Any]] = _list_cycles(surface_name)
+            except Exception:
+                cycles = []
+
+            # Metric/direction/window context for normalizing experiments below:
+            # prefer the first cycle, then fall back to the legacy block.
+            _ctx = cycles[0] if cycles else exp_cfg
+            c_metric = _ctx.get("metric")
+            c_direction = _ctx.get("direction")
+            c_window = _ctx.get("window")
 
             experiments: List[Dict[str, Any]] = []
             exp_dir = surface_dir / "experiments"
@@ -6573,6 +6567,121 @@ def get_heartbeat_experiments():
     except Exception as exc:
         _log.exception("GET /api/heartbeats/experiments failed")
         raise HTTPException(status_code=500, detail=f"Heartbeat experiments failed: {exc}")
+
+
+def _validate_heartbeat_surface(surface: str) -> str:
+    """Return the trimmed surface name if it has a heartbeat workspace dir for the
+    current account, else raise 400/404. Cycle endpoints are scoped to real
+    surfaces only.
+    """
+    from elevate_constants import get_account_data_dir
+
+    surface_key = (surface or "").strip()
+    if not surface_key:
+        raise HTTPException(status_code=400, detail="surface is required")
+    surface_dir = get_account_data_dir() / "heartbeats" / surface_key
+    if not surface_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"No heartbeat surface '{surface_key}'")
+    return surface_key
+
+
+@app.get("/api/heartbeats/surfaces/{surface}/cycles")
+def list_heartbeat_cycles(surface: str):
+    """List a surface's experiment cycles (the real ``cycles[]`` array, falling
+    back to the migrated legacy ``experiment`` block). Read-only."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from cron.cycles import list_cycles
+        return {"cycles": list_cycles(surface_key)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/heartbeats/surfaces/%s/cycles failed", surface)
+        raise HTTPException(status_code=500, detail=f"List cycles failed: {exc}")
+
+
+class _HeartbeatCycleCreateBody(BaseModel):
+    name: str
+    metric: str
+    metric_type: str
+    direction: str
+    window: str
+    every_n_runs: Optional[int] = None
+    measurement: Optional[str] = None
+    approval_required: Optional[bool] = None
+    surface: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+@app.post("/api/heartbeats/surfaces/{surface}/cycles")
+def create_heartbeat_cycle(surface: str, body: _HeartbeatCycleCreateBody):
+    """Create a new agent-creatable experiment cycle on a surface."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from cron.cycles import manage_cycle
+
+        opts = {k: v for k, v in body.model_dump().items() if v is not None}
+        result = manage_cycle(surface_key, "create", **opts)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "create failed")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/heartbeats/surfaces/%s/cycles failed", surface)
+        raise HTTPException(status_code=500, detail=f"Create cycle failed: {exc}")
+
+
+class _HeartbeatCyclePatchBody(BaseModel):
+    metric_type: Optional[str] = None
+    direction: Optional[str] = None
+    window: Optional[str] = None
+    loop_interval: Optional[str] = None
+    every_n_runs: Optional[int] = None
+    surface: Optional[str] = None
+    measurement: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@app.patch("/api/heartbeats/surfaces/{surface}/cycles/{name}")
+def modify_heartbeat_cycle(surface: str, name: str, body: _HeartbeatCyclePatchBody):
+    """Patch supplied fields of a surface cycle (matched by name, case-insensitive)."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from cron.cycles import manage_cycle
+
+        opts = {k: v for k, v in body.model_dump().items() if v is not None}
+        result = manage_cycle(surface_key, "modify", name=name, **opts)
+        if not result.get("ok"):
+            err = result.get("error") or "modify failed"
+            status = 404 if "not found" in err.lower() else 400
+            raise HTTPException(status_code=status, detail=err)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("PATCH /api/heartbeats/surfaces/%s/cycles/%s failed", surface, name)
+        raise HTTPException(status_code=500, detail=f"Modify cycle failed: {exc}")
+
+
+@app.delete("/api/heartbeats/surfaces/{surface}/cycles/{name}")
+def remove_heartbeat_cycle(surface: str, name: str):
+    """Remove a surface cycle by name (case-insensitive)."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from cron.cycles import manage_cycle
+
+        result = manage_cycle(surface_key, "remove", name=name)
+        if not result.get("ok"):
+            err = result.get("error") or "remove failed"
+            status = 404 if "not found" in err.lower() else 400
+            raise HTTPException(status_code=status, detail=err)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("DELETE /api/heartbeats/surfaces/%s/cycles/%s failed", surface, name)
+        raise HTTPException(status_code=500, detail=f"Remove cycle failed: {exc}")
 
 
 class _HeartbeatSurfaceEnabledBody(BaseModel):
