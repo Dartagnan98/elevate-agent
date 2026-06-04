@@ -8163,7 +8163,7 @@ function ArtifactPreviewPane({
             />
           </div>
         ) : kind === "text" && textPreview !== null ? (
-          <pre className="h-full overflow-auto p-4 text-[0.76rem] leading-5 text-[var(--chat-muted-strong)] whitespace-pre-wrap">
+          <pre className="h-full max-w-full overflow-x-hidden overflow-y-auto p-4 text-[0.76rem] leading-5 text-[var(--chat-muted-strong)] whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
             {textPreview}
           </pre>
         ) : (
