@@ -105,7 +105,6 @@ const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
 const loadCronPage = () => import("@/pages/CronPage");
 const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
 const loadExperimentsPage = () => import("@/pages/ExperimentsPage");
-const loadAgentsPage = () => import("@/pages/AgentsPage");
 const loadTasksPage = () => import("@/pages/TasksPage");
 const loadApprovalsPage = () => import("@/pages/ApprovalsPage");
 const loadSkillsPage = () => import("@/pages/SkillsPage");
@@ -136,7 +135,6 @@ const AnalyticsPage = lazy(loadAnalyticsPage);
 const CronPage = lazy(loadCronPage);
 const HeartbeatPage = lazy(loadHeartbeatPage);
 const ExperimentsPage = lazy(loadExperimentsPage);
-const AgentsPage = lazy(loadAgentsPage);
 const TasksPage = lazy(loadTasksPage);
 const ApprovalsPage = lazy(loadApprovalsPage);
 const SkillsPage = lazy(loadSkillsPage);
@@ -170,7 +168,6 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/cron": loadCronPage,
   "/heartbeat": loadHeartbeatPage,
   "/experiments": loadExperimentsPage,
-  "/agents": loadAgentsPage,
   "/tasks": loadTasksPage,
   "/approvals": loadApprovalsPage,
   "/skills": loadSkillsPage,
@@ -420,7 +417,6 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/cron": CronPage,
   "/heartbeat": HeartbeatPage,
   "/experiments": ExperimentsPage,
-  "/agents": AgentsPage,
   "/tasks": TasksPage,
   "/approvals": ApprovalsPage,
   "/skills": SkillsPage,
@@ -430,11 +426,6 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
 };
 
 const BUILTIN_NAV_REST: NavItem[] = [
-  {
-    path: "/hub",
-    label: "Agent Hub",
-    icon: Bot,
-  },
   {
     path: "/desktop-setup",
     label: "Desktop Setup",
@@ -1608,8 +1599,8 @@ function DesktopSidebar({
   if (realEstatePacks.realEstateMarketing) {
     realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
-  // Agents = the fleet hub: roster + per-agent detail tabs (the cortextOS backbone).
-  realEstateNavItems.push({ icon: Bot, label: "Agents", path: "/agents" });
+  // Agents = the Agent Hub (single config page): identity + skills + the cortextOS loops.
+  realEstateNavItems.push({ icon: Bot, label: "Agents", path: "/hub" });
   // Heartbeat = the simple scheduled check-in surface; Automations = power cron.
   realEstateNavItems.push({ icon: Activity, label: "Heartbeat", path: "/heartbeat" });
   // Experiments = autoresearch view of the surface heartbeat improvement loops.

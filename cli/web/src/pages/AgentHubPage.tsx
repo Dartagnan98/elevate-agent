@@ -22,6 +22,7 @@ import { isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import { AgentLoops } from "@/components/agent/agent-loops";
 import {
   type AgentEditPatch,
   type SkillEntry,
@@ -637,6 +638,7 @@ function AgentCard({
           onSave={onTelegramLaneSave}
           saving={savingTelegram}
         />
+        <AgentLoops agentId={agent.id} agentName={agent.name} />
       </div>
     </div>
   );
