@@ -2977,8 +2977,12 @@ export default function ChatPage() {
         );
       }
       // Open EVEN. Auto-population shouldn't let the preview take over the chat
-      // (or vice versa) — start at a balanced 50/50; the divider still resizes.
-      setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(window.innerWidth * 0.5)));
+      // (or vice versa) — start at a balanced 50/50 of the CHAT SHELL (the area
+      // between the sidebar and the right border), NOT the whole window (which
+      // includes the sidebar and would make the preview bigger than half).
+      const shellEl = document.querySelector<HTMLElement>(".elevate-chat-shell");
+      const shellWidth = shellEl?.clientWidth || window.innerWidth;
+      setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(shellWidth * 0.5)));
       setPreviewArtifact(artifact);
     },
     [artifactStateSessionId],
