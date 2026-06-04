@@ -246,7 +246,7 @@ const ADMIN_SIDE_LABELS: Record<AdminSide, { title: string; description: string 
 const ADMIN_COLUMNS: AdminColumn[] = [
   {
     stage: 0,
-    stageNumber: "S0",
+    stageNumber: "S1",
     stageLabel: "Pre-CMA",
     labels: {
       listing: { title: "Pre-CMA", subtitle: "Dashboard setup + contact verification" },
@@ -255,7 +255,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 1,
-    stageNumber: "S1",
+    stageNumber: "S2",
     stageLabel: "CMA",
     labels: {
       listing: { title: "CMA / Evaluation", subtitle: "PDF + pricing story" },
@@ -264,7 +264,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 2,
-    stageNumber: "S2",
+    stageNumber: "S3",
     stageLabel: "Intake",
     labels: {
       listing: { title: "Listing Intake", subtitle: "Trigger MLC + missing fields" },
@@ -273,7 +273,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 3,
-    stageNumber: "S3",
+    stageNumber: "S4",
     stageLabel: "SkySlope",
     labels: {
       listing: { title: "SkySlope & Matrix Prep", subtitle: "Compliance file + incomplete MLS draft" },
@@ -282,7 +282,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 4,
-    stageNumber: "S4",
+    stageNumber: "S5",
     stageLabel: "Marketing",
     labels: {
       listing: { title: "Marketing Go", subtitle: "Coming-soon + launch assets" },
@@ -291,7 +291,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 5,
-    stageNumber: "S5",
+    stageNumber: "S6",
     stageLabel: "Live",
     labels: {
       listing: { title: "Listing Live / Marketing", subtitle: "MLS live + seller updates" },
@@ -300,7 +300,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 6,
-    stageNumber: "S6",
+    stageNumber: "S7",
     stageLabel: "Contract",
     labels: {
       listing: { title: "Accepted Offer", subtitle: "Contract review + dates" },
@@ -309,7 +309,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 7,
-    stageNumber: "S7",
+    stageNumber: "S8",
     stageLabel: "Conditions",
     labels: {
       listing: { title: "Condition Removal", subtitle: "Conditions + lawyer package" },
@@ -318,15 +318,6 @@ const ADMIN_COLUMNS: AdminColumn[] = [
   },
   {
     stage: 8,
-    stageNumber: "S8",
-    stageLabel: "Closed",
-    labels: {
-      listing: { title: "Closed", subtitle: "Archive + nurture" },
-      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
-    },
-  },
-  {
-    stage: 9,
     stageNumber: "S9",
     stageLabel: "Closed",
     labels: {
@@ -335,8 +326,17 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     },
   },
   {
-    stage: 10,
+    stage: 9,
     stageNumber: "S10",
+    stageLabel: "Closed",
+    labels: {
+      listing: { title: "Closed", subtitle: "Archive + nurture" },
+      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
+    },
+  },
+  {
+    stage: 10,
+    stageNumber: "S11",
     stageLabel: "Closed",
     labels: {
       listing: { title: "Closed", subtitle: "Archive + nurture" },
