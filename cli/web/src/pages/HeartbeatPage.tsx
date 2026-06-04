@@ -1,24 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Beaker,
   ChevronDown,
   ChevronRight,
   Clock,
+  FlaskConical,
   Loader2,
   Pause,
   Pencil,
   Play,
   Plus,
+  Repeat,
   Trash2,
   X,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { CronJob } from "@/lib/api";
-import type { AgentHubAgent } from "@/lib/api-types";
+import type { AgentHubAgent, HeartbeatSurface } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Markdown } from "@/components/Markdown";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
@@ -179,6 +185,212 @@ function statusTone(status?: string | null): string {
     default:
       return "text-muted-foreground";
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Surface heartbeats (per-account work + experiment loop per surface)*/
+/* ------------------------------------------------------------------ */
+
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** Best-effort human rendering of a 5-field cron cadence string. */
+function prettyCron(expr?: string | null): string {
+  const raw = (expr || "").trim();
+  if (!raw) return "—";
+  const parts = raw.split(/\s+/);
+  if (parts.length !== 5) return raw;
+  const [min, hr, dom, mon, dow] = parts;
+
+  const times = (): string | null => {
+    // Only render times when both minute and hour are concrete lists.
+    if (/[*/-]/.test(hr)) return null;
+    if (min !== "0" && /[*/-]/.test(min)) return null;
+    const hours = hr.split(",");
+    const mm = min === "0" || min === "*" ? "00" : min.padStart(2, "0");
+    const fmt = hours
+      .map((h) => `${h.padStart(2, "0")}:${mm}`)
+      .join(", ");
+    return fmt;
+  };
+
+  const t = times();
+  if (dom === "*" && mon === "*" && dow === "*" && t) {
+    return `Daily at ${t}`;
+  }
+  if (dom === "*" && mon === "*" && dow !== "*" && t) {
+    const days = dow
+      .split(",")
+      .map((d) => DOW[Number(d) % 7] ?? d)
+      .join(", ");
+    return `${days} at ${t}`;
+  }
+  return raw;
+}
+
+function titleCase(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+function keepRateTone(rate: number, total: number): "outline" | "success" | "warning" {
+  if (total === 0) return "outline";
+  if (rate >= 60) return "success";
+  if (rate <= 30) return "warning";
+  return "outline";
+}
+
+function SurfaceCard({ surface }: { surface: HeartbeatSurface }) {
+  const [showLearnings, setShowLearnings] = useState(false);
+  const cfg = surface.config;
+  const last = surface.lastRun;
+  const exp = surface.experiments;
+  const enabled = cfg?.enabled !== false;
+
+  const lastSummary = (last?.summary || last?.found || "").trim();
+  const lastRanAt = last?.ran_at || null;
+
+  const learnings = (surface.learnings || "").trim();
+  // Treat the seed placeholder as "no learnings yet" for the collapsed state.
+  const hasLearnings =
+    learnings.length > 0 && !/\(none yet/i.test(learnings);
+
+  const recentExperiments = exp.history.slice(0, 3);
+
+  return (
+    <Card className={cn(!enabled && "opacity-70")}>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <CardTitle>{titleCase(surface.surface)}</CardTitle>
+              {!enabled && (
+                <Badge variant="secondary">paused</Badge>
+              )}
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                <Clock className="h-3 w-3" />
+                {prettyCron(cfg?.cadence)}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <Repeat className="h-3 w-3" />
+                {surface.runCount} {surface.runCount === 1 ? "run" : "runs"}
+              </span>
+              {cfg?.experiment?.every_n_runs ? (
+                <span className="inline-flex items-center gap-1">
+                  <FlaskConical className="h-3 w-3" />
+                  experiment every {cfg.experiment.every_n_runs}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <Badge variant={keepRateTone(exp.stats.keepRate, exp.stats.kept + exp.stats.discarded)}>
+            {exp.stats.kept + exp.stats.discarded > 0
+              ? `${exp.stats.keepRate}% kept`
+              : "no experiments"}
+          </Badge>
+        </div>
+        {cfg?.goal && (
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">{cfg.goal}</p>
+        )}
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {/* Last run */}
+        <div className="space-y-1">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+              Last run
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              {formatRelative(lastRanAt)}
+            </span>
+          </div>
+          {lastSummary ? (
+            <p className="whitespace-pre-wrap text-xs leading-5 text-foreground/90">
+              {lastSummary}
+            </p>
+          ) : (
+            <p className="text-xs italic text-muted-foreground/70">
+              No runs yet — fires on its cadence.
+            </p>
+          )}
+        </div>
+
+        {/* Active experiment */}
+        {exp.active && (
+          <div className="rounded-md border border-border bg-secondary/30 p-2.5">
+            <div className="flex items-center gap-1.5">
+              <Beaker className="h-3.5 w-3.5 text-foreground/70" />
+              <span className="text-[11px] font-medium uppercase tracking-wide text-foreground/70">
+                Running experiment
+              </span>
+            </div>
+            {exp.active.hypothesis && (
+              <p className="mt-1 text-xs leading-5 text-foreground/90">
+                {exp.active.hypothesis}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Recent experiments */}
+        {recentExperiments.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+              Recent experiments
+            </span>
+            <ul className="space-y-1.5">
+              {recentExperiments.map((e, i) => (
+                <li
+                  key={e.id || i}
+                  className="flex items-start gap-2 rounded-md bg-secondary/30 p-2"
+                >
+                  <Badge
+                    variant={
+                      e.decision === "keep"
+                        ? "success"
+                        : e.decision === "discard"
+                          ? "warning"
+                          : "outline"
+                    }
+                    className="mt-0.5 shrink-0"
+                  >
+                    {e.decision || "open"}
+                  </Badge>
+                  <span className="min-w-0 text-xs leading-5 text-muted-foreground">
+                    {e.learning || e.hypothesis || e.id || "experiment"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Learnings */}
+        {hasLearnings && (
+          <div className="space-y-1.5">
+            <button
+              type="button"
+              onClick={() => setShowLearnings((v) => !v)}
+              className="flex w-full items-center gap-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80 hover:text-foreground"
+            >
+              {showLearnings ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+              Learnings
+            </button>
+            {showLearnings && (
+              <div className="rounded-md border border-border bg-secondary/20 p-3">
+                <Markdown content={learnings} />
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -360,6 +572,8 @@ export default function HeartbeatPage() {
   const { toast, showToast } = useToast();
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [agents, setAgents] = useState<AgentHubAgent[]>([]);
+  const [surfaces, setSurfaces] = useState<HeartbeatSurface[]>([]);
+  const [surfacesLoaded, setSurfacesLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [createForm, setCreateForm] = useState<FormValues>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
@@ -395,6 +609,25 @@ export default function HeartbeatPage() {
       .then((snap) => setAgents(snap.agents || []))
       .catch(() => setAgents([]));
   }, []);
+
+  // Surface heartbeats: per-account work+experiment loop per surface
+  // (Admin, Leads). Read-only view of config/last-run/learnings/experiments.
+  const refreshSurfaces = useCallback(async () => {
+    try {
+      const resp = await api.getHeartbeatSurfaces({ refresh: true });
+      setSurfaces(resp.surfaces || []);
+    } catch {
+      // background poll — keep last good state
+    } finally {
+      setSurfacesLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSurfaces();
+    const id = window.setInterval(refreshSurfaces, 30000);
+    return () => window.clearInterval(id);
+  }, [refreshSurfaces]);
 
   const markBusy = (id: string, on: boolean) =>
     setBusyIds((prev) => {
@@ -544,6 +777,24 @@ export default function HeartbeatPage() {
           wakes on that clock, runs it, and reports back here.
         </p>
       </header>
+
+      {/* Surface heartbeats — always-on, self-improving per surface */}
+      {surfacesLoaded && surfaces.length > 0 && (
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-foreground">Surfaces</h2>
+            <p className="text-xs text-muted-foreground">
+              Each surface runs its own work loop on a cadence and periodically
+              experiments to do it better — compounding what it learns.
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {surfaces.map((s) => (
+              <SurfaceCard key={s.surface} surface={s} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Create */}
       <section className="rounded-lg border border-border bg-card/40 p-4">

@@ -2456,3 +2456,84 @@ export interface PluginManifestResponse {
   has_api: boolean;
   source: string;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Surface heartbeats (per-account work+experiment loop per surface)  */
+/* ------------------------------------------------------------------ */
+
+export interface HeartbeatSurfaceExperimentConfig {
+  every_n_runs?: number;
+  metric?: string;
+  metric_type?: string;
+  direction?: string;
+  window?: string;
+  measurement?: string;
+  approval_required?: boolean;
+}
+
+export interface HeartbeatSurfaceConfig {
+  surface?: string;
+  goal?: string;
+  cadence?: string;
+  enabled?: boolean;
+  experiment?: HeartbeatSurfaceExperimentConfig;
+  created_by?: string;
+  created_at?: string;
+}
+
+/** One work-loop run (history/<ts>.json). */
+export interface HeartbeatSurfaceRun {
+  ran_at?: string;
+  checked?: string;
+  did?: string;
+  found?: string;
+  summary?: string;
+  [key: string]: unknown;
+}
+
+/** A completed experiment (experiments/history/<id>.json). */
+export interface HeartbeatSurfaceExperiment {
+  id?: string;
+  hypothesis?: string;
+  baseline?: unknown;
+  result?: unknown;
+  decision?: "keep" | "discard" | string | null;
+  learning?: string | null;
+  ts?: string;
+  [key: string]: unknown;
+}
+
+/** The currently running experiment (experiments/active.json). */
+export interface HeartbeatSurfaceActiveExperiment {
+  id?: string;
+  hypothesis?: string;
+  surface_change?: string;
+  baseline?: unknown;
+  started_at?: string;
+  window?: string;
+  [key: string]: unknown;
+}
+
+export interface HeartbeatSurfaceExperimentStats {
+  total: number;
+  kept: number;
+  discarded: number;
+  keepRate: number;
+}
+
+export interface HeartbeatSurface {
+  surface: string;
+  config: HeartbeatSurfaceConfig | null;
+  runCount: number;
+  lastRun: HeartbeatSurfaceRun | null;
+  learnings: string;
+  experiments: {
+    active: HeartbeatSurfaceActiveExperiment | null;
+    history: HeartbeatSurfaceExperiment[];
+    stats: HeartbeatSurfaceExperimentStats;
+  };
+}
+
+export interface HeartbeatSurfacesResponse {
+  surfaces: HeartbeatSurface[];
+}

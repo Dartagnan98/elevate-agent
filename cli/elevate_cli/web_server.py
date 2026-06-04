@@ -6242,6 +6242,123 @@ def get_admin_upcoming_events(days: int = 21):
         raise HTTPException(status_code=500, detail=f"Admin upcoming events failed: {exc}")
 
 
+@app.get("/api/heartbeats/surfaces")
+def get_heartbeat_surfaces():
+    """Per-surface heartbeat state for the CURRENT account.
+
+    Scans ``<account_data_dir>/heartbeats/<surface>/`` (admin, leads, …) and
+    returns each surface's config, run history, accumulated learnings, and
+    experiment keep/discard record. Mirrors the cortextOS experiments scan but
+    Elevate-native and per-account-scoped. Missing dirs/files degrade to empty
+    so a surface that has never fired still renders.
+    """
+    try:
+        from elevate_constants import get_account_data_dir
+
+        heartbeats_dir = get_account_data_dir() / "heartbeats"
+        surfaces: List[Dict[str, Any]] = []
+
+        if not heartbeats_dir.is_dir():
+            return {"surfaces": surfaces}
+
+        def _read_json(path: Path) -> Optional[Any]:
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+        for surface_dir in sorted(heartbeats_dir.iterdir(), key=lambda p: p.name):
+            if not surface_dir.is_dir():
+                continue
+            surface_name = surface_dir.name
+
+            # Config
+            config = _read_json(surface_dir / "config.json")
+
+            # Work-run history (history/*.json), newest first.
+            history_files: List[Path] = []
+            hist_dir = surface_dir / "history"
+            if hist_dir.is_dir():
+                history_files = sorted(
+                    (p for p in hist_dir.glob("*.json") if p.is_file()),
+                    key=lambda p: p.name,
+                    reverse=True,
+                )
+            run_count = len(history_files)
+            last_run = _read_json(history_files[0]) if history_files else None
+
+            # Learnings (raw markdown)
+            learnings = ""
+            learnings_path = surface_dir / "learnings.md"
+            if learnings_path.is_file():
+                try:
+                    learnings = learnings_path.read_text(encoding="utf-8")
+                except Exception:
+                    learnings = ""
+
+            # Experiments: active.json + history/*.json
+            exp_dir = surface_dir / "experiments"
+            active_exp = _read_json(exp_dir / "active.json") if exp_dir.is_dir() else None
+            exp_history: List[Any] = []
+            exp_hist_dir = exp_dir / "history"
+            if exp_hist_dir.is_dir():
+                exp_history_files = sorted(
+                    (p for p in exp_hist_dir.glob("*.json") if p.is_file()),
+                    key=lambda p: p.name,
+                    reverse=True,
+                )
+                for p in exp_history_files:
+                    parsed = _read_json(p)
+                    if parsed is not None:
+                        exp_history.append(parsed)
+
+            # Newest first by timestamp when present (filename sort is the fallback).
+            def _exp_ts(e: Any) -> str:
+                return str(e.get("ts") or "") if isinstance(e, dict) else ""
+
+            exp_history.sort(key=_exp_ts, reverse=True)
+
+            kept = sum(
+                1
+                for e in exp_history
+                if isinstance(e, dict) and e.get("decision") == "keep"
+            )
+            discarded = sum(
+                1
+                for e in exp_history
+                if isinstance(e, dict) and e.get("decision") == "discard"
+            )
+            decided = kept + discarded
+            keep_rate = round((kept / decided) * 100) if decided else 0
+
+            surfaces.append(
+                {
+                    "surface": surface_name,
+                    "config": config,
+                    "runCount": run_count,
+                    "lastRun": last_run,
+                    "learnings": learnings,
+                    "experiments": {
+                        "active": active_exp,
+                        "history": exp_history,
+                        "stats": {
+                            "total": len(exp_history),
+                            "kept": kept,
+                            "discarded": discarded,
+                            "keepRate": keep_rate,
+                        },
+                    },
+                }
+            )
+
+        return {"surfaces": surfaces}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/heartbeats/surfaces failed")
+        raise HTTPException(status_code=500, detail=f"Heartbeat surfaces failed: {exc}")
+
+
 @app.post("/api/admin/deals")
 def post_admin_deal(body: _DealCreateBody):
     """Create one Admin Hub deal card."""

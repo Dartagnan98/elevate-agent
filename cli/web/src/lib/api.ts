@@ -96,6 +96,7 @@ import type {
   TelegramPairApproveResponse,
   DashboardThemesResponse,
   PluginManifestResponse,
+  HeartbeatSurfacesResponse,
 } from "./api-types";
 import { recordStartupApiTiming } from "./startup-performance";
 
@@ -584,6 +585,14 @@ export const api = {
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}`, { method: "DELETE" }),
   getCronAttention: () =>
     fetchJSON<import("./api-types").CronAttention>(`/api/cron/attention`),
+
+  // Surface heartbeats — per-account work+experiment loop per surface (Admin, Leads).
+  getHeartbeatSurfaces: (options?: { refresh?: boolean }) => {
+    const url = "/api/heartbeats/surfaces";
+    return options?.refresh
+      ? fetchJSON<HeartbeatSurfacesResponse>(url)
+      : cachedFetchJSON<HeartbeatSurfacesResponse>(url, 5_000);
+  },
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {

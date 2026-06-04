@@ -305,12 +305,106 @@ def ensure_operational_freshness_job() -> Dict[str, Any]:
     )
 
 
+# ─── Surface heartbeats ───────────────────────────────────────────────────────
+# Per-surface work+experiment loops (Admin, Leads). Each runs the surface-heartbeat
+# skill on a cadence: do the surface's work, log history, distill learnings, and
+# every Nth run experiment on its own playbook. See docs/surface-heartbeats.md.
+SURFACE_HEARTBEAT_SKILL = "real-estate/surface-heartbeat"
+SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "leads": {
+        "name": "Leads Heartbeat",
+        "schedule": "0 8,15 * * *",
+        "goal": (
+            "Each run: check new/changed leads since the last run; surface the hot ones "
+            "with a one-line why; list overdue follow-ups and today's showings; draft "
+            "(never send) the next-touch for anyone gone quiet. End with one tight summary; "
+            "say 'all quiet' if nothing changed."
+        ),
+        "experiment": {
+            "every_n_runs": 7, "metric": "next_touch_reply_rate", "metric_type": "qualitative",
+            "direction": "higher", "window": "7d",
+            "measurement": "Self-score 1-10 the quality/likely-conversion of the next-touch drafts vs the prior cycle, with justification, until a real reply-rate metric is wired.",
+            "approval_required": False,
+        },
+    },
+    "admin": {
+        "name": "Admin Heartbeat",
+        "schedule": "30 7 * * *",
+        "goal": (
+            "Each run: scan the calendar and tasks; flag deadlines, conflicts, and anything "
+            "needing the realtor's decision; reconcile today's agenda. End with one tight "
+            "summary; say 'all quiet' if nothing needs attention."
+        ),
+        "experiment": {
+            "every_n_runs": 7, "metric": "tasks_slipped", "metric_type": "qualitative",
+            "direction": "lower", "window": "7d",
+            "measurement": "Self-score 1-10 how well the agenda/flagging kept anything from slipping vs the prior cycle, with justification, until a real slipped-task metric is wired.",
+            "approval_required": False,
+        },
+    },
+}
+
+
+def _seed_surface_heartbeat_workspace(surface: str, spec: Dict[str, Any]) -> Path:
+    """Create accounts/<key>/heartbeats/<surface>/{config.json, learnings.md, history/,
+    experiments/history/} from defaults if absent. Returns the workspace Path."""
+    from elevate_constants import get_account_data_dir
+    ws = get_account_data_dir() / "heartbeats" / surface
+    (ws / "history").mkdir(parents=True, exist_ok=True)
+    (ws / "experiments" / "history").mkdir(parents=True, exist_ok=True)
+    cfg = ws / "config.json"
+    if not cfg.exists():
+        cfg.write_text(json.dumps({
+            "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
+            "enabled": True, "experiment": spec["experiment"],
+            "created_by": "system", "created_at": _hermes_now().date().isoformat(),
+        }, indent=2))
+    learn = ws / "learnings.md"
+    if not learn.exists():
+        learn.write_text(
+            f"# {surface.capitalize()} Heartbeat — Learnings\n\n"
+            "_Accumulated work + experiment learnings. Read every run; write back durable "
+            "insight. Keep it tight._\n\n(none yet — first runs populate this)\n"
+        )
+    return ws
+
+
+def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
+    """Idempotently seed the Admin + Leads surface heartbeats (workspace + cron job) for
+    the active account, so every realtor gets them. Mirrors the system-job seeders."""
+    out: List[Dict[str, Any]] = []
+    for surface, spec in SURFACE_HEARTBEAT_DEFAULTS.items():
+        ws = _seed_surface_heartbeat_workspace(surface, spec)
+        name = spec["name"]
+        existing = next(
+            (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
+            None,
+        )
+        if existing:
+            out.append(existing)
+            continue
+        prompt = (
+            f"You are the {surface.upper()} surface-heartbeat. Surface: {surface}. "
+            f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read config.json "
+            f"+ learnings.md, do the {surface} work, log to history/, distill learnings, and run "
+            f"the experiment loop when due. Drafts only — never act on the realtor's behalf."
+        )
+        out.append(create_job(
+            prompt=prompt, schedule=spec["schedule"], name=name,
+            skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
+            origin={"type": "surface-heartbeat", "surface": surface, "source": "system"},
+            workdir=str(ws),
+        ))
+    return out
+
+
 def ensure_system_jobs() -> List[Dict[str, Any]]:
     """Ensure repo-backed system cron jobs exist for the active Elevate home."""
     return [
         ensure_admin_calendar_sync_job(),
         ensure_operational_maintenance_job(),
         ensure_operational_freshness_job(),
+        *ensure_surface_heartbeats(),
     ]
 
 
