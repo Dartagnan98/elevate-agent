@@ -2218,7 +2218,14 @@ PromptRenderer = Callable[[], str]
 
 def _local_python_prefix() -> str:
     cli_root = Path(__file__).resolve().parents[1]
+    # Dev checkout ships a virtualenv next to the CLI package. The packaged
+    # desktop app does NOT — its interpreter is the bundled runtime python
+    # (Contents/Resources/runtime/python/bin/python3.12), which is exactly the
+    # process running this code. Fall back to sys.executable so the rendered
+    # command works on a real install instead of pointing at a missing .venv.
     python = cli_root / ".venv" / "bin" / "python"
+    if not python.exists():
+        python = Path(sys.executable)
     return (
         f"PYTHONPATH={shlex.quote(str(cli_root))} "
         f"ELEVATE_PYTHON_SRC_ROOT={shlex.quote(str(cli_root))} "
