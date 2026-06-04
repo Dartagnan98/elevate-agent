@@ -28,7 +28,6 @@ import {
   Brain,
   CheckCircle2,
   ChevronDown,
-  ChevronsLeftRight,
   ChevronUp,
   Clipboard,
   Clock,
@@ -3025,22 +3024,6 @@ export default function ChatPage() {
     },
     [previewArtifact, previewPanelWidth],
   );
-
-  // One-click: collapse the chat to its minimum so the preview takes the rest,
-  // or restore to a balanced split. Saves fiddling with the divider on small screens.
-  const toggleMaxPreview = useCallback(() => {
-    const maxWidth = clampPreviewPanelWidth(window.innerWidth);
-    const next =
-      previewPanelWidth >= maxWidth - 8
-        ? clampPreviewPanelWidth(Math.round(window.innerWidth * 0.5))
-        : maxWidth;
-    setPreviewPanelWidth(next);
-    try {
-      localStorage.setItem("elevate-preview-width", String(next));
-    } catch {
-      // best-effort
-    }
-  }, [previewPanelWidth]);
 
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
@@ -6217,17 +6200,6 @@ export default function ChatPage() {
                 type="button"
               >
                 <span className="h-12 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)] transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
-              </button>
-            )}
-            {previewArtifact && (
-              <button
-                aria-label="Maximize or restore preview"
-                title="Maximize / restore preview"
-                className="absolute -left-[18px] top-[2px] z-20 flex h-7 w-7 items-center justify-center rounded-full border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-muted)] shadow-[0_8px_22px_-12px_rgba(0,0,0,0.7)] transition hover:text-[var(--chat-text)]"
-                onClick={toggleMaxPreview}
-                type="button"
-              >
-                <ChevronsLeftRight className="h-3.5 w-3.5" />
               </button>
             )}
             {previewArtifact ? (
