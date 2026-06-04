@@ -47,6 +47,15 @@ for (const file of feed.files || []) {
   }
 }
 
+// Fresh-download DMGs: electron-updater never uses these (auto-update is the zip),
+// but they're the first-time MANUAL download. The feed only listed zips, so the
+// public .dmg used to go stale every release. Ship this version's DMGs too, and
+// refresh stable "latest" aliases (below) so the download link is permanent.
+const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
+for (const name of fs.readdirSync(DIST)) {
+  if (name.endsWith(".dmg") && name.includes(`-${PKG_VERSION}-`)) selected.add(name);
+}
+
 const matches = Array.from(selected).filter((name) => fs.existsSync(path.join(DIST, name)));
 
 if (matches.length === 0) {
@@ -84,6 +93,23 @@ const chown = spawnSync(
 
 if (chown.status !== 0) {
   console.error("[ship] chown failed — may need to fix permissions manually");
+}
+
+// Refresh the stable "latest" fresh-download aliases so a single permanent URL
+// always serves the newest DMG — e.g. https://api.elevationrealestatehq.com/
+// updates/Elevate-latest-mac-arm64.dmg — so the public download link never needs
+// a per-release change again.
+for (const arch of ["arm64", "x64"]) {
+  const src = `Elevate-${PKG_VERSION}-mac-${arch}.dmg`;
+  if (!fs.existsSync(path.join(DIST, src))) continue;
+  const dst = `Elevate-latest-mac-${arch}.dmg`;
+  const alias = spawnSync(
+    "ssh",
+    [HOST, `cp -f ${REMOTE}${src} ${REMOTE}${dst} && chown www-data:www-data ${REMOTE}${dst}`],
+    { stdio: "inherit" },
+  );
+  if (alias.status === 0) console.log(`[ship] fresh-download alias ${dst} -> ${src}`);
+  else console.error(`[ship] failed to refresh alias ${dst}`);
 }
 
 console.log("\n[ship] live at https://api.elevationrealestatehq.com/updates/");
