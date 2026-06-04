@@ -691,6 +691,23 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
+  // Per-surface delivery routing — where this agent's heartbeat output goes
+  // (in-app or a connected channel/bot). Faithful to CTRL Flow per-agent routing.
+  getHeartbeatSurfaceRoute: (surface: string) =>
+    fetchJSON<{
+      surface: string;
+      deliver: string;
+      routes: { value: string; label: string; platform: string }[];
+    }>(`/api/heartbeats/surfaces/${encodeURIComponent(surface)}/route`),
+  setHeartbeatSurfaceRoute: (surface: string, deliver: string) =>
+    fetchJSON<{ surface: string; deliver: string }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/route`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deliver }),
+      },
+    ),
   // Available models for the per-surface model picker ({models:[{id,...}], default}).
   getAvailableModels: () =>
     cachedFetchJSON<{ models: { id: string; label?: string }[]; default?: string }>(

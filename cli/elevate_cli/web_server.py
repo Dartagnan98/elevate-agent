@@ -6758,6 +6758,115 @@ def remove_heartbeat_cycle(surface: str, name: str):
         raise HTTPException(status_code=500, detail=f"Remove cycle failed: {exc}")
 
 
+# ─── Surface delivery routing (each agent routes to its own channel/bot) ───────
+def _surface_heartbeat_job(surface_key: str) -> Optional[Dict[str, Any]]:
+    """The account-scoped heartbeat cron job for a surface (enabled or not)."""
+    from cron.jobs import list_jobs
+
+    return next(
+        (
+            j
+            for j in list_jobs(include_disabled=True)
+            if (j.get("origin") or {}).get("type") == "surface-heartbeat"
+            and (j.get("origin") or {}).get("surface") == surface_key
+        ),
+        None,
+    )
+
+
+def _delivery_routes() -> List[Dict[str, str]]:
+    """Available delivery routes for the picker: in-app (local) + every channel the
+    account has connected (the channel directory — Telegram/Discord/Slack/…). Each
+    agent/surface can route to its own channel, faithful to CTRL Flow's per-agent
+    bot/channel routing."""
+    routes: List[Dict[str, str]] = [
+        {"value": "local", "label": "In-app (default)", "platform": "local"}
+    ]
+    try:
+        from gateway.channel_directory import load_directory
+
+        directory = load_directory()
+        for platform, channels in (directory.get("platforms") or {}).items():
+            channels = [c for c in (channels or []) if c.get("id")]
+            if not channels:
+                continue  # platform not actually connected — skip the noise
+            routes.append(
+                {"value": platform, "label": f"{platform.title()} (home)", "platform": platform}
+            )
+            for ch in channels:
+                cid = ch["id"]
+                name = ch.get("name") or cid
+                routes.append(
+                    {"value": f"{platform}:{cid}", "label": f"{name} ({platform})", "platform": platform}
+                )
+    except Exception:
+        _log.warning("delivery routes: channel directory unavailable", exc_info=True)
+    return routes
+
+
+@app.get("/api/heartbeats/surfaces/{surface}/route")
+def get_heartbeat_surface_route(surface: str):
+    """Current delivery route for a surface + the routes available to pick from."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        job = _surface_heartbeat_job(surface_key)
+        deliver = (job or {}).get("deliver") or "local"
+        return {"surface": surface_key, "deliver": deliver, "routes": _delivery_routes()}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/heartbeats/surfaces/%s/route failed", surface)
+        raise HTTPException(status_code=500, detail=f"Get route failed: {exc}")
+
+
+class _HeartbeatRouteBody(BaseModel):
+    deliver: str
+
+
+@app.post("/api/heartbeats/surfaces/{surface}/route")
+def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
+    """Route a surface's heartbeat output to a channel/bot (or 'local' = in-app).
+    Updates the authoritative cron job's ``deliver`` + mirrors to config.json."""
+    try:
+        surface_key = _validate_heartbeat_surface(surface)
+        from cron.jobs import update_job
+        from elevate_constants import get_account_data_dir
+
+        deliver = (body.deliver or "local").strip() or "local"
+        valid = {r["value"] for r in _delivery_routes()}
+        platform0 = deliver.split(":")[0]
+        if deliver not in valid and platform0 != "local":
+            # Accept explicit ``platform:chat`` forms whose platform is known even
+            # if the directory cache is stale.
+            from cron.scheduler import _is_known_delivery_platform
+
+            if not _is_known_delivery_platform(platform0):
+                raise HTTPException(status_code=400, detail=f"unknown delivery route: {deliver}")
+        job = _surface_heartbeat_job(surface_key)
+        if not job:
+            raise HTTPException(
+                status_code=404, detail=f"No heartbeat job for surface '{surface_key}'"
+            )
+        updated = update_job(job["id"], {"deliver": deliver})
+        try:
+            cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
+            if cfg_path.is_file():
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if isinstance(cfg, dict):
+                    cfg["deliver"] = deliver
+                    tmp = cfg_path.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                    tmp.replace(cfg_path)
+        except Exception:
+            _log.warning("route config mirror failed for %s", surface_key, exc_info=True)
+        return {"surface": surface_key, "deliver": (updated or {}).get("deliver", deliver)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/heartbeats/surfaces/%s/route failed", surface)
+        raise HTTPException(status_code=500, detail=f"Set route failed: {exc}")
+
+
 class _HeartbeatSurfaceEnabledBody(BaseModel):
     enabled: bool
 
@@ -6910,6 +7019,15 @@ def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody
         tmp = cfg_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         tmp.replace(cfg_path)
+        # The runner honors the cron job's ``model`` (scheduler reads job.model), so a
+        # model change must reach the JOB, not just config.json — otherwise it's
+        # cosmetic. Mirror it onto the surface's heartbeat job (empty = default).
+        if "model" in patch:
+            from cron.jobs import update_job
+
+            job = _surface_heartbeat_job(surface_key)
+            if job:
+                update_job(job["id"], {"model": patch.get("model") or None})
         return {"surface": surface_key, "config": cfg, "mode": day_night_mode(cfg)}
     except HTTPException:
         raise

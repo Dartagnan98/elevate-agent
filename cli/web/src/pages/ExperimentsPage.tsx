@@ -619,14 +619,19 @@ function SurfaceSettingsForm({
   const [dayEnd, setDayEnd] = useState("22:00");
   const [commStyle, setCommStyle] = useState("");
   const [rules, setRules] = useState<Record<string, "always" | "never" | "">>({});
+  const [routes, setRoutes] = useState<{ value: string; label: string }[]>([]);
+  const [deliver, setDeliver] = useState("local");
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [cfgResp, modelsResp] = await Promise.all([
+        const [cfgResp, modelsResp, routeResp] = await Promise.all([
           api.getHeartbeatSurfaceConfig(surface),
           api.getAvailableModels().catch(() => ({ models: [] as { id: string }[] })),
+          api
+            .getHeartbeatSurfaceRoute(surface)
+            .catch(() => ({ deliver: "local", routes: [] as { value: string; label: string }[] })),
         ]);
         if (!alive) return;
         const c = (cfgResp.config || {}) as Record<string, unknown>;
@@ -646,6 +651,8 @@ function SurfaceSettingsForm({
         }
         setRules(next);
         setModels(modelsResp.models || []);
+        setRoutes(routeResp.routes || []);
+        setDeliver(routeResp.deliver || "local");
       } catch (e) {
         if (alive) setErr(String(e));
       } finally {
@@ -669,14 +676,17 @@ function SurfaceSettingsForm({
     try {
       const always_ask = APPROVAL_CATEGORIES.filter((c) => rules[c] === "always");
       const never_ask = APPROVAL_CATEGORIES.filter((c) => rules[c] === "never");
-      await api.patchHeartbeatSurfaceConfig(surface, {
-        model: model || "",
-        timezone: timezone.trim(),
-        day_mode_start: dayStart,
-        day_mode_end: dayEnd,
-        communication_style: commStyle.trim(),
-        approval_rules: { always_ask, never_ask },
-      });
+      await Promise.all([
+        api.patchHeartbeatSurfaceConfig(surface, {
+          model: model || "",
+          timezone: timezone.trim(),
+          day_mode_start: dayStart,
+          day_mode_end: dayEnd,
+          communication_style: commStyle.trim(),
+          approval_rules: { always_ask, never_ask },
+        }),
+        api.setHeartbeatSurfaceRoute(surface, deliver).catch(() => undefined),
+      ]);
       onClose();
     } catch (e) {
       setErr(String(e));
@@ -694,6 +704,18 @@ function SurfaceSettingsForm({
 
   return (
     <div className="space-y-3">
+      <Field label="Delivery route">
+        <Select value={deliver} onValueChange={setDeliver}>
+          {(routes.length ? routes : [{ value: "local", label: "In-app (default)" }]).map((r) => (
+            <SelectOption key={r.value} value={r.value}>
+              {r.label}
+            </SelectOption>
+          ))}
+        </Select>
+        <p className="text-[11px] text-muted-foreground">
+          Where this agent's heartbeat output goes. Connect a channel to add routes.
+        </p>
+      </Field>
       <Field label="Model">
         <Select value={model} onValueChange={setModel}>
           <SelectOption value="">Harness default</SelectOption>
