@@ -308,9 +308,20 @@ def _detect_preferred_transport(phone: str) -> str:
     """Pick `iMessage` or `SMS` from chat.db history.
 
     Per-handle: look at the most recent outbound message to that handle
-    where `error=0 AND is_sent=1`. If the winner was SMS, return "SMS";
-    if iMessage, return "iMessage"; if no successful history exists,
-    default to "iMessage" (Apple's own default).
+    where `error=0 AND is_sent=1`. Returns "iMessage" only when the last
+    successful send was iMessage; ANY other successful service (SMS or
+    **RCS**) returns "SMS". If no successful history exists, default to
+    "iMessage" (Apple's own default), and the caller's post-send verify
+    falls back to SMS on a delivery failure.
+
+    Why RCS → SMS: RCS contacts are Android users. macOS Messages.app can
+    *receive* RCS (mirrored from a paired iPhone, which is why RCS rows
+    appear in chat.db) but CANNOT *send* RCS via osascript — there is no
+    RCS service to target. Sending those numbers iMessage silently fails
+    (they're not on iMessage); sending them SMS actually reaches them. So
+    a recipient whose last good message was RCS must be sent SMS, not
+    iMessage. Treating RCS as iMessage (the old behaviour) is exactly why
+    Android leads "sent" but never arrived.
 
     chat.db.error column meanings the dispatcher cares about:
         0  → no error (delivered / queued OK)
@@ -336,11 +347,14 @@ def _detect_preferred_transport(phone: str) -> str:
     except Exception:
         return "iMessage"
     if row and row[0]:
-        svc = str(row[0]).strip()
-        if svc.lower() == "sms":
-            return "SMS"
-        if svc.lower() == "imessage":
+        svc = str(row[0]).strip().lower()
+        # iMessage is the only blue-bubble transport the Mac can send. Every
+        # other successful service (sms, rcs, and any future carrier label)
+        # is a non-iMessage recipient and must go out as SMS — the Mac can't
+        # send RCS, and SMS is what actually lands for those numbers.
+        if svc == "imessage":
             return "iMessage"
+        return "SMS"
     return "iMessage"
 
 
