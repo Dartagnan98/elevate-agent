@@ -7003,6 +7003,178 @@ def patch_heartbeat_surface_goals(surface: str, body: _HeartbeatGoalsPatchBody):
         raise HTTPException(status_code=500, detail=f"Update goals failed: {exc}")
 
 
+# ─── Surface Tasks (dispatch work to a surface; kanban) ───────────────────────
+class _SurfaceTaskCreateBody(BaseModel):
+    title: str
+    description: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    assignee: Optional[str] = None
+    project: Optional[str] = None
+    needs_approval: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class _SurfaceTaskPatchBody(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    assignee: Optional[str] = None
+    project: Optional[str] = None
+    needs_approval: Optional[bool] = None
+    notes: Optional[str] = None
+    outputs: Optional[List[Any]] = None
+
+
+@app.get("/api/surface-tasks")
+def list_surface_tasks(status: Optional[str] = None, assignee: Optional[str] = None):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            return {"tasks": st.list_tasks(conn, status=status, assignee=assignee)}
+    except Exception as exc:
+        _log.exception("GET /api/surface-tasks failed")
+        raise HTTPException(status_code=500, detail=f"List tasks failed: {exc}")
+
+
+@app.post("/api/surface-tasks")
+def create_surface_task(body: _SurfaceTaskCreateBody):
+    """Dispatch = enqueue: insert a task assigned to a surface (or 'human'). The
+    surface's next heartbeat WORK run drains pending tasks (drafts-only)."""
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            task = st.create_task(
+                conn,
+                title=body.title,
+                description=body.description,
+                status=body.status or "pending",
+                priority=body.priority or "normal",
+                assignee=body.assignee,
+                project=body.project,
+                needs_approval=bool(body.needs_approval),
+                notes=body.notes,
+            )
+        return {"ok": True, "task": task}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/surface-tasks failed")
+        raise HTTPException(status_code=500, detail=f"Create task failed: {exc}")
+
+
+@app.get("/api/surface-tasks/{task_id}")
+def get_surface_task(task_id: str):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            task = st.get_task(conn, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"task": task}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/surface-tasks/%s failed", task_id)
+        raise HTTPException(status_code=500, detail=f"Get task failed: {exc}")
+
+
+@app.patch("/api/surface-tasks/{task_id}")
+def patch_surface_task(task_id: str, body: _SurfaceTaskPatchBody):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        with connect() as conn:
+            task = st.update_task(conn, task_id, patch)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"ok": True, "task": task}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("PATCH /api/surface-tasks/%s failed", task_id)
+        raise HTTPException(status_code=500, detail=f"Update task failed: {exc}")
+
+
+@app.delete("/api/surface-tasks/{task_id}")
+def delete_surface_task(task_id: str):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            ok = st.delete_task(conn, task_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("DELETE /api/surface-tasks/%s failed", task_id)
+        raise HTTPException(status_code=500, detail=f"Delete task failed: {exc}")
+
+
+# ─── Surface Approvals (decisions kanban — dashboard-only) ─────────────────────
+class _SurfaceApprovalResolveBody(BaseModel):
+    decision: str  # 'approve' | 'reject'
+    note: Optional[str] = None
+
+
+@app.get("/api/surface-approvals")
+def list_surface_approvals(
+    status: Optional[str] = None,
+    surface: Optional[str] = None,
+    category: Optional[str] = None,
+):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            return {
+                "approvals": st.list_approvals(
+                    conn, status=status, surface=surface, category=category
+                )
+            }
+    except Exception as exc:
+        _log.exception("GET /api/surface-approvals failed")
+        raise HTTPException(status_code=500, detail=f"List approvals failed: {exc}")
+
+
+@app.patch("/api/surface-approvals/{approval_id}")
+def resolve_surface_approval(approval_id: str, body: _SurfaceApprovalResolveBody):
+    """Resolve an approval (approve/reject). Dashboard-only — no Telegram path."""
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            approval = st.resolve_approval(
+                conn, approval_id, decision=body.decision, note=body.note
+            )
+        if not approval:
+            raise HTTPException(status_code=404, detail="approval not found")
+        return {"ok": True, "approval": approval}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("PATCH /api/surface-approvals/%s failed", approval_id)
+        raise HTTPException(status_code=500, detail=f"Resolve approval failed: {exc}")
+
+
 class _HeartbeatAutomationEnabledBody(BaseModel):
     enabled: bool
 
