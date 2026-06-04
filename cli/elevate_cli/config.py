@@ -800,7 +800,13 @@ DEFAULT_CONFIG = {
     
     "display": {
         "compact": False,
-        "personality": "kawaii",
+        # Professional default tone for the realtor product. The built-in
+        # "kawaii"/"catgirl"/etc. personalities live only in the interactive
+        # CLI's config, not in load_config() used by the desktop/gateway — so a
+        # non-default value here resolved to nothing on the desktop and tripped
+        # the "personality overlay will be skipped" warning. "default" = no
+        # overlay (normal tone), which is what realtor-facing usage wants.
+        "personality": "default",
         "resume_display": "full",
         "busy_input_mode": "interrupt",
         "bell_on_complete": False,
