@@ -112,6 +112,11 @@ for (const arch of ["arm64", "x64"]) {
   else console.error(`[ship] failed to refresh alias ${dst}`);
 }
 
+// Prune old build artifacts on the remote — keep last 3 versioned builds.
+// Script lives at /root/prune-elevate-updates.sh on ctrl-flow.
+const prune = spawnSync("ssh", [HOST, "bash /root/prune-elevate-updates.sh"], { stdio: "inherit" });
+if (prune.status !== 0) console.warn("[ship] artifact prune exited non-zero — disk may be growing");
+
 console.log("\n[ship] live at https://api.elevationrealestatehq.com/updates/");
 console.log("[ship] running apps poll every ~3min (and on window focus), so it lands within minutes.");
 

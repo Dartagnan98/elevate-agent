@@ -6412,6 +6412,46 @@ def get_heartbeat_surfaces():
         raise HTTPException(status_code=500, detail=f"Heartbeat surfaces failed: {exc}")
 
 
+class _HeartbeatSurfaceCreateBody(BaseModel):
+    surface: str
+    title: Optional[str] = None
+    name: Optional[str] = None
+    schedule: Optional[str] = None
+    goal: Optional[str] = None
+    experiment: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/heartbeats/surfaces")
+def create_heartbeat_surface(body: _HeartbeatSurfaceCreateBody):
+    """Create a NEW custom surface from the template + overrides (cortextOS add-agent
+    equivalent). Registers it in the account surface registry, scaffolds its workspace,
+    and seeds an opt-in (off) cron job. The realtor turns it on from the Heartbeat page.
+    """
+    try:
+        from cron.jobs import create_surface
+
+        spec = {
+            k: v
+            for k, v in {
+                "title": body.title,
+                "name": body.name,
+                "schedule": body.schedule,
+                "goal": body.goal,
+                "experiment": body.experiment,
+            }.items()
+            if v is not None
+        }
+        result = create_surface(body.surface, spec, created_by="user")
+        return {"ok": True, **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/heartbeats/surfaces failed")
+        raise HTTPException(status_code=500, detail=f"Create surface failed: {exc}")
+
+
 def _experiment_stats(experiments: List[Dict[str, Any]]) -> Dict[str, int]:
     """Per-surface experiment stats, computed at read time (never persisted)."""
     running = sum(1 for e in experiments if e.get("status") == "running")

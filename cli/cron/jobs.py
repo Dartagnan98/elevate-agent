@@ -397,56 +397,157 @@ def _seed_surface_heartbeat_workspace(
     return ws
 
 
+# ─── Surface registry (surfaces are creatable, not hardcoded) ──────────────────
+# Built-in surfaces (leads, admin) are seed specs above; custom surfaces are added
+# at runtime via create_surface() and persisted to the account registry
+# accounts/<key>/heartbeats/surfaces.json — Elevate's analog of cortextOS
+# enabled-agents.json. ensure_surface() seeds ANY surface (built-in or custom) the
+# same way: workspace scaffold + opt-in cron job. SURFACE_TEMPLATE is the default
+# spec a new surface is filled from (cortextOS copyTemplateFiles equivalent).
+SURFACE_TEMPLATE: Dict[str, Any] = {
+    "name": "{Title} Heartbeat",
+    "schedule": "0 9 * * *",
+    "goal": (
+        "Each run: do this surface's recurring work, surface what changed, and draft "
+        "(never send) anything that needs the realtor. End with one tight summary; say "
+        "'all quiet' if nothing changed."
+    ),
+    "experiment": {
+        "every_n_runs": 7, "metric": "surface_effectiveness", "metric_type": "qualitative",
+        "direction": "higher", "window": "7d",
+        "measurement": "Self-score 1-10 how well this surface did its job vs the prior cycle, with justification.",
+        "approval_required": False,
+    },
+}
+
+
+def _surfaces_registry_path() -> Path:
+    from elevate_constants import get_account_data_dir
+    return get_account_data_dir() / "heartbeats" / "surfaces.json"
+
+
+def _write_surface_registry(reg: Dict[str, Dict[str, Any]]) -> None:
+    path = _surfaces_registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"surfaces": reg}, indent=2))
+    tmp.replace(path)
+
+
+def load_surface_registry() -> Dict[str, Dict[str, Any]]:
+    """Return {surface: spec} for every registered surface — built-ins always present,
+    custom surfaces preserved. Seeds/repairs the on-disk registry with the built-ins so
+    a fresh account still gets Leads + Admin while custom surfaces persist across runs.
+    """
+    path = _surfaces_registry_path()
+    reg: Dict[str, Any] = {}
+    if path.exists():
+        try:
+            reg = (json.loads(path.read_text()) or {}).get("surfaces") or {}
+        except Exception:
+            reg = {}
+    changed = not path.exists()
+    for surface, spec in SURFACE_HEARTBEAT_DEFAULTS.items():
+        if surface not in reg:
+            reg[surface] = {**spec, "builtin": True, "created_by": "system"}
+            changed = True
+    if changed:
+        _write_surface_registry(reg)
+    return reg
+
+
+def register_surface(surface: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a surface spec to the account registry (add or replace)."""
+    reg = load_surface_registry()
+    reg[surface] = spec
+    _write_surface_registry(reg)
+    return spec
+
+
+def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False) -> Dict[str, Any]:
+    """Seed ONE surface (built-in or custom): workspace scaffold + opt-in cron job.
+
+    Idempotent — a job already present (matched by name) is left EXACTLY as-is (its
+    enabled/paused state, schedule, history untouched); only the workspace dirs are
+    repaired. Brand-new seeds default OFF (opt-in) unless ``enabled`` is set. Returns
+    the job dict.
+    """
+    name = spec.get("name") or f"{surface.capitalize()} Heartbeat"
+    existing = next(
+        (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
+        None,
+    )
+    if existing:
+        _seed_surface_heartbeat_workspace(
+            surface, spec, enabled=bool(existing.get("enabled", False))
+        )
+        return existing
+    ws = _seed_surface_heartbeat_workspace(surface, spec, enabled=enabled)
+    prompt = (
+        f"You are the {surface.upper()} surface-heartbeat. Surface: {surface}. "
+        f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read config.json "
+        f"+ learnings.md, do the {surface} work, log to history/, distill learnings, and run "
+        f"the experiment loop when due. Drafts only — never act on the realtor's behalf."
+    )
+    source = "system" if spec.get("created_by", "system") == "system" else "user"
+    job = create_job(
+        prompt=prompt, schedule=spec["schedule"], name=name,
+        skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
+        origin={"type": "surface-heartbeat", "surface": surface, "source": source},
+        workdir=str(ws),
+    )
+    if not enabled:
+        # create_job() returns an enabled+scheduled job; flip it off through the
+        # canonical disable path (enabled=False / state="paused" / cleared next_run).
+        paused = pause_job(job["id"], reason="surface heartbeat is opt-in (seeded off)")
+        return paused or job
+    return job
+
+
+def create_surface(
+    surface: str, spec: Optional[Dict[str, Any]] = None, *, created_by: str = "user"
+) -> Dict[str, Any]:
+    """Create a NEW custom surface from SURFACE_TEMPLATE + caller overrides, persist it
+    to the registry, and seed it (opt-in/off). Mirrors cortextOS add-agent +
+    copyTemplateFiles. Returns {surface, spec, job}. Raises ValueError on a bad key or
+    a name that already exists.
+    """
+    key = (surface or "").strip().lower()
+    if not re.match(r"^[a-z][a-z0-9_-]{1,31}$", key):
+        raise ValueError(
+            "surface key must be 2-32 chars: a lowercase letter then letters/digits/-/_"
+        )
+    reg = load_surface_registry()
+    if key in reg:
+        raise ValueError(f"surface '{key}' already exists")
+    spec = spec or {}
+    title = spec.get("title") or key.replace("-", " ").replace("_", " ").title()
+    merged = {
+        "name": spec.get("name") or SURFACE_TEMPLATE["name"].format(Title=title),
+        "schedule": spec.get("schedule") or SURFACE_TEMPLATE["schedule"],
+        "goal": spec.get("goal") or SURFACE_TEMPLATE["goal"],
+        "experiment": {**SURFACE_TEMPLATE["experiment"], **(spec.get("experiment") or {})},
+        "builtin": False,
+        "created_by": created_by,
+    }
+    register_surface(key, merged)
+    job = ensure_surface(key, merged, enabled=False)
+    return {"surface": key, "spec": merged, "job": job}
+
+
 def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
-    """Idempotently seed the Admin + Leads surface heartbeats (workspace + cron job) for
-    the active account, so every realtor GETS them — but OFF by default (opt-in).
+    """Idempotently seed every REGISTERED surface heartbeat (workspace + cron job) for
+    the active account — OFF by default (opt-in). Built-ins (Leads, Admin) come from
+    the registry seed; custom surfaces created via create_surface() are seeded here too.
 
-    Surface heartbeats run agent passes on the realtor's box, so a fresh install
-    must not auto-fire them. New seeds are created DISABLED (config.json
-    ``enabled: false`` + the cron job paused). The realtor turns a surface on from
-    the Heartbeat page (POST /api/heartbeats/surfaces/<surface>/enabled).
-
-    Idempotency: a surface whose cron job already exists (matched by name) is left
-    EXACTLY as-is via the early ``continue`` — its enabled/paused state, schedule,
-    and run history are never touched. Only brand-new seeds get the disabled
-    default. Mirrors the system-job seeders.
+    Surface heartbeats run agent passes on the realtor's box, so a fresh install must
+    not auto-fire them: new seeds are DISABLED (config.json ``enabled: false`` + cron
+    paused). The realtor turns a surface on from the Heartbeat page. A surface whose
+    cron job already exists is left exactly as-is. Mirrors the system-job seeders.
     """
     out: List[Dict[str, Any]] = []
-    for surface, spec in SURFACE_HEARTBEAT_DEFAULTS.items():
-        name = spec["name"]
-        existing = next(
-            (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
-            None,
-        )
-        if existing:
-            # Already seeded for this account — never re-seed or flip its state.
-            # (Seed the workspace dirs only if the config is also already present;
-            # passing the existing job's enabled keeps a freshly-recreated
-            # config.json consistent without overwriting an existing one.)
-            _seed_surface_heartbeat_workspace(
-                surface, spec, enabled=bool(existing.get("enabled", False))
-            )
-            out.append(existing)
-            continue
-        # Brand-new seed: workspace + job both OFF by default.
-        ws = _seed_surface_heartbeat_workspace(surface, spec, enabled=False)
-        prompt = (
-            f"You are the {surface.upper()} surface-heartbeat. Surface: {surface}. "
-            f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read config.json "
-            f"+ learnings.md, do the {surface} work, log to history/, distill learnings, and run "
-            f"the experiment loop when due. Drafts only — never act on the realtor's behalf."
-        )
-        job = create_job(
-            prompt=prompt, schedule=spec["schedule"], name=name,
-            skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
-            origin={"type": "surface-heartbeat", "surface": surface, "source": "system"},
-            workdir=str(ws),
-        )
-        # create_job() always returns an enabled+scheduled job; flip it off
-        # through the canonical disable path so it carries the same
-        # enabled=False / state="paused" / cleared next_run as any paused job.
-        paused = pause_job(job["id"], reason="surface heartbeat is opt-in (seeded off)")
-        out.append(paused or job)
+    for surface, spec in load_surface_registry().items():
+        out.append(ensure_surface(surface, spec, enabled=False))
     return out
 
 
@@ -555,6 +656,78 @@ def ensure_surface_automations() -> List[Dict[str, Any]]:
     return out
 
 
+# ─── Theta Wave — fleet self-improvement reviewer ─────────────────────────────
+# The system-level analyst: the ONLY actor that creates/modifies/removes surface
+# experiment cycles. Runs nightly (quiet window), scans every surface, classifies
+# each (Stale/Converged/Successful/Underperforming), and shapes cycles via the cycle
+# endpoints — gated by auto_create_agent_cycles / auto_modify_agent_cycles (else it
+# only proposes, for dashboard approval). Faithful port of cortextOS theta-wave.
+THETA_WAVE_SKILL = "real-estate/theta-wave"
+THETA_WAVE_NAME = "Theta Wave"
+THETA_WAVE_SCHEDULE = "0 2 * * *"
+
+
+def _seed_theta_wave_workspace(*, enabled: bool = False) -> Path:
+    """Scaffold accounts/<key>/system-review/{config.json, learnings.md, history/,
+    experiments/history/, reviews/}. Never rewrites an existing config.json."""
+    from elevate_constants import get_account_data_dir
+    ws = get_account_data_dir() / "system-review"
+    (ws / "history").mkdir(parents=True, exist_ok=True)
+    (ws / "experiments" / "history").mkdir(parents=True, exist_ok=True)
+    (ws / "reviews").mkdir(parents=True, exist_ok=True)
+    cfg = ws / "config.json"
+    if not cfg.exists():
+        cfg.write_text(json.dumps({
+            "metric": "system_effectiveness",
+            "metric_type": "qualitative_compound",
+            "direction": "higher",
+            "schedule": THETA_WAVE_SCHEDULE,
+            "enabled": bool(enabled),
+            "auto_create_agent_cycles": False,
+            "auto_modify_agent_cycles": False,
+            "approval_required": True,
+            "created_by": "system",
+            "created_at": _hermes_now().date().isoformat(),
+        }, indent=2))
+    learn = ws / "learnings.md"
+    if not learn.exists():
+        learn.write_text(
+            "# Theta Wave — Fleet Learnings\n\n_Durable insight about which surfaces improve "
+            "vs stall and why. Read every review; keep it tight._\n\n(none yet)\n"
+        )
+    return ws
+
+
+def ensure_theta_wave() -> Dict[str, Any]:
+    """Idempotently seed the Theta Wave system-review cron (workspace + job) for the
+    active account — OFF by default (opt-in), like the surfaces it reviews. An existing
+    job (matched by name) is left exactly as-is."""
+    existing = next(
+        (j for j in load_jobs() if (j.get("name") or "").strip().lower() == THETA_WAVE_NAME.lower()),
+        None,
+    )
+    if existing:
+        _seed_theta_wave_workspace(enabled=bool(existing.get("enabled", False)))
+        return existing
+    ws = _seed_theta_wave_workspace(enabled=False)
+    prompt = (
+        f"You are Theta Wave, the fleet self-improvement reviewer. Workspace: {ws}. The surface "
+        f"fleet is in the sibling dir ../heartbeats/. Run your loop per the theta-wave skill: scan "
+        f"every surface, classify each (Stale/Converged/Successful/Underperforming), and create/"
+        f"modify/remove cycles via the cycle endpoints — gated by auto_create_agent_cycles / "
+        f"auto_modify_agent_cycles (else propose for dashboard approval). You are the only actor "
+        f"that authors cycles. Change cycles, never realtor data."
+    )
+    job = create_job(
+        prompt=prompt, schedule=THETA_WAVE_SCHEDULE, name=THETA_WAVE_NAME,
+        skill=THETA_WAVE_SKILL, deliver="local",
+        origin={"type": "system-review", "source": "system"},
+        workdir=str(ws),
+    )
+    paused = pause_job(job["id"], reason="theta-wave is opt-in (seeded off)")
+    return paused or job
+
+
 def ensure_system_jobs() -> List[Dict[str, Any]]:
     """Ensure repo-backed system cron jobs exist for the active Elevate home."""
     return [
@@ -563,6 +736,7 @@ def ensure_system_jobs() -> List[Dict[str, Any]]:
         ensure_operational_freshness_job(),
         *ensure_surface_heartbeats(),
         *ensure_surface_automations(),
+        ensure_theta_wave(),
     ]
 
 
