@@ -118,6 +118,13 @@ shape, New Leads hygiene, and the closed-client protocol are all in
 
 ## Phase 3 — Draft
 
+**Before drafting, REVIEW the voice guide: read `references/voice-and-drafting.md`
+in full and the realtor's `docs/voice/realtor-profile.md` (their specific voice),
+and open each lead's Lofty thread + iMessage history.** Every draft must read like
+the next message in that real conversation, in this realtor's voice — never a
+template. If `docs/voice/realtor-profile.md` is missing or thin, draft in a plain
+warm human voice and ask the realtor for a few real texts to populate it.
+
 Draft realtor-voice iMessage or email outreach from classified candidates only.
 Draft only from `draft_candidates` or `reply_needed`, never from `send_suppressed`.
 Do not send in this phase.
