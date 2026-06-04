@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import { ArrowRight, Hash, Loader2, MessageSquare, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type { AgentHandoff } from "@/lib/api-types";
@@ -120,6 +121,7 @@ export default function CommsPage() {
     const id = window.setInterval(() => load(true), 20000);
     return () => window.clearInterval(id);
   }, [load]);
+  useRefreshOnAgentTurn(() => void load(true));
 
   const nameOf = useCallback(
     (id: string) => names[id] || (id ? id.replace(/-/g, " ") : "—"),

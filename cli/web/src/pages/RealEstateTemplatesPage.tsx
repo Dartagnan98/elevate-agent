@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import {
   AlertCircle,
   Archive,
@@ -443,6 +444,9 @@ export default function RealEstateTemplatesPage() {
   useEffect(() => {
     void refresh("all");
   }, [refresh]);
+
+  // Reflect agent-made template changes immediately (no restart).
+  useRefreshOnAgentTurn(() => void refresh("all"));
 
   const proposedCount = proposed?.length ?? null;
   const retiredCount = retired?.length ?? null;

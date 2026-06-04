@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import {
   Activity,
   ChevronDown,
@@ -657,6 +658,7 @@ export default function HeartbeatPage() {
     const id = window.setInterval(refresh, 20000);
     return () => window.clearInterval(id);
   }, [refresh]);
+  useRefreshOnAgentTurn(() => void refresh());
 
   // Agent Hub agents power the "Run as agent" picker. Telegram delivery routes
   // to the chosen agent's own bot (per-agent ELEVATE_AGENT_<id>_TELEGRAM_*).

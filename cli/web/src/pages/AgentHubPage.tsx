@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type SVGProps,
 } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import { Link } from "react-router-dom";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
@@ -1054,6 +1055,7 @@ export default function AgentHubPage() {
       }
     };
   }, [load]);
+  useRefreshOnAgentTurn(() => void load());
 
   useLayoutEffect(() => {
     setAfterTitle(

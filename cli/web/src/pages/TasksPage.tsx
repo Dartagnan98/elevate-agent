@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import { Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { SurfaceTask } from "@/lib/api-types";
@@ -304,6 +305,7 @@ export default function TasksPage() {
     const id = window.setInterval(() => load(true), 30000);
     return () => window.clearInterval(id);
   }, [load]);
+  useRefreshOnAgentTurn(() => void load(true));
 
   const byStatus = useMemo(() => {
     const map: Record<string, SurfaceTask[]> = {

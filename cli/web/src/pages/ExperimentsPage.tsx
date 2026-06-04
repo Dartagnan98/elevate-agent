@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import { createPortal } from "react-dom";
 import {
   Check,
@@ -1195,6 +1196,7 @@ export default function ExperimentsPage() {
     const id = window.setInterval(() => load(true), 30000);
     return () => window.clearInterval(id);
   }, [load]);
+  useRefreshOnAgentTurn(() => void load(true));
 
   const surfaces = data?.surfaces || [];
   const summary = data?.summary;

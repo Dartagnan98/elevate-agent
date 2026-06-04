@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import {
   ChevronLeft,
   Code,
@@ -224,6 +225,7 @@ function ComposioPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useRefreshOnAgentTurn(() => void refresh(true));
 
   // After Connect opens the Composio OAuth tab in a new window, the user
   // completes the flow there and switches back. Refresh on focus so the

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import { Activity, Clock, FlaskConical, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -68,6 +69,7 @@ export default function ActivityPage() {
     const id = window.setInterval(() => load(true), 20000);
     return () => window.clearInterval(id);
   }, [load]);
+  useRefreshOnAgentTurn(() => void load(true));
 
   const agents = useMemo(() => [...new Set(items.map((i) => i.agent))], [items]);
   const feed = useMemo(

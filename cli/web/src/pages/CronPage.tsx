@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -963,6 +964,7 @@ export default function CronPage() {
     }, 15_000);
     return () => window.clearInterval(interval);
   }, [loadJobs]);
+  useRefreshOnAgentTurn(() => void loadJobs({ refresh: true }));
 
   /* ---- Load attention rollup ---- */
   const loadAttention = useCallback(() => {

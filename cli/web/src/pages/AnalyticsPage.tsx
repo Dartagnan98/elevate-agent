@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import {
   BarChart3,
   Brain,
@@ -350,6 +351,7 @@ export default function AnalyticsPage() {
   useEffect(() => {
     load();
   }, [load]);
+  useRefreshOnAgentTurn(() => void load());
 
   return (
     <div className="flex flex-col gap-6">
