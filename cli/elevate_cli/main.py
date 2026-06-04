@@ -7009,6 +7009,18 @@ def cmd_dashboard(args):
         if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
             sys.exit(1)
 
+    # Seed bundled skills before the server starts. The desktop app launches
+    # via the `dashboard` command (this path), which — unlike `cmd_chat` —
+    # otherwise never runs the seed. Without it a desktop-only install (user
+    # never opens the interactive CLI) has an empty ~/.elevate/skills and the
+    # app shows zero skills.
+    try:
+        from tools.skills_sync import sync_skills
+
+        sync_skills(quiet=True)
+    except Exception as exc:  # never block dashboard startup on a seed hiccup
+        logger.debug("bundled skill seed (dashboard) failed: %s", exc)
+
     from elevate_cli.web_server import start_server
 
     embedded_chat = args.tui or os.environ.get("ELEVATE_DASHBOARD_TUI") == "1"
