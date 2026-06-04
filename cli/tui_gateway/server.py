@@ -2323,6 +2323,24 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, result)
 
     try:
+        # Follow the compression-continuation chain to its live tip before
+        # loading history. When a turn compacts, the agent rotates to a NEW
+        # child session holding the compressed (small) history; the original
+        # session keeps its full pre-compaction transcript and is marked
+        # ended ("compression"). A cold resume keyed on the ORIGINAL id would
+        # reload that full transcript every time — so the next turn's preflight
+        # immediately re-compacts, looping forever ("it already compacted twice
+        # but still thinks it needs to"). Resolving to the tip loads the small
+        # compressed history and binds the agent/slash-worker to the live
+        # continuation. get_compression_tip is idempotent and a no-op for
+        # sessions that were never compressed.
+        try:
+            _tip = db.get_compression_tip(target)
+        except Exception:
+            _tip = None
+        if _tip and _tip != target:
+            logger.info("resume: following compression chain %s -> %s", target, _tip)
+            target = _tip
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
         messages = _history_to_messages(history) if include_messages else None

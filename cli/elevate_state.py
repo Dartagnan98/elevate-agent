@@ -1431,6 +1431,19 @@ class SessionDB:
         input ``session_id`` if it isn't part of a compression chain (or if the
         input itself doesn't exist).
         """
+        # PG-first: sessions (and their parent_session_id lineage) are
+        # PG-backed post-cutover. The SQLite walk below reads stale rows when
+        # writes go to PG, so the resume path would never find the compressed
+        # child and would loop re-compacting. Resolve against PG when active.
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import (
+                    get_compression_tip as _pg_get_compression_tip,
+                )
+                return _pg_get_compression_tip(session_id)
+            except Exception:
+                pass  # fall back to SQLite walk below
+
         current = session_id
         # Bound the walk defensively — compression chains this deep are
         # pathological and shouldn't happen in practice. 100 = plenty.

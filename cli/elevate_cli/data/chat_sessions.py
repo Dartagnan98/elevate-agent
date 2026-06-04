@@ -106,6 +106,39 @@ def reopen_session(session_id: str) -> None:
         conn.commit()
 
 
+def get_compression_tip(session_id: str) -> Optional[str]:
+    """Walk the compression-continuation chain forward and return its tip.
+
+    PG mirror of ``ElevateState.get_compression_tip`` (sessions are PG-backed
+    post-cutover, so the SQLite walk would read stale rows). A compression
+    continuation is a child session whose parent's ``end_reason='compression'``
+    and which was created after the parent ended (``started_at >= ended_at``) —
+    that second condition excludes delegate/branch children. Returns the latest
+    continuation, or the input ``session_id`` when it is not part of a
+    compression chain.
+    """
+    if not session_id:
+        return session_id
+    current = session_id
+    with connect() as conn:
+        # Bound the walk defensively — chains this deep are pathological.
+        for _ in range(100):
+            row = conn.execute(
+                "SELECT id FROM chat_sessions "
+                "WHERE parent_session_id = ? "
+                "  AND started_at >= ("
+                "      SELECT ended_at FROM chat_sessions "
+                "      WHERE id = ? AND end_reason = 'compression'"
+                "  ) "
+                "ORDER BY started_at DESC LIMIT 1",
+                (current, current),
+            ).fetchone()
+            if row is None:
+                break
+            current = row["id"] if not isinstance(row, (tuple, list)) else row[0]
+    return current
+
+
 def update_system_prompt(session_id: str, system_prompt: str) -> None:
     if not session_id:
         return
