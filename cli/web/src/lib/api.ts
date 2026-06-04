@@ -1161,6 +1161,14 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  // Comms — connected channels for the channel panel (agent-to-agent traffic is
+  // the handoff bus via getAgentHandoffs).
+  getCommsChannels: () =>
+    cachedFetchJSON<{
+      channels: { platform: string; id: string; name: string; type?: string }[];
+      updated_at?: string | null;
+    }>("/api/comms/channels", 30_000),
+
   // Agent Hub
   getAgentHub: (
     options?: {

@@ -6867,6 +6867,31 @@ def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
         raise HTTPException(status_code=500, detail=f"Set route failed: {exc}")
 
 
+@app.get("/api/comms/channels")
+def get_comms_channels():
+    """The connected delivery channels (Telegram/Discord/Slack/… chats) for the Comms
+    tab's channel panel. Read-only view of the channel directory."""
+    try:
+        from gateway.channel_directory import load_directory
+
+        directory = load_directory()
+        out: List[Dict[str, Any]] = []
+        for platform, channels in (directory.get("platforms") or {}).items():
+            for ch in channels or []:
+                if not ch.get("id"):
+                    continue
+                out.append({
+                    "platform": platform,
+                    "id": ch["id"],
+                    "name": ch.get("name") or ch["id"],
+                    "type": ch.get("type"),
+                })
+        return {"channels": out, "updated_at": directory.get("updated_at")}
+    except Exception as exc:
+        _log.exception("GET /api/comms/channels failed")
+        raise HTTPException(status_code=500, detail=f"Comms channels failed: {exc}")
+
+
 class _HeartbeatSurfaceEnabledBody(BaseModel):
     enabled: bool
 

@@ -105,6 +105,7 @@ const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
 const loadCronPage = () => import("@/pages/CronPage");
 const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
 const loadExperimentsPage = () => import("@/pages/ExperimentsPage");
+const loadCommsPage = () => import("@/pages/CommsPage");
 const loadTasksPage = () => import("@/pages/TasksPage");
 const loadApprovalsPage = () => import("@/pages/ApprovalsPage");
 const loadSkillsPage = () => import("@/pages/SkillsPage");
@@ -135,6 +136,7 @@ const AnalyticsPage = lazy(loadAnalyticsPage);
 const CronPage = lazy(loadCronPage);
 const HeartbeatPage = lazy(loadHeartbeatPage);
 const ExperimentsPage = lazy(loadExperimentsPage);
+const CommsPage = lazy(loadCommsPage);
 const TasksPage = lazy(loadTasksPage);
 const ApprovalsPage = lazy(loadApprovalsPage);
 const SkillsPage = lazy(loadSkillsPage);
@@ -168,6 +170,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/cron": loadCronPage,
   "/heartbeat": loadHeartbeatPage,
   "/experiments": loadExperimentsPage,
+  "/comms": loadCommsPage,
   "/tasks": loadTasksPage,
   "/approvals": loadApprovalsPage,
   "/skills": loadSkillsPage,
@@ -417,6 +420,7 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/cron": CronPage,
   "/heartbeat": HeartbeatPage,
   "/experiments": ExperimentsPage,
+  "/comms": CommsPage,
   "/tasks": TasksPage,
   "/approvals": ApprovalsPage,
   "/skills": SkillsPage,
@@ -1608,6 +1612,7 @@ function DesktopSidebar({
   // Tasks = dispatch work to surfaces (kanban); Approvals = decisions board.
   realEstateNavItems.push({ icon: KanbanSquare, label: "Tasks", path: "/tasks" });
   realEstateNavItems.push({ icon: CheckCheck, label: "Approvals", path: "/approvals" });
+  realEstateNavItems.push({ icon: MessageSquare, label: "Comms", path: "/comms" });
   // Automations lives in this (now "Agent") section — always shown.
   realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const toolsNavItems: NavItem[] = [
