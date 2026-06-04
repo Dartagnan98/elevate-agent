@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
@@ -7,7 +8,9 @@ import {
   FlaskConical,
   Loader2,
   Play,
+  Plus,
   RefreshCw,
+  Trash2,
   TrendingDown,
   TrendingUp,
   X,
@@ -22,6 +25,9 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectOption } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -196,8 +202,44 @@ function ExperimentRow({ exp }: { exp: HeartbeatExperiment }) {
 
 /* ---------------------------- cycle row --------------------------- */
 
-function CycleRow({ cycle }: { cycle: HeartbeatExperimentCycle }) {
+function CycleRow({
+  cycle,
+  surface,
+  onChanged,
+}: {
+  cycle: HeartbeatExperimentCycle;
+  surface: string;
+  onChanged: () => void;
+}) {
   const up = (cycle.direction || "").toLowerCase() === "higher";
+  const [busy, setBusy] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await api.updateHeartbeatCycle(surface, cycle.name, { enabled: !cycle.enabled });
+      onChanged();
+    } catch {
+      /* surfaced on next load */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      await api.deleteHeartbeatCycle(surface, cycle.name);
+      onChanged();
+    } catch {
+      /* surfaced on next load */
+    } finally {
+      setBusy(false);
+      setConfirmDel(false);
+    }
+  };
+
   return (
     <li className="flex items-center justify-between gap-3 rounded-md bg-secondary/30 p-2">
       <div className="min-w-0">
@@ -216,9 +258,52 @@ function CycleRow({ cycle }: { cycle: HeartbeatExperimentCycle }) {
           </span>
         </div>
       </div>
-      <Badge variant={cycle.enabled ? "success" : "secondary"} className="shrink-0">
-        {cycle.enabled ? "on" : "off"}
-      </Badge>
+      <div className="flex shrink-0 items-center gap-1.5">
+        {confirmDel ? (
+          <>
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy}
+              className="text-[11px] font-medium text-destructive hover:underline"
+            >
+              {busy ? "…" : "Delete?"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDel(false)}
+              className="text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              No
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={toggle}
+              disabled={busy}
+              title={cycle.enabled ? "Pause cycle" : "Resume cycle"}
+            >
+              <Badge
+                variant={cycle.enabled ? "success" : "secondary"}
+                className="cursor-pointer"
+              >
+                {cycle.enabled ? "on" : "off"}
+              </Badge>
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDel(true)}
+              disabled={busy}
+              title="Remove cycle"
+              className="text-muted-foreground/60 hover:text-destructive"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </>
+        )}
+      </div>
     </li>
   );
 }
@@ -243,10 +328,280 @@ function KeepDiscardBar({ kept, discarded }: { kept: number; discarded: number }
   );
 }
 
+/* ----------------------------- modal ------------------------------ */
+
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-4 backdrop-blur-sm"
+      onMouseDown={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-lg border border-border bg-card shadow-xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <Label className="text-[11px] uppercase tracking-wide text-muted-foreground/80">
+        {label}
+      </Label>
+      {children}
+    </div>
+  );
+}
+
+/* --------------------- new surface / new cycle -------------------- */
+
+function NewSurfaceForm({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [surface, setSurface] = useState("");
+  const [title, setTitle] = useState("");
+  const [goal, setGoal] = useState("");
+  const [schedule, setSchedule] = useState("0 9 * * *");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const keyHint = surface.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const valid = /^[a-z][a-z0-9_-]{1,31}$/.test(keyHint);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.createHeartbeatSurface({
+        surface: keyHint,
+        title: title.trim() || undefined,
+        goal: goal.trim() || undefined,
+        schedule: schedule.trim() || undefined,
+      });
+      onCreated();
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <Field label="Surface key">
+        <Input
+          value={surface}
+          onChange={(e) => setSurface(e.target.value)}
+          placeholder="marketing"
+          autoFocus
+        />
+        <p className="text-[11px] text-muted-foreground">
+          {surface ? (
+            valid ? (
+              <span className="text-success">→ {keyHint}</span>
+            ) : (
+              <span className="text-destructive">
+                2–32 chars: a lowercase letter then letters/digits/-/_
+              </span>
+            )
+          ) : (
+            "lowercase, e.g. marketing, transactions, recruiting"
+          )}
+        </p>
+      </Field>
+      <Field label="Title (optional)">
+        <Input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Listing Marketing"
+        />
+      </Field>
+      <Field label="Goal (optional)">
+        <textarea
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          rows={3}
+          placeholder="What this surface does each run. Leave blank to use the template."
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
+        />
+      </Field>
+      <Field label="Schedule (cron)">
+        <Input
+          value={schedule}
+          onChange={(e) => setSchedule(e.target.value)}
+          placeholder="0 9 * * *"
+          className="font-mono-ui"
+        />
+      </Field>
+      {err && <p className="text-xs text-destructive">{err}</p>}
+      <p className="text-[11px] text-muted-foreground">
+        Created OFF — turn it on from the Heartbeat page.
+      </p>
+      <div className="flex justify-end gap-2 pt-1">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={!valid || busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          Create surface
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function NewCycleForm({
+  surface,
+  onClose,
+  onCreated,
+}: {
+  surface: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [metric, setMetric] = useState("");
+  const [metricType, setMetricType] = useState("qualitative");
+  const [direction, setDirection] = useState("higher");
+  const [windowVal, setWindow] = useState("7d");
+  const [everyN, setEveryN] = useState("7");
+  const [measurement, setMeasurement] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const valid = name.trim().length > 1 && metric.trim().length > 1;
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.createHeartbeatCycle(surface, {
+        name: name.trim(),
+        metric: metric.trim(),
+        metric_type: metricType,
+        direction,
+        window: windowVal.trim() || "7d",
+        every_n_runs: Math.max(1, parseInt(everyN, 10) || 7),
+        measurement: measurement.trim() || undefined,
+      });
+      onCreated();
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <Field label="Cycle name">
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="faster-first-touch"
+          autoFocus
+        />
+      </Field>
+      <Field label="Metric">
+        <Input
+          value={metric}
+          onChange={(e) => setMetric(e.target.value)}
+          placeholder="next_touch_reply_rate"
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Type">
+          <Select value={metricType} onValueChange={setMetricType}>
+            <SelectOption value="qualitative">qualitative</SelectOption>
+            <SelectOption value="quantitative">quantitative</SelectOption>
+          </Select>
+        </Field>
+        <Field label="Direction">
+          <Select value={direction} onValueChange={setDirection}>
+            <SelectOption value="higher">higher is better</SelectOption>
+            <SelectOption value="lower">lower is better</SelectOption>
+          </Select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Window">
+          <Input value={windowVal} onChange={(e) => setWindow(e.target.value)} placeholder="7d" />
+        </Field>
+        <Field label="Run every N runs">
+          <Input
+            value={everyN}
+            onChange={(e) => setEveryN(e.target.value.replace(/[^0-9]/g, ""))}
+            placeholder="7"
+            inputMode="numeric"
+          />
+        </Field>
+      </div>
+      <Field label="Measurement (optional)">
+        <textarea
+          value={measurement}
+          onChange={(e) => setMeasurement(e.target.value)}
+          rows={2}
+          placeholder="How to measure the metric each cycle."
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
+        />
+      </Field>
+      {err && <p className="text-xs text-destructive">{err}</p>}
+      <div className="flex justify-end gap-2 pt-1">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={!valid || busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          Add cycle
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------- surface card --------------------------- */
 
-function SurfaceCard({ surface }: { surface: HeartbeatExperimentSurface }) {
+function SurfaceCard({
+  surface,
+  onChanged,
+}: {
+  surface: HeartbeatExperimentSurface;
+  onChanged: () => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [showNewCycle, setShowNewCycle] = useState(false);
   const stats = surface.stats;
   const decided = stats.kept + stats.discarded;
   const tone = keepRateTone(stats.keepRate, decided);
@@ -291,17 +646,48 @@ function SurfaceCard({ surface }: { surface: HeartbeatExperimentSurface }) {
         <CardContent className="space-y-4">
           {decided > 0 && <KeepDiscardBar kept={stats.kept} discarded={stats.discarded} />}
 
-          {surface.cycles.length > 0 && (
-            <div className="space-y-1.5">
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
                 Research Cycles
               </span>
+              <Button
+                variant="ghost"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => setShowNewCycle(true)}
+              >
+                <Plus className="h-3 w-3" /> New cycle
+              </Button>
+            </div>
+            {surface.cycles.length > 0 ? (
               <ul className="space-y-1.5">
                 {surface.cycles.map((c, i) => (
-                  <CycleRow key={c.name || i} cycle={c} />
+                  <CycleRow
+                    key={c.name || i}
+                    cycle={c}
+                    surface={surface.surface}
+                    onChanged={onChanged}
+                  />
                 ))}
               </ul>
-            </div>
+            ) : (
+              <p className="text-xs italic text-muted-foreground/70">
+                No cycles yet — add one to start a research track.
+              </p>
+            )}
+          </div>
+
+          {showNewCycle && (
+            <Modal
+              title={`New cycle · ${titleCase(surface.surface)}`}
+              onClose={() => setShowNewCycle(false)}
+            >
+              <NewCycleForm
+                surface={surface.surface}
+                onClose={() => setShowNewCycle(false)}
+                onCreated={onChanged}
+              />
+            </Modal>
           )}
 
           {surface.experiments.length > 0 ? (
@@ -383,6 +769,7 @@ export default function ExperimentsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("surfaces");
+  const [showNewSurface, setShowNewSurface] = useState(false);
 
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) setRefreshing(true);
@@ -435,15 +822,29 @@ export default function ExperimentsPage() {
             Autoresearch — each surface improves its own playbook.
           </p>
         </div>
-        <Button variant="ghost" onClick={() => load(true)} disabled={refreshing}>
-          {refreshing ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="h-4 w-4" />
-          )}
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" onClick={() => load(true)} disabled={refreshing}>
+            {refreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            Refresh
+          </Button>
+          <Button onClick={() => setShowNewSurface(true)}>
+            <Plus className="h-4 w-4" /> New surface
+          </Button>
+        </div>
       </header>
+
+      {showNewSurface && (
+        <Modal title="New surface" onClose={() => setShowNewSurface(false)}>
+          <NewSurfaceForm
+            onClose={() => setShowNewSurface(false)}
+            onCreated={() => load(true)}
+          />
+        </Modal>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
@@ -501,7 +902,7 @@ export default function ExperimentsPage() {
           ) : tab === "surfaces" ? (
             <div className="grid gap-3 lg:grid-cols-2">
               {surfaces.map((s) => (
-                <SurfaceCard key={s.surface} surface={s} />
+                <SurfaceCard key={s.surface} surface={s} onChanged={() => load(true)} />
               ))}
             </div>
           ) : tab === "timeline" ? (

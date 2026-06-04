@@ -623,6 +623,60 @@ export const api = {
       ? fetchJSON<HeartbeatExperimentsResponse>(url)
       : cachedFetchJSON<HeartbeatExperimentsResponse>(url, 5_000);
   },
+  // Create a NEW custom surface from the template (cortextOS add-agent). Seeds it
+  // opt-in/off; the realtor turns it on from the Heartbeat page.
+  createHeartbeatSurface: (body: {
+    surface: string;
+    title?: string;
+    goal?: string;
+    schedule?: string;
+  }) =>
+    fetchJSON<{ ok: boolean; surface: string }>("/api/heartbeats/surfaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  // Create a new experiment cycle on a surface (the analyst's lever — a new
+  // self-improvement track). Mirrors cortextOS manage-cycle create.
+  createHeartbeatCycle: (
+    surface: string,
+    body: {
+      name: string;
+      metric: string;
+      metric_type: string;
+      direction: string;
+      window: string;
+      every_n_runs?: number;
+      measurement?: string;
+    },
+  ) =>
+    fetchJSON<{ ok: boolean; cycles: unknown[] }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/cycles`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  // Pause/resume or delete a cycle (analyst controls; surfaces only run them).
+  updateHeartbeatCycle: (
+    surface: string,
+    name: string,
+    body: Record<string, unknown>,
+  ) =>
+    fetchJSON<{ ok: boolean; cycles: unknown[] }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/cycles/${encodeURIComponent(name)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteHeartbeatCycle: (surface: string, name: string) =>
+    fetchJSON<{ ok: boolean; cycles: unknown[] }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/cycles/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {
