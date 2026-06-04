@@ -1,5 +1,18 @@
 import type { AdminSetupItemStatus, AdminSetupSnapshot } from "@/lib/api";
 
+// Prefilled starting point for the Approval policy box — a safe, realtor-
+// appropriate default the user can tighten. Drafts-only AI; a human signs off
+// on anything binding or client-facing. Used when no policy has been saved yet.
+export const DEFAULT_APPROVAL_POLICY = [
+  "AI drafts and prepares everything; a human approves anything that leaves the brokerage or is legally binding.",
+  "",
+  "Auto (no sign-off): internal drafts, data entry, file organization, CMA prep, listing-copy drafts, email/text drafts, summaries, reminders, calendar holds, checklist updates.",
+  "",
+  "Requires human sign-off before it goes out: anything sent to a client or third party (emails, texts, documents), MLS create / edit / publish, e-signature / DocuSign sends, offers / counteroffers / contracts, price changes, subject removals, and any deadline- or money-binding action.",
+  "",
+  "Hard rule: no document, MLS change, or signing request ever goes out without a named human approving it first.",
+].join("\n");
+
 export type AdminSetupDraft = {
   realtorLegalName: string;
   licenseName: string;
@@ -79,9 +92,9 @@ export function adminSetupDraftFromSnapshot(setup: AdminSetupSnapshot): AdminSet
   const regionalMemory = profile.regionalMemory && typeof profile.regionalMemory.notes === "string"
     ? profile.regionalMemory.notes
     : "";
-  const approvalPolicy = profile.approvalPolicy && typeof profile.approvalPolicy.notes === "string"
+  const approvalPolicy = profile.approvalPolicy && typeof profile.approvalPolicy.notes === "string" && profile.approvalPolicy.notes.trim()
     ? profile.approvalPolicy.notes
-    : "";
+    : DEFAULT_APPROVAL_POLICY;
   return {
     realtorLegalName: profile.realtorLegalName ?? "",
     licenseName: profile.licenseName ?? "",
