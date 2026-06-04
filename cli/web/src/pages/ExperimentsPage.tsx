@@ -42,7 +42,7 @@ import { cn } from "@/lib/utils";
 
 /* ----------------------------- helpers ---------------------------- */
 
-function timeAgo(iso?: string | null): string {
+export function timeAgo(iso?: string | null): string {
   if (!iso) return "never";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "never";
@@ -59,7 +59,7 @@ function timeAgo(iso?: string | null): string {
   return `${months}mo ago`;
 }
 
-function titleCase(s: string): string {
+export function titleCase(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
@@ -151,7 +151,7 @@ function StatTile({
 
 /* --------------------------- experiment row ----------------------- */
 
-function ExperimentRow({ exp }: { exp: HeartbeatExperiment }) {
+export function ExperimentRow({ exp }: { exp: HeartbeatExperiment }) {
   const shortId = (exp.id || "").slice(0, 8) || "exp";
   const hasResult = exp.result != null;
   return (
@@ -204,7 +204,7 @@ function ExperimentRow({ exp }: { exp: HeartbeatExperiment }) {
 
 /* ---------------------------- cycle row --------------------------- */
 
-function CycleRow({
+export function CycleRow({
   cycle,
   surface,
   onChanged,
@@ -372,7 +372,7 @@ function Modal({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1">
       <Label className="text-[11px] uppercase tracking-wide text-muted-foreground/80">
@@ -385,7 +385,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /* --------------------- new surface / new cycle -------------------- */
 
-function NewSurfaceForm({
+export function NewSurfaceForm({
   onClose,
   onCreated,
 }: {
@@ -484,7 +484,7 @@ function NewSurfaceForm({
   );
 }
 
-function NewCycleForm({
+export function NewCycleForm({
   surface,
   onClose,
   onCreated,
@@ -602,7 +602,7 @@ const APPROVAL_CATEGORIES = [
   "data-deletion",
 ] as const;
 
-function SurfaceSettingsForm({
+export function SurfaceSettingsForm({
   surface,
   onClose,
 }: {
@@ -802,7 +802,7 @@ function SurfaceSettingsForm({
 
 type GoalItem = { id: string; title: string; progress: number; order: number };
 
-function SurfaceGoalsForm({
+export function SurfaceGoalsForm({
   surface,
   onClose,
 }: {
