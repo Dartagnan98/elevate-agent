@@ -451,6 +451,10 @@ function orderGroupedItems(
 }
 
 function shouldAppendSpace(item: PickerItem): boolean {
+  // Skills almost always take arguments (an address, a name, "pick up from
+  // step X"). Leave a trailing space after the command so the user can type
+  // them immediately instead of the command firing bare.
+  if (item.kind === "skill") return true;
   if (item.kind === "slash" || item.text.startsWith("/")) {
     return false;
   }
@@ -615,11 +619,15 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
               const item = items[selected];
               if (item) {
                 const next = inputForItem(item);
+                // Only fire on Enter when the typed text already IS the full
+                // command (user typed it out, no list-pick). Picking a skill
+                // from the list loads it (with a space for args) instead of
+                // firing it bare — matching the click behavior.
                 const shouldSubmit =
                   event.key === "Enter" &&
                   trigger?.mode === "slash" &&
                   Boolean(onSubmit) &&
-                  (item.kind === "skill" || next?.nextInput.trim() === input.trim());
+                  next?.nextInput.trim() === input.trim();
                 apply(item, { submit: shouldSubmit });
               }
               return true;
@@ -675,9 +683,11 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
                 className={cn("slash-row", active && "active")}
                 id={`slash-item-${index}`}
                 onClick={() =>
-                  apply(item, {
-                    submit: trigger?.mode === "slash" && item.kind === "skill",
-                  })
+                  // Load the command into the composer (with a trailing space
+                  // for skills) so the user can add arguments, then Enter to
+                  // run — instead of firing it bare on click, which left
+                  // arg-taking skills doing nothing.
+                  apply(item)
                 }
                 onMouseEnter={() => setSelected(index)}
                 role="option"
