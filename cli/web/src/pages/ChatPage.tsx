@@ -376,7 +376,7 @@ function fallbackCopyText(text: string): boolean {
 const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
 const PREVIEW_PANEL_MIN_WIDTH = 340;
-const PREVIEW_PANEL_CHAT_MIN_WIDTH = 320;
+const PREVIEW_PANEL_CHAT_MIN_WIDTH = 260;
 
 const ARTIFACT_DISMISS_STORAGE_PREFIX = "elevate.chat.artifacts.dismissed.v1:";
 const MESSAGE_PIN_STORAGE_KEY = "elevate.chat.messagePins.v1";
@@ -5857,10 +5857,14 @@ export default function ChatPage() {
       className="elevate-chat-shell relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case"
       style={previewPanelLayoutStyle}
     >
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <section
           className={cn(
-            "flex min-h-0 flex-1 flex-col",
+            // min-w-0 is critical: without it a flex child defaults to
+            // min-width:auto and its content (long lines, composer, file-path
+            // chips) pushes the column past the app's right edge, overflowing the
+            // shell and clipping the preview. min-w-0 lets it shrink to fit.
+            "flex min-h-0 min-w-0 flex-1 flex-col",
             previewArtifact && "lg:basis-1/2",
           )}
         >
