@@ -28,6 +28,7 @@ import {
   Brain,
   CheckCircle2,
   ChevronDown,
+  ChevronsLeftRight,
   ChevronUp,
   Clipboard,
   Clock,
@@ -374,8 +375,8 @@ function fallbackCopyText(text: string): boolean {
 
 const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
-const PREVIEW_PANEL_MIN_WIDTH = 480;
-const PREVIEW_PANEL_CHAT_MIN_WIDTH = 420;
+const PREVIEW_PANEL_MIN_WIDTH = 340;
+const PREVIEW_PANEL_CHAT_MIN_WIDTH = 320;
 
 const ARTIFACT_DISMISS_STORAGE_PREFIX = "elevate.chat.artifacts.dismissed.v1:";
 const MESSAGE_PIN_STORAGE_KEY = "elevate.chat.messagePins.v1";
@@ -3025,6 +3026,22 @@ export default function ChatPage() {
     [previewArtifact, previewPanelWidth],
   );
 
+  // One-click: collapse the chat to its minimum so the preview takes the rest,
+  // or restore to a balanced split. Saves fiddling with the divider on small screens.
+  const toggleMaxPreview = useCallback(() => {
+    const maxWidth = clampPreviewPanelWidth(window.innerWidth);
+    const next =
+      previewPanelWidth >= maxWidth - 8
+        ? clampPreviewPanelWidth(Math.round(window.innerWidth * 0.5))
+        : maxWidth;
+    setPreviewPanelWidth(next);
+    try {
+      localStorage.setItem("elevate-preview-width", String(next));
+    } catch {
+      // best-effort
+    }
+  }, [previewPanelWidth]);
+
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
       const clean = displayStatusText(text).trim();
@@ -3894,6 +3911,18 @@ export default function ChatPage() {
         const messageId = currentAssistantRef.current ?? ensureAssistant(at);
         const stopForced = stoppedAssistantIdsRef.current.has(messageId);
         flushAssistantDelta();
+
+        // The agent just finished a turn — if the user asked it to change
+        // anything (add a card, update a template, move a deal, edit an
+        // automation, update memory), the change is already written
+        // server-side. Broadcast one app-wide signal so EVERY data view
+        // re-fetches immediately, instead of waiting on each page's poll or an
+        // app restart. Data hooks subscribe via useRefreshOnAgentTurn(); each
+        // listener only fires while its page is mounted. Background
+        // (cron/heartbeat) changes still ride the per-page poll as a fallback.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("elevate:agent-turn-complete"));
+        }
 
         // Snapshot the finished turn's tools + reasoning traces onto the
         // message so the activity digest survives a session resume. Any
@@ -6159,12 +6188,12 @@ export default function ChatPage() {
           className={cn(
             "hidden min-h-0 shrink-0 lg:flex",
             previewArtifact
-              ? "flex-col pb-5 pl-0 pr-5 pt-2"
+              ? "flex-col pb-[var(--sidebar-gap)] pl-0 pr-[var(--sidebar-gap)] pt-[var(--sidebar-gap)]"
               : "w-[16.25rem] flex-col self-start pr-[18px] pt-[60px]",
           )}
           style={
             previewArtifact
-              ? { width: "min(var(--preview-panel-width), 50%)" }
+              ? { width: "var(--preview-panel-width)" }
               : undefined
           }
         >
@@ -6184,6 +6213,17 @@ export default function ChatPage() {
                 type="button"
               >
                 <span className="h-12 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)] transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
+              </button>
+            )}
+            {previewArtifact && (
+              <button
+                aria-label="Maximize or restore preview"
+                title="Maximize / restore preview"
+                className="absolute -left-[18px] top-[2px] z-20 flex h-7 w-7 items-center justify-center rounded-full border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-muted)] shadow-[0_8px_22px_-12px_rgba(0,0,0,0.7)] transition hover:text-[var(--chat-text)]"
+                onClick={toggleMaxPreview}
+                type="button"
+              >
+                <ChevronsLeftRight className="h-3.5 w-3.5" />
               </button>
             )}
             {previewArtifact ? (

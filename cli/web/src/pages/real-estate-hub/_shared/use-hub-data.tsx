@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import type {
   AdminActionRun,
   AdminDealTask,
@@ -382,6 +383,11 @@ export function useRealEstateHubData(): HubData {
       refreshSeq.current += 1;
     };
   }, [refresh]);
+
+  // Instant refresh the moment the agent finishes a turn (the common
+  // "I told it to add/move/update X and want to see it" case). The 25s poll
+  // below stays as the fallback for background cron/heartbeat changes.
+  useRefreshOnAgentTurn(refresh);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
