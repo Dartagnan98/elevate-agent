@@ -2620,3 +2620,32 @@ export interface HeartbeatExperimentsResponse {
   surfaces: HeartbeatExperimentSurface[];
   summary: HeartbeatExperimentSummary;
 }
+
+export interface SurfaceTask {
+  id: string;
+  title: string;
+  description?: string | null;
+  status: "pending" | "in_progress" | "blocked" | "completed";
+  priority: "urgent" | "high" | "normal" | "low";
+  assignee?: string | null;
+  project?: string | null;
+  needsApproval: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  completedAt?: string | null;
+  notes?: string | null;
+  outputs?: unknown[];
+}
+
+export interface SurfaceApproval {
+  id: string;
+  title: string;
+  category: "deployment" | "cost" | "access" | "other";
+  description?: string | null;
+  status: "pending" | "approved" | "rejected";
+  surface?: string | null;
+  createdAt?: string | null;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
+  resolutionNote?: string | null;
+}

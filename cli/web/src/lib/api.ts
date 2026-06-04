@@ -723,6 +723,63 @@ export const api = {
       },
     ),
 
+  // Surface Tasks — dispatch work to a surface (or 'human'); kanban board.
+  listSurfaceTasks: (params?: { status?: string; assignee?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.assignee) qs.set("assignee", params.assignee);
+    const q = qs.toString();
+    return fetchJSON<{ tasks: import("./api-types").SurfaceTask[] }>(
+      `/api/surface-tasks${q ? `?${q}` : ""}`,
+    );
+  },
+  createSurfaceTask: (body: {
+    title: string;
+    description?: string;
+    assignee?: string;
+    priority?: string;
+    project?: string;
+    needs_approval?: boolean;
+  }) =>
+    fetchJSON<{ ok: boolean; task: import("./api-types").SurfaceTask }>("/api/surface-tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateSurfaceTask: (id: string, body: Record<string, unknown>) =>
+    fetchJSON<{ ok: boolean; task: import("./api-types").SurfaceTask }>(
+      `/api/surface-tasks/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteSurfaceTask: (id: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/surface-tasks/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // Surface Approvals — decisions kanban (dashboard-only resolve).
+  listSurfaceApprovals: (params?: { status?: string; surface?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.surface) qs.set("surface", params.surface);
+    const q = qs.toString();
+    return fetchJSON<{ approvals: import("./api-types").SurfaceApproval[] }>(
+      `/api/surface-approvals${q ? `?${q}` : ""}`,
+    );
+  },
+  resolveSurfaceApproval: (id: string, decision: "approve" | "reject", note?: string) =>
+    fetchJSON<{ ok: boolean; approval: import("./api-types").SurfaceApproval }>(
+      `/api/surface-approvals/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision, note }),
+      },
+    ),
+
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {
     const qs = lane ? `?lane=${encodeURIComponent(lane)}` : "";

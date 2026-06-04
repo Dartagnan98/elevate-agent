@@ -24,15 +24,24 @@ playbook), never the realtor's leads, calendar, or data.
 ## Every run — WORK loop
 1. **Load context.** Read `config.json` (your `goal`, your `playbook` if present) and the whole
    `learnings.md` (apply it). Count prior runs: `ls "<Workspace>/history" | wc -l`.
-2. **Do the work** in `config.json.goal`, sharpened by your learnings + playbook, using your
+2. **Drain dispatched tasks.** Pull work the realtor (or the analyst) queued to you:
+   `GET ${ELEVATE_DASHBOARD_URL:-http://127.0.0.1:9120}/api/surface-tasks?assignee=<surface>&status=pending`.
+   For each, do the work (drafts only), `PATCH .../api/surface-tasks/<id>` to `in_progress` then
+   `completed` with `outputs:[...]`. If a task has `needsApproval` (or your action would send /
+   change anything), do NOT act — leave a draft and it surfaces for sign-off (see below). Skip
+   tasks assigned to `human`.
+3. **Do the work** in `config.json.goal`, sharpened by your learnings + playbook, using your
    normal Elevate tools/skills for this surface.
-3. **Log** → write `history/<UTC-ISO-timestamp>.json`:
+4. **Surface anything needing sign-off.** When you produce a draft/recommendation that must NOT
+   go out without the realtor's yes, it shows on the Approvals board — resolved on the dashboard
+   only, never auto-sent. (Approvals are created for you; you never send on the realtor's behalf.)
+6. **Log** → write `history/<UTC-ISO-timestamp>.json`:
    ```json
    {"ran_at":"<iso>","checked":"<what you looked at>","did":"<actions/drafts>","found":"<key findings>","summary":"<one line>"}
    ```
-4. **Distill** — if you learned something durable (a pattern, a preference, what landed), append
+7. **Distill** — if you learned something durable (a pattern, a preference, what landed), append
    ONE tight bullet to `learnings.md`. Dedupe. No noise.
-5. **Report** one tight summary to your delivery channel. Nothing changed → "all quiet."
+8. **Report** one tight summary to your delivery channel. Nothing changed → "all quiet."
 
 ---
 
