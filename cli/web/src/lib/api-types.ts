@@ -2521,12 +2521,22 @@ export interface HeartbeatSurfaceExperimentStats {
   keepRate: number;
 }
 
+/** A per-surface automation cron job (origin.type === "surface-automation"). */
+export interface HeartbeatSurfaceAutomation {
+  id: string;
+  name: string;
+  schedule: string;
+  enabled: boolean;
+  last_run_at: string | null;
+}
+
 export interface HeartbeatSurface {
   surface: string;
   config: HeartbeatSurfaceConfig | null;
   runCount: number;
   lastRun: HeartbeatSurfaceRun | null;
   learnings: string;
+  automations: HeartbeatSurfaceAutomation[];
   experiments: {
     active: HeartbeatSurfaceActiveExperiment | null;
     history: HeartbeatSurfaceExperiment[];

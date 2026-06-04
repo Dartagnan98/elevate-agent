@@ -499,8 +499,12 @@ def ensure_surface_automations() -> List[Dict[str, Any]]:
     exactly like ensure_surface_heartbeats().
 
     New seeds are created then paused (enabled=False / state="paused"). A job that
-    already exists (matched by name) is left EXACTLY as-is, so a realtor's own
-    already-on automations keep their enabled state, schedule, and skill ref.
+    already exists (matched by name) is ADOPTED into its surface — tagged with
+    origin.type="surface-automation"/origin.surface so it shows on the surface UI —
+    but its enabled state, schedule, skill, and run history are NEVER touched. So a
+    realtor's own already-on automations keep running and simply appear under their
+    surface (this is the "connect the lead/admin ones" half). Re-running is a no-op
+    once tagged.
     """
     out: List[Dict[str, Any]] = []
     for spec in SURFACE_AUTOMATION_DEFAULTS:
@@ -510,6 +514,13 @@ def ensure_surface_automations() -> List[Dict[str, Any]]:
             None,
         )
         if existing:
+            # Adopt into the surface: tag origin ONLY (no enabled/schedule change).
+            o = existing.get("origin") or {}
+            if o.get("type") != "surface-automation":
+                existing = update_job(existing["id"], {"origin": {
+                    "type": "surface-automation", "surface": spec["surface"],
+                    "source": "adopted",
+                }}) or existing
             out.append(existing)
             continue
         job = create_job(

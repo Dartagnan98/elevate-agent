@@ -239,20 +239,76 @@ function keepRateTone(rate: number, total: number): "outline" | "success" | "war
   return "outline";
 }
 
+/** One automation row: name, schedule, last-run, and an enable/disable toggle
+ *  reusing the SAME Switch the heartbeat enable uses. Off reads muted. */
+function AutomationRow({
+  automation,
+  onToggle,
+  busy,
+}: {
+  automation: HeartbeatSurface["automations"][number];
+  onToggle: (jobId: string, enabled: boolean) => void;
+  busy: boolean;
+}) {
+  const on = automation.enabled;
+  return (
+    <li
+      className={cn(
+        "flex items-center justify-between gap-3 rounded-md bg-secondary/30 p-2",
+        !on && "opacity-70",
+      )}
+    >
+      <div className="min-w-0">
+        <p
+          className={cn(
+            "truncate text-xs font-medium",
+            on ? "text-foreground/90" : "text-muted-foreground",
+          )}
+        >
+          {automation.name}
+        </p>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            {prettyCron(automation.schedule) === "—" && automation.schedule
+              ? automation.schedule
+              : prettyCron(automation.schedule)}
+          </span>
+          <span>last run {formatRelative(automation.last_run_at)}</span>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+        <Switch
+          checked={on}
+          disabled={busy}
+          onCheckedChange={(next) => onToggle(automation.id, next)}
+          aria-label={on ? `Disable ${automation.name}` : `Enable ${automation.name}`}
+        />
+      </div>
+    </li>
+  );
+}
+
 function SurfaceCard({
   surface,
   onToggle,
   busy,
+  onToggleAutomation,
+  automationBusyIds,
 }: {
   surface: HeartbeatSurface;
   onToggle: (surface: string, enabled: boolean) => void;
   busy: boolean;
+  onToggleAutomation: (jobId: string, enabled: boolean) => void;
+  automationBusyIds: Set<string>;
 }) {
   const [showLearnings, setShowLearnings] = useState(false);
   const cfg = surface.config;
   const last = surface.lastRun;
   const exp = surface.experiments;
   const enabled = cfg?.enabled !== false;
+  const automations = surface.automations || [];
 
   const lastSummary = (last?.summary || last?.found || "").trim();
   const lastRanAt = last?.ran_at || null;
@@ -275,6 +331,27 @@ function SurfaceCard({
       />
     </div>
   );
+
+  // Per-surface automations (the "kit" cron jobs). Each has its own toggle and
+  // independent enabled state. Render nothing when the surface has none.
+  const automationsBlock =
+    automations.length > 0 ? (
+      <div className="space-y-1.5">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+          Automations
+        </span>
+        <ul className="space-y-1.5">
+          {automations.map((a) => (
+            <AutomationRow
+              key={a.id}
+              automation={a}
+              onToggle={onToggleAutomation}
+              busy={automationBusyIds.has(a.id)}
+            />
+          ))}
+        </ul>
+      </div>
+    ) : null;
 
   // OFF state: surface heartbeats ship opt-in. Show a muted, paused card with a
   // one-line nudge and the toggle to turn it on — no run/experiment detail.
@@ -300,6 +377,9 @@ function SurfaceCard({
             <p className="mt-1 text-xs leading-5 text-muted-foreground/80">{cfg.goal}</p>
           )}
         </CardHeader>
+        {automationsBlock && (
+          <CardContent className="space-y-4 pt-0">{automationsBlock}</CardContent>
+        )}
       </Card>
     );
   }
@@ -435,6 +515,9 @@ function SurfaceCard({
             )}
           </div>
         )}
+
+        {/* Automations — per-surface "kit" cron jobs, each toggled on its own */}
+        {automationsBlock}
       </CardContent>
     </Card>
   );
@@ -628,6 +711,7 @@ export default function HeartbeatPage() {
   const [editForm, setEditForm] = useState<FormValues>(EMPTY_FORM);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [togglingSurfaces, setTogglingSurfaces] = useState<Set<string>>(new Set());
+  const [togglingAutomations, setTogglingAutomations] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const pollRef = useRef<number | null>(null);
 
@@ -702,6 +786,37 @@ export default function HeartbeatPage() {
         setTogglingSurfaces((prev) => {
           const next = new Set(prev);
           next.delete(surfaceName);
+          return next;
+        });
+        await refreshSurfaces();
+      }
+    },
+    [refreshSurfaces, showToast],
+  );
+
+  // Per-automation opt-in toggle. Same shape as the surface toggle: optimistic
+  // flip on the local automation row, then reconcile with the authoritative
+  // server state (the cron job) on refetch.
+  const handleAutomationToggle = useCallback(
+    async (jobId: string, enabled: boolean) => {
+      setTogglingAutomations((prev) => new Set(prev).add(jobId));
+      setSurfaces((prev) =>
+        prev.map((s) => ({
+          ...s,
+          automations: (s.automations || []).map((a) =>
+            a.id === jobId ? { ...a, enabled } : a,
+          ),
+        })),
+      );
+      try {
+        await api.setHeartbeatAutomationEnabled(jobId, enabled);
+        showToast(`Automation ${enabled ? "on" : "off"}`, "success");
+      } catch (e) {
+        showToast(`Couldn't update: ${e}`, "error");
+      } finally {
+        setTogglingAutomations((prev) => {
+          const next = new Set(prev);
+          next.delete(jobId);
           return next;
         });
         await refreshSurfaces();
@@ -876,6 +991,8 @@ export default function HeartbeatPage() {
                 surface={s}
                 onToggle={handleSurfaceToggle}
                 busy={togglingSurfaces.has(s.surface)}
+                onToggleAutomation={handleAutomationToggle}
+                automationBusyIds={togglingAutomations}
               />
             ))}
           </div>

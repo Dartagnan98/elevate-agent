@@ -6266,18 +6266,45 @@ def get_heartbeat_surfaces():
         # so a card reflects whether the heartbeat will actually fire, even if a
         # stale config.json copy disagrees.
         job_enabled_by_surface: Dict[str, bool] = {}
+        # Surface automations are the per-surface "kit" cron jobs that pair with
+        # each heartbeat (origin.type=="surface-automation"). Group them by
+        # surface here from the SAME job scan so each card can list its own.
+        automations_by_surface: Dict[str, List[Dict[str, Any]]] = {}
         try:
             from cron.jobs import list_jobs as _list_jobs
 
             for _job in _list_jobs(include_disabled=True):
                 _origin = _job.get("origin") or {}
-                if _origin.get("type") == "surface-heartbeat":
-                    _surf = _origin.get("surface")
-                    if isinstance(_surf, str) and _surf:
-                        job_enabled_by_surface[_surf] = bool(_job.get("enabled", True))
+                _otype = _origin.get("type")
+                _surf = _origin.get("surface")
+                if not (isinstance(_surf, str) and _surf):
+                    continue
+                if _otype == "surface-heartbeat":
+                    job_enabled_by_surface[_surf] = bool(_job.get("enabled", True))
+                elif _otype == "surface-automation":
+                    _sched_obj = _job.get("schedule") or {}
+                    _sched = (
+                        str(_job.get("schedule_display") or "").strip()
+                        or str(_sched_obj.get("display") or "").strip()
+                        or str(_sched_obj.get("expr") or "").strip()
+                    )
+                    automations_by_surface.setdefault(_surf, []).append(
+                        {
+                            "id": _job.get("id"),
+                            "name": _job.get("name") or _job.get("id") or "automation",
+                            "schedule": _sched,
+                            "enabled": bool(_job.get("enabled", True)),
+                            "last_run_at": _job.get("last_run_at"),
+                        }
+                    )
         except Exception:
             # No cron access -> fall back to config.json's own enabled below.
             job_enabled_by_surface = {}
+            automations_by_surface = {}
+
+        # Stable order: sort each surface's automations by name (case-insensitive).
+        for _list in automations_by_surface.values():
+            _list.sort(key=lambda a: str(a.get("name") or "").lower())
 
         def _read_json(path: Path) -> Optional[Any]:
             try:
@@ -6363,6 +6390,7 @@ def get_heartbeat_surfaces():
                     "runCount": run_count,
                     "lastRun": last_run,
                     "learnings": learnings,
+                    "automations": automations_by_surface.get(surface_name, []),
                     "experiments": {
                         "active": active_exp,
                         "history": exp_history,
@@ -6450,6 +6478,59 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
     except Exception as exc:
         _log.exception("POST /api/heartbeats/surfaces/%s/enabled failed", surface)
         raise HTTPException(status_code=500, detail=f"Heartbeat toggle failed: {exc}")
+
+
+class _HeartbeatAutomationEnabledBody(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/heartbeats/automations/{job_id}/enabled")
+def set_heartbeat_automation_enabled(job_id: str, body: _HeartbeatAutomationEnabledBody):
+    """Turn a single surface AUTOMATION on or off for the CURRENT account.
+
+    Surface automations are the per-surface "kit" cron jobs that pair with each
+    surface heartbeat (``origin.type == "surface-automation"``). They ship OFF
+    (opt-in) and the realtor flips one here. This reuses the EXACT same cron
+    enable/disable path as ``set_heartbeat_surface_enabled`` — ``resume_job``
+    (recomputes a fresh ``next_run_at`` so it actually schedules) / ``pause_job``.
+
+    Safety: refuses to toggle any job that is NOT a ``surface-automation`` job, so
+    this endpoint can never be used to flip arbitrary cron jobs.
+    """
+    try:
+        from cron.jobs import get_job, pause_job, resume_job
+
+        want = bool(body.enabled)
+        job_ref = (job_id or "").strip()
+        if not job_ref:
+            raise HTTPException(status_code=400, detail="job_id is required")
+
+        # Look up by ID and verify it's a surface-automation job before touching it.
+        job = get_job(job_ref)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"No job '{job_ref}'")
+        origin = job.get("origin") or {}
+        if origin.get("type") != "surface-automation":
+            raise HTTPException(
+                status_code=400,
+                detail="Job is not a surface automation",
+            )
+
+        # Flip via the canonical cron paths (resume recomputes next_run_at) — the
+        # same path the surface-heartbeat toggle uses.
+        if want:
+            updated = resume_job(job["id"])
+        else:
+            updated = pause_job(job["id"], reason="surface automation disabled by realtor")
+        if not updated:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        return {"id": job["id"], "enabled": bool(updated.get("enabled", want))}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/heartbeats/automations/%s/enabled failed", job_id)
+        raise HTTPException(status_code=500, detail=f"Automation toggle failed: {exc}")
 
 
 @app.post("/api/admin/deals")

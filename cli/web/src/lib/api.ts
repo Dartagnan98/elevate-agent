@@ -603,6 +603,17 @@ export const api = {
         body: JSON.stringify({ enabled }),
       },
     ),
+  // Per-automation toggle: each surface's automation cron jobs ship OFF and the
+  // realtor turns one on here (reuses the same pause/resume cron path as above).
+  setHeartbeatAutomationEnabled: (jobId: string, enabled: boolean) =>
+    fetchJSON<{ id: string; enabled: boolean }>(
+      `/api/heartbeats/automations/${encodeURIComponent(jobId)}/enabled`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    ),
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {
