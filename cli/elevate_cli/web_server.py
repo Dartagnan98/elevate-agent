@@ -4667,6 +4667,83 @@ async def get_session_todos(session_id: str):
     }
 
 
+_SESSION_FILE_ARG_KEYS = (
+    "path", "file_path", "target_file", "filename", "file", "notebook_path",
+)
+
+
+@app.get("/api/sessions/{session_id}/files")
+async def get_session_files(session_id: str):
+    """Files the agent actually worked on in a session (the Files panel source).
+
+    Elevate chats have no single workspace dir, so "the files it was working on"
+    is reconstructed from the file paths the agent passed to file tools
+    (read_file / edit / write_file / etc.). We keep only paths that resolve to an
+    existing file — directories (e.g. search_files roots) and dead paths drop out.
+    """
+    from elevate_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        messages = db.get_messages(sid)
+    finally:
+        db.close()
+
+    raw_seen: set[str] = set()
+    candidates: list[str] = []
+    for msg in messages:
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") if isinstance(call.get("function"), dict) else None
+            args = (fn or {}).get("arguments", call.get("arguments"))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+            if not isinstance(args, dict):
+                continue
+            for key in _SESSION_FILE_ARG_KEYS:
+                value = args.get(key)
+                values = value if isinstance(value, list) else [value]
+                for item in values:
+                    if isinstance(item, str) and item.strip() and item not in raw_seen:
+                        raw_seen.add(item)
+                        candidates.append(item.strip())
+
+    files: list[dict] = []
+    out_seen: set[str] = set()
+    for raw in candidates:
+        try:
+            path = Path(os.path.expandvars(raw)).expanduser()
+        except (OSError, ValueError):
+            continue
+        if not path.is_absolute():
+            continue
+        try:
+            resolved = path.resolve()
+            if not resolved.is_file():
+                continue
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in out_seen:
+            continue
+        out_seen.add(key)
+        files.append({"path": key, "name": resolved.name})
+        if len(files) >= 500:
+            break
+
+    return {"session_id": sid, "files": files}
+
+
 @app.put("/api/sessions/{session_id}/title")
 async def update_session_title_endpoint(session_id: str, payload: SessionTitleUpdate):
     from elevate_state import SessionDB

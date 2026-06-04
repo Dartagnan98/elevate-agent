@@ -77,6 +77,7 @@ import type {
   EnvVarInfo,
   SessionMessagesResponse,
   SessionTodosResponse,
+  SessionFilesResponse,
   FilesTreeResponse,
   LogsResponse,
   AnalyticsResponse,
@@ -326,6 +327,8 @@ export const api = {
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
   getSessionTodos: (id: string) =>
     fetchJSON<SessionTodosResponse>(`/api/sessions/${encodeURIComponent(id)}/todos`),
+  getSessionFiles: (id: string) =>
+    fetchJSON<SessionFilesResponse>(`/api/sessions/${encodeURIComponent(id)}/files`),
   getFilesTree: (root?: string, depth?: number) => {
     const qs = new URLSearchParams();
     if (root) qs.set("root", root);

@@ -2159,6 +2159,16 @@ export interface FilesTreeResponse {
   tree: FileTreeNode[];
 }
 
+export interface SessionFileItem {
+  path: string;
+  name: string;
+}
+
+export interface SessionFilesResponse {
+  session_id: string;
+  files: SessionFileItem[];
+}
+
 export interface LogsResponse {
   file: string;
   lines: string[];

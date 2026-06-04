@@ -58,6 +58,10 @@ _ELEVATE_CORE_TOOLS = [
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
+    # First-class Elevate data tools — one-call snapshots of the realtor's own
+    # operational data so the agent answers "where are my deals/leads / what's
+    # pending" from the store instead of falling back to terminal SQL. Read-only.
+    "deals_overview", "leads_overview", "elevate_db",
     # Composio integration hub introspection (gated on COMPOSIO_API_KEY via check_fn)
     "composio",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

@@ -22,7 +22,7 @@ import { createPortal } from "react-dom";
 import type { ToolEntry } from "@/components/ToolCall";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import type { TodoItem, TodoStatus } from "@/lib/api-types";
+import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
 
 export type SidePanelMode = "none" | "preview" | "plan" | "tasks" | "files";
@@ -152,6 +152,7 @@ export function SidePanelSelector({
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const toggle = useCallback(() => {
     setOpen((prev) => {
@@ -167,7 +168,12 @@ export function SidePanelSelector({
   useEffect(() => {
     if (!open) return;
     const onDown = (event: MouseEvent) => {
-      if (btnRef.current?.contains(event.target as Node)) return;
+      const target = event.target as Node;
+      // The menu is portaled to document.body, so it is NOT inside btnRef —
+      // must check it separately or mousedown closes the menu before a row's
+      // click can land (the row unmounts), making every option a no-op.
+      if (btnRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
       setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
@@ -201,6 +207,7 @@ export function SidePanelSelector({
       {open && coords
         ? createPortal(
             <div
+              ref={menuRef}
               className="fixed z-[80] min-w-[212px] overflow-hidden rounded-[10px] border border-[var(--chat-border)] bg-[var(--chat-surface)] p-1 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.03)_inset]"
               style={{ top: coords.top, right: coords.right }}
             >
@@ -501,14 +508,9 @@ export function EmptyPreviewPanel({ onClose }: { onClose: () => void }) {
 // ---------------------------------------------------------------------------
 // Files panel — the files the agent actually worked on this session. Elevate
 // chats have no single workspace dir (agents touch scattered absolute paths),
-// so we derive the list from the session artifacts and group by directory.
-// Click a file to open it in Preview.
+// so the list comes from GET /api/sessions/:id/files (server-side scan of the
+// file paths passed to file tools), grouped by directory. Click → Preview.
 // ---------------------------------------------------------------------------
-
-export interface SessionFile {
-  path: string;
-  title: string;
-}
 
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
@@ -522,34 +524,56 @@ function shortDir(path: string): string {
 }
 
 export function FilesPanel({
-  files,
+  sessionId,
   onOpenFile,
   onClose,
 }: {
-  files: SessionFile[];
+  sessionId: string;
   onOpenFile: (path: string, name: string) => void;
   onClose: () => void;
 }) {
+  const [files, setFiles] = useState<SessionFileItem[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
-  const uniquePaths = useMemo(
-    () => new Set(files.filter((f) => f.path).map((f) => f.path)).size,
-    [files],
-  );
+  useEffect(() => {
+    if (!sessionId) {
+      setFiles([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    api
+      .getSessionFiles(sessionId)
+      .then((response) => {
+        if (cancelled) return;
+        setFiles(Array.isArray(response.files) ? response.files : []);
+        setError(null);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  const total = files?.length ?? 0;
 
   const groups = useMemo(() => {
-    const byPath = new Map<string, SessionFile>();
-    for (const file of files) {
-      if (file.path) byPath.set(file.path, file);
-    }
+    const list = files ?? [];
     const query = filter.trim().toLowerCase();
-    const filtered = [...byPath.values()].filter(
+    const filtered = list.filter(
       (file) =>
         !query ||
-        file.title.toLowerCase().includes(query) ||
+        file.name.toLowerCase().includes(query) ||
         file.path.toLowerCase().includes(query),
     );
-    const map = new Map<string, SessionFile[]>();
+    const map = new Map<string, SessionFileItem[]>();
     for (const file of filtered) {
       const dir = dirOf(file.path);
       const arr = map.get(dir) ?? [];
@@ -560,7 +584,7 @@ export function FilesPanel({
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([dir, items]) => ({
         dir,
-        items: items.sort((a, b) => a.title.localeCompare(b.title)),
+        items: items.sort((a, b) => a.name.localeCompare(b.name)),
       }));
   }, [files, filter]);
 
@@ -569,13 +593,11 @@ export function FilesPanel({
       icon={<Folder className="h-4.5 w-4.5" />}
       title="Files"
       subtitle={
-        uniquePaths
-          ? `${uniquePaths} file${uniquePaths === 1 ? "" : "s"} this session`
-          : "Files the agent worked on"
+        total ? `${total} file${total === 1 ? "" : "s"} this session` : "Files the agent worked on"
       }
       onClose={onClose}
     >
-      {uniquePaths > 0 ? (
+      {total > 0 ? (
         <div className="sticky top-0 z-10 border-b border-[var(--chat-border)] bg-[var(--chat-surface-soft)] p-2">
           <input
             type="text"
@@ -586,7 +608,15 @@ export function FilesPanel({
           />
         </div>
       ) : null}
-      {uniquePaths === 0 ? (
+      {loading && files === null ? (
+        <div className="flex flex-col gap-2 p-3">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-4 w-full animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
+          ))}
+        </div>
+      ) : error ? (
+        <PanelError message={error} />
+      ) : total === 0 ? (
         <PanelEmpty
           icon={<Folder className="h-5 w-5" />}
           title="No files yet"
@@ -613,12 +643,12 @@ export function FilesPanel({
                 <button
                   key={file.path}
                   type="button"
-                  onClick={() => onOpenFile(file.path, file.title)}
+                  onClick={() => onOpenFile(file.path, file.name)}
                   title={file.path}
                   className="flex w-full items-center gap-2 rounded-[6px] py-1 pl-5 pr-2 text-left text-[12.5px] text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
                 >
                   <FileIcon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)]" />
-                  <span className="truncate">{file.title}</span>
+                  <span className="truncate">{file.name}</span>
                 </button>
               ))}
             </div>

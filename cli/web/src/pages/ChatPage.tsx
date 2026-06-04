@@ -11,7 +11,6 @@ import {
   FilesPanel,
   PlanPanel,
   SidePanelSelector,
-  type SessionFile,
   type SidePanelMode,
 } from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
@@ -2934,6 +2933,9 @@ export default function ChatPage() {
       !dismissedArtifactsRef.current.has(artifactDismissKey(previewCandidate))
     ) {
       setPreviewArtifact(previewCandidate);
+      // The aside now renders by sidePanel mode, so auto-opening a preview
+      // must also flip the mode or the panel stays hidden.
+      setSidePanel((current) => (current === "none" ? "preview" : current));
     }
   }, []);
 
@@ -3005,15 +3007,14 @@ export default function ChatPage() {
     [artifactStateSessionId],
   );
 
-  // Open a non-preview side panel (plan/tasks/files) at a balanced 50/50.
+  // Open a non-preview side panel (plan/tasks/files). These are compact
+  // fixed-width breakdowns, so there's no 50/50 width to set (preview owns the
+  // resizable width).
   const openSidePanel = useCallback((mode: SidePanelMode) => {
     if (mode === "none") {
       setSidePanel("none");
       return;
     }
-    const shellEl = document.querySelector<HTMLElement>(".elevate-chat-shell");
-    const shellWidth = shellEl?.clientWidth || window.innerWidth;
-    setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(shellWidth * 0.5)));
     if (mode === "plan") planAutoOpenDisabledRef.current = false;
     setSidePanel(mode);
   }, []);
@@ -3062,7 +3063,7 @@ export default function ChatPage() {
 
   const startPreviewResize = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
-      if (sidePanel === "none") return;
+      if (sidePanel !== "preview") return;
       event.preventDefault();
 
       const target = event.currentTarget;
@@ -4862,6 +4863,7 @@ export default function ChatPage() {
       agentId: string,
       status = "Sending...",
       targetSessionId?: string,
+      skipUserMessage = false,
     ) => {
       const effectiveSessionId = targetSessionId ?? sessionId;
       if (!effectiveSessionId) return;
@@ -4881,11 +4883,15 @@ export default function ChatPage() {
           previewUrl: att.previewUrl,
         }),
       );
-      appendMessage(
-        "user",
-        text,
-        messageAttachments.length ? { attachments: messageAttachments } : {},
-      );
+      // When the caller already showed the user bubble optimistically (the
+      // new-chat cold-start path), don't append it a second time.
+      if (!skipUserMessage) {
+        appendMessage(
+          "user",
+          text,
+          messageAttachments.length ? { attachments: messageAttachments } : {},
+        );
+      }
       setBusy(true);
       setStatusText(status);
 
@@ -5230,11 +5236,25 @@ export default function ChatPage() {
       const routedText = routePromptForAgent(trimmed);
       let targetSessionId = sessionId;
 
-      if (!targetSessionId && draftChat) {
+      // New-chat cold start: creating the session takes a few seconds. Show the
+      // user bubble + thinking animation INSTANTLY (before awaiting the session)
+      // instead of leaving a dead, empty screen until the agent spins up. Only
+      // for the no-attachment case so the attachment chips still render via the
+      // normal append path.
+      const needsSession = !targetSessionId && draftChat;
+      const optimistic = needsSession && !hasReadyAttachment && !!trimmed;
+      if (optimistic) {
+        appendMessage("user", trimmed);
+        setBusy(true);
+        setStatusText("Thinking...");
+      }
+
+      if (needsSession) {
         targetSessionId = await createSessionForSend();
       }
 
       if (!targetSessionId || (state !== "open" && !draftChat)) {
+        if (optimistic) setBusy(false);
         const queued: QueuedInput = {
           agentId: selectedAgent.id,
           createdAt: Date.now(),
@@ -5268,6 +5288,7 @@ export default function ChatPage() {
         selectedAgent.id,
         "Sending...",
         targetSessionId,
+        optimistic,
       );
       pinCreatedSessionInUrl();
     },
@@ -5863,25 +5884,24 @@ export default function ChatPage() {
     };
   }, [chatTitle, folderLabel, handleOpenChatMenu, sessionId, setBeforeTitle, setEnd, setTitle]);
   const previewPanelWidthPx = `${previewPanelWidth}px`;
-  // The wide right panel is open for ANY side-panel mode. Preview included —
-  // it shows a "No preview" state when there's no artifact rather than being
-  // a dead menu row.
+  // The right panel is open for ANY side-panel mode. Preview included — it
+  // shows a "No preview" state when there's no artifact rather than being a
+  // dead menu row.
   const wideOpen = sidePanel !== "none";
-  // "Files it was working on" — Elevate chats have no single workspace dir, so
-  // the Files panel lists the files the agent actually touched (the session
-  // artifacts), deduped by path. Click → Preview.
-  const sessionFiles: SessionFile[] = useMemo(
-    () =>
-      artifacts
-        .filter((a) => a.path)
-        .map((a) => ({ path: a.path as string, title: a.title || (a.path as string).split("/").pop() || "file" })),
-    [artifacts],
-  );
-  const previewPanelLayoutStyle = wideOpen
+  // Preview shows file content, so it earns the big resizable 50/50. Plan /
+  // Files / Background tasks are just breakdowns (lists) — they get a compact
+  // fixed width and no resize handle.
+  const isPreviewPanel = sidePanel === "preview";
+  const previewPanelLayoutStyle = isPreviewPanel
     ? ({
         "--preview-panel-width": previewPanelWidthPx,
       } as CSSProperties)
     : undefined;
+  // Plan/Files data is keyed by the PERSISTED session id (where the message
+  // history lives), not the live gateway sessionId — on resume the latter is a
+  // freshly minted id with no history yet. This is the same id artifacts and
+  // dismissals key on.
+  const dataSessionId = artifactStateSessionId();
   const renderSidePanel = () => {
     switch (sidePanel) {
       case "preview":
@@ -5893,7 +5913,7 @@ export default function ChatPage() {
       case "plan":
         return (
           <PlanPanel
-            sessionId={sessionId ?? ""}
+            sessionId={dataSessionId ?? ""}
             refreshSignal={planRefreshSignal}
             onClose={closeSidePanel}
           />
@@ -5902,7 +5922,11 @@ export default function ChatPage() {
         return <BackgroundTasksPanel tools={tools} onClose={closeSidePanel} />;
       case "files":
         return (
-          <FilesPanel files={sessionFiles} onOpenFile={openFileInPreview} onClose={closeSidePanel} />
+          <FilesPanel
+            sessionId={dataSessionId ?? ""}
+            onOpenFile={openFileInPreview}
+            onClose={closeSidePanel}
+          />
         );
       default:
         return null;
@@ -5989,7 +6013,7 @@ export default function ChatPage() {
             // chips) pushes the column past the app's right edge, overflowing the
             // shell and clipping the preview. min-w-0 lets it shrink to fit.
             "flex min-h-0 min-w-0 flex-1 flex-col",
-            wideOpen && "lg:basis-1/2",
+            isPreviewPanel && "lg:basis-1/2",
           )}
         >
           <div
@@ -6327,7 +6351,7 @@ export default function ChatPage() {
           )}
           style={
             wideOpen
-              ? { width: "var(--preview-panel-width)" }
+              ? { width: isPreviewPanel ? "var(--preview-panel-width)" : "22.5rem" }
               : undefined
           }
         >
@@ -6339,7 +6363,7 @@ export default function ChatPage() {
                 : "max-h-[calc(100dvh-2.5rem)] overflow-hidden",
             )}
           >
-            {wideOpen && (
+            {isPreviewPanel && (
               <button
                 aria-label="Resize panel"
                 className="absolute -left-5 top-6 z-20 flex h-[calc(100%-3rem)] w-11 touch-none cursor-col-resize items-center justify-center rounded-full text-[var(--chat-muted)] transition hover:text-[var(--chat-text)]"
