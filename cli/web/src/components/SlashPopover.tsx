@@ -502,6 +502,25 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           : `mention:${trigger.word}:${catalog.skills.length}:${catalog.toolsets.length}:${catalog.plugins.length}:${agents.length}`;
       requestKeyRef.current = key;
 
+      // Show locally-known skill items immediately so the popover appears the
+      // instant you type "/", instead of waiting on the gateway round-trip
+      // (which can take seconds when the agent is mid-turn). The gateway result
+      // below then enriches the list with built-in commands and replaces this.
+      if (trigger.mode === "slash") {
+        const query = slashCommandQuery(trigger.text);
+        const skillItems = slashSkillItems(catalog, query);
+        if (skillItems.length > 0) {
+          setItems(
+            orderGroupedItems(
+              skillItems,
+              slashGroupOrder(query, trigger.text, true),
+              MAX_SLASH_GROUP_ITEMS,
+            ),
+          );
+          setSelected(0);
+        }
+      }
+
       const timer = window.setTimeout(async () => {
         try {
           if (trigger.mode === "slash") {
