@@ -136,6 +136,21 @@ MAX_DEPTH = 1  # flat by default: parent (0) -> child (1); grandchild rejected u
 _MIN_SPAWN_DEPTH = 1
 _MAX_SPAWN_DEPTH_CAP = 3
 
+# Global cap on concurrently-RUNNING leaf subagents across the WHOLE process,
+# independent of tree shape. Per-parent `max_concurrent_children` does not bound
+# the total: a depth-2 orchestrator (or several parallel orchestrators) multiply
+# it into many simultaneous in-process agent threads — each issuing model calls
+# and memory inits — which saturates the single Python process and starves the
+# gateway WebSocket loop, freezing the desktop renderer (see
+# docs/freeze-diagnosis.md). Only LEAF agents acquire a slot. Orchestrators run
+# free: they mostly block waiting on their children, so counting them would
+# deadlock (an orchestrator would hold a slot while its leaves can't get one).
+_DEFAULT_MAX_TOTAL_LEAF_CONCURRENCY = 3
+_LEAF_ACQUIRE_TIMEOUT_SECONDS = 120.0
+_leaf_semaphore_lock = threading.Lock()
+_leaf_semaphore = None  # threading.BoundedSemaphore, lazily created
+_leaf_semaphore_size = 0
+
 
 # ---------------------------------------------------------------------------
 # Runtime state: pause flag + active subagent registry
@@ -362,6 +377,42 @@ def _get_max_concurrent_children() -> int:
         except (TypeError, ValueError):
             return _DEFAULT_MAX_CONCURRENT_CHILDREN
     return _DEFAULT_MAX_CONCURRENT_CHILDREN
+
+
+def _get_max_total_leaf_concurrency() -> int:
+    """Process-wide cap on concurrent leaf subagents across all trees.
+
+    config.yaml ``delegation.max_total_concurrent`` (env
+    ``DELEGATION_MAX_TOTAL_CONCURRENT``), default 3, clamped [1, 16]. This is the
+    backstop that keeps nested/parallel orchestrators from multiplying
+    per-parent concurrency into a process-saturating thread storm.
+    """
+    cfg = _load_config()
+    val = cfg.get("max_total_concurrent")
+    if val is None:
+        val = os.getenv("DELEGATION_MAX_TOTAL_CONCURRENT")
+    if val is not None:
+        try:
+            return max(1, min(16, int(val)))
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_MAX_TOTAL_LEAF_CONCURRENCY
+
+
+def _get_leaf_semaphore() -> "threading.BoundedSemaphore":
+    """Lazily create the process-global leaf-concurrency semaphore.
+
+    Re-created only when the configured size changes. A child captures the
+    returned object and releases that same object, so a mid-run resize never
+    releases against the wrong semaphore.
+    """
+    global _leaf_semaphore, _leaf_semaphore_size
+    size = _get_max_total_leaf_concurrency()
+    with _leaf_semaphore_lock:
+        if _leaf_semaphore is None or _leaf_semaphore_size != size:
+            _leaf_semaphore = threading.BoundedSemaphore(size)
+            _leaf_semaphore_size = size
+        return _leaf_semaphore
 
 
 def _get_child_timeout() -> float:
@@ -1465,6 +1516,24 @@ def _run_single_child(
             }
         )
 
+    # Global leaf-concurrency gate. Only leaves acquire a slot (orchestrators
+    # run free — see _get_leaf_semaphore). Bounded wait, then proceed anyway so
+    # a saturated cap degrades to "slower" rather than "hung". The acquired
+    # semaphore object is captured locally and released in finally.
+    _is_leaf = getattr(child, "_delegate_role", None) != "orchestrator"
+    _leaf_sem = _get_leaf_semaphore() if _is_leaf else None
+    _leaf_slot = False
+    if _leaf_sem is not None:
+        _leaf_slot = _leaf_sem.acquire(timeout=_LEAF_ACQUIRE_TIMEOUT_SECONDS)
+        if not _leaf_slot:
+            logger.warning(
+                "delegate_task: leaf subagent %s proceeding without a global "
+                "concurrency slot after %.0fs (cap=%d saturated)",
+                task_index,
+                _LEAF_ACQUIRE_TIMEOUT_SECONDS,
+                _leaf_semaphore_size,
+            )
+
     try:
         _heartbeat_thread.start()
         if child_progress_cb:
@@ -1848,6 +1917,13 @@ def _run_single_child(
         _heartbeat_stop.set()
         if _heartbeat_thread.ident is not None:
             _heartbeat_thread.join(timeout=5)
+
+        # Release the global leaf-concurrency slot (only if we acquired one).
+        if _leaf_slot and _leaf_sem is not None:
+            try:
+                _leaf_sem.release()
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.debug("leaf semaphore release failed: %s", exc)
 
         # Drop the TUI-facing registry entry.  Safe to call even if the
         # child was never registered (e.g. ID missing on test doubles).

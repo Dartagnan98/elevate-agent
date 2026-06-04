@@ -2574,6 +2574,34 @@ export default function ChatPage() {
   // turn, so any populated-list -> empty during that window is the spurious
   // wipe (the render-then-vanish blank) and is blocked in the setter below.
   const reconnectRunRef = useRef(false);
+  // Compaction guard. Context compaction rotates the session_id mid-turn (the
+  // continuation session's stored transcript is the COMPRESSED/shorter list —
+  // for the model, not the screen). The connect-effect re-runs under the new
+  // resumeId and can wipe the displayed transcript to empty (a real LIST WIPE
+  // with a live session id, so the fresh-mount guard misses it). This window
+  // opens when "Compacting context…" fires and stays open a few seconds past
+  // resume to cover the rotation re-hydrate; the wrapped setter blocks any
+  // populated-list -> empty wipe while it's open. See docs/freeze-diagnosis.md.
+  const compactionGuardRef = useRef(false);
+  const compactionGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  // Mint guard. When a draft chat's first message mints a real session,
+  // pinCreatedSessionInUrl rewrites the URL to ?resume=<mintedId>, which re-runs
+  // the connect effect under the new id — and that re-run can wipe the just-sent
+  // user message + streaming reply to empty before renderedChatKeyRef catches up
+  // to the minted id (a real LIST WIPE with a live session id, prevCount ~2).
+  // Open while the mint settles; the wrapped setter blocks populated -> empty.
+  const mintGuardRef = useRef(false);
+  const mintGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The invariant behind every blank fix: a populated transcript clears to
+  // empty ONLY for a deliberate new chat (URL carries ?new=). Synced during
+  // render (not an effect) so it is correct before the connect effect or any
+  // event handler runs in the same commit. The wrapped setter below blocks any
+  // populated -> empty wipe whenever this is false — covering resume re-hydrate,
+  // draft->session mint, compaction rotation, and reconnect re-runs in one rule.
+  const newChatPresentRef = useRef(false);
+  newChatPresentRef.current = Boolean(newChatId);
   const gw = useMemo(
     () => getSharedChatGateway(version),
     [version],
@@ -2643,20 +2671,25 @@ export default function ChatPage() {
             ? (updater as (p: ChatMessage[]) => ChatMessage[])(prev)
             : updater;
         if (prev.length >= 2 && (next?.length ?? 0) === 0) {
-          if (reconnectRunRef.current) {
-            // A reconnect/liveness-watchdog re-run must RESTORE the turn, not
-            // erase it. Block the wipe and keep what's on screen — the real
-            // fix for the render-then-vanish blank, independent of which
-            // connect-effect path tried to clear the list.
-            blankTrace("blocked list wipe during reconnect window", {
+          // INVARIANT: a populated transcript clears to empty ONLY for a
+          // deliberate new chat (URL carries ?new=). Every other populated ->
+          // empty transition is the spurious render-then-vanish blank — resume
+          // re-hydrate, draft->session mint, compaction session rotation,
+          // reconnect/liveness-watchdog re-run. Block them all and keep what's
+          // on screen; the next hydrate under the correct id repopulates from
+          // cache/DB. This one rule replaced four per-window guards that each
+          // only caught a single trigger.
+          if (!newChatPresentRef.current) {
+            blankTrace("blocked spurious list wipe", {
               prevCount: prev.length,
+              reconnect: reconnectRunRef.current,
+              compaction: compactionGuardRef.current,
+              mint: mintGuardRef.current,
             });
             return prev;
           }
-          blankTrace("LIST WIPED to empty", {
-            prevCount: prev.length,
-            stack: new Error().stack?.split("\n").slice(1, 14).join(" || "),
-          });
+          // Deliberate new chat — allow the intentional clear.
+          blankTrace("list cleared for new chat", { prevCount: prev.length });
         }
         return next;
       });
@@ -3319,6 +3352,29 @@ export default function ChatPage() {
       clearActiveTurnSnapshot(persisted);
     }
   }, [activityTrace, busy, messages, sessionId, tools]);
+
+  // Drive the compaction guard off the `compacting` lifecycle state. Open it
+  // the moment compaction starts; once compaction ends (the model resumes),
+  // hold the guard open a few more seconds so the session-rotation re-hydrate
+  // that follows can't wipe the displayed transcript to empty. The wrapped
+  // setMessages blocks any populated-list -> empty wipe while this is open.
+  useEffect(() => {
+    if (compacting) {
+      compactionGuardRef.current = true;
+      if (compactionGuardTimerRef.current) {
+        clearTimeout(compactionGuardTimerRef.current);
+        compactionGuardTimerRef.current = null;
+      }
+    } else if (compactionGuardRef.current) {
+      if (compactionGuardTimerRef.current) {
+        clearTimeout(compactionGuardTimerRef.current);
+      }
+      compactionGuardTimerRef.current = setTimeout(() => {
+        compactionGuardRef.current = false;
+        compactionGuardTimerRef.current = null;
+      }, 5000);
+    }
+  }, [compacting]);
 
   // Safety net: the compaction banner must never outlive an active turn. The
   // resume-signal clears (delta/thinking/tool) cover the normal path; this
@@ -4624,6 +4680,16 @@ export default function ChatPage() {
   const pinCreatedSessionInUrl = useCallback(() => {
     const pinnedId = persistedSessionIdRef.current;
     if (!pinnedId || resumeId) return;
+    // Open the mint guard: the URL rewrite below re-runs the connect effect
+    // under the minted id, which can wipe the live transcript before
+    // renderedChatKeyRef catches up. Hold the guard a few seconds so the
+    // wrapped setter blocks that populated -> empty wipe while it settles.
+    mintGuardRef.current = true;
+    if (mintGuardTimerRef.current) clearTimeout(mintGuardTimerRef.current);
+    mintGuardTimerRef.current = setTimeout(() => {
+      mintGuardRef.current = false;
+      mintGuardTimerRef.current = null;
+    }, 4000);
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);

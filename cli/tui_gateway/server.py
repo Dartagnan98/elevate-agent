@@ -1455,6 +1455,25 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
     }
 
 
+def _release_agent_memory(agent, *, ended: bool) -> None:
+    """Release a dropped agent's memory connections so the embedded Postgres
+    doesn't accumulate orphaned holographic connections ("too many clients").
+
+    ``ended=True``  — genuine session close: run on_session_end + close.
+    ``ended=False`` — session continues under a replacement agent: close
+    connections only (no mid-session consolidation).
+    """
+    if agent is None:
+        return
+    try:
+        if ended:
+            agent.shutdown_memory_provider()
+        else:
+            agent.close_memory_connections()
+    except Exception as exc:  # best-effort — never block reset/close
+        logger.debug("agent memory release failed: %s", exc)
+
+
 def _reset_session_agent(sid: str, session: dict) -> dict:
     tokens = _set_session_context(session["session_key"])
     try:
@@ -1463,6 +1482,11 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         )
     finally:
         _clear_session_context(tokens)
+    # Close the outgoing agent's memory connections before dropping it, or each
+    # reset orphans its holographic Postgres connection (-> "too many clients").
+    _old_agent = session.get("agent")
+    if _old_agent is not None and _old_agent is not new_agent:
+        _release_agent_memory(_old_agent, ended=False)
     session["agent"] = new_agent
     session.pop("agent_base_ephemeral", None)
     session.pop("agent_lane_id", None)
@@ -2345,6 +2369,7 @@ def _(rid, params: dict) -> dict:
             if _sessions.get(sid) is not session:
                 return
 
+            _release_agent_memory(session.get("agent"), ended=False)
             session["agent"] = agent
             _emit("session.info", sid, _light_session_info(agent))
             ready.set()
@@ -2550,6 +2575,9 @@ def _(rid, params: dict) -> dict:
     session = _sessions.pop(sid, None)
     if not session:
         return _ok(rid, {"closed": False})
+    # Genuine session end — run end-of-session hooks AND close the memory
+    # connection so the holographic Postgres connection isn't orphaned.
+    _release_agent_memory(session.get("agent"), ended=True)
     try:
         from tools.approval import unregister_gateway_notify
 

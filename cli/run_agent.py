@@ -4527,6 +4527,23 @@ class AIAgent:
             except Exception:
                 pass
     
+    def close_memory_connections(self) -> None:
+        """Release memory-provider connections WITHOUT running session-end hooks.
+
+        For when this agent instance is discarded but its session continues
+        under a replacement agent (gateway session reset / re-attach). Closes
+        the provider's resources — notably the holographic Postgres connection —
+        so dropped agents don't accumulate into "FATAL: too many clients
+        already" on the embedded PG. Unlike shutdown_memory_provider(), this
+        does NOT call on_session_end (no mid-session fact extraction or journal
+        organize), since the session is not actually ending.
+        """
+        if self._memory_manager:
+            try:
+                self._memory_manager.shutdown_all()
+            except Exception:
+                pass
+
     def commit_memory_session(self, messages: list = None) -> None:
         """Trigger end-of-session extraction without tearing providers down.
         Called when session_id rotates (e.g. /new, context compression);
