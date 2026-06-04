@@ -7,6 +7,7 @@ export interface UseAdminDealsResult {
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+  moveDeal: (dealId: string, toStage: number) => Promise<void>;
 }
 
 function errMsg(e: unknown, fallback: string): string {
@@ -39,6 +40,32 @@ export function useAdminDeals(): UseAdminDealsResult {
     await load();
   }, [load]);
 
+  // Optimistic stage move (kanban drag-and-drop). Update currentStage locally so
+  // the card jumps columns immediately, persist via the move endpoint, then
+  // reconcile with the server row. Roll back on failure.
+  const moveDeal = useCallback(async (dealId: string, toStage: number) => {
+    let prevStage: number | undefined;
+    setDeals((prev) =>
+      prev.map((d) => {
+        if (d.id !== dealId) return d;
+        prevStage = d.currentStage;
+        return { ...d, currentStage: toStage };
+      }),
+    );
+    if (prevStage === toStage) return;
+    try {
+      const updated = await api.moveAdminDeal(dealId, toStage);
+      setDeals((prev) => prev.map((d) => (d.id === dealId ? updated : d)));
+    } catch (e) {
+      setDeals((prev) =>
+        prev.map((d) =>
+          d.id === dealId && prevStage !== undefined ? { ...d, currentStage: prevStage } : d,
+        ),
+      );
+      setError(errMsg(e, "Move deal failed"));
+    }
+  }, []);
+
   useEffect(() => {
     const signal = { cancelled: false };
     setLoading(true);
@@ -48,5 +75,5 @@ export function useAdminDeals(): UseAdminDealsResult {
     };
   }, [load]);
 
-  return { deals, loading, error, refresh };
+  return { deals, loading, error, refresh, moveDeal };
 }

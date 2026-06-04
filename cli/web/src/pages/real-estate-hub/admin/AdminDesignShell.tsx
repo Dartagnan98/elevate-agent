@@ -24,7 +24,7 @@ export function AdminDesignShell() {
     "data-artifacts": "hidden" as const,
   };
 
-  const { deals, loading, error, refresh } = useAdminDeals();
+  const { deals, loading, error, refresh, moveDeal } = useAdminDeals();
   const { events: syncedEvents, error: eventsError, refresh: refreshEvents } = useAdminEvents(21);
 
   const adminSetup = useAdminSetup();
@@ -108,6 +108,7 @@ export function AdminDesignShell() {
           loading={loading}
           error={visibleError}
           onRefresh={handleRefresh}
+          onMoveDeal={moveDeal}
           onReRunOnboarding={() => setForceOnboarding(true)}
         />
       )}

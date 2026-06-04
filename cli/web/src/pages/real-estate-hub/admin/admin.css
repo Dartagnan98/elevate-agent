@@ -1921,7 +1921,16 @@
   border-radius: 6px;
   overflow: hidden;
   min-width: 0;
+  transition: border-color 120ms ease, background 120ms ease;
 }
+/* Kanban drag-and-drop: target column highlight + dragged card ghost. */
+.ab-col.drop-over {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+.ab-deal { cursor: grab; }
+.ab-deal:active { cursor: grabbing; }
+.ab-deal.dragging { opacity: 0.4; }
 .ab-col-head {
   display: flex; align-items: baseline; gap: 8px;
   padding: 11px 14px 6px;

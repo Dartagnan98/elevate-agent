@@ -36,6 +36,7 @@ export interface AdminBoardProps {
   error?: string | null;
   onRefresh?: () => void;
   onOpenDeal?: (dealId: string) => void;
+  onMoveDeal?: (dealId: string, toStage: number) => void;
   onReRunOnboarding?: () => void;
 }
 
@@ -184,10 +185,29 @@ interface Deal {
   side?: string;
 }
 
-function DealCard({ deal, onOpen }: { deal: Deal; onOpen?: (deal: Deal) => void }) {
+function DealCard({
+  deal,
+  onOpen,
+  onDragStart,
+  onDragEnd,
+  dragging,
+}: {
+  deal: Deal;
+  onOpen?: (deal: Deal) => void;
+  onDragStart?: (id: string) => void;
+  onDragEnd?: () => void;
+  dragging?: boolean;
+}) {
   return (
     <div
-      className={"ab-deal" + (deal.blocked ? " blocked" : "")}
+      className={"ab-deal" + (deal.blocked ? " blocked" : "") + (dragging ? " dragging" : "")}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", deal.id);
+        onDragStart?.(deal.id);
+      }}
+      onDragEnd={() => onDragEnd?.()}
       onClick={() => onOpen?.(deal)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -227,14 +247,46 @@ function PipelineColumn({
   phase,
   deals,
   onOpenDeal,
+  onDropDeal,
+  onCardDragStart,
+  onCardDragEnd,
+  draggingId,
+  canDrop,
 }: {
   phase: PipelinePhase;
   deals: Deal[];
   onOpenDeal: (deal: Deal) => void;
+  onDropDeal?: (dealId: string, toStage: number) => void;
+  onCardDragStart?: (id: string) => void;
+  onCardDragEnd?: () => void;
+  draggingId?: string | null;
+  canDrop?: boolean;
 }) {
   const motion = phase.motion || phase.note;
+  const [isOver, setIsOver] = useState(false);
+  // phase.stage is "S<n>" — the numeric stage the move endpoint expects.
+  const stageNum = Number.parseInt(String(phase.stage).replace(/^S/i, ""), 10);
+  const dndEnabled = Boolean(onDropDeal) && Number.isFinite(stageNum);
   return (
-    <div className="ab-col">
+    <div
+      className={"ab-col" + (isOver && canDrop ? " drop-over" : "")}
+      onDragOver={(e) => {
+        if (!dndEnabled || !draggingId) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (!isOver) setIsOver(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsOver(false);
+      }}
+      onDrop={(e) => {
+        if (!dndEnabled) return;
+        e.preventDefault();
+        setIsOver(false);
+        const id = e.dataTransfer.getData("text/plain") || draggingId;
+        if (id) onDropDeal?.(id, stageNum);
+      }}
+    >
       <header className="ab-col-head">
         <span className="ab-col-stage mono">{phase.stage}</span>
         <span className="ab-col-name">{phase.name}</span>
@@ -245,9 +297,20 @@ function PipelineColumn({
       {phase.hint && <div className="ab-col-hint">{phase.hint}</div>}
       <div className="ab-col-deals">
         {deals.length === 0 ? (
-          <div className="ab-col-empty">No deals in this stage</div>
+          <div className="ab-col-empty">
+            {isOver && canDrop ? "Drop to move here" : "No deals in this stage"}
+          </div>
         ) : (
-          deals.map(d => <DealCard key={d.id} deal={d} onOpen={onOpenDeal} />)
+          deals.map(d => (
+            <DealCard
+              key={d.id}
+              deal={d}
+              onOpen={onOpenDeal}
+              onDragStart={onCardDragStart}
+              onDragEnd={onCardDragEnd}
+              dragging={draggingId === d.id}
+            />
+          ))
         )}
       </div>
     </div>
@@ -844,11 +907,12 @@ function NewDealModal({
    AdminBoard (main)
    ───────────────────────────────────────────────────────────────── */
 
-function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh, onOpenDeal, onReRunOnboarding }: AdminBoardProps = {}) {
+function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh, onOpenDeal, onMoveDeal, onReRunOnboarding }: AdminBoardProps = {}) {
   const [tab, setTab] = useState("listing");
   const [query, setQuery] = useState("");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [showNewDeal, setShowNewDeal] = useState(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const listingDeals = deals ?? ADMIN_DEALS;
   const buyerDealsResolved = buyerDeals ?? ADMIN_BUYER_DEALS;
@@ -969,6 +1033,11 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
                 phase={p}
                 deals={dealsByPhase[p.id] || []}
                 onOpenDeal={handleOpenDeal}
+                onDropDeal={onMoveDeal}
+                onCardDragStart={(id) => setDraggingId(id)}
+                onCardDragEnd={() => setDraggingId(null)}
+                draggingId={draggingId}
+                canDrop={Boolean(draggingId)}
               />
             ))}
           </div>
