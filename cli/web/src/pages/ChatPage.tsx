@@ -2976,6 +2976,9 @@ export default function ChatPage() {
           dismissedArtifactsRef.current,
         );
       }
+      // Open EVEN. Auto-population shouldn't let the preview take over the chat
+      // (or vice versa) — start at a balanced 50/50; the divider still resizes.
+      setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(window.innerWidth * 0.5)));
       setPreviewArtifact(artifact);
     },
     [artifactStateSessionId],
