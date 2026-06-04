@@ -3983,7 +3983,12 @@ def update_source_task_state(
     status = "approved" if normalized == "approve" else "skipped" if normalized == "skip" else "pending"
     existing = _as_dict(tasks.get(task_id))
     existing.update({"status": status, "updated_at": _now()})
-    if draft_text is not None:
+    # Only overwrite the stored draft when a NON-EMPTY draft is supplied. The
+    # /leads Approve button calls this with draftText="" (the api default), and a
+    # blanking overwrite here strips the real draft — the send then fails with
+    # "messages-native: payload missing draft_text". An explicit empty edit can't
+    # be sent anyway, so guarding on truthiness is safe.
+    if draft_text:
         existing["draft_text"] = str(draft_text)
     if task_id.startswith("thread-draft:"):
         template_state = _thread_draft_template_state(source_id, task_id, source_dir)
