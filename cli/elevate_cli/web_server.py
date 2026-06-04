@@ -6867,6 +6867,65 @@ def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
         raise HTTPException(status_code=500, detail=f"Set route failed: {exc}")
 
 
+@app.get("/api/activity")
+def get_activity(limit: int = 100, agent: Optional[str] = None):
+    """Fleet activity feed — what every agent did, newest first. Aggregates surface
+    heartbeat run history + cron job last-runs (file-based, no DB). Mirrors cortextOS
+    /ai/activity."""
+    try:
+        from elevate_constants import get_account_data_dir
+
+        items: List[Dict[str, Any]] = []
+        base = get_account_data_dir() / "heartbeats"
+        if base.is_dir():
+            for sdir in base.iterdir():
+                if not sdir.is_dir():
+                    continue
+                surface = sdir.name
+                hist = sdir / "history"
+                if not hist.is_dir():
+                    continue
+                for f in sorted(hist.glob("*.json"), reverse=True)[:30]:
+                    try:
+                        rec = json.loads(f.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    items.append({
+                        "kind": "heartbeat",
+                        "agent": surface,
+                        "ts": rec.get("ran_at") or f.stem,
+                        "title": rec.get("summary") or rec.get("did") or "ran",
+                        "detail": rec.get("found") or rec.get("checked"),
+                        "status": "ok",
+                    })
+        try:
+            from cron.jobs import list_jobs
+
+            for j in list_jobs(include_disabled=True):
+                lr = j.get("last_run_at")
+                if not lr:
+                    continue
+                o = j.get("origin") or {}
+                items.append({
+                    "kind": "cron",
+                    "agent": o.get("surface") or "system",
+                    "ts": lr,
+                    "title": j.get("name") or "job",
+                    "detail": j.get("last_summary"),
+                    "status": j.get("last_status") or "ok",
+                })
+        except Exception:
+            _log.warning("activity: cron last-runs unavailable", exc_info=True)
+
+        if agent:
+            items = [i for i in items if i.get("agent") == agent]
+        items.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+        return {"items": items[: max(1, min(limit, 300))]}
+    except Exception as exc:
+        _log.exception("GET /api/activity failed")
+        raise HTTPException(status_code=500, detail=f"Activity failed: {exc}")
+
+
 @app.get("/api/comms/channels")
 def get_comms_channels():
     """The connected delivery channels (Telegram/Discord/Slack/… chats) for the Comms

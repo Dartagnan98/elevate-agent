@@ -1161,6 +1161,23 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  // Activity — fleet feed of what every agent did (heartbeat runs + cron runs).
+  getActivity: (params?: { agent?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.agent) qs.set("agent", params.agent);
+    if (params?.limit != null) qs.set("limit", String(params.limit));
+    const q = qs.toString();
+    return fetchJSON<{
+      items: {
+        kind: string;
+        agent: string;
+        ts: string;
+        title: string;
+        detail?: string | null;
+        status?: string;
+      }[];
+    }>(`/api/activity${q ? `?${q}` : ""}`);
+  },
   // Comms — connected channels for the channel panel (agent-to-agent traffic is
   // the handoff bus via getAgentHandoffs).
   getCommsChannels: () =>

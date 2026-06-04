@@ -106,6 +106,7 @@ const loadCronPage = () => import("@/pages/CronPage");
 const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
 const loadExperimentsPage = () => import("@/pages/ExperimentsPage");
 const loadCommsPage = () => import("@/pages/CommsPage");
+const loadActivityPage2 = () => import("@/pages/ActivityPage");
 const loadTasksPage = () => import("@/pages/TasksPage");
 const loadApprovalsPage = () => import("@/pages/ApprovalsPage");
 const loadSkillsPage = () => import("@/pages/SkillsPage");
@@ -137,6 +138,7 @@ const CronPage = lazy(loadCronPage);
 const HeartbeatPage = lazy(loadHeartbeatPage);
 const ExperimentsPage = lazy(loadExperimentsPage);
 const CommsPage = lazy(loadCommsPage);
+const ActivityFeedPage = lazy(loadActivityPage2);
 const TasksPage = lazy(loadTasksPage);
 const ApprovalsPage = lazy(loadApprovalsPage);
 const SkillsPage = lazy(loadSkillsPage);
@@ -171,6 +173,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/heartbeat": loadHeartbeatPage,
   "/experiments": loadExperimentsPage,
   "/comms": loadCommsPage,
+  "/activity": loadActivityPage2,
   "/tasks": loadTasksPage,
   "/approvals": loadApprovalsPage,
   "/skills": loadSkillsPage,
@@ -421,6 +424,7 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/heartbeat": HeartbeatPage,
   "/experiments": ExperimentsPage,
   "/comms": CommsPage,
+  "/activity": ActivityFeedPage,
   "/tasks": TasksPage,
   "/approvals": ApprovalsPage,
   "/skills": SkillsPage,
@@ -1613,6 +1617,7 @@ function DesktopSidebar({
   realEstateNavItems.push({ icon: KanbanSquare, label: "Tasks", path: "/tasks" });
   realEstateNavItems.push({ icon: CheckCheck, label: "Approvals", path: "/approvals" });
   realEstateNavItems.push({ icon: MessageSquare, label: "Comms", path: "/comms" });
+  realEstateNavItems.push({ icon: Activity, label: "Activity", path: "/activity" });
   // Automations lives in this (now "Agent") section — always shown.
   realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const toolsNavItems: NavItem[] = [
