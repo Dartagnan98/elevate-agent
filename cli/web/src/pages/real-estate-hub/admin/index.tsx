@@ -41,11 +41,13 @@ import {
   Users,
   X as CloseIcon,
 } from "lucide-react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import type {
   AdminActionRun,
   AdminContact,
+  AdminDeadlineDeal,
   AdminDeal,
   AdminDealCreateRequest,
   AdminProvinceGuideCoverage,
@@ -5125,6 +5127,85 @@ function NewDealDialog({
   );
 }
 
+// Deadline-aware strip: surfaces deals with an upcoming subject-removal or
+// completion so the realtor sees what to prep before it lands, with one-click
+// "Prep" that seeds the chat (e.g. "prep subject removal for <address>").
+function AdminDeadlinesStrip() {
+  const navigate = useNavigate();
+  const [data, setData] = useState<{
+    subjectsSoon: AdminDeadlineDeal[];
+    closingsSoon: AdminDeadlineDeal[];
+  } | null>(null);
+
+  const load = useCallback(() => {
+    void api
+      .getAdminDeadlines()
+      .then((d) => setData({ subjectsSoon: d.subjectsSoon, closingsSoon: d.closingsSoon }))
+      .catch(() => {});
+  }, []);
+  useEffect(() => void load(), [load]);
+  useRefreshOnAgentTurn(load);
+
+  const subjects = data?.subjectsSoon ?? [];
+  const closings = data?.closingsSoon ?? [];
+  if (subjects.length === 0 && closings.length === 0) return null;
+
+  const daysLeft = (iso: string | null): number | null => {
+    if (!iso) return null;
+    return Math.ceil((new Date(`${iso}T00:00:00`).getTime() - Date.now()) / 86_400_000);
+  };
+
+  const prep = (deal: AdminDeadlineDeal, seedText: string) => {
+    const ts = String(Date.now());
+    window.sessionStorage.setItem(`elevate:chat-seed:${ts}`, `${seedText} for ${deal.title}`);
+    navigate(`/chat?new=${ts}&seed=${ts}`);
+  };
+
+  const Row = ({ deal, iso, label, seedText }: {
+    deal: AdminDeadlineDeal; iso: string | null; label: string; seedText: string;
+  }) => {
+    const dl = daysLeft(iso);
+    return (
+      <div className="flex items-center justify-between gap-3 px-3 py-1.5 text-[12px]">
+        <span className="min-w-0 truncate text-foreground">{deal.title}</span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="font-mono-ui tabular-nums text-muted-foreground">
+            {label} {iso ?? "?"}
+            {dl != null && (
+              <span className={cn("ml-1", dl <= 3 ? "text-warning" : "text-muted-foreground")}>
+                ({dl}d)
+              </span>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={() => prep(deal, seedText)}
+            className="rounded-[6px] border border-border px-2 py-0.5 text-[11px] text-foreground hover:bg-muted"
+          >
+            Prep
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-card">
+      <div className="border-b border-border px-3 py-2 font-mono-ui text-[0.62rem] uppercase tracking-wider text-muted-foreground">
+        Coming up
+      </div>
+      <div className="divide-y divide-border">
+        {subjects.map((d) => (
+          <Row key={`subj-${d.id}`} deal={d} iso={d.subjectRemovalDate} label="Subjects" seedText="prep subject removal" />
+        ))}
+        {closings.map((d) => (
+          <Row key={`close-${d.id}`} deal={d} iso={d.completionDate} label="Closes" seedText="prep closing" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AdminKanbanBoard() {
   const adminDeals = useAdminDeals();
   const cards = adminDeals.deals;
@@ -5240,6 +5321,7 @@ function AdminKanbanBoard() {
 
   return (
     <div className="flex flex-col gap-4">
+      <AdminDeadlinesStrip />
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card px-3 py-2">
         <div role="status" aria-live="polite" className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="font-mono-ui text-[0.62rem] uppercase tracking-wider text-muted-foreground">

@@ -2755,6 +2755,81 @@ def _resolve_preview_file(raw_path: str) -> Path:
     return path
 
 
+_FILES_TREE_EXCLUDED = {
+    "node_modules", ".git", ".next", "__pycache__", ".venv", "venv",
+    ".turbo", "dist", "build", ".cache", ".DS_Store", ".idea", ".vscode",
+    "web_dist", ".pytest_cache", ".mypy_cache", "coverage",
+}
+_FILES_TREE_MAX_ENTRIES = 300
+
+
+def _resolve_tree_root(raw_root: str) -> Path:
+    raw = (raw_root or "").strip()
+    if not raw:
+        base = PROJECT_ROOT
+    else:
+        candidate = Path(os.path.expandvars(raw)).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        base = candidate
+    try:
+        base = base.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid root: {exc}")
+    if not base.exists() or not base.is_dir():
+        raise HTTPException(status_code=404, detail="Directory not found")
+    if not any(_is_relative_to(base, root) for root in _preview_roots()):
+        raise HTTPException(status_code=403, detail="Directory is outside allowed roots")
+    return base
+
+
+def _walk_files_tree(base: Path, max_depth: int, depth: int = 1) -> list:
+    """One level (or more) of {name, type, path, children?} for the Files panel.
+
+    Dirs only carry a `children` key when actually walked (depth < max_depth),
+    so the client can lazy-load deeper levels with ?root=<dir>. Absolute paths
+    are returned so click-to-preview reuses /api/files/preview directly.
+    """
+    try:
+        children = list(base.iterdir())
+    except (PermissionError, OSError):
+        return []
+    folders: list[Path] = []
+    files: list[Path] = []
+    for child in children:
+        if child.name.startswith(".") or child.name in _FILES_TREE_EXCLUDED:
+            continue
+        try:
+            is_dir = child.is_dir()
+        except OSError:
+            continue
+        (folders if is_dir else files).append(child)
+    folders.sort(key=lambda c: c.name.lower())
+    files.sort(key=lambda c: c.name.lower())
+
+    entries: list = []
+    for child in folders[:_FILES_TREE_MAX_ENTRIES]:
+        entry = {"name": child.name, "type": "dir", "path": str(child)}
+        if depth < max_depth:
+            entry["children"] = _walk_files_tree(child, max_depth, depth + 1)
+        entries.append(entry)
+    for child in files[:_FILES_TREE_MAX_ENTRIES]:
+        entries.append({"name": child.name, "type": "file", "path": str(child)})
+    return entries
+
+
+@app.get("/api/files/tree")
+async def get_files_tree(root: str = "", depth: int = 1):
+    """Nested file tree for the chat Files panel, clamped to preview roots."""
+    base = _resolve_tree_root(root)
+    safe_depth = max(1, min(int(depth or 1), 4))
+    return {
+        "root": str(base),
+        "name": base.name or str(base),
+        "tree": _walk_files_tree(base, max_depth=safe_depth),
+    }
+
+
 @app.get("/api/files/preview")
 async def preview_file(path: str):
     target = _resolve_preview_file(path)
@@ -4536,6 +4611,60 @@ async def get_session_messages(session_id: str):
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
+
+
+@app.get("/api/sessions/{session_id}/todos")
+async def get_session_todos(session_id: str):
+    """Current plan/todo list for a session (the chat Plan panel's source).
+
+    The gateway runs a fresh AIAgent per turn, so the in-memory TodoStore is
+    empty between turns -- the durable source is the most recent `todo` tool
+    result in the message history. This mirrors AIAgent._hydrate_todo_store
+    (run_agent.py): walk history newest-first for a tool message whose content
+    parses to {"todos": [...]}. We serve it from here (untruncated) because the
+    client tool stream caps tool results at 300 chars, which corrupts any real
+    plan's JSON.
+    """
+    from elevate_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        messages = db.get_messages(sid)
+    finally:
+        db.close()
+
+    todos: list = []
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or '"todos"' not in content:
+            continue
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("todos"), list):
+            todos = [t for t in data["todos"] if isinstance(t, dict)]
+            break
+
+    def _count(status: str) -> int:
+        return sum(1 for t in todos if t.get("status") == status)
+
+    return {
+        "session_id": sid,
+        "todos": todos,
+        "summary": {
+            "total": len(todos),
+            "pending": _count("pending"),
+            "in_progress": _count("in_progress"),
+            "completed": _count("completed"),
+            "cancelled": _count("cancelled"),
+        },
+    }
 
 
 @app.put("/api/sessions/{session_id}/title")
@@ -7581,6 +7710,36 @@ def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
     except Exception as exc:
         _log.exception("POST /api/admin/deals/%s/move failed", deal_id)
         raise HTTPException(status_code=500, detail=f"Move deal failed: {exc}")
+
+
+@app.get("/api/admin/deals/deadlines")
+def get_admin_deal_deadlines(near_subject_days: int = 21, near_close_days: int = 30):
+    """Deals with an upcoming subject-removal or completion deadline.
+
+    Powers the admin "Coming up" strip so the realtor sees what needs prepping
+    (subject removal / amendment / closing) before it lands. Reuses the existing
+    deals_overview soon-lists; no new data, just surfaced.
+    """
+    try:
+        _require_admin_setup_ready_for_launch()
+        from elevate_cli.data import connect, deals_overview
+
+        with connect() as conn:
+            ov = deals_overview(
+                conn,
+                near_subject_days=near_subject_days,
+                near_close_days=near_close_days,
+            )
+        return {
+            "subjectsSoon": ov.get("subjectsSoon", []),
+            "closingsSoon": ov.get("closingsSoon", []),
+            "staleStages": ov.get("staleStages", []),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/admin/deals/deadlines failed")
+        raise HTTPException(status_code=500, detail=f"Deadlines failed: {exc}")
 
 
 @app.post("/api/admin/deals/{deal_id}/toggle")

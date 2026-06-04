@@ -76,6 +76,8 @@ import type {
   PaginatedSessions,
   EnvVarInfo,
   SessionMessagesResponse,
+  SessionTodosResponse,
+  FilesTreeResponse,
   LogsResponse,
   AnalyticsResponse,
   CronJob,
@@ -212,6 +214,16 @@ async function getSessionToken(): Promise<string> {
   throw new Error("Session token not available — page must be served by the Elevation dashboard server");
 }
 
+export type AdminDeadlineDeal = {
+  id: string;
+  title: string;
+  side: string;
+  currentStage: number;
+  subjectRemovalDate: string | null;
+  completionDate: string | null;
+  primaryContactId: string | null;
+};
+
 export const api = {
   getStatus: (options?: { refresh?: boolean }) =>
     options?.refresh
@@ -312,6 +324,15 @@ export const api = {
   },
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
+  getSessionTodos: (id: string) =>
+    fetchJSON<SessionTodosResponse>(`/api/sessions/${encodeURIComponent(id)}/todos`),
+  getFilesTree: (root?: string, depth?: number) => {
+    const qs = new URLSearchParams();
+    if (root) qs.set("root", root);
+    if (depth) qs.set("depth", String(depth));
+    const suffix = qs.toString();
+    return fetchJSON<FilesTreeResponse>(`/api/files/tree${suffix ? `?${suffix}` : ""}`);
+  },
   renameSession: (id: string, title: string | null) =>
     fetchJSON<{ ok: boolean; title: string | null }>(
       `/api/sessions/${encodeURIComponent(id)}/title`,
@@ -1375,6 +1396,12 @@ export const api = {
     fetchJSON<PackOnboardingSnapshot>(`/api/pack-onboarding/${encodeURIComponent(packId)}/complete`, {
       method: "POST",
     }),
+  getAdminDeadlines: () =>
+    fetchJSON<{
+      subjectsSoon: AdminDeadlineDeal[];
+      closingsSoon: AdminDeadlineDeal[];
+      staleStages: AdminDeadlineDeal[];
+    }>("/api/admin/deals/deadlines"),
   getAdminJurisdiction: () => fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction"),
   setAdminJurisdiction: (body: AdminJurisdictionUpdateRequest) =>
     fetchJSON<AdminJurisdiction>("/api/admin/jurisdiction", {
