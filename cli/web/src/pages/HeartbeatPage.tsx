@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
-  Beaker,
   ChevronDown,
   ChevronRight,
   Clock,
-  FlaskConical,
   Loader2,
   Pause,
   Pencil,
@@ -232,13 +230,6 @@ function titleCase(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
-function keepRateTone(rate: number, total: number): "outline" | "success" | "warning" {
-  if (total === 0) return "outline";
-  if (rate >= 60) return "success";
-  if (rate <= 30) return "warning";
-  return "outline";
-}
-
 /** One automation row: name, schedule, last-run, and an enable/disable toggle
  *  reusing the SAME Switch the heartbeat enable uses. Off reads muted. */
 function AutomationRow({
@@ -306,7 +297,6 @@ function SurfaceCard({
   const [showLearnings, setShowLearnings] = useState(false);
   const cfg = surface.config;
   const last = surface.lastRun;
-  const exp = surface.experiments;
   const enabled = cfg?.enabled !== false;
   const automations = surface.automations || [];
 
@@ -317,8 +307,6 @@ function SurfaceCard({
   // Treat the seed placeholder as "no learnings yet" for the collapsed state.
   const hasLearnings =
     learnings.length > 0 && !/\(none yet/i.test(learnings);
-
-  const recentExperiments = exp.history.slice(0, 3);
 
   const toggle = (
     <div className="flex shrink-0 items-center gap-2">
@@ -399,22 +387,9 @@ function SurfaceCard({
                 <Repeat className="h-3 w-3" />
                 {surface.runCount} {surface.runCount === 1 ? "run" : "runs"}
               </span>
-              {cfg?.experiment?.every_n_runs ? (
-                <span className="inline-flex items-center gap-1">
-                  <FlaskConical className="h-3 w-3" />
-                  experiment every {cfg.experiment.every_n_runs}
-                </span>
-              ) : null}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Badge variant={keepRateTone(exp.stats.keepRate, exp.stats.kept + exp.stats.discarded)}>
-              {exp.stats.kept + exp.stats.discarded > 0
-                ? `${exp.stats.keepRate}% kept`
-                : "no experiments"}
-            </Badge>
-            {toggle}
-          </div>
+          {toggle}
         </div>
         {cfg?.goal && (
           <p className="mt-1 text-xs leading-5 text-muted-foreground">{cfg.goal}</p>
@@ -442,56 +417,6 @@ function SurfaceCard({
             </p>
           )}
         </div>
-
-        {/* Active experiment */}
-        {exp.active && (
-          <div className="rounded-md border border-border bg-secondary/30 p-2.5">
-            <div className="flex items-center gap-1.5">
-              <Beaker className="h-3.5 w-3.5 text-foreground/70" />
-              <span className="text-[11px] font-medium uppercase tracking-wide text-foreground/70">
-                Running experiment
-              </span>
-            </div>
-            {exp.active.hypothesis && (
-              <p className="mt-1 text-xs leading-5 text-foreground/90">
-                {exp.active.hypothesis}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* Recent experiments */}
-        {recentExperiments.length > 0 && (
-          <div className="space-y-1.5">
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
-              Recent experiments
-            </span>
-            <ul className="space-y-1.5">
-              {recentExperiments.map((e, i) => (
-                <li
-                  key={e.id || i}
-                  className="flex items-start gap-2 rounded-md bg-secondary/30 p-2"
-                >
-                  <Badge
-                    variant={
-                      e.decision === "keep"
-                        ? "success"
-                        : e.decision === "discard"
-                          ? "warning"
-                          : "outline"
-                    }
-                    className="mt-0.5 shrink-0"
-                  >
-                    {e.decision || "open"}
-                  </Badge>
-                  <span className="min-w-0 text-xs leading-5 text-muted-foreground">
-                    {e.learning || e.hypothesis || e.id || "experiment"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
 
         {/* Learnings */}
         {hasLearnings && (
