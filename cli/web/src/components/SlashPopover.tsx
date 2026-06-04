@@ -473,6 +473,10 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     const [catalog, setCatalog] = useState<MentionCatalog>(EMPTY_CATALOG);
     const catalogLoadedRef = useRef(false);
     const requestKeyRef = useRef("");
+    // Cached full slash-command list. The registry is static, so we fetch it
+    // from the gateway once and then filter client-side on every keystroke —
+    // no per-/ round-trip that stalls for seconds when the agent is mid-turn.
+    const slashCommandsCacheRef = useRef<{ items: CompletionItem[]; replaceFrom: number } | null>(null);
 
     useEffect(() => {
       if (!trigger || catalogLoadedRef.current) return;
@@ -490,6 +494,26 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
       });
     }, [trigger]);
 
+    // Warm the slash-command cache on mount (in the background) so even the
+    // very first "/" is instant — the one-time gateway scan happens off-screen.
+    useEffect(() => {
+      if (!gw || slashCommandsCacheRef.current) return;
+      let cancelled = false;
+      void gw
+        .request<CompletionResponse>("complete.slash", { text: "/" })
+        .then((response) => {
+          if (cancelled) return;
+          slashCommandsCacheRef.current = {
+            items: response?.items ?? [],
+            replaceFrom: response?.replace_from ?? 1,
+          };
+        })
+        .catch(() => {});
+      return () => {
+        cancelled = true;
+      };
+    }, [gw]);
+
     useEffect(() => {
       if (!trigger || !gw) {
         setItems([]);
@@ -502,57 +526,77 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           : `mention:${trigger.word}:${catalog.skills.length}:${catalog.toolsets.length}:${catalog.plugins.length}:${agents.length}`;
       requestKeyRef.current = key;
 
-      // Show locally-known skill items immediately so the popover appears the
-      // instant you type "/", instead of waiting on the gateway round-trip
-      // (which can take seconds when the agent is mid-turn). The gateway result
-      // below then enriches the list with built-in commands and replaces this.
+      // Slash commands: the registry is static, so render from a cached full
+      // list (filtered client-side) instantly instead of awaiting a
+      // per-keystroke gateway round-trip — that round-trip stalls for seconds
+      // when the agent is mid-turn. The gateway still refreshes the cache in
+      // the background.
       if (trigger.mode === "slash") {
         const query = slashCommandQuery(trigger.text);
-        const skillItems = slashSkillItems(catalog, query);
-        if (skillItems.length > 0) {
+        const renderSlash = (rawItems: CompletionItem[], replaceFrom: number) => {
+          setSlashReplaceFrom(replaceFrom);
+          const skillsByCommand = skillCommandMap(catalog);
+          const commandItems = (rawItems ?? [])
+            .map((item) => normalizeSlashItem(item, skillsByCommand))
+            .filter((item) => query === null || matchesSlash(item, query));
+          const skillItems = slashSkillItems(catalog, query);
+          const hasSkillMatches =
+            skillItems.length > 0 || commandItems.some((item) => item.kind === "skill");
           setItems(
             orderGroupedItems(
-              skillItems,
-              slashGroupOrder(query, trigger.text, true),
+              [
+                ...skillItems,
+                ...commandItems.filter((item) =>
+                  shouldShowSlashCommandItem(item, query, hasSkillMatches),
+                ),
+              ],
+              slashGroupOrder(query, trigger.text, hasSkillMatches),
               MAX_SLASH_GROUP_ITEMS,
             ),
           );
           setSelected(0);
-        }
-      }
+        };
 
-      const timer = window.setTimeout(async () => {
-        try {
-          if (trigger.mode === "slash") {
-            const response = await gw.request<CompletionResponse>("complete.slash", {
-              text: trigger.text,
-            });
-            if (requestKeyRef.current !== key) return;
-            setSlashReplaceFrom(response?.replace_from ?? 1);
-            const query = slashCommandQuery(trigger.text);
-            const skillsByCommand = skillCommandMap(catalog);
-            const commandItems = (response?.items ?? [])
-              .map((item) => normalizeSlashItem(item, skillsByCommand))
-              .filter((item) => query === null || matchesSlash(item, query));
-            const skillItems = slashSkillItems(catalog, query);
-            const hasSkillMatches =
-              skillItems.length > 0 || commandItems.some((item) => item.kind === "skill");
+        // Instant: render from the cache (or at least local skills) right now.
+        const cached = slashCommandsCacheRef.current;
+        if (cached) {
+          renderSlash(cached.items, cached.replaceFrom);
+        } else {
+          const skillItems = slashSkillItems(catalog, query);
+          if (skillItems.length > 0) {
             setItems(
               orderGroupedItems(
-                [
-                  ...skillItems,
-                  ...commandItems.filter((item) =>
-                    shouldShowSlashCommandItem(item, query, hasSkillMatches),
-                  ),
-                ],
-                slashGroupOrder(query, trigger.text, hasSkillMatches),
+                skillItems,
+                slashGroupOrder(query, trigger.text, true),
                 MAX_SLASH_GROUP_ITEMS,
               ),
             );
             setSelected(0);
-            return;
           }
+        }
 
+        // Background: refresh the full command list (text "/" = whole registry,
+        // reusable across queries) and re-render once it lands.
+        const slashTimer = window.setTimeout(async () => {
+          try {
+            const response = await gw.request<CompletionResponse>("complete.slash", {
+              text: "/",
+            });
+            slashCommandsCacheRef.current = {
+              items: response?.items ?? [],
+              replaceFrom: response?.replace_from ?? 1,
+            };
+            if (requestKeyRef.current !== key) return;
+            renderSlash(response?.items ?? [], response?.replace_from ?? 1);
+          } catch {
+            /* keep whatever we rendered from cache/skills */
+          }
+        }, DEBOUNCE_MS);
+        return () => window.clearTimeout(slashTimer);
+      }
+
+      const timer = window.setTimeout(async () => {
+        try {
           const pathResponse = await gw.request<CompletionResponse>("complete.path", {
             word: trigger.word,
           });
