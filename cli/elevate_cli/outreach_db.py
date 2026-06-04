@@ -844,6 +844,37 @@ def claim_due_sends(limit: int = 10) -> list[dict[str, Any]]:
     return claimed
 
 
+def approve_pending_send(source_id: str, task_id: str) -> dict[str, Any] | None:
+    """Flip a ``pending_approval`` send_queue row to ``queued`` so the sender picks
+    it up. The /leads Approve button surfaces send_queue rows as drafts (id
+    ``<source>:send-queue:<queue_id>``, taskId = the row's task_id or id), but the
+    approve path historically only touched source-dir tasks — so these never queued
+    and never sent. Match by (source_id, task_id|id) and release the latest pending
+    one. Returns the queued row, or None if there's no pending row to release."""
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            row = conn.execute(
+                """
+                SELECT * FROM send_queue
+                 WHERE status = 'pending_approval'
+                   AND source_id = ?
+                   AND (task_id = ? OR id = ?)
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                (source_id, task_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
+                (SEND_STATUS_QUEUED, now, row["id"]),
+            )
+        out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
+    return _row_to_send(out)
+
+
 def mark_sent(queue_id: str, provider_message_id: str) -> dict[str, Any] | None:
     now = _now()
     with connect() as conn:

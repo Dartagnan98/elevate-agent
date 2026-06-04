@@ -13,6 +13,7 @@ import concurrent.futures
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import re
 import hashlib
@@ -4001,7 +4002,25 @@ def update_source_task_state(
     state["tasks"] = tasks
 
     if normalized == "approve":
-        _approve_atomic(source_id, task_id, existing, source_dir, state)
+        # Most /leads drafts are send_queue rows in pending_approval (a cron wrote
+        # them straight to the DB), surfaced with id "<source>:send-queue:<id>".
+        # For those, approval means RELEASE the existing row to 'queued' so the
+        # sender delivers it — NOT insert a fresh source-dir send. Try that first;
+        # fall back to the source-dir task path only if there's no pending row.
+        flipped = None
+        try:
+            from elevate_cli import outreach_db
+
+            flipped = outreach_db.approve_pending_send(source_id, task_id)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "approve: pending-send release failed for %s/%s", source_id, task_id,
+                exc_info=True,
+            )
+        if flipped is not None:
+            _write_source_ui_state(source_dir, state)
+        else:
+            _approve_atomic(source_id, task_id, existing, source_dir, state)
     else:
         _write_source_ui_state(source_dir, state)
 
