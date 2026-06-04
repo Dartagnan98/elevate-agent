@@ -57,15 +57,32 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function TaskCard({
   task,
   onClick,
+  onDragStart,
+  onDragEnd,
+  dragging,
 }: {
   task: SurfaceTask;
   onClick: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  dragging: boolean;
 }) {
   return (
     <button
       type="button"
+      draggable
       onClick={onClick}
-      className="w-full space-y-1.5 rounded-md border border-border bg-card/60 p-2.5 text-left transition-colors hover:border-foreground/20"
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        // Firefox requires data to be set for drag to start.
+        e.dataTransfer.setData("text/plain", task.id);
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+      className={cn(
+        "w-full space-y-1.5 rounded-md border border-border bg-card/60 p-2.5 text-left transition-colors hover:border-foreground/20 cursor-grab active:cursor-grabbing",
+        dragging && "opacity-40",
+      )}
     >
       <p className="text-xs font-medium leading-5 text-foreground/90">{task.title}</p>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
@@ -281,6 +298,8 @@ export default function TasksPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<SurfaceTask | null>(null);
   const [surfaces, setSurfaces] = useState<string[]>([]);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<SurfaceTask["status"] | null>(null);
 
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) setRefreshing(true);
@@ -306,6 +325,24 @@ export default function TasksPage() {
     return () => window.clearInterval(id);
   }, [load]);
   useRefreshOnAgentTurn(() => void load(true));
+
+  const moveTask = useCallback(
+    async (id: string, next: SurfaceTask["status"]) => {
+      const current = tasks.find((t) => t.id === id);
+      if (!current || current.status === next) return;
+      // Optimistic — move the card immediately, reconcile on reload.
+      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: next } : t)));
+      try {
+        await api.updateSurfaceTask(id, { status: next });
+        void load(true);
+      } catch (e) {
+        // Roll back on failure.
+        setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: current.status } : t)));
+        setError(String(e));
+      }
+    },
+    [tasks, load],
+  );
 
   const byStatus = useMemo(() => {
     const map: Record<string, SurfaceTask[]> = {
@@ -381,14 +418,48 @@ export default function TasksPage() {
                   {byStatus[col.key].length}
                 </span>
               </div>
-              <div className="space-y-2 rounded-lg border border-dashed border-border/60 p-2 min-h-[80px]">
+              <div
+                onDragOver={(e) => {
+                  if (!draggingId) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  if (dropTarget !== col.key) setDropTarget(col.key);
+                }}
+                onDragLeave={(e) => {
+                  // Only clear when leaving the column entirely, not its children.
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                    setDropTarget((prev) => (prev === col.key ? null : prev));
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const id = e.dataTransfer.getData("text/plain") || draggingId;
+                  setDropTarget(null);
+                  setDraggingId(null);
+                  if (id) void moveTask(id, col.key);
+                }}
+                className={cn(
+                  "space-y-2 rounded-lg border border-dashed border-border/60 p-2 min-h-[80px] transition-colors",
+                  dropTarget === col.key && draggingId && "border-foreground/40 bg-foreground/5",
+                )}
+              >
                 {byStatus[col.key].length === 0 ? (
                   <p className="px-1 py-3 text-center text-[11px] italic text-muted-foreground/60">
-                    nothing here
+                    {dropTarget === col.key && draggingId ? "drop here" : "nothing here"}
                   </p>
                 ) : (
                   byStatus[col.key].map((t) => (
-                    <TaskCard key={t.id} task={t} onClick={() => setSelected(t)} />
+                    <TaskCard
+                      key={t.id}
+                      task={t}
+                      onClick={() => setSelected(t)}
+                      onDragStart={() => setDraggingId(t.id)}
+                      onDragEnd={() => {
+                        setDraggingId(null);
+                        setDropTarget(null);
+                      }}
+                      dragging={draggingId === t.id}
+                    />
                   ))
                 )}
               </div>
