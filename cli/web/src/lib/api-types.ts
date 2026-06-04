@@ -2547,3 +2547,76 @@ export interface HeartbeatSurface {
 export interface HeartbeatSurfacesResponse {
   surfaces: HeartbeatSurface[];
 }
+
+/* ------------------------------------------------------------------ */
+/*  Experiments page (GET /api/heartbeats/experiments)                 */
+/*  Autoresearch view: each surface runs research cycles + experiments */
+/*  that compound into its playbook. Read-only.                        */
+/* ------------------------------------------------------------------ */
+
+/** A research cycle definition — the loop that proposes experiments. */
+export interface HeartbeatExperimentCycle {
+  name: string;
+  surface: string;
+  metric: string;
+  metric_type: string;
+  direction: "higher" | "lower" | string;
+  window: string;
+  measurement: string;
+  every_n_runs: number;
+  loop_interval: string;
+  approval_required: boolean;
+  enabled: boolean;
+}
+
+/** A single experiment across its lifecycle. */
+export interface HeartbeatExperiment {
+  id: string;
+  surface: string;
+  status: "running" | "completed" | "proposed" | string;
+  decision: "keep" | "discard" | null;
+  hypothesis: string;
+  changes_description: string;
+  baseline: unknown;
+  result: unknown;
+  learning: string | null;
+  metric: string;
+  direction: "higher" | "lower" | string;
+  window: string;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface HeartbeatExperimentStats {
+  total: number;
+  running: number;
+  proposed: number;
+  completed: number;
+  kept: number;
+  discarded: number;
+  keepRate: number;
+}
+
+export interface HeartbeatExperimentSurface {
+  surface: string;
+  cycles: HeartbeatExperimentCycle[];
+  experiments: HeartbeatExperiment[];
+  learnings: string;
+  stats: HeartbeatExperimentStats;
+}
+
+export interface HeartbeatExperimentSummary {
+  surfaces: number;
+  cycles: number;
+  total: number;
+  running: number;
+  completed: number;
+  kept: number;
+  discarded: number;
+  keepRate: number;
+}
+
+export interface HeartbeatExperimentsResponse {
+  surfaces: HeartbeatExperimentSurface[];
+  summary: HeartbeatExperimentSummary;
+}

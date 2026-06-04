@@ -6412,6 +6412,169 @@ def get_heartbeat_surfaces():
         raise HTTPException(status_code=500, detail=f"Heartbeat surfaces failed: {exc}")
 
 
+def _experiment_stats(experiments: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Per-surface experiment stats, computed at read time (never persisted)."""
+    running = sum(1 for e in experiments if e.get("status") == "running")
+    proposed = sum(1 for e in experiments if e.get("status") == "proposed")
+    completed = sum(1 for e in experiments if e.get("status") == "completed")
+    kept = sum(1 for e in experiments if e.get("decision") == "keep")
+    discarded = sum(1 for e in experiments if e.get("decision") == "discard")
+    decided = kept + discarded
+    return {
+        "total": len(experiments),
+        "running": running,
+        "proposed": proposed,
+        "completed": completed,
+        "kept": kept,
+        "discarded": discarded,
+        "keepRate": round((kept / decided) * 100) if decided else 0,
+    }
+
+
+def _experiment_summary(surfaces: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Fleet-wide rollup across all surfaces."""
+    kept = sum(s["stats"]["kept"] for s in surfaces)
+    discarded = sum(s["stats"]["discarded"] for s in surfaces)
+    decided = kept + discarded
+    return {
+        "surfaces": len(surfaces),
+        "cycles": sum(len(s["cycles"]) for s in surfaces),
+        "total": sum(s["stats"]["total"] for s in surfaces),
+        "running": sum(s["stats"]["running"] for s in surfaces),
+        "completed": sum(s["stats"]["completed"] for s in surfaces),
+        "kept": kept,
+        "discarded": discarded,
+        "keepRate": round((kept / decided) * 100) if decided else 0,
+    }
+
+
+@app.get("/api/heartbeats/experiments")
+def get_heartbeat_experiments():
+    """Dedicated experiments view for the CURRENT account — the data behind the
+    Experiments page. For every surface, reads the cycle definition (config.json's
+    ``experiment`` block), the running experiment (experiments/active.json), and the
+    completed ones (experiments/history/*.json), normalizes each to one shape, folds in
+    learnings.md, and computes per-surface + fleet stats. Read-only; the surface-heartbeat
+    EXPERIMENT loop owns all writes. Elevate-native port of cortextOS scanExperiments().
+    """
+    try:
+        from elevate_constants import get_account_data_dir
+
+        heartbeats_dir = get_account_data_dir() / "heartbeats"
+        out_surfaces: List[Dict[str, Any]] = []
+        if not heartbeats_dir.is_dir():
+            return {"surfaces": out_surfaces, "summary": _experiment_summary([])}
+
+        def _read_json(path: Path) -> Optional[Any]:
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+        for surface_dir in sorted(heartbeats_dir.iterdir(), key=lambda p: p.name):
+            if not surface_dir.is_dir():
+                continue
+            surface_name = surface_dir.name
+            config = _read_json(surface_dir / "config.json")
+            exp_cfg = config.get("experiment") if isinstance(config, dict) else None
+            exp_cfg = exp_cfg if isinstance(exp_cfg, dict) else {}
+
+            # One cycle per surface = the config.experiment block (the recurring loop).
+            cycles: List[Dict[str, Any]] = []
+            if exp_cfg:
+                every_n = exp_cfg.get("every_n_runs")
+                cycles.append({
+                    "name": f"{surface_name} self-improvement",
+                    "surface": surface_name,
+                    "metric": exp_cfg.get("metric"),
+                    "metric_type": exp_cfg.get("metric_type"),
+                    "direction": exp_cfg.get("direction"),
+                    "window": exp_cfg.get("window"),
+                    "measurement": exp_cfg.get("measurement"),
+                    "every_n_runs": every_n,
+                    "loop_interval": (f"every {every_n} runs" if every_n else None),
+                    "approval_required": bool(exp_cfg.get("approval_required", False)),
+                    "enabled": True,
+                })
+            c_metric = exp_cfg.get("metric")
+            c_direction = exp_cfg.get("direction")
+            c_window = exp_cfg.get("window")
+
+            experiments: List[Dict[str, Any]] = []
+            exp_dir = surface_dir / "experiments"
+
+            active = _read_json(exp_dir / "active.json") if exp_dir.is_dir() else None
+            if isinstance(active, dict):
+                experiments.append({
+                    "id": active.get("id"),
+                    "surface": surface_name,
+                    "status": "running",
+                    "decision": None,
+                    "hypothesis": active.get("hypothesis"),
+                    "changes_description": active.get("surface_change"),
+                    "baseline": active.get("baseline"),
+                    "result": None,
+                    "learning": None,
+                    "metric": c_metric,
+                    "direction": c_direction,
+                    "window": active.get("window") or c_window,
+                    "created_at": active.get("started_at"),
+                    "completed_at": None,
+                })
+
+            exp_hist_dir = exp_dir / "history"
+            hist_records: List[Dict[str, Any]] = []
+            if exp_hist_dir.is_dir():
+                for p in sorted(
+                    (q for q in exp_hist_dir.glob("*.json") if q.is_file()),
+                    key=lambda q: q.name, reverse=True,
+                ):
+                    r = _read_json(p)
+                    if isinstance(r, dict):
+                        hist_records.append(r)
+            hist_records.sort(key=lambda e: str(e.get("ts") or ""), reverse=True)
+            for r in hist_records:
+                experiments.append({
+                    "id": r.get("id") or r.get("ts"),
+                    "surface": surface_name,
+                    "status": "completed",
+                    "decision": r.get("decision"),
+                    "hypothesis": r.get("hypothesis"),
+                    "changes_description": r.get("surface_change") or r.get("changes_description"),
+                    "baseline": r.get("baseline"),
+                    "result": r.get("result"),
+                    "learning": r.get("learning"),
+                    "metric": r.get("metric") or c_metric,
+                    "direction": r.get("direction") or c_direction,
+                    "window": r.get("window") or c_window,
+                    "created_at": r.get("started_at"),
+                    "completed_at": r.get("ts") or r.get("completed_at"),
+                })
+
+            learnings = ""
+            lp = surface_dir / "learnings.md"
+            if lp.is_file():
+                try:
+                    learnings = lp.read_text(encoding="utf-8")
+                except Exception:
+                    learnings = ""
+
+            out_surfaces.append({
+                "surface": surface_name,
+                "cycles": cycles,
+                "experiments": experiments,
+                "learnings": learnings,
+                "stats": _experiment_stats(experiments),
+            })
+
+        return {"surfaces": out_surfaces, "summary": _experiment_summary(out_surfaces)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/heartbeats/experiments failed")
+        raise HTTPException(status_code=500, detail=f"Heartbeat experiments failed: {exc}")
+
+
 class _HeartbeatSurfaceEnabledBody(BaseModel):
     enabled: bool
 

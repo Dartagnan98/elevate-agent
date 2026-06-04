@@ -97,6 +97,7 @@ import type {
   DashboardThemesResponse,
   PluginManifestResponse,
   HeartbeatSurfacesResponse,
+  HeartbeatExperimentsResponse,
 } from "./api-types";
 import { recordStartupApiTiming } from "./startup-performance";
 
@@ -614,6 +615,14 @@ export const api = {
         body: JSON.stringify({ enabled }),
       },
     ),
+
+  // Experiments — autoresearch view: per-surface research cycles + experiments.
+  getHeartbeatExperiments: (options?: { refresh?: boolean }) => {
+    const url = "/api/heartbeats/experiments";
+    return options?.refresh
+      ? fetchJSON<HeartbeatExperimentsResponse>(url)
+      : cachedFetchJSON<HeartbeatExperimentsResponse>(url, 5_000);
+  },
 
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {

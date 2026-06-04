@@ -39,6 +39,7 @@ import {
   ExternalLink,
   Eye,
   FileText,
+  FlaskConical,
   Folder,
   FolderOpen,
   Globe,
@@ -101,6 +102,7 @@ const loadLogsPage = () => import("@/pages/LogsPage");
 const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
 const loadCronPage = () => import("@/pages/CronPage");
 const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
+const loadExperimentsPage = () => import("@/pages/ExperimentsPage");
 const loadSkillsPage = () => import("@/pages/SkillsPage");
 const loadChatPage = () => import("@/pages/ChatPage");
 const loadAgentHubPage = () => import("@/pages/AgentHubPage");
@@ -128,6 +130,7 @@ const LogsPage = lazy(loadLogsPage);
 const AnalyticsPage = lazy(loadAnalyticsPage);
 const CronPage = lazy(loadCronPage);
 const HeartbeatPage = lazy(loadHeartbeatPage);
+const ExperimentsPage = lazy(loadExperimentsPage);
 const SkillsPage = lazy(loadSkillsPage);
 const ChatPage = lazy(loadChatPage);
 const AgentHubPage = lazy(loadAgentHubPage);
@@ -158,6 +161,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/logs": loadLogsPage,
   "/cron": loadCronPage,
   "/heartbeat": loadHeartbeatPage,
+  "/experiments": loadExperimentsPage,
   "/skills": loadSkillsPage,
   "/config": loadConfigPage,
   "/env": loadEnvPage,
@@ -404,6 +408,7 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/logs": LogsPage,
   "/cron": CronPage,
   "/heartbeat": HeartbeatPage,
+  "/experiments": ExperimentsPage,
   "/skills": SkillsPage,
   "/config": ConfigPage,
   "/env": EnvPage,
@@ -1591,6 +1596,8 @@ function DesktopSidebar({
   }
   // Heartbeat = the simple scheduled check-in surface; Automations = power cron.
   realEstateNavItems.push({ icon: Activity, label: "Heartbeat", path: "/heartbeat" });
+  // Experiments = autoresearch view of the surface heartbeat improvement loops.
+  realEstateNavItems.push({ icon: FlaskConical, label: "Experiments", path: "/experiments" });
   // Automations lives in this (now "Agent") section — always shown.
   realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const toolsNavItems: NavItem[] = [
