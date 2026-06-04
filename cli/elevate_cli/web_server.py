@@ -2470,6 +2470,25 @@ def _workspace_git_status_payload(
     }
 
 
+_GIT_UNAVAILABLE_WARNED = False
+
+
+def _is_git_unavailable_error(msg: str) -> bool:
+    """True when the failure means git itself can't run (not a repo problem).
+
+    Covers the common fresh-Mac case where Xcode command line tools aren't
+    installed and the `/usr/bin/git` shim emits an install prompt to stderr.
+    """
+    low = (msg or "").lower()
+    return (
+        "no developer tools were found" in low
+        or "xcode-select" in low
+        or "git: command not found" in low
+        or "git: not found" in low
+        or "no such file or directory: 'git'" in low
+    )
+
+
 @app.get("/api/workspace/git/status")
 async def get_workspace_git_status(
     session_id: str | None = None,
@@ -2482,8 +2501,23 @@ async def get_workspace_git_status(
             working_directory=working_directory,
         )
     except Exception as exc:
+        msg = str(exc)
+        # Fresh non-developer Macs ship a `git` stub that errors with
+        # "No developer tools were found" until Xcode CLT is installed. End
+        # users (e.g. realtors) never need git, so don't flood errors.log with
+        # a full traceback on every poll — warn once, then degrade quietly.
+        if _is_git_unavailable_error(msg):
+            global _GIT_UNAVAILABLE_WARNED
+            if not _GIT_UNAVAILABLE_WARNED:
+                _GIT_UNAVAILABLE_WARNED = True
+                _log.warning(
+                    "workspace git status disabled: git is unavailable "
+                    "(Xcode command line tools not installed?): %s",
+                    msg.splitlines()[0] if msg else "git unavailable",
+                )
+            return _empty_workspace_git_payload(msg)
         _log.exception("GET /api/workspace/git/status failed")
-        return _empty_workspace_git_payload(str(exc))
+        return _empty_workspace_git_payload(msg)
 
 
 @app.post("/api/workspace/open")
