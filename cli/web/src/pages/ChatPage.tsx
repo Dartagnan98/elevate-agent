@@ -5,6 +5,15 @@ import {
   type SlashPopoverHandle,
 } from "@/components/SlashPopover";
 import type { ToolEntry } from "@/components/ToolCall";
+import {
+  BackgroundTasksPanel,
+  EmptyPreviewPanel,
+  FilesPanel,
+  PlanPanel,
+  SidePanelSelector,
+  type SessionFile,
+  type SidePanelMode,
+} from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -2657,6 +2666,12 @@ export default function ChatPage() {
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
   const dismissedArtifactsRef = useRef<Set<string>>(new Set());
   const previewAutoOpenDisabledRef = useRef(false);
+  // Side-panel mode for the right aside. "preview" still uses previewArtifact
+  // as the WHICH; plan/tasks/files are derived/fetched panels.
+  const [sidePanel, setSidePanel] = useState<SidePanelMode>("none");
+  const [planRefreshSignal, setPlanRefreshSignal] = useState(0);
+  const planAutoOpenDisabledRef = useRef(false);
+  const lastTodoSigRef = useRef<string>("");
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
   const [messages, setMessagesRaw] = useState<ChatMessage[]>([]);
   // Wrap the setter so ANY call that wipes a populated list to empty is caught
@@ -2954,6 +2969,7 @@ export default function ChatPage() {
       }
       return null;
     });
+    setSidePanel("none");
   }, [artifactStateSessionId]);
 
   const hydrateArtifactsFromMessages = useCallback(
@@ -2984,13 +3000,69 @@ export default function ChatPage() {
       const shellWidth = shellEl?.clientWidth || window.innerWidth;
       setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(shellWidth * 0.5)));
       setPreviewArtifact(artifact);
+      setSidePanel("preview");
     },
     [artifactStateSessionId],
   );
 
+  // Open a non-preview side panel (plan/tasks/files) at a balanced 50/50.
+  const openSidePanel = useCallback((mode: SidePanelMode) => {
+    if (mode === "none") {
+      setSidePanel("none");
+      return;
+    }
+    const shellEl = document.querySelector<HTMLElement>(".elevate-chat-shell");
+    const shellWidth = shellEl?.clientWidth || window.innerWidth;
+    setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(shellWidth * 0.5)));
+    if (mode === "plan") planAutoOpenDisabledRef.current = false;
+    setSidePanel(mode);
+  }, []);
+
+  const closeSidePanel = useCallback(() => {
+    setSidePanel((current) => {
+      if (current === "plan") planAutoOpenDisabledRef.current = true;
+      return "none";
+    });
+  }, []);
+
+  const handleSelectPanel = useCallback(
+    (mode: SidePanelMode) => {
+      // Selecting the active panel toggles it closed.
+      if (mode === sidePanel) {
+        if (mode === "preview") dismissPreviewArtifact();
+        else closeSidePanel();
+        return;
+      }
+      // Preview always opens — it shows a "No preview" state when there's no
+      // current artifact, rather than being a dead menu row.
+      if (mode === "preview") {
+        setSidePanel("preview");
+        return;
+      }
+      openSidePanel(mode);
+    },
+    [sidePanel, dismissPreviewArtifact, closeSidePanel, openSidePanel],
+  );
+
+  const openFileInPreview = useCallback(
+    (path: string, name: string) => {
+      openArtifactPreview({
+        content: undefined,
+        createdAt: Date.now(),
+        id: `file:${path}`,
+        key: `file:${path}`,
+        kind: "file",
+        path,
+        source: "Files",
+        title: name,
+      });
+    },
+    [openArtifactPreview],
+  );
+
   const startPreviewResize = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
-      if (!previewArtifact) return;
+      if (sidePanel === "none") return;
       event.preventDefault();
 
       const target = event.currentTarget;
@@ -3029,8 +3101,29 @@ export default function ChatPage() {
       window.addEventListener("pointerup", stopResize);
       window.addEventListener("pointercancel", stopResize);
     },
-    [previewArtifact, previewPanelWidth],
+    [sidePanel, previewPanelWidth],
   );
+
+  // Auto-open the Plan panel when the agent writes/updates a todo list, unless
+  // the user dismissed it this session. The tool stream is just the trigger;
+  // PlanPanel refetches the untruncated list from /api/sessions/:id/todos.
+  useEffect(() => {
+    let latest: ToolEntry | undefined;
+    for (let i = tools.length - 1; i >= 0; i--) {
+      if (tools[i].name === "todo") {
+        latest = tools[i];
+        break;
+      }
+    }
+    if (!latest) return;
+    const sig = `${latest.id}:${latest.status}:${latest.completedAt ?? ""}`;
+    if (sig === lastTodoSigRef.current) return;
+    lastTodoSigRef.current = sig;
+    setPlanRefreshSignal((value) => value + 1);
+    if (!planAutoOpenDisabledRef.current && sidePanel === "none") {
+      openSidePanel("plan");
+    }
+  }, [tools, sidePanel, openSidePanel]);
 
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
@@ -3111,13 +3204,17 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    if (!previewArtifact) return;
+    if (sidePanel === "none") return;
     const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); dismissPreviewArtifact(); }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (sidePanel === "preview") dismissPreviewArtifact();
+        else closeSidePanel();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [previewArtifact, dismissPreviewArtifact]);
+  }, [sidePanel, dismissPreviewArtifact, closeSidePanel]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5766,11 +5863,51 @@ export default function ChatPage() {
     };
   }, [chatTitle, folderLabel, handleOpenChatMenu, sessionId, setBeforeTitle, setEnd, setTitle]);
   const previewPanelWidthPx = `${previewPanelWidth}px`;
-  const previewPanelLayoutStyle = previewArtifact
+  // The wide right panel is open for ANY side-panel mode. Preview included —
+  // it shows a "No preview" state when there's no artifact rather than being
+  // a dead menu row.
+  const wideOpen = sidePanel !== "none";
+  // "Files it was working on" — Elevate chats have no single workspace dir, so
+  // the Files panel lists the files the agent actually touched (the session
+  // artifacts), deduped by path. Click → Preview.
+  const sessionFiles: SessionFile[] = useMemo(
+    () =>
+      artifacts
+        .filter((a) => a.path)
+        .map((a) => ({ path: a.path as string, title: a.title || (a.path as string).split("/").pop() || "file" })),
+    [artifacts],
+  );
+  const previewPanelLayoutStyle = wideOpen
     ? ({
         "--preview-panel-width": previewPanelWidthPx,
       } as CSSProperties)
     : undefined;
+  const renderSidePanel = () => {
+    switch (sidePanel) {
+      case "preview":
+        return previewArtifact ? (
+          <ArtifactPreviewPane artifact={previewArtifact} onClose={dismissPreviewArtifact} />
+        ) : (
+          <EmptyPreviewPanel onClose={dismissPreviewArtifact} />
+        );
+      case "plan":
+        return (
+          <PlanPanel
+            sessionId={sessionId ?? ""}
+            refreshSignal={planRefreshSignal}
+            onClose={closeSidePanel}
+          />
+        );
+      case "tasks":
+        return <BackgroundTasksPanel tools={tools} onClose={closeSidePanel} />;
+      case "files":
+        return (
+          <FilesPanel files={sessionFiles} onOpenFile={openFileInPreview} onClose={closeSidePanel} />
+        );
+      default:
+        return null;
+    }
+  };
   const activity = (
     <ActivityPanel
       artifacts={artifacts}
@@ -5822,21 +5959,18 @@ export default function ChatPage() {
 
   const mobilePreviewPortal =
     narrow &&
-    previewArtifact &&
+    wideOpen &&
     portalRoot &&
     createPortal(
       <>
         <button
-          aria-label="Close artifact preview"
+          aria-label="Close panel"
           className="fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm"
-          onClick={dismissPreviewArtifact}
+          onClick={sidePanel === "preview" ? dismissPreviewArtifact : closeSidePanel}
           type="button"
         />
         <aside className="fixed inset-x-3 bottom-3 top-3 z-[70] animate-in fade-in slide-in-from-bottom-4 duration-200">
-          <ArtifactPreviewPane
-            artifact={previewArtifact}
-            onClose={dismissPreviewArtifact}
-          />
+          {renderSidePanel()}
         </aside>
       </>,
       portalRoot,
@@ -5855,7 +5989,7 @@ export default function ChatPage() {
             // chips) pushes the column past the app's right edge, overflowing the
             // shell and clipping the preview. min-w-0 lets it shrink to fit.
             "flex min-h-0 min-w-0 flex-1 flex-col",
-            previewArtifact && "lg:basis-1/2",
+            wideOpen && "lg:basis-1/2",
           )}
         >
           <div
@@ -5901,18 +6035,22 @@ export default function ChatPage() {
                 </button>
               ) : null}
             </div>
-            {narrow && (
-              <div className="toggle-rail">
+            <div
+              className="toggle-rail"
+              style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+            >
+              <SidePanelSelector mode={sidePanel} onSelect={handleSelectPanel} />
+              {narrow && (
                 <button
                   type="button"
                   className="icon-btn"
-                  title="Toggle artifacts panel"
+                  title="Toggle activity"
                   onClick={() => setMobilePanelOpen((value) => !value)}
                 >
                   <PanelLeftOpen className="h-3.5 w-3.5" />
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
           <div ref={chatScrollRef} className="chat-scroll" onScroll={handleChatScroll}>
             {visibleMessages.length === 0 ? (
@@ -6183,12 +6321,12 @@ export default function ChatPage() {
         <aside
           className={cn(
             "hidden min-h-0 shrink-0 lg:flex",
-            previewArtifact
+            wideOpen
               ? "flex-col pb-[var(--sidebar-gap)] pl-0 pr-[var(--sidebar-gap)] pt-[var(--sidebar-gap)]"
               : "w-[16.25rem] flex-col self-start pr-[18px] pt-[60px]",
           )}
           style={
-            previewArtifact
+            wideOpen
               ? { width: "var(--preview-panel-width)" }
               : undefined
           }
@@ -6196,14 +6334,14 @@ export default function ChatPage() {
           <div
             className={cn(
               "relative",
-              previewArtifact
+              wideOpen
                 ? "min-h-0 flex-1"
                 : "max-h-[calc(100dvh-2.5rem)] overflow-hidden",
             )}
           >
-            {previewArtifact && (
+            {wideOpen && (
               <button
-                aria-label="Resize artifact preview"
+                aria-label="Resize panel"
                 className="absolute -left-5 top-6 z-20 flex h-[calc(100%-3rem)] w-11 touch-none cursor-col-resize items-center justify-center rounded-full text-[var(--chat-muted)] transition hover:text-[var(--chat-text)]"
                 onPointerDown={startPreviewResize}
                 type="button"
@@ -6211,20 +6349,13 @@ export default function ChatPage() {
                 <span className="h-12 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)] transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
               </button>
             )}
-            {previewArtifact ? (
-              <ArtifactPreviewPane
-                artifact={previewArtifact}
-                onClose={dismissPreviewArtifact}
-              />
-            ) : (
-              activity
-            )}
+            {wideOpen ? renderSidePanel() : activity}
           </div>
         </aside>
       </div>
       {mobileActivityPortal}
       {mobilePreviewPortal}
-      {narrow && !mobilePanelOpen && !previewArtifact && (
+      {narrow && !mobilePanelOpen && !wideOpen && (
         <button
           className="fixed right-4 top-4 z-40 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-1.5 text-[12px] font-medium text-[var(--chat-muted-strong)] shadow-[0_12px_34px_-18px_rgba(0,0,0,0.7)]"
           onClick={() => setMobilePanelOpen(true)}

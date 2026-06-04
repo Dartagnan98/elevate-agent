@@ -1,0 +1,630 @@
+import {
+  AlertCircle,
+  Boxes,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Circle,
+  CircleDot,
+  File as FileIcon,
+  FileText,
+  Folder,
+  ListChecks,
+  Loader2,
+  PanelRight,
+  X,
+  XCircle,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
+
+import type { ToolEntry } from "@/components/ToolCall";
+import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
+import type { TodoItem, TodoStatus } from "@/lib/api-types";
+import { cn } from "@/lib/utils";
+
+export type SidePanelMode = "none" | "preview" | "plan" | "tasks" | "files";
+
+// ---------------------------------------------------------------------------
+// Shared shell — mirrors ArtifactPreviewPane so every side panel reads the
+// same: rounded-xl card, chat tokens, icon-badge header, soft-surface body.
+// ---------------------------------------------------------------------------
+
+function PanelShell({
+  icon,
+  title,
+  subtitle,
+  actions,
+  onClose,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle?: string;
+  actions?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="@container flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.04)_inset]">
+      <header className="flex shrink-0 items-start gap-2 px-3 pb-3 pt-3 @[28rem]:gap-3 @[28rem]:px-4 @[28rem]:pt-4">
+        <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface-soft)] text-[var(--chat-accent)] @[24rem]:flex">
+          {icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-[0.95rem] font-semibold leading-5">{title}</h2>
+          {subtitle ? (
+            <p className="mt-1 truncate text-[0.72rem] leading-4 text-[var(--chat-muted)]">
+              {subtitle}
+            </p>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {actions}
+          <Button
+            aria-label="Close panel"
+            className="h-7 w-7 rounded-[7px] p-0 @[24rem]:h-8 @[24rem]:w-8"
+            onClick={onClose}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto border-t border-[var(--chat-border)] bg-[var(--chat-surface-soft)]">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PanelEmpty({
+  icon,
+  title,
+  body,
+}: {
+  icon: ReactNode;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="flex h-full items-center justify-center p-6">
+      <div className="max-w-xs text-center">
+        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-accent)]">
+          {icon}
+        </div>
+        <div className="mt-3 text-sm font-semibold text-[var(--chat-muted-strong)]">
+          {title}
+        </div>
+        <p className="mt-1 text-xs leading-5 text-[var(--chat-muted)]">{body}</p>
+      </div>
+    </div>
+  );
+}
+
+function PanelError({ message }: { message: string }) {
+  return (
+    <div className="flex h-full items-center justify-center p-6">
+      <div className="max-w-sm rounded-[8px] border border-[color-mix(in_srgb,var(--chat-danger)_34%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_10%,var(--chat-bg))] p-4 text-sm text-[var(--chat-danger)]">
+        <div className="font-semibold">Could not load this panel</div>
+        <div className="mt-1 break-words text-xs opacity-90">{message}</div>
+      </div>
+    </div>
+  );
+}
+
+function PanelSectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="px-1 text-[11px] font-medium uppercase tracking-wider text-[var(--chat-muted)]">
+      {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Header selector — the "little icon" dropdown (Preview / Files / Background
+// tasks / Plan). No Diff, no Terminal.
+// ---------------------------------------------------------------------------
+
+const SELECTOR_ROWS: {
+  mode: SidePanelMode;
+  label: string;
+  icon: ReactNode;
+  hint?: string;
+}[] = [
+  { mode: "preview", label: "Preview", icon: <FileText className="h-4 w-4" />, hint: "⇧⌘P" },
+  { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" />, hint: "⇧⌘F" },
+  { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" /> },
+  { mode: "plan", label: "Plan", icon: <ListChecks className="h-4 w-4" /> },
+];
+
+export function SidePanelSelector({
+  mode,
+  onSelect,
+}: {
+  mode: SidePanelMode;
+  onSelect: (mode: SidePanelMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const toggle = useCallback(() => {
+    setOpen((prev) => {
+      if (prev) return false;
+      const rect = btnRef.current?.getBoundingClientRect();
+      if (rect) {
+        setCoords({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+      }
+      return true;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      if (btnRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={toggle}
+        aria-label="Side panels"
+        aria-expanded={open}
+        title="Side panels"
+        className={cn(
+          "icon-btn inline-flex items-center gap-0.5",
+          mode !== "none" && "text-[var(--chat-accent)]",
+        )}
+      >
+        <PanelRight className="h-3.5 w-3.5" />
+        <ChevronDown className="h-3 w-3 opacity-70" />
+      </button>
+      {open && coords
+        ? createPortal(
+            <div
+              className="fixed z-[80] min-w-[212px] overflow-hidden rounded-[10px] border border-[var(--chat-border)] bg-[var(--chat-surface)] p-1 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.03)_inset]"
+              style={{ top: coords.top, right: coords.right }}
+            >
+              {SELECTOR_ROWS.map((row) => {
+                const active = mode === row.mode;
+                return (
+                  <button
+                    key={row.mode}
+                    type="button"
+                    onClick={() => {
+                      onSelect(row.mode);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors",
+                      "text-[var(--chat-text)] hover:bg-[var(--chat-surface-strong)]",
+                      active && "bg-[var(--chat-surface-strong)]",
+                    )}
+                  >
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--chat-muted-strong)]">
+                      {row.icon}
+                    </span>
+                    <span className="flex-1 truncate">{row.label}</span>
+                    {row.hint ? (
+                      <span className="shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
+                        {row.hint}
+                      </span>
+                    ) : null}
+                    {active ? (
+                      <Check className="h-3.5 w-3.5 shrink-0 text-[var(--chat-accent)]" />
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Plan panel — the session todo list (source: GET /api/sessions/:id/todos).
+// ---------------------------------------------------------------------------
+
+const STATUS_GLYPH: Record<TodoStatus, { icon: ReactNode; tone: string }> = {
+  pending: { icon: <Circle className="h-4 w-4" />, tone: "text-[var(--chat-muted)]" },
+  in_progress: { icon: <CircleDot className="h-4 w-4" />, tone: "text-[var(--chat-accent)]" },
+  completed: { icon: <CheckCircle2 className="h-4 w-4" />, tone: "text-[var(--color-success)]" },
+  cancelled: { icon: <XCircle className="h-4 w-4" />, tone: "text-[var(--chat-muted)]" },
+};
+
+function PlanRow({ item }: { item: TodoItem }) {
+  const glyph = STATUS_GLYPH[item.status] ?? STATUS_GLYPH.pending;
+  return (
+    <li className="flex items-start gap-2.5 rounded-[7px] px-2.5 py-1.5 hover:bg-[var(--chat-surface-strong)]/50">
+      <span className={cn("mt-px shrink-0", glyph.tone)}>{glyph.icon}</span>
+      <span
+        className={cn(
+          "text-[13px] leading-5",
+          item.status === "completed" && "text-[var(--chat-muted)] line-through",
+          item.status === "cancelled" && "text-[var(--chat-muted)] line-through opacity-70",
+          item.status === "in_progress" && "font-medium text-[var(--chat-text)]",
+          item.status === "pending" && "text-[var(--chat-muted-strong)]",
+        )}
+      >
+        {item.content}
+      </span>
+    </li>
+  );
+}
+
+export function PlanPanel({
+  sessionId,
+  refreshSignal,
+  onClose,
+}: {
+  sessionId: string;
+  refreshSignal: number;
+  onClose: () => void;
+}) {
+  const [todos, setTodos] = useState<TodoItem[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setTodos([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    api
+      .getSessionTodos(sessionId)
+      .then((response) => {
+        if (cancelled) return;
+        setTodos(Array.isArray(response.todos) ? response.todos : []);
+        setError(null);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, refreshSignal]);
+
+  const total = todos?.length ?? 0;
+  const completed = todos?.filter((t) => t.status === "completed").length ?? 0;
+  const pct = total ? Math.round((completed / total) * 100) : 0;
+
+  return (
+    <PanelShell
+      icon={<ListChecks className="h-4.5 w-4.5" />}
+      title="Plan"
+      subtitle={total ? `${completed} of ${total} done` : "Task list for this session"}
+      onClose={onClose}
+    >
+      {total > 0 ? (
+        <div className="sticky top-0 z-10 border-b border-[var(--chat-border)] bg-[var(--chat-surface-soft)] px-4 pb-2.5 pt-3">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--chat-surface-strong)]">
+            <div
+              className="h-full rounded-full bg-[var(--chat-accent)] transition-all duration-300"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+      {loading && todos === null ? (
+        <div className="flex flex-col gap-3 p-4">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-4 w-full animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
+          ))}
+        </div>
+      ) : error ? (
+        <PanelError message={error} />
+      ) : total === 0 ? (
+        <PanelEmpty
+          icon={<ListChecks className="h-5 w-5" />}
+          title="No plan yet"
+          body="Claude writes the plan here as it works through a multi-step task."
+        />
+      ) : (
+        <ul className="flex flex-col gap-0.5 p-2">
+          {todos!.map((item, index) => (
+            <PlanRow key={item.id || `todo-${index}`} item={item} />
+          ))}
+        </ul>
+      )}
+    </PanelShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Background tasks panel — subagent / mixture / handoff activity, derived
+// purely from the tool stream (ToolEntry.status). No backend.
+// ---------------------------------------------------------------------------
+
+const BG_TOOL_LABELS: Record<string, string> = {
+  delegate: "Subagent",
+  mixture_of_agents: "Mixture of agents",
+  agent_handoff: "Handoff",
+};
+
+function relativeTime(ts?: number): string {
+  if (!ts) return "";
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function TaskStatusBadge({ status }: { status: ToolEntry["status"] }) {
+  if (status === "running") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-accent)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-accent)]">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Running
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-danger)]">
+        <AlertCircle className="h-3 w-3" />
+        Failed
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-muted-strong)]">
+      <Check className="h-3 w-3" />
+      Done
+    </span>
+  );
+}
+
+function TaskCard({ tool }: { tool: ToolEntry }) {
+  const label = BG_TOOL_LABELS[tool.name] ?? tool.name;
+  const detail = tool.context || tool.summary || "";
+  return (
+    <div className="rounded-[9px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <TaskStatusBadge status={tool.status} />
+        <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">{label}</span>
+        <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
+          {relativeTime(tool.completedAt ?? tool.startedAt)}
+        </span>
+      </div>
+      {detail ? (
+        <p className="mt-1.5 line-clamp-3 break-words text-[12px] leading-5 text-[var(--chat-muted-strong)]">
+          {detail}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function BackgroundTasksPanel({
+  tools,
+  onClose,
+}: {
+  tools: ToolEntry[];
+  onClose: () => void;
+}) {
+  const tasks = useMemo(
+    () => tools.filter((tool) => tool.name in BG_TOOL_LABELS).slice().reverse(),
+    [tools],
+  );
+  const running = tasks.filter((tool) => tool.status === "running");
+  const finished = tasks.filter((tool) => tool.status !== "running");
+
+  return (
+    <PanelShell
+      icon={<Boxes className="h-4.5 w-4.5" />}
+      title="Background tasks"
+      subtitle={tasks.length ? `${tasks.length} this session` : "Subagent + handoff activity"}
+      onClose={onClose}
+    >
+      {tasks.length === 0 ? (
+        <PanelEmpty
+          icon={<Boxes className="h-5 w-5" />}
+          title="No background tasks"
+          body="Subagent runs, mixtures, and handoffs from this session show up here."
+        />
+      ) : (
+        <div className="flex flex-col gap-3 p-3">
+          {running.length > 0 ? (
+            <div className="flex flex-col gap-2">
+              <PanelSectionLabel>Running</PanelSectionLabel>
+              <div className="flex flex-col gap-2">
+                {running.map((tool) => (
+                  <TaskCard key={tool.id} tool={tool} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {finished.length > 0 ? (
+            <div className="flex flex-col gap-2">
+              <PanelSectionLabel>Finished</PanelSectionLabel>
+              <div className="flex flex-col gap-2">
+                {finished.map((tool) => (
+                  <TaskCard key={tool.id} tool={tool} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preview (empty) — Preview always opens; this is the no-artifact state so the
+// panel still pops up instead of being a dead/disabled menu row.
+// ---------------------------------------------------------------------------
+
+export function EmptyPreviewPanel({ onClose }: { onClose: () => void }) {
+  return (
+    <PanelShell icon={<FileText className="h-4.5 w-4.5" />} title="Preview" onClose={onClose}>
+      <PanelEmpty
+        icon={<FileText className="h-5 w-5" />}
+        title="No preview"
+        body="Open a file from Files, or click a file the agent created, to preview it here."
+      />
+    </PanelShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Files panel — the files the agent actually worked on this session. Elevate
+// chats have no single workspace dir (agents touch scattered absolute paths),
+// so we derive the list from the session artifacts and group by directory.
+// Click a file to open it in Preview.
+// ---------------------------------------------------------------------------
+
+export interface SessionFile {
+  path: string;
+  title: string;
+}
+
+function dirOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i > 0 ? path.slice(0, i) : "/";
+}
+
+function shortDir(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 2) return path;
+  return `…/${parts.slice(-2).join("/")}`;
+}
+
+export function FilesPanel({
+  files,
+  onOpenFile,
+  onClose,
+}: {
+  files: SessionFile[];
+  onOpenFile: (path: string, name: string) => void;
+  onClose: () => void;
+}) {
+  const [filter, setFilter] = useState("");
+
+  const uniquePaths = useMemo(
+    () => new Set(files.filter((f) => f.path).map((f) => f.path)).size,
+    [files],
+  );
+
+  const groups = useMemo(() => {
+    const byPath = new Map<string, SessionFile>();
+    for (const file of files) {
+      if (file.path) byPath.set(file.path, file);
+    }
+    const query = filter.trim().toLowerCase();
+    const filtered = [...byPath.values()].filter(
+      (file) =>
+        !query ||
+        file.title.toLowerCase().includes(query) ||
+        file.path.toLowerCase().includes(query),
+    );
+    const map = new Map<string, SessionFile[]>();
+    for (const file of filtered) {
+      const dir = dirOf(file.path);
+      const arr = map.get(dir) ?? [];
+      arr.push(file);
+      map.set(dir, arr);
+    }
+    return [...map.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([dir, items]) => ({
+        dir,
+        items: items.sort((a, b) => a.title.localeCompare(b.title)),
+      }));
+  }, [files, filter]);
+
+  return (
+    <PanelShell
+      icon={<Folder className="h-4.5 w-4.5" />}
+      title="Files"
+      subtitle={
+        uniquePaths
+          ? `${uniquePaths} file${uniquePaths === 1 ? "" : "s"} this session`
+          : "Files the agent worked on"
+      }
+      onClose={onClose}
+    >
+      {uniquePaths > 0 ? (
+        <div className="sticky top-0 z-10 border-b border-[var(--chat-border)] bg-[var(--chat-surface-soft)] p-2">
+          <input
+            type="text"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter files…"
+            className="w-full rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-2.5 py-1.5 text-[12.5px] text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)] focus:border-[var(--chat-accent)]"
+          />
+        </div>
+      ) : null}
+      {uniquePaths === 0 ? (
+        <PanelEmpty
+          icon={<Folder className="h-5 w-5" />}
+          title="No files yet"
+          body="Files the agent reads or writes in this session show up here."
+        />
+      ) : groups.length === 0 ? (
+        <PanelEmpty
+          icon={<Folder className="h-5 w-5" />}
+          title="No matches"
+          body="No files match your filter."
+        />
+      ) : (
+        <div className="flex flex-col gap-3 p-2">
+          {groups.map((group) => (
+            <div key={group.dir} className="flex flex-col">
+              <div
+                className="flex items-center gap-1.5 px-1.5 py-1 text-[11px] font-medium text-[var(--chat-muted)]"
+                title={group.dir}
+              >
+                <Folder className="h-3 w-3 shrink-0" />
+                <span className="truncate">{shortDir(group.dir)}</span>
+              </div>
+              {group.items.map((file) => (
+                <button
+                  key={file.path}
+                  type="button"
+                  onClick={() => onOpenFile(file.path, file.title)}
+                  title={file.path}
+                  className="flex w-full items-center gap-2 rounded-[6px] py-1 pl-5 pr-2 text-left text-[12.5px] text-[var(--chat-muted-strong)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
+                >
+                  <FileIcon className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted)]" />
+                  <span className="truncate">{file.title}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </PanelShell>
+  );
+}

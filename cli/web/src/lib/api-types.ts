@@ -2126,6 +2126,39 @@ export interface SessionMessagesResponse {
   messages: SessionMessage[];
 }
 
+export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
+
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+}
+
+export interface SessionTodosResponse {
+  session_id: string;
+  todos: TodoItem[];
+  summary: {
+    total: number;
+    pending: number;
+    in_progress: number;
+    completed: number;
+    cancelled: number;
+  };
+}
+
+export interface FileTreeNode {
+  name: string;
+  type: "dir" | "file";
+  path: string;
+  children?: FileTreeNode[];
+}
+
+export interface FilesTreeResponse {
+  root: string;
+  name: string;
+  tree: FileTreeNode[];
+}
+
 export interface LogsResponse {
   file: string;
   lines: string[];
