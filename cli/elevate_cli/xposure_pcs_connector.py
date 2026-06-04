@@ -55,6 +55,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -123,7 +124,12 @@ def _scraper_output_path() -> Path:
 
 def _local_python_prefix() -> str:
     cli_root = Path(__file__).resolve().parents[1]
+    # Dev checkout has a .venv next to the CLI package; the packaged desktop app
+    # does not (its interpreter is the bundled runtime python running this code).
+    # Fall back to sys.executable so the command works on a real install.
     python = cli_root / ".venv" / "bin" / "python"
+    if not python.exists():
+        python = Path(sys.executable)
     return (
         f"PYTHONPATH={shlex.quote(str(cli_root))} "
         f"ELEVATE_PYTHON_SRC_ROOT={shlex.quote(str(cli_root))} "
