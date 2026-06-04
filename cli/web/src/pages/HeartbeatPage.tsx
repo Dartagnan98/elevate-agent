@@ -905,8 +905,8 @@ export default function HeartbeatPage() {
           <div className="space-y-1">
             <h2 className="text-sm font-semibold text-foreground">Surfaces</h2>
             <p className="text-xs text-muted-foreground">
-              Each surface runs its own work loop on a cadence and periodically
-              experiments to do it better — compounding what it learns.
+              Each surface runs its own work loop on a cadence, compounding what it
+              learns each run.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
