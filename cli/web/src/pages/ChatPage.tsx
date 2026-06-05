@@ -2604,6 +2604,11 @@ function artifactsFromSubagentEvent(
   return artifacts;
 }
 
+// Set once per full page load (app launch / reload). Lets us force a fresh
+// draft chat on startup without interfering with later in-app navigation
+// (sidebar clicks to resume a chat happen after this has already fired).
+let forcedNewChatThisLoad = false;
+
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
@@ -2618,7 +2623,10 @@ export default function ChatPage() {
   // lands. Initialized to true when the URL already disambiguates (resume
   // or new) — no probe needed there.
   const [autoResumeDecided, setAutoResumeDecided] = useState(
-    Boolean(resumeId || newChatId),
+    // On the very first mount of a fresh page load, keep the gate closed so the
+    // startup effect can force a new draft chat (even if the URL still carries a
+    // ?resume= from before the reload). After that, the URL disambiguates.
+    () => (forcedNewChatThisLoad ? Boolean(resumeId || newChatId) : false),
   );
   const [version, setVersion] = useState(0);
   // The chat key (resume/new/seed) that the currently-displayed messages were
@@ -3604,50 +3612,29 @@ export default function ChatPage() {
     writeQueue(persisted, queuedInputs);
   }, [queuedInputs, sessionId]);
 
-  // Auto-resume probe. When /chat mounts with neither ?resume= nor ?new=,
-  // pull the most-recent active TUI session and redirect into it via
-  // ?resume=<id>. If there is no recent candidate, release the gate so the
-  // bootstrap effect below proceeds with a fresh session.create.
-  // Lifecycle invariant: this effect runs at most once per mount.
+  // Startup behavior: on every full page load (app launch / reload) open a
+  // fresh draft chat — ready to type — instead of reopening the last session.
+  // It mints no row (a draft only persists once you send) and the sidebar still
+  // lets you reopen prior chats by hand. The module-level guard fires this once
+  // per page load, so client-side navigations (sidebar clicks -> ?resume=) are
+  // untouched.
   useEffect(() => {
     if (autoResumeDecided) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { sessions } = await api.getSessions(10, 0, {
-          includeTotal: false,
-        });
-        if (cancelled) return;
-        const now = Date.now() / 1000;
-        // Pick the most-recent TUI session with at least one message
-        // whose last activity was within the past 24h. Anything older
-        // is stale enough that a fresh start is a better default.
-        const recent = sessions.find((s) => {
-          if (s.source !== "tui") return false;
-          if ((s.message_count ?? 0) < 1) return false;
-          const lastActive = s.last_active ?? s.started_at ?? 0;
-          return now - lastActive < 86_400;
-        });
-        if (recent?.id) {
-          // Redirect into the recent session instead of minting a new one.
-          // The effect cleanup will fire and bootstrap will re-run with
-          // resumeId set, taking the normal resume code path.
-          const next = new URLSearchParams(searchParams);
-          next.set("resume", recent.id);
-          setSearchParams(next, { replace: true });
-          return;
-        }
-      } catch {
-        // Network/auth glitch — fall through and let bootstrap create a
-        // fresh session.  The sidebar still lets the user open prior
-        // chats by hand.
+    if (!forcedNewChatThisLoad) {
+      // First load of this page → force a fresh draft chat (drop any resume).
+      forcedNewChatThisLoad = true;
+      if (!newChatId) {
+        const next = new URLSearchParams();
+        next.set("new", String(Date.now()));
+        setSearchParams(next, { replace: true });
       }
-      if (!cancelled) setAutoResumeDecided(true);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [autoResumeDecided, searchParams, setSearchParams]);
+      setAutoResumeDecided(true);
+      return;
+    }
+    // A later bare /chat (no resume / no new): just release the gate so the
+    // bootstrap mints a fresh session instead of auto-resuming.
+    setAutoResumeDecided(true);
+  }, [autoResumeDecided, newChatId, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!autoResumeDecided) return;

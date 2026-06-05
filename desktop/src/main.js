@@ -26,7 +26,7 @@ autoUpdater.autoInstallOnAppQuit = true; // safety net if user ignores the toast
 const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
 const HOST = "127.0.0.1";
 const HOME = os.homedir();
-const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/hub";
+const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/chat";
 const HQ_BASE_URL = (process.env.ELEVATE_BACKEND_URL || "https://api.elevationrealestatehq.com").replace(/\/+$/, "");
 const LICENSE_PATH = path.join(HOME, ".elevate", "license.json");
 // Refresh access tokens with this much headroom before expiry. Mirrors
