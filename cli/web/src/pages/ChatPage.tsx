@@ -3175,7 +3175,9 @@ export default function ChatPage() {
       // deltas are sentence fragments, so judging each as "generic" is wrong.
       // Transient pills are dropped later, at the whole-trace level.
       const clean = isReasoning
-        ? text.replace(/\s+/g, " ").trim()
+        ? text // raw token-stream text — tokens carry their own spacing and are
+                // appended verbatim below. Collapsing \s+ and trimming here is what
+                // shredded words into "embell ishment" / "Let 's" / "non -manager".
         : displayStatusText(text).trim();
       if (!clean) return;
       if (kind === "status" && isGenericActivityText(clean)) {
@@ -3200,8 +3202,10 @@ export default function ChatPage() {
           last.messageId === messageId &&
           last.createdAt >= toolBoundaryAt
         ) {
-          const sep = /[.!?…]$/.test(last.text) ? " " : last.text.endsWith(" ") || clean.startsWith(" ") ? "" : " ";
-          const merged = (last.text + sep + clean).trim().slice(-2000);
+          // Append the token stream verbatim — its own whitespace IS the
+          // formatting. (Previously joined with a " " separator, which inserted
+          // spaces mid-word: "non -manager", "SQL -like", "over doing".)
+          const merged = (last.text + clean).slice(-2000);
           const next = prev.slice(0, -1);
           next.push({ ...last, text: merged });
           return next;
@@ -7804,18 +7808,28 @@ function buildBreakdownSteps(
   return groupConsecutiveTools(merged);
 }
 
-// Reasoning summaries from gpt-5.5 / codex lead with a bold header, e.g.
-// "**Considering contact entries** I'm about how a new number...". Show only
-// the substance after that header — handles the raw "**Header**" form and the
-// "Header**" form (where an upstream pass already ate the leading **).
-function stripReasoningHeader(text: string): string {
-  let t = text.replace(/^\s+/, "");
-  t = t.replace(/^\*\*([^*]+)\*\*\s*/, "");
-  const idx = t.indexOf("**");
-  if (idx > 0 && idx <= 80 && !/[.!?]/.test(t.slice(0, idx))) {
-    t = t.slice(idx + 2).replace(/^\s+/, "");
+// Reasoning summaries from gpt-5.5 / codex structure themselves with bold
+// section headers, e.g. "**Querying ad performance** I need to gather data...
+// **Creating ad script** I need to develop...". Each "**Header**" is a new
+// reasoning layer, so we split the blob into one section per header (instead of
+// one long run-on), and strip the ** markers so they never show as literal
+// asterisks. A leading run before the first header becomes its own section.
+type ReasoningSection = { header?: string; body: string };
+
+function splitReasoningSections(text: string): ReasoningSection[] {
+  const t = text.replace(/^\s+/, "");
+  if (!t) return [];
+  // Split on **Header** markers, capturing the header text (markers consumed).
+  const parts = t.split(/\*\*\s*([^*\n]+?)\s*\*\*/g);
+  const sections: ReasoningSection[] = [];
+  const lead = (parts[0] || "").trim();
+  if (lead) sections.push({ body: lead });
+  for (let i = 1; i < parts.length; i += 2) {
+    const header = (parts[i] || "").trim();
+    const body = (parts[i + 1] || "").trim();
+    if (header || body) sections.push({ header: header || undefined, body });
   }
-  return t.trim() || text;
+  return sections.length ? sections : [{ body: t.trim() }];
 }
 
 // A single tool shown inside an expanded group — static, no chevron of its
@@ -7857,12 +7871,22 @@ function BreakdownRow({ step }: { step: BreakdownStep }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
 
   if (step.type === "trace") {
-    // Render reasoning as a full, always-visible message — no "Thinking"
-    // label, no collapse. The agent narrates; the tool groups below stay
-    // as collapsed one-liners.
-    const body = stripReasoningHeader(step.text);
-    if (!body.trim()) return null;
-    return <div className="reasoning-message">{body}</div>;
+    // Render reasoning as full, always-visible messages — no "Thinking"
+    // label, no collapse. Each "**Header**" section becomes its own message
+    // (markers stripped) rather than one long run-on blob.
+    const sections = splitReasoningSections(step.text);
+    if (!sections.length) return null;
+    return (
+      <>
+        {sections.map((s, i) => (
+          <div key={`${step.id}-${i}`} className="reasoning-message">
+            {s.header && <strong>{s.header}</strong>}
+            {s.header && s.body ? "\n" : ""}
+            {s.body}
+          </div>
+        ))}
+      </>
+    );
   }
 
   if (step.type === "group") {

@@ -50,7 +50,6 @@ let mainWindow = null;
 let overlayWindow = null;
 let overlayWatcher = null;
 let backendProcess = null;
-let updateToastWindow = null;
 // Deep link (elevate://…) captured before the main window exists, replayed
 // once startup finishes. macOS can fire open-url before app.whenReady().
 let pendingDeepLink = null;
@@ -1119,88 +1118,12 @@ ipcMain.handle("auth:open-external", async (_event, target) => {
 // updater throws "no app-update.yml" without a real install.
 let updateState = { status: "idle", info: null, progress: null, error: null };
 
-// "checking" and "current" stay silent so the toast doesn't flash on every poll.
-const TOAST_VISIBLE_STATES = new Set([
-  "available",
-  "downloading",
-  "ready",
-  "error",
-]);
-// Once the user hits "Later", suppress re-pops for everything *except* a
-// transition into "ready" — that's a new ask (restart now) worth nagging.
-let toastDismissedFor = null; // status string the user dismissed under
-
 function broadcastUpdaterEvent(payload) {
-  const prevStatus = updateState.status;
   updateState = { ...updateState, ...payload };
+  // The floating "update available" toast window was removed — the in-app
+  // update card (App.tsx, fed by these same events) is the single update UI.
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("updater:event", updateState);
-  }
-  if (updateToastWindow && !updateToastWindow.isDestroyed()) {
-    updateToastWindow.webContents.send("updater:event", updateState);
-  }
-  // Reset suppression when we enter "ready" so the user always sees that ask.
-  if (updateState.status === "ready" && prevStatus !== "ready") {
-    toastDismissedFor = null;
-  }
-  if (
-    TOAST_VISIBLE_STATES.has(updateState.status) &&
-    toastDismissedFor !== updateState.status
-  ) {
-    showUpdateToast();
-  }
-}
-
-function createUpdateToast() {
-  if (updateToastWindow && !updateToastWindow.isDestroyed()) return;
-  const display = screen.getPrimaryDisplay();
-  const { x, y, width, height } = display.workArea;
-  // Bottom-right corner, with a small inset off the screen edge.
-  const w = 340;
-  const h = 150;
-  const margin = 16;
-  updateToastWindow = new BrowserWindow({
-    width: w,
-    height: h,
-    x: x + width - w - margin,
-    y: y + height - h - margin,
-    show: false,
-    frame: false,
-    transparent: true,
-    hasShadow: false,
-    resizable: false,
-    movable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    focusable: false,
-    backgroundColor: "#00000000",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-  updateToastWindow.setAlwaysOnTop(true, "floating");
-  if (process.platform === "darwin") {
-    updateToastWindow.setVisibleOnAllWorkspaces(true, {
-      visibleOnFullScreen: true,
-    });
-  }
-  updateToastWindow.loadFile(path.join(__dirname, "update-toast.html"));
-  updateToastWindow.on("closed", () => {
-    updateToastWindow = null;
-  });
-}
-
-function showUpdateToast() {
-  createUpdateToast();
-  if (!updateToastWindow) return;
-  if (!updateToastWindow.isVisible()) {
-    updateToastWindow.showInactive();
   }
 }
 
@@ -1272,16 +1195,6 @@ ipcMain.handle("updater:install", () => {
   }
   // setImmediate so the IPC reply is sent before quit kicks in.
   setImmediate(() => autoUpdater.quitAndInstall(false, true));
-  return { ok: true };
-});
-
-// Toast clicked "Later" — hide window + remember the current state so
-// background events (download-progress) don't re-pop it.
-ipcMain.handle("updater:dismiss-toast", () => {
-  toastDismissedFor = updateState.status;
-  if (updateToastWindow && !updateToastWindow.isDestroyed()) {
-    updateToastWindow.hide();
-  }
   return { ok: true };
 });
 
