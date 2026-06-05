@@ -8857,9 +8857,9 @@ class GatewayRunner:
         set_session_permission_mode(session_key, "plan")
         return (
             "🧭 Plan mode **ON** for this session — read-only. I'll research "
-            "and write a concrete plan; the runtime blocks edits, commands, "
-            "sends, and delegation until you approve. Type **/run** to approve "
-            "and execute."
+            "and write a concrete plan into the Plan panel; the runtime blocks "
+            "edits, commands, sends, and delegation until you approve. Use the "
+            "**Approve & run** button (or /run) to execute."
         )
 
     async def _handle_run_command(self, event: MessageEvent) -> str:
@@ -8873,8 +8873,7 @@ class GatewayRunner:
         set_session_permission_mode(session_key, "default")
         if was_plan:
             return (
-                "✅ Plan approved — plan mode **OFF**. Send 'go' (or re-send "
-                "your request) and I'll execute the plan."
+                "✅ Plan approved — plan mode **OFF**. Executing the plan now."
             )
         return "✅ Permission mode set to **default** for this session."
 

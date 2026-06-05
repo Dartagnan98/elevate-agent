@@ -5398,6 +5398,22 @@ export default function ChatPage() {
     [addArtifacts, appendMessage, artifacts, busy, createSessionForSend, draftChat, gw, hasReadyAttachment, messages, openArtifactPreview, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
 
+  // Claude-Code-style plan approval: leave plan mode and immediately execute the
+  // presented plan in one click (no manual /run, no "send 'go'").
+  const approvePlanAndRun = useCallback(async () => {
+    try {
+      await gw.request(
+        "config.set",
+        { key: "permission_mode", value: "default", session_id: sessionId },
+        8_000,
+      );
+    } catch {
+      /* non-fatal: the execute message below still flips behavior */
+    }
+    setPermissionModeId("default");
+    await submitPrompt("Approved — execute the plan now.");
+  }, [gw, sessionId, submitPrompt]);
+
   useEffect(() => {
     if (seededRef.current) return;
     if (!seedKey || !sessionId || state !== "open" || busy) return;
@@ -6354,6 +6370,28 @@ export default function ChatPage() {
               >
                 <span className="h-16 w-1 rounded-full bg-transparent" />
               </button>
+              {permissionModeId === "plan" &&
+                !busy &&
+                messages.length > 0 &&
+                messages[messages.length - 1]?.role === "assistant" &&
+                !!messages[messages.length - 1]?.content?.trim() && (
+                  <div className="mb-2 flex items-center gap-3 rounded-[10px] border border-[color-mix(in_srgb,var(--chat-accent)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-bg))] px-3 py-2">
+                    <Eye className="h-4 w-4 shrink-0 text-[var(--chat-accent)]" />
+                    <div className="min-w-0 flex-1 text-[12.5px] leading-snug text-[var(--chat-text)]">
+                      <span className="font-medium">Plan ready.</span>{" "}
+                      <span className="text-[var(--chat-muted-strong)]">
+                        Reply to refine it, or approve to run.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void approvePlanAndRun()}
+                      className="shrink-0 rounded-[7px] bg-[var(--chat-accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--chat-bg)] transition-opacity hover:opacity-90"
+                    >
+                      Approve &amp; run
+                    </button>
+                  </div>
+                )}
               {queuedInputs.length ? (
                 <QueuedInputStrip
                   busy={busy}

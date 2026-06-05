@@ -4736,8 +4736,9 @@ class AIAgent:
             "approach, the key decision/trade-off, and anything you need "
             "confirmed. Do NOT restate the full step list in chat — it already "
             "shows in the Plan panel.\n"
-            "- End the brief by telling the user to review the plan and type "
-            "**/run** to approve and execute."
+            "- End the brief by saying the plan is ready for review. The user "
+            "approves it with the **Approve & run** button (you do not need to "
+            "ask them to type a command); when approved you'll execute it."
         )
 
     def _build_system_prompt(self, system_message: str = None) -> str:
