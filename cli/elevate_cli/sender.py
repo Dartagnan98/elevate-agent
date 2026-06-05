@@ -305,6 +305,15 @@ def _send_agent_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 _CHAT_DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# macOS SMS / iMessage transport — CANONICAL PATH. Any Mac-specific phone send
+# goes through _messages_native_dispatch below; do not hand-roll transport
+# decisions or osascript sends elsewhere. Full decision tree, the rationale for
+# every choice, the liabilities (private IDS API, imsg dependency, FDA flakiness,
+# SIP, carrier compliance), and the step-by-step REPAIR RUNBOOK for when a macOS
+# update breaks it live in: cli/docs/mac-sms-transport.md  ← READ THAT FIRST.
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Outreach-safe default transport. SMS reaches every phone (iPhone + Android);
 # iMessage silently fails for non-Apple numbers. For COLD outreach to new
 # numbers there is no message history to read, so the only safe default is SMS.
