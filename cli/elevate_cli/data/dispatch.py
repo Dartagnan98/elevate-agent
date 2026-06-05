@@ -77,39 +77,84 @@ _ADMIN_WORKER_SKILL_REFS = {
     "buyer-cps": "real-estate-admin/webforms",
     "deal-matcher": _ADMIN_DEAL_MATCHER_SKILL,
     "closing-admin": "real-estate-admin/closing-admin",
+    "cma": "real-estate-admin/cma-generator",
+    "cma-generator": "real-estate-admin/cma-generator",
     "listing-build": "real-estate-admin/listing-build",
+    "lofty-crm-client-contacts": "real-estate-admin/lofty-crm-client-contacts",
     "marketing": "real-estate-admin/marketing",
+    "matrix-incomplete-listing": "real-estate-admin/matrix-incomplete-listing",
     "mlc": "real-estate-admin/mlc",
     "offer-review": "real-estate-admin/offer-review",
     "photo-cleanup": "real-estate-admin/photo-cleanup",
+    "pre-cma-dashboard-setup": "real-estate-admin/pre-cma-dashboard-setup",
     "property-lookup": "real-estate-admin/property-lookup",
+    "seller-package": "real-estate-admin/seller-package",
     "signing-package": "real-estate-admin/signing-package",
     "skyslope-sync": "real-estate-admin/skyslope-sync",
     "subject-removal": "real-estate-admin/subject-removal",
 }
 
 
+# Canonical listing flow (stage index == deal currentStage == registry to_stage):
+#   0 Pre-CMA · 1 CMA / Evaluation · 2 Listing Intake · 3 SkySlope & Matrix Prep
+#   4 Marketing Go · 5 Listing Live · 6 Accepted Offer · 7 Condition Removal · 8 Closed
+# Buyer flow: 0 Offer Prep · 1 Accepted · 2 Conditions · 3 Subjects Off.
+# Only skills that exist under cli/skills/real-estate-admin are wired. Stage 0
+# (Pre-CMA) has no auto-launch yet — its setup/verification work is manual until
+# the pre-cma-dashboard-setup / lofty-crm-client-contacts skills ship.
 _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
-        "name": "S1 Collect listing info for MLC",
+        "name": "Pre-CMA: Set up listing dashboard",
         "trigger": "stage_entry",
-        "skill": "real-estate-admin/mlc",
-        "skill_args": {"mode": "intake"},
+        "skill": "real-estate-admin/pre-cma-dashboard-setup",
+        "side": "listing",
+        "to_stage": 0,
+        "priority": 90,
+    },
+    {
+        "name": "Pre-CMA: Verify CRM contact",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/lofty-crm-client-contacts",
+        "side": "listing",
+        "to_stage": 0,
+        "priority": 80,
+    },
+    {
+        "name": "CMA: Generate evaluation",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/cma-generator",
         "side": "listing",
         "to_stage": 1,
         "priority": 90,
     },
     {
-        "name": "S2 Prepare MLC package",
+        "name": "Listing Intake: Collect MLC info",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/mlc",
-        "skill_args": {"mode": "documents"},
+        "skill_args": {"mode": "intake"},
         "side": "listing",
         "to_stage": 2,
         "priority": 90,
     },
     {
-        "name": "S2 Sync signing status",
+        "name": "Listing Intake: Prepare MLC documents",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/mlc",
+        "skill_args": {"mode": "documents"},
+        "side": "listing",
+        "to_stage": 2,
+        "priority": 85,
+    },
+    {
+        "name": "Listing Intake: Match inbound docs",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/deal-matcher",
+        "side": "listing",
+        "to_stage": 2,
+        "priority": 75,
+    },
+    {
+        "name": "Listing Intake: Sync MLC signing",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/signing-package",
         "skill_args": {
@@ -123,39 +168,65 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "priority": 80,
     },
     {
-        "name": "S2 Check SkySlope opening docs",
+        "name": "SkySlope & Matrix: Sync opening docs",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/skyslope-sync",
-        "side": "listing",
-        "to_stage": 2,
-        "priority": 70,
-    },
-    {
-        "name": "S3 Prepare listing-ready photos",
-        "trigger": "stage_entry",
-        "skill": "real-estate-admin/photo-cleanup",
         "side": "listing",
         "to_stage": 3,
         "priority": 90,
     },
     {
-        "name": "S4 Research prior listing context",
+        "name": "SkySlope & Matrix: Research property",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/property-lookup",
+        "side": "listing",
+        "to_stage": 3,
+        "priority": 80,
+    },
+    {
+        "name": "SkySlope & Matrix: Draft incomplete listing",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/matrix-incomplete-listing",
+        "skill_args": {"mode": "draft"},
+        "side": "listing",
+        "to_stage": 3,
+        "priority": 70,
+    },
+    {
+        "name": "Marketing Go: Prepare photos",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/photo-cleanup",
+        "side": "listing",
+        "to_stage": 4,
+        "priority": 90,
+    },
+    {
+        "name": "Marketing Go: Build MLS package",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/listing-build",
         "side": "listing",
         "to_stage": 4,
         "priority": 85,
     },
     {
-        "name": "S4 Build MLS launch package",
+        "name": "Marketing Go: Prepare launch package",
         "trigger": "stage_entry",
-        "skill": "real-estate-admin/listing-build",
+        "skill": "real-estate-admin/marketing",
         "side": "listing",
         "to_stage": 4,
-        "priority": 80,
+        "priority": 75,
     },
     {
-        "name": "S5 Run listing-live marketing",
+        "name": "Marketing Go: Upload final photos to Matrix",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/matrix-incomplete-listing",
+        "skill_args": {"mode": "photos"},
+        "side": "listing",
+        "to_stage": 4,
+        "priority": 70,
+    },
+    {
+        "name": "Listing Live: Run marketing",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/marketing",
         "side": "listing",
@@ -163,7 +234,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "priority": 80,
     },
     {
-        "name": "S6 Review accepted-offer package",
+        "name": "Accepted Offer: Review package",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/offer-review",
         "side": "listing",
@@ -171,7 +242,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "priority": 90,
     },
     {
-        "name": "S7 Run subject-removal admin check",
+        "name": "Condition Removal: Admin check",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/subject-removal",
         "side": "listing",
@@ -179,7 +250,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "priority": 90,
     },
     {
-        "name": "S7 Sync subject-removal signing",
+        "name": "Condition Removal: Sync signing",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/signing-package",
         "skill_args": {
@@ -193,7 +264,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "priority": 70,
     },
     {
-        "name": "S8 Run closing admin check",
+        "name": "Closed: Run closing admin",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/closing-admin",
         "side": "listing",
@@ -201,32 +272,103 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "priority": 90,
     },
     {
-        "name": "S9 Verify SkySlope closeout",
+        "name": "Closed: Verify SkySlope closeout",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/skyslope-sync",
         "side": "listing",
-        "to_stage": 9,
-        "priority": 90,
+        "to_stage": 8,
+        "priority": 80,
     },
     {
-        "name": "S9 Create sold update and nurture handoff",
+        "name": "Closed: Sold update and nurture",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/marketing",
         "side": "listing",
-        "to_stage": 9,
+        "to_stage": 8,
         "priority": 70,
     },
     {
-        "name": "Buyer S4 Prepare CPS draft",
+        "name": "Buyer Offer Prep: Prepare CPS draft",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/webforms",
         "skill_args": {"mode": "draft", "sendPolicy": "draft_only"},
         "side": "buyer",
-        "to_stage": 4,
+        "to_stage": 0,
         "priority": 90,
         "approval_required": True,
     },
+    {
+        "name": "Buyer Offer Prep: Match inbound docs",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/deal-matcher",
+        "side": "buyer",
+        "to_stage": 0,
+        "priority": 75,
+    },
+    {
+        "name": "Buyer Accepted: Review offer package",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/offer-review",
+        "side": "buyer",
+        "to_stage": 1,
+        "priority": 90,
+    },
+    {
+        "name": "Buyer Conditions: Admin check",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/subject-removal",
+        "side": "buyer",
+        "to_stage": 2,
+        "priority": 90,
+    },
+    {
+        "name": "Buyer Conditions: Sync signing",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/signing-package",
+        "skill_args": {
+            "mode": "sync",
+            "provider": "digisign",
+            "packageKind": "subject_removal",
+            "sendPolicy": "approval_required",
+        },
+        "side": "buyer",
+        "to_stage": 2,
+        "priority": 70,
+        "approval_required": True,
+    },
+    {
+        "name": "Buyer Subjects Off: Run closing admin",
+        "trigger": "stage_entry",
+        "skill": "real-estate-admin/closing-admin",
+        "side": "buyer",
+        "to_stage": 3,
+        "priority": 90,
+    },
 )
+
+
+# Maps every pre-realignment default action name to its canonical successor so
+# existing installs converge by *renaming the row in place* (preserving its id
+# and CASCADE-protected run history) before the name-keyed seed corrects the
+# row's to_stage / skill. Without this the seed would orphan the old rows and
+# create duplicates. Idempotent: rows already renamed or absent are skipped.
+_LEGACY_ACTION_RENAMES: dict[str, str] = {
+    "S1 Collect listing info for MLC": "Listing Intake: Collect MLC info",
+    "S2 Prepare MLC package": "Listing Intake: Prepare MLC documents",
+    "S2 Sync signing status": "Listing Intake: Sync MLC signing",
+    "S2 Check SkySlope opening docs": "SkySlope & Matrix: Sync opening docs",
+    "S3 Prepare listing-ready photos": "Marketing Go: Prepare photos",
+    "S4 Research prior listing context": "SkySlope & Matrix: Research property",
+    "S4 Build MLS launch package": "Marketing Go: Build MLS package",
+    "S5 Run listing-live marketing": "Listing Live: Run marketing",
+    "S6 Review accepted-offer package": "Accepted Offer: Review package",
+    "S7 Run subject-removal admin check": "Condition Removal: Admin check",
+    "S7 Sync subject-removal signing": "Condition Removal: Sync signing",
+    "S8 Run closing admin check": "Closed: Run closing admin",
+    "S9 Verify SkySlope closeout": "Closed: Verify SkySlope closeout",
+    "S9 Create sold update and nurture handoff": "Closed: Sold update and nurture",
+    "Buyer S4 Prepare CPS draft": "Buyer Offer Prep: Prepare CPS draft",
+}
 
 
 def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
@@ -480,8 +622,31 @@ def create_action(
     return get_action(conn, aid)  # type: ignore[return-value]
 
 
+def _apply_legacy_action_renames(conn: sqlite3.Connection) -> None:
+    """Rename pre-realignment default rows in place so the name-keyed seed lands
+    on the existing row (keeping its id + run history) instead of duplicating it."""
+    rows = conn.execute("SELECT id, name FROM admin_action_registry").fetchall()
+    by_name = {str(row["name"]).strip().lower(): row["id"] for row in rows}
+    for old_name, new_name in _LEGACY_ACTION_RENAMES.items():
+        old_id = by_name.get(old_name.strip().lower())
+        if old_id is None:
+            continue  # fresh install or already migrated
+        if new_name.strip().lower() in by_name:
+            # Canonical row already present — drop the stale legacy duplicate.
+            try:
+                delete_action(conn, old_id)
+            except LookupError:
+                pass
+            by_name.pop(old_name.strip().lower(), None)
+            continue
+        update_action(conn, old_id, name=new_name)
+        by_name.pop(old_name.strip().lower(), None)
+        by_name[new_name.strip().lower()] = old_id
+
+
 def ensure_default_admin_actions(conn: sqlite3.Connection) -> dict[str, Any]:
     """Idempotently seed the production listing phase action registry."""
+    _apply_legacy_action_renames(conn)
     existing_rows = conn.execute("SELECT * FROM admin_action_registry").fetchall()
     existing_by_name = {str(row["name"]).strip().lower(): _row_to_action(row) for row in existing_rows}
     created: list[dict[str, Any]] = []

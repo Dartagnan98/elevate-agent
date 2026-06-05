@@ -66,18 +66,22 @@ _FIELD_API_NAMES = {
     "sale_of_buyers_property": "saleOfBuyersProperty",
 }
 _WORKFLOW_STAGE_COMPLETE_RE = re.compile(r"^workflow_stage_(\d+)_complete$")
+# Checklist-driven auto-advance, keyed by the completed stage. Stage 5 (Listing
+# Live) is intentionally absent: a live listing only moves to Accepted Offer (6)
+# on the accepted-offer signal, never just because its marketing tasks are done.
+# Stage 8 (Closed) is terminal.
 _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {
     1: 2,
     2: 3,
     3: 4,
-    4: 6,
+    4: 5,
     6: 7,
     7: 8,
-    8: 9,
-    9: 10,
 }
 _WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
-_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7, 8, 9}
+# Stages whose resolved phase gate may auto-advance the deal when clear. 5 is
+# excluded (offer-driven, handled by _advance_on_accepted_offer); 8 is terminal.
+_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7}
 _CHECKLIST_TRUE_VALUES = {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
 _CHECKLIST_FALSE_VALUES = {"0", "false", "no", "n", "unchecked", "todo", "incomplete", "not done", ""}
 
@@ -1216,7 +1220,7 @@ def _maybe_advance_from_workflow_signal(
 ) -> dict[str, Any] | None:
     try:
         if field in _WORKFLOW_ACCEPTED_OFFER_FIELDS and _present_signal(value):
-            return _move_if_current_stage(conn, deal_id, current_stage=6, to_stage=7, actor=actor)
+            return _advance_on_accepted_offer(conn, deal_id, actor=actor)
     except DealPhaseGateBlocked:
         return None
     completed_stage = _workflow_stage_complete_stage(field)
@@ -1228,6 +1232,31 @@ def _maybe_advance_from_workflow_signal(
     try:
         return _move_if_current_stage(conn, deal_id, current_stage=completed_stage, to_stage=next_stage, actor=actor)
     except DealPhaseGateBlocked:
+        return None
+
+
+def _advance_on_accepted_offer(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    actor: str,
+) -> dict[str, Any] | None:
+    """Move a live listing (stage 5) into Accepted Offer (6) on an accepted-offer
+    signal, but only once the listing-live phase gate is otherwise clear."""
+    try:
+        context = get_deal_context(conn, deal_id)
+    except Exception:
+        return None
+    deal = context.get("deal") or {}
+    if int(deal.get("currentStage") or 0) != 5:
+        return None
+    gate = ((context.get("dealFlow") or {}).get("gate") or {})
+    next_stage = gate.get("nextStage")
+    if not gate.get("canAdvance") or next_stage is None:
+        return None
+    try:
+        return move_deal_stage(conn, deal_id, to_stage=int(next_stage), actor=actor, gate_checked=True)
+    except Exception:
         return None
 
 
@@ -1499,7 +1528,7 @@ def set_deal_fields(
     moved = None
     if _present_signal(updates.get("offer_accepted_at")):
         try:
-            moved = _move_if_current_stage(conn, deal_id, current_stage=6, to_stage=7, actor=actor)
+            moved = _advance_on_accepted_offer(conn, deal_id, actor=actor)
         except DealPhaseGateBlocked:
             moved = None
     if moved is None:

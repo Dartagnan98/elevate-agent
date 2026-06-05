@@ -712,6 +712,29 @@ function createWindow() {
     }
   });
 
+  // Native right-click menu (copy / paste / cut / select-all). Electron shows
+  // no context menu by default, so wire one up like a normal mac app.
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const editFlags = params.editFlags || {};
+    const hasSelection = (params.selectionText || "").trim().length > 0;
+    const items = [];
+    if (params.isEditable) {
+      items.push(
+        { role: "cut", enabled: !!editFlags.canCut },
+        { role: "copy", enabled: !!editFlags.canCopy },
+        { role: "paste", enabled: !!editFlags.canPaste },
+        { type: "separator" },
+        { role: "selectAll" },
+      );
+    } else {
+      if (hasSelection) items.push({ role: "copy" }, { type: "separator" });
+      items.push({ role: "selectAll" });
+    }
+    if (items.length) {
+      Menu.buildFromTemplate(items).popup({ window: mainWindow });
+    }
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(backendUrl)) {
       return { action: "allow" };

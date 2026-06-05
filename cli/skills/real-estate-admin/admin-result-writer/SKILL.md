@@ -11,9 +11,18 @@ metadata:
 
 # Admin Result Writer
 
-Use this contract at the end of every Admin workflow run.
+Use this contract at the end of every Admin workflow, however it was invoked.
 
-Write one result for one verified `deal_id` and `run_id`. Include a stable `idempotencyKey` so retries do not duplicate artifacts, checklist updates, or next tasks.
+Write one result for one verified `deal_id`. Include a stable `idempotencyKey` so retries do not duplicate artifacts, checklist updates, or next tasks. `run_id` is optional: present for background/stage runs, absent for live sessions (see "Where this writes").
+
+## Where this writes — the kanban board is the source of truth
+
+The result always lands on the deal's kanban card. How it gets there depends on how the skill was invoked:
+
+- **Background / stage run (has a `run_id`):** close the run through its result callback. The callback applies checklist updates, fields, and artifacts to the deal and advances the stage when the gate clears. Free-form questions reach the realtor on the Admin agent's async lane.
+- **Live session (no `run_id`):** you are talking to the realtor directly. Hold the back-and-forth in that session — ask, confirm, iterate — then finalize through the **`admin_deal`** tool so the SAME result lands on the card: `set_fields` for named fields, `set_checklist` for cells, `attach` for artifacts, and `advance` when the gate is clear. If the deal entered the stage on its own it has a pending run that blocks the gate — close it with `admin_deal` `complete_run` (which applies checklist_updates + artifacts and auto-advances), not `force`. The card must reflect the outcome before you consider the work done.
+
+Either way the end state is identical: the kanban shows the completed checklist cells, the attached artifacts, and the new stage. A session conversation that ends without syncing the deal is unfinished — never leave the result only in the chat.
 
 Result shape:
 
@@ -53,7 +62,7 @@ On retry, reuse the same key so SQLite can update or ignore the existing result 
 
 ## Human Prompts
 
-Use `waiting_human` when the next safe action depends on the realtor. The prompt should be short enough for Telegram and structured enough for the UI:
+Use `waiting_human` when the next safe action depends on the realtor. In a **live session**, ask the prompt inline and wait for the answer, then finalize. In a **background run**, the prompt surfaces on the dashboard (approvals + the deal card) and the realtor's answer comes back on the Admin agent's async lane. Keep it short enough for the lane and structured enough for the UI:
 
 ```json
 {

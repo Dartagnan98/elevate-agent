@@ -9,11 +9,9 @@ import {
   Globe,
   KeyRound,
   LogOut,
-  Moon,
   RotateCw,
   Settings,
   Sparkles,
-  Sun,
   User,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -22,7 +20,6 @@ import { cn } from "@/lib/utils";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import { useI18n } from "@/i18n";
-import { useTheme } from "@/themes";
 
 export function SidebarUserPill() {
   const navigate = useNavigate();
@@ -30,7 +27,6 @@ export function SidebarUserPill() {
   const { activeAction, isBusy, isRunning, pendingAction, runAction, updateStatus } =
     useSystemActions();
   const { locale, setLocale } = useI18n();
-  const { themeName, setTheme } = useTheme();
   const [license, setLicense] = useState<LicenseStatusResponse | null>(null);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -105,8 +101,6 @@ export function SidebarUserPill() {
   const updateBehind = updateStatus?.behind ?? 0;
   const desktopManagedUpdate =
     updateStatus?.error === "desktop_app_managed_update";
-  const themeIsDark = themeName !== "light";
-  const themeLabel = themeIsDark ? "Dark" : "Light";
   const localeLabel = locale === "zh" ? "中文" : "EN";
   const restartBusy =
     pendingAction === "restart" || (activeAction === "restart" && isRunning);
@@ -200,14 +194,7 @@ export function SidebarUserPill() {
 
           <div className="user-menu-section">
             <div className="user-menu-toggles">
-              <button
-                type="button"
-                className={cn("user-menu-toggle", themeIsDark && "active")}
-                onClick={() => setTheme(themeIsDark ? "light" : "dark")}
-              >
-                {themeIsDark ? <Moon /> : <Sun />}
-                <span>{themeLabel}</span>
-              </button>
+              {/* Light mode removed — app is dark-only. */}
               <button
                 type="button"
                 className="user-menu-toggle"

@@ -60,8 +60,10 @@ _ELEVATE_CORE_TOOLS = [
     "send_message",
     # First-class Elevate data tools — one-call snapshots of the realtor's own
     # operational data so the agent answers "where are my deals/leads / what's
-    # pending" from the store instead of falling back to terminal SQL. Read-only.
-    "deals_overview", "leads_overview", "elevate_db",
+    # pending" from the store instead of falling back to terminal SQL.
+    # deals_overview/leads_overview are read-only; admin_deal writes a single
+    # deal's kanban card so an in-session skill finalize syncs to the board.
+    "deals_overview", "leads_overview", "elevate_db", "admin_deal",
     # Composio integration hub introspection (gated on COMPOSIO_API_KEY via check_fn)
     "composio",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

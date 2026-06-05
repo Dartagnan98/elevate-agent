@@ -17,10 +17,12 @@ from elevate_cli.data import (
     create_action,
     create_deal,
     drain_queued_action_runs,
+    ensure_default_admin_actions,
     evaluate_dispatch,
     get_admin_setup,
     import_exp_agent_centre,
     list_action_runs,
+    list_actions,
     move_deal_stage,
     mark_stale_action_runs,
     record_date_trigger_firing,
@@ -499,7 +501,14 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     body = first.json()
     created_skills = {item["skill"] for item in body["created"]}
     assert {
+        "real-estate-admin/pre-cma-dashboard-setup",
+        "real-estate-admin/lofty-crm-client-contacts",
+        "real-estate-admin/cma-generator",
         "real-estate-admin/mlc",
+        "real-estate-admin/deal-matcher",
+        "real-estate-admin/skyslope-sync",
+        "real-estate-admin/property-lookup",
+        "real-estate-admin/matrix-incomplete-listing",
         "real-estate-admin/photo-cleanup",
         "real-estate-admin/listing-build",
         "real-estate-admin/offer-review",
@@ -508,18 +517,35 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
         "real-estate-admin/webforms",
     }.issubset(created_skills)
     created_names = {item["name"]: item for item in body["created"]}
-    assert created_names["S1 Collect listing info for MLC"]["skillArgs"] == {"mode": "intake"}
-    assert created_names["S2 Prepare MLC package"]["skillArgs"] == {"mode": "documents"}
-    buyer_cps = created_names["Buyer S4 Prepare CPS draft"]
+    # Pre-CMA (stage 0) now auto-launches dashboard setup + CRM contact verification.
+    assert created_names["Pre-CMA: Set up listing dashboard"]["toStage"] == 0
+    assert created_names["Pre-CMA: Verify CRM contact"]["toStage"] == 0
+    # CMA generates at stage 1, MLC intake/documents land at Listing Intake (stage 2).
+    assert created_names["CMA: Generate evaluation"]["toStage"] == 1
+    assert created_names["Listing Intake: Collect MLC info"]["skillArgs"] == {"mode": "intake"}
+    assert created_names["Listing Intake: Collect MLC info"]["toStage"] == 2
+    assert created_names["Listing Intake: Prepare MLC documents"]["skillArgs"] == {"mode": "documents"}
+    # Matrix listing is drafted at SkySlope & Matrix Prep (3) and finished at Marketing Go (4).
+    assert created_names["SkySlope & Matrix: Draft incomplete listing"]["skillArgs"] == {"mode": "draft"}
+    assert created_names["SkySlope & Matrix: Draft incomplete listing"]["toStage"] == 3
+    assert created_names["Marketing Go: Upload final photos to Matrix"]["skillArgs"] == {"mode": "photos"}
+    assert created_names["Marketing Go: Upload final photos to Matrix"]["toStage"] == 4
+    buyer_cps = created_names["Buyer Offer Prep: Prepare CPS draft"]
     assert buyer_cps["skill"] == "real-estate-admin/webforms"
     assert buyer_cps["side"] == "buyer"
-    assert buyer_cps["toStage"] == 4
+    assert buyer_cps["toStage"] == 0
     assert buyer_cps["approvalRequired"] is True
     assert buyer_cps["skillArgs"] == {"mode": "draft", "sendPolicy": "draft_only"}
+    # Buyer pipeline is wired across all four buyer stages.
+    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {0, 1, 2, 3}
+    assert created_names["Buyer Accepted: Review offer package"]["skill"] == "real-estate-admin/offer-review"
+    assert created_names["Buyer Subjects Off: Run closing admin"]["skill"] == "real-estate-admin/closing-admin"
     assert "gmail-doc-router" not in created_skills
     assert "seller-update" not in created_skills
     assert body["updated"] == []
-    assert all(item["approvalRequired"] is False for item in body["created"] if item["name"] != "Buyer S4 Prepare CPS draft")
+    # Only the contract/signing sends are approval-gated; everything else runs unattended.
+    approval_gated = {item["name"] for item in body["created"] if item["approvalRequired"]}
+    assert approval_gated == {"Buyer Offer Prep: Prepare CPS draft", "Buyer Conditions: Sync signing"}
 
     second = client.post("/api/admin/actions/defaults")
     assert second.status_code == 200, second.text
@@ -528,9 +554,11 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert second.json()["count"] == body["count"]
 
 
-def test_seed_default_admin_actions_updates_stale_default_rows(client):
+def test_seed_default_admin_actions_migrates_legacy_rows_in_place(client):
+    # A pre-realignment row (old name, old stage) must be renamed in place —
+    # same id, no duplicate — then corrected to the canonical stage/args.
     with connect() as conn:
-        create_action(
+        legacy = create_action(
             conn,
             name="S2 Prepare MLC package",
             trigger="stage_entry",
@@ -540,14 +568,119 @@ def test_seed_default_admin_actions_updates_stale_default_rows(client):
             priority=1,
             approval_required=True,
         )
+        legacy_id = legacy["id"]
 
     resp = client.post("/api/admin/actions/defaults")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    updated = {item["name"]: item for item in body["updated"]}
-    assert updated["S2 Prepare MLC package"]["priority"] == 90
-    assert updated["S2 Prepare MLC package"]["approvalRequired"] is False
-    assert updated["S2 Prepare MLC package"]["skillArgs"] == {"mode": "documents"}
+
+    with connect() as conn:
+        rows = {row["name"]: row for row in list_actions(conn)}
+    # Old name retired, canonical name present, id preserved (run history intact).
+    assert "S2 Prepare MLC package" not in rows
+    migrated = rows["Listing Intake: Prepare MLC documents"]
+    assert migrated["id"] == legacy_id
+    assert migrated["toStage"] == 2
+    assert migrated["priority"] == 85
+    assert migrated["approvalRequired"] is False
+    assert migrated["skillArgs"] == {"mode": "documents"}
+    # No stale "S-numbered" defaults survive the migration.
+    assert not any(name.startswith("S1 ") or name.startswith("S9 ") for name in rows)
+
+
+def test_seeded_defaults_launch_matrix_and_buyer_stages():
+    # Seed the canonical registry, then confirm the new wiring actually fires:
+    # SkySlope & Matrix Prep (listing stage 3) and the buyer pipeline.
+    _complete_admin_setup()
+    with connect() as conn:
+        ensure_default_admin_actions(conn)
+        listing = create_deal(conn, title="Matrix listing", side="listing", actor="human:test", current_stage=2)
+        move_deal_stage(conn, listing["id"], to_stage=3, actor="human:test", force=True)
+        listing_skills = {run["skill"] for run in list_action_runs(conn, deal_id=listing["id"])}
+    assert "real-estate-admin/skyslope-sync" in listing_skills
+    assert "real-estate-admin/property-lookup" in listing_skills
+    assert "real-estate-admin/matrix-incomplete-listing" in listing_skills
+
+    with connect() as conn:
+        buyer = create_deal(conn, title="Buyer deal", side="buyer", actor="human:test", current_stage=0)
+        move_deal_stage(conn, buyer["id"], to_stage=1, actor="human:test", force=True)
+        buyer_runs = list_action_runs(conn, deal_id=buyer["id"])
+    assert any(run["skill"] == "real-estate-admin/offer-review" for run in buyer_runs)
+
+
+def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
+    # A skill invoked in a live session finalizes the deal through the admin_deal
+    # tool, mirroring the background run-result callback: the kanban card syncs
+    # (fields + checklist + artifact) and the stage advances.
+    import json
+
+    monkeypatch.setattr("elevate_cli.access.is_entitlement_active", lambda *a, **k: True)
+    from tools.admin_deal_tool import _admin_deal_handler
+
+    _complete_admin_setup()
+    with connect() as conn:
+        ensure_default_admin_actions(conn)
+        deal = create_deal(conn, title="CMA in session", side="listing", actor="human:test", current_stage=1)
+        did = deal["id"]
+
+    # Entering CMA auto-launched a blocking run, so the gate is held.
+    shown = json.loads(_admin_deal_handler({"action": "show", "deal_id": did}))
+    assert shown["gate"]["stage"] == 1
+    assert shown["gate"]["canAdvance"] is False
+
+    # Agent gathers the list price in chat, writes it, then closes out the run.
+    priced = json.loads(_admin_deal_handler({"action": "set_fields", "deal_id": did, "fields": {"listPrice": 799000}}))
+    assert priced["applied"] == {"listPrice": 799000}
+
+    done = json.loads(_admin_deal_handler({
+        "action": "complete_run",
+        "deal_id": did,
+        "skill": "cma-generator",
+        "checklist_updates": [
+            {"id": "cma_pdf_ready", "completed": True},
+            {"id": "pricing_story_approved", "completed": True},
+            {"id": "client_yes_to_listing", "completed": True},
+            {"id": "workflow_cma_date_requested", "completed": True},
+        ],
+        "artifacts": [{"kind": "cma_report", "file_path": "/tmp/cma.pdf", "summary": "CMA"}],
+    }))
+    assert done["completedRun"]
+    # The blocking run cleared and the card advanced CMA (1) -> Listing Intake (2).
+    assert done["gate"]["stage"] == 2
+
+    with connect() as conn:
+        runs = list_action_runs(conn, deal_id=did)
+    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma-generator")
+    assert cma["status"] in {"succeeded", "completed"}
+
+
+def test_admin_deal_tool_writes_sync_the_gate(monkeypatch):
+    # set_checklist / set_fields write straight to the deal so the kanban gate
+    # reflects them immediately — the in-session sync the realtor sees.
+    import json
+
+    monkeypatch.setattr("elevate_cli.access.is_entitlement_active", lambda *a, **k: True)
+    from tools.admin_deal_tool import _admin_deal_handler
+
+    _complete_admin_setup()
+    with connect() as conn:
+        deal = create_deal(conn, title="Pre-CMA writes", side="listing", actor="human:test", current_stage=0)
+        did = deal["id"]
+
+    before = json.loads(_admin_deal_handler({"action": "show", "deal_id": did}))
+    assert "pre_cma_dashboard_setup" in before["gate"]["missingChecklist"]
+    assert "workflow_client_1_name" in before["gate"]["missingFields"]
+
+    # A checklist write immediately drops that item from the gate's missing list.
+    ticked = json.loads(_admin_deal_handler({"action": "set_checklist", "deal_id": did, "field": "pre_cma_dashboard_setup"}))
+    assert ticked["success"] is True
+    assert "pre_cma_dashboard_setup" not in ticked["gate"]["missingChecklist"]
+
+    # set_fields auto-routes a workflow_* required "field" to the toggle path and
+    # it leaves the missing-fields list too.
+    filled = json.loads(_admin_deal_handler({"action": "set_fields", "deal_id": did, "fields": {"workflow_client_1_name": "Seller One"}}))
+    assert filled["success"] is True
+    assert "workflow_client_1_name" not in filled["gate"]["missingFields"]
 
 
 def test_run_result_accepts_per_run_service_token_without_session(client):

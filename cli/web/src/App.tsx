@@ -1476,6 +1476,32 @@ function DesktopSidebar({
     };
   }, [loadCronJobs, loadSessions, readyToLoad]);
 
+  // Reshuffle the sidebar the moment a chat sends/finishes a turn, instead of
+  // waiting for the 12s poll. ChatPage fires these as the user messages.
+  useEffect(() => {
+    if (!readyToLoad) return;
+    const onActivity = (event: Event) => {
+      // Optimistically float the active chat to the top right away, then
+      // reconcile with the server so it stays put.
+      const sid = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      if (sid) {
+        const nowSec = Date.now() / 1000;
+        setSessions((prev) =>
+          prev.map((item) =>
+            item.id === sid ? { ...item, last_active: nowSec, is_active: true } : item,
+          ),
+        );
+      }
+      loadSessions({ refresh: true });
+    };
+    window.addEventListener("elevate:agent-turn-complete", onActivity);
+    window.addEventListener("elevate:agent-turn-start", onActivity);
+    return () => {
+      window.removeEventListener("elevate:agent-turn-complete", onActivity);
+      window.removeEventListener("elevate:agent-turn-start", onActivity);
+    };
+  }, [loadSessions, readyToLoad]);
+
   useEffect(() => {
     writePinnedSessionIds(pinnedIds);
   }, [pinnedIds]);
@@ -1562,6 +1588,12 @@ function DesktopSidebar({
   const spotlightIds = new Set(pinnedSessions.map((session) => session.id));
   const chatSessions = filteredSessions
     .filter((session) => !spotlightIds.has(session.id) && !isSidebarAutomationSession(session))
+    // Most-recent first, but a running chat floats to the top immediately —
+    // its last_active is stale until the turn finishes, so sort on is_active first.
+    .sort((a, b) => {
+      if (!!a.is_active !== !!b.is_active) return a.is_active ? -1 : 1;
+      return (b.last_active ?? 0) - (a.last_active ?? 0);
+    })
     .slice(0, 18);
   const cronSessionsByJobId = useMemo(() => {
     const map = new Map<string, SessionInfo[]>();
@@ -2316,13 +2348,18 @@ const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 function SessionStatusDot({
   lastActive,
   unread,
+  running,
 }: {
   lastActive: number;
   unread: boolean;
+  running?: boolean;
 }) {
   let tone: "warning" | "idle" | "ok";
   let label: string;
-  if (unread) {
+  if (running) {
+    tone = "ok";
+    label = "Running";
+  } else if (unread) {
     tone = "warning";
     label = "Needs attention";
   } else if (
@@ -2341,6 +2378,8 @@ function SessionStatusDot({
       title={label}
       className={cn(
         "dot",
+        // Pulse while the chat is actively running a turn.
+        running && "animate-pulse",
         tone === "warning" && "warn",
         tone === "idle" && "idle",
         tone === "ok" && "done",
@@ -2436,6 +2475,7 @@ function SessionListItem({
         <SessionStatusDot
           lastActive={session.last_active}
           unread={unread}
+          running={session.is_active}
         />
         </span>
         <span className="title">{title}</span>

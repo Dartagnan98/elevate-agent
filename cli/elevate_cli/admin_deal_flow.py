@@ -491,8 +491,6 @@ def resolve_admin_deal_flow(
     )
     checklist = [*current["checklist"], *additions]
     next_stage = stage_index + 1 if stage_index < last_stage else None
-    if side_key == "listing" and stage_index == 4 and last_stage >= 6:
-        next_stage = 6
     next_stage_name = stages[next_stage]["title"] if next_stage is not None else None
     return {
         "packageKey": package["packageKey"],

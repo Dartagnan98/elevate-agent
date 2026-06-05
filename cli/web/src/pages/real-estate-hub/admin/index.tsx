@@ -435,7 +435,7 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
 const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminChecklistItem[]>> = {
   listing: {
     0: [
-    { id: "pre_cma_google_form", label: "Pre-CMA Google Form filled" },
+    { id: "pre_cma_dashboard_setup", label: "Pre-CMA Google Form filled" },
     { id: "lofty_contact_verified", label: "Lofty contact verified / created" },
     { id: "pre_cma_handoff", label: "Client/property notes saved for CMA" },
     ],

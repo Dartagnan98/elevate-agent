@@ -116,7 +116,7 @@ export const lightTheme: DashboardTheme = {
 
 export const defaultTheme = darkTheme;
 
+// Light mode removed — the app is dark-only (grey surfaces, white text).
 export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   dark: darkTheme,
-  light: lightTheme,
 };

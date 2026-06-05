@@ -178,6 +178,11 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
+  /* Electron can feel "locked" — make text content selectable by default so
+     the user can highlight + copy. Buttons/labels opt out via their own
+     user-select: none. */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 code, kbd, pre, samp, .font-mono, .font-mono-ui {
@@ -1053,13 +1058,13 @@ html .font-courier {
 
 .user-msg {
   max-width: 88%;
-  padding: 12px 16px;
-  border-radius: 14px;
+  padding: 7px 13px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--fg) 7%, var(--bg-2));
   border: 1px solid var(--border);
   color: var(--fg);
   font-size: 14.5px;
-  line-height: 1.55;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-wrap: break-word;
 }
@@ -1275,6 +1280,29 @@ html .font-courier {
   line-height: 1.65;
   color: var(--fg-muted);
   font-style: italic;
+}
+
+/* Reasoning shown as a full, always-visible message (no "Thinking" label,
+   no collapse) — reads like the agent narrating its work. */
+.reasoning-message {
+  margin: 8px 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* One neutral selection highlight everywhere — grey background, white text.
+   Overrides any accent-tinted ::selection so highlighting doesn't flash
+   different colors across the app. */
+::selection {
+  background: #5d5d5d;
+  color: #ffffff;
+}
+::-moz-selection {
+  background: #5d5d5d;
+  color: #ffffff;
 }
 
 .status-line {

@@ -552,7 +552,8 @@ def test_move_deal_endpoint_blocks_incomplete_forward_stage_move(client):
     detail = resp.json()["detail"]
     assert detail["message"] == "deal phase gate is blocked"
     assert detail["gate"]["stage"] == 1
-    assert any(item["field"] == "listingAddress" for item in detail["gate"]["missingFields"])
+    # Stage 1 is CMA / Evaluation — its recommended list price gates the advance.
+    assert any(item["field"] == "listPrice" for item in detail["gate"]["missingFields"])
 
 
 def test_force_move_deal_endpoint_persists_stage_and_audits_override(client):
@@ -596,24 +597,44 @@ def test_current_workflow_stage_complete_toggle_does_not_bypass_gate(client):
     assert not any(event["kind"] == "stage_transition" for event in events)
 
 
-def test_current_workflow_stage_complete_advances_when_gate_is_clear(client):
-    deal = _create(title="Gate clear stage four", current_stage=4)
-
+def _clear_stage_four_gate(client, deal_id: str):
+    # Marketing Go (stage 4): every checklist item + AI/photo fields + photos doc.
+    for item_id in (
+        "marketing_go_started",
+        "photographer_drive_link_received",
+        "marketing_go_questions_answered",
+        "photo_cleanup_complete",
+        "cleaned_photos_saved_to_drive",
+        "best_99_matrix_photos_selected",
+        "matrix_photos_uploaded",
+        "matrix_listing_finished_with_photos",
+        "coming_soon_assets_ready",
+        "landing_page_ready",
+        "launch_copy_social_email_ready",
+        "marketing_package_ready_for_approval",
+    ):
+        ok = client.post(f"/api/admin/deals/{deal_id}/toggle", json={"field": item_id, "value": True})
+        assert ok.status_code == 200, ok.text
     for field, value in {
-        "workflow_evalue_bc_age_verified": True,
-        "workflow_listing_description_approved": True,
-        "workflow_feature_sheet_uploaded": True,
-        "workflow_ai_edited_photos_labelled": True,
-        "workflow_mls_input_started_date": "2026-05-06",
-        "workflow_realtor_tour_scheduled": "2026-05-07",
+        "workflow_photo_shoot_date": "2026-05-05",
+        "workflow_ai_garage_carport": "Garage",
+        "workflow_ai_suite_detected": "Not detected",
+        "workflow_ai_ac_heat_pump": "Heat pump",
+        "workflow_ai_appliances_listed": "Fridge, stove",
+        "workflow_ai_flooring_types": "Laminate",
     }.items():
-        ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": field, "value": value})
+        ok = client.post(f"/api/admin/deals/{deal_id}/toggle", json={"field": field, "value": value})
         assert ok.status_code == 200, ok.text
     attached = client.post(
-        f"/api/deals/{deal['id']}/attachments",
-        json={"kind": "feature_sheet", "filePath": "/tmp/feature-sheet.pdf"},
+        f"/api/deals/{deal_id}/attachments",
+        json={"kind": "listing_photos", "filePath": "/tmp/listing-photos.zip"},
     )
     assert attached.status_code == 200, attached.text
+
+
+def test_current_workflow_stage_complete_advances_when_gate_is_clear(client):
+    deal = _create(title="Gate clear stage four", current_stage=4)
+    _clear_stage_four_gate(client, deal["id"])
 
     resp = client.post(
         f"/api/admin/deals/{deal['id']}/toggle",
@@ -944,7 +965,7 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert body["conditions"]["property_subtype"] == "strata"
     assert body["checklist"]["draft-cma-followup"] is True
     assert body["dealFlow"]["packageKey"] == "ca.bc"
-    assert body["dealFlow"]["gate"]["stageName"] == "CMA / Prospect"
+    assert body["dealFlow"]["gate"]["stageName"] == "Pre-CMA"
     assert body["dealFlow"]["gate"]["canAdvance"] is False
     assert {item["skill"] for item in body["dealFlow"]["backgroundAutomations"]} == {
         "gmail-doc-router",
@@ -1082,9 +1103,10 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     assert blocked.status_code == 409, blocked.text
     detail = blocked.json()["detail"]
     assert detail["message"] == "deal phase gate is blocked"
-    assert any(item["id"] == "draft-cma-followup" for item in detail["gate"]["missingChecklist"])
+    assert any(item["id"] == "pre_cma_dashboard_setup" for item in detail["gate"]["missingChecklist"])
 
-    for item_id in ("draft-cma-followup", "pricing-recap", "missing-info-list"):
+    # Clear the Pre-CMA gate: setup checklist + lead/contact fields (no docs required).
+    for item_id in ("pre_cma_dashboard_setup", "lofty_contact_verified", "pre_cma_handoff"):
         ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": item_id, "value": True})
         assert ok.status_code == 200, ok.text
     for field, value in {
@@ -1095,17 +1117,12 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
     }.items():
         ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": field, "value": value})
         assert ok.status_code == 200, ok.text
-    attached = client.post(
-        f"/api/deals/{deal['id']}/attachments",
-        json={"kind": "cma_report", "filePath": "/tmp/gate-cma.pdf"},
-    )
-    assert attached.status_code == 200, attached.text
 
     context = client.get(f"/api/deals/{deal['id']}/context")
     assert context.status_code == 200, context.text
     body = context.json()
     assert body["deal"]["currentStage"] == 1
-    assert body["dealFlow"]["stageName"] == "Listing Intake"
+    assert body["dealFlow"]["stageName"] == "CMA / Evaluation"
 
     next_advance = client.post(f"/api/deals/{deal['id']}/advance", json={})
     assert next_advance.status_code == 409, next_advance.text
@@ -1113,7 +1130,8 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
 
 
 def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
-    deal = _create(title="Task Deal", side="listing", current_stage=0)
+    # CMA / Evaluation (stage 1) is where the cma ai_action and cma_report doc live.
+    deal = _create(title="Task Deal", side="listing", current_stage=1)
 
     resp = client.get("/api/admin/tasks")
     assert resp.status_code == 200, resp.text
@@ -1124,7 +1142,7 @@ def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
     assert any(item["type"] == "checklist" and item["status"] == "open" for item in tasks)
     assert any(item["type"] == "document" and item["kind"] == "cma_report" for item in tasks)
     assert {item["packageKey"] for item in tasks} == {"generic.real-estate"}
-    assert {item["stageName"] for item in tasks} == {"CMA / Prospect"}
+    assert {item["stageName"] for item in tasks} == {"CMA / Evaluation"}
 
     ai_task = next(item for item in tasks if item["type"] == "ai_action")
     queued = client.post(
@@ -1385,7 +1403,14 @@ def test_run_result_stage_complete_update_requires_human_not_skill_callback(clie
 
 
 def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(client):
-    deal = _create(title="Gate clear auto move", current_stage=0)
+    # A CMA run that clears the CMA / Evaluation gate (stage 1) advances the deal
+    # to Listing Intake (stage 2) without any explicit stage-complete toggle.
+    deal = _create(title="Gate clear auto move", current_stage=1)
+    priced = client.post(
+        f"/api/deals/{deal['id']}/fields",
+        json={"fields": {"listPrice": 799000}},
+    )
+    assert priced.status_code == 200, priced.text
     with connect() as conn:
         create_action(
             conn,
@@ -1393,14 +1418,14 @@ def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(cli
             trigger="stage_entry",
             skill="cma",
             side="listing",
-            to_stage=0,
+            to_stage=1,
         )
         runs = evaluate_dispatch(
             conn,
             deal_id=deal["id"],
             trigger="stage_entry",
             actor="human:test",
-            to_stage=0,
+            to_stage=1,
         )
     run_id = runs[0]["id"]
 
@@ -1413,12 +1438,9 @@ def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(cli
                 {"kind": "cma_report", "filePath": "/tmp/gate-clear-cma.pdf", "summary": "CMA report"}
             ],
             "checklist_updates": [
-                {"id": "draft-cma-followup", "completed": True},
-                {"id": "pricing-recap", "completed": True},
-                {"id": "missing-info-list", "completed": True},
-                {"id": "workflow_client_1_name", "completed": True},
-                {"id": "workflow_client_1_email", "completed": True},
-                {"id": "workflow_lead_source", "completed": True},
+                {"id": "cma_pdf_ready", "completed": True},
+                {"id": "pricing_story_approved", "completed": True},
+                {"id": "client_yes_to_listing", "completed": True},
                 {"id": "workflow_cma_date_requested", "completed": True},
             ],
         },
@@ -1428,7 +1450,7 @@ def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(cli
     context = client.get(f"/api/deals/{deal['id']}/context")
     assert context.status_code == 200, context.text
     body = context.json()
-    assert body["deal"]["currentStage"] == 1
+    assert body["deal"]["currentStage"] == 2
     assert "workflow_stage_0_complete" not in body["checklist"]
 
 

@@ -1753,6 +1753,45 @@ function isGenericActivityText(text: string): boolean {
   return false;
 }
 
+// Transient-noise check for REASONING traces. Unlike isGenericActivityText it
+// does NOT run displayStatusText, which collapses any text containing
+// "thinking"/"reasoning"/"computing"/"pondering" into "Working..." — that
+// shreds real reasoning prose (which constantly uses those words) into
+// sentence-start fragments. This only drops true noise: empties, fixed status
+// strings, heartbeats, rotating verbs, and lone single-word status pills
+// ("mulling…", "synthesizing…", "deliberating…"). Real reasoning is prose, so
+// it always has multiple words and survives.
+function isTransientStatus(text: string): boolean {
+  const clean = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!clean) return true;
+  if (
+    clean === "working..." ||
+    clean === "thinking..." ||
+    clean === "reasoning..." ||
+    clean === "running..." ||
+    clean === "ready" ||
+    clean === "done"
+  ) {
+    return true;
+  }
+  if (clean.startsWith("sending request") || clean.startsWith("still working")) {
+    return true;
+  }
+  const stripped = clean.replace(/[.…!?]+$/, "").trim();
+  if (ROTATING_VERBS.includes(stripped)) return true;
+  // A single status word ("mulling…", "synthesizing…") — but only when it
+  // stands alone as a whole trace (real reasoning is multi-word prose).
+  if (/^\p{L}+$/u.test(stripped) && stripped.length <= 24) return true;
+  // Same, but with a leading kaomoji/emoticon ("(｡•́‿•̀｡) reasoning…",
+  // "(͡° ͜ʖ ͡°) synthesizing…", "٩(๑˃̵ᴗ˂̵)۶ reasoning…"). The decoration has no
+  // ASCII letters, so stripping leading non-letters lands on the lone status
+  // verb. Real prose starts with a word, so the strip stops immediately and it
+  // stays multi-word — never matched here.
+  const deco = stripped.replace(/^[^a-z]+/i, "").trim();
+  if (deco !== stripped && /^[a-z]+$/i.test(deco) && deco.length <= 24) return true;
+  return false;
+}
+
 function progressIntentLabel(text: string): string {
   const clean = displayStatusText(text).trim();
   if (!clean || isGenericActivityText(clean)) return "";
@@ -3128,12 +3167,18 @@ export default function ChatPage() {
 
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
-      const clean = displayStatusText(text).trim();
+      const isReasoning = kind === "thinking" || kind === "reasoning";
+      // Reasoning content keeps its RAW text: displayStatusText collapses any
+      // chunk mentioning "thinking"/"reasoning"/"computing" into "Working...",
+      // which (combined with the filter below) shreds real reasoning into
+      // sentence-start fragments. And we do NOT filter reasoning per-delta —
+      // deltas are sentence fragments, so judging each as "generic" is wrong.
+      // Transient pills are dropped later, at the whole-trace level.
+      const clean = isReasoning
+        ? text.replace(/\s+/g, " ").trim()
+        : displayStatusText(text).trim();
       if (!clean) return;
-      if (
-        (kind === "thinking" || kind === "reasoning" || kind === "status") &&
-        isGenericActivityText(clean)
-      ) {
+      if (kind === "status" && isGenericActivityText(clean)) {
         return;
       }
 
@@ -5184,6 +5229,13 @@ export default function ChatPage() {
       // An attachment-only message (image with no caption) is a valid send.
       if (!trimmed && !hasReadyAttachment) return;
 
+      // Tell the sidebar this chat just became active so it floats to the top
+      // immediately, without waiting for the next poll. (Pairs with the
+      // agent-turn-complete event fired on message.complete.)
+      window.dispatchEvent(
+        new CustomEvent("elevate:agent-turn-start", { detail: { sessionId } }),
+      );
+
       setInput("");
       composerScrollTopRef.current = 0;
       if (richLayerRef.current) richLayerRef.current.style.transform = "translateY(0px)";
@@ -6230,7 +6282,7 @@ export default function ChatPage() {
                     aria-label="Message Elevation Agent"
                     className={cn(
                       "composer-input block",
-                      "caret-[var(--chat-text)] selection:bg-[var(--chat-accent-soft)]",
+                      "caret-[var(--chat-text)] selection:bg-[#5d5d5d] selection:text-white",
                       input
                         ? "text-transparent"
                         : "text-[var(--chat-text)]",
@@ -7564,21 +7616,106 @@ const MemoMessageRow = memo(MessageRow);
  * One row in the per-turn breakdown dropdown — either an individual tool
  * call or a reasoning/thinking step, interleaved chronologically.
  */
+type ToolStep = {
+  type: "tool";
+  id: string;
+  at: number;
+  name: string;
+  context: string;
+  error?: string;
+  inline_diff?: string;
+  preview?: string;
+  summary?: string;
+  status: ToolEntry["status"];
+  count: number;
+};
+
 type BreakdownStep =
-  | {
-      type: "tool";
-      id: string;
-      at: number;
-      name: string;
-      context: string;
-      error?: string;
-      inline_diff?: string;
-      preview?: string;
-      summary?: string;
-      status: ToolEntry["status"];
-      count: number;
+  | ToolStep
+  | { type: "trace"; id: string; at: number; text: string }
+  | { type: "group"; id: string; at: number; tools: ToolStep[]; label: string };
+
+type ToolCategory = "command" | "search" | "edit" | "read" | "skill" | "other";
+
+function toolCategory(name: string): ToolCategory {
+  const n = name.toLowerCase();
+  if (/terminal|bash|shell|exec|command|process|^run/.test(n)) return "command";
+  if (/search|grep|glob|find/.test(n)) return "search";
+  if (/write|edit|patch/.test(n)) return "edit";
+  if (/skill/.test(n)) return "skill";
+  if (/read|cat|open|view|file/.test(n)) return "read";
+  return "other";
+}
+
+// Pull the most label-worthy bit of a tool — a filename/skill/query — for the
+// "Read App.tsx" style single-item summary.
+function toolTarget(tool: ToolStep): string {
+  const ctx = (tool.context || "").replace(/\s+/g, " ").trim();
+  if (!ctx) return "";
+  const firstToken = ctx.split(/\s+/)[0] ?? ctx;
+  const base = firstToken.split("/").pop() || firstToken;
+  return base.length > 36 ? `${base.slice(0, 36)}…` : base;
+}
+
+// Natural-language summary for a run of consecutive tool calls, e.g.
+// "Ran 2 commands", "Read App.tsx", "Ran a command, read a file".
+function describeToolGroup(tools: ToolStep[]): string {
+  const order: ToolCategory[] = [];
+  const byCat = new Map<ToolCategory, ToolStep[]>();
+  for (const tool of tools) {
+    const cat = toolCategory(tool.name);
+    if (!byCat.has(cat)) {
+      byCat.set(cat, []);
+      order.push(cat);
     }
-  | { type: "trace"; id: string; at: number; text: string };
+    byCat.get(cat)!.push(tool);
+  }
+  const phrase = (cat: ToolCategory, items: ToolStep[]): string => {
+    const n = items.reduce((sum, t) => sum + Math.max(1, t.count), 0);
+    const one = n === 1;
+    const target = one ? toolTarget(items[0]) : "";
+    switch (cat) {
+      case "command": return one ? "ran a command" : `ran ${n} commands`;
+      case "search": return one ? "ran a search" : `ran ${n} searches`;
+      case "edit": return one ? (target ? `edited ${target}` : "edited a file") : `edited ${n} files`;
+      case "read": return one ? (target ? `read ${target}` : "read a file") : `read ${n} files`;
+      case "skill": return one ? (target ? `loaded ${target}` : "loaded a skill") : `loaded ${n} skills`;
+      default: return one ? "ran a step" : `ran ${n} steps`;
+    }
+  };
+  const parts = order.map((cat) => phrase(cat, byCat.get(cat)!));
+  const joined = parts.join(", ");
+  return joined.charAt(0).toUpperCase() + joined.slice(1);
+}
+
+// Collapse runs of consecutive tool steps into a single labelled group, the
+// way image-2 shows "Ran 2 commands" instead of a row per call. Reasoning
+// (trace) steps break a run and stay on their own line.
+function groupConsecutiveTools(steps: BreakdownStep[]): BreakdownStep[] {
+  const out: BreakdownStep[] = [];
+  let run: ToolStep[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    out.push({
+      type: "group",
+      id: `group-${run[0].id}`,
+      at: run[0].at,
+      tools: run,
+      label: describeToolGroup(run),
+    });
+    run = [];
+  };
+  for (const step of steps) {
+    if (step.type === "tool") {
+      run.push(step);
+      continue;
+    }
+    flush();
+    out.push(step);
+  }
+  flush();
+  return out;
+}
 
 /** Pick a lucide icon for a tool by substring-matching its name. */
 function breakdownToolIcon(name: string): LucideIcon {
@@ -7630,9 +7767,11 @@ function buildBreakdownSteps(
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
     const text = compactLine(trace.text);
     if (!text) continue;
-    // Drop transient heartbeats ("brainstorming", "Working...", etc.) —
-    // they belong on the rotating header pill, not as permanent rows.
-    if (isGenericActivityText(text)) continue;
+    // Drop transient single-word pills ("brainstorming", "Working...", etc.) —
+    // they belong on the rotating header pill, not as permanent rows. Uses the
+    // non-mangling check so real reasoning prose (which mentions "thinking"/
+    // "reasoning") is kept intact.
+    if (isTransientStatus(text)) continue;
     raw.push({ type: "trace", id: trace.id, at: trace.createdAt || 0, text });
   }
 
@@ -7662,47 +7801,116 @@ function buildBreakdownSteps(
     }
     merged.push({ ...step });
   }
-  return merged;
+  return groupConsecutiveTools(merged);
+}
+
+// Reasoning summaries from gpt-5.5 / codex lead with a bold header, e.g.
+// "**Considering contact entries** I'm about how a new number...". Show only
+// the substance after that header — handles the raw "**Header**" form and the
+// "Header**" form (where an upstream pass already ate the leading **).
+function stripReasoningHeader(text: string): string {
+  let t = text.replace(/^\s+/, "");
+  t = t.replace(/^\*\*([^*]+)\*\*\s*/, "");
+  const idx = t.indexOf("**");
+  if (idx > 0 && idx <= 80 && !/[.!?]/.test(t.slice(0, idx))) {
+    t = t.slice(idx + 2).replace(/^\s+/, "");
+  }
+  return t.trim() || text;
+}
+
+// A single tool shown inside an expanded group — static, no chevron of its
+// own (only the parent "Ran commands" group is expandable). The detail/output
+// is shown inline.
+function GroupToolDetail({ tool }: { tool: ToolStep }) {
+  const Icon = breakdownToolIcon(tool.name);
+  const body = [
+    tool.context && `context\n${tool.context}`,
+    tool.preview && `streaming\n${tool.preview}`,
+    tool.summary && `result\n${tool.summary}`,
+    tool.error && `error\n${tool.error}`,
+    tool.inline_diff && `diff\n${tool.inline_diff}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return (
+    <div className="py-0.5">
+      <div className="tool-link cursor-default">
+        <span className="chev" />
+        <Icon
+          className={cn(
+            "h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)]",
+            tool.status === "error" && "text-[var(--chat-danger)]",
+            tool.status === "running" && "animate-pulse",
+          )}
+        />
+        <span className="name">{tool.name}</span>
+        {tool.context && <span className="target">· {truncatePreview(tool.context)}</span>}
+        {tool.count > 1 && <span className="duration">×{tool.count}</span>}
+      </div>
+      {body && <div className="tool-body">{body}</div>}
+    </div>
+  );
 }
 
 /** A single tool/trace line inside the expanded breakdown. */
 function BreakdownRow({ step }: { step: BreakdownStep }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  const toolBody =
-    step.type === "tool"
-      ? [
-          step.context && `context\n${step.context}`,
-          step.preview && `streaming\n${step.preview}`,
-          step.summary && `result\n${step.summary}`,
-          step.error && `error\n${step.error}`,
-          step.inline_diff && `diff\n${step.inline_diff}`,
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-      : "";
-  const hasBody = step.type === "trace" ? Boolean(step.text) : Boolean(toolBody);
-  const open = userOpen ?? (step.type === "tool" && step.status === "error");
 
   if (step.type === "trace") {
+    // Render reasoning as a full, always-visible message — no "Thinking"
+    // label, no collapse. The agent narrates; the tool groups below stay
+    // as collapsed one-liners.
+    const body = stripReasoningHeader(step.text);
+    if (!body.trim()) return null;
+    return <div className="reasoning-message">{body}</div>;
+  }
+
+  if (step.type === "group") {
+    const running = step.tools.some((t) => t.status === "running");
+    const errored = step.tools.some((t) => t.status === "error");
+    const open = userOpen ?? errored;
+    const Icon = breakdownToolIcon(step.tools[0]?.name ?? "");
     return (
-      <div className={cn("reasoning reasoning-inline", open && "open")}>
+      <div>
         <button
           aria-expanded={open}
-          className="reasoning-head"
+          className={cn("tool-link", open && "open")}
           onClick={() => setUserOpen(!open)}
           type="button"
         >
           <ChevronDown className="chev" />
-          <span>Thinking</span>
-          <span className="reasoning-preview">
-            · {truncatePreview(step.text, 140)}
-          </span>
+          <Icon
+            className={cn(
+              "h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)]",
+              errored && "text-[var(--chat-danger)]",
+              running && "animate-pulse",
+            )}
+          />
+          <span className="name">{step.label}</span>
         </button>
-        {open && <div className="reasoning-body">{step.text}</div>}
+        {open && (
+          <div className="ml-4 border-l border-[var(--border-faint,rgba(255,255,255,0.08))] pl-2">
+            {step.tools.map((t) => (
+              <GroupToolDetail key={t.id} tool={t} />
+            ))}
+          </div>
+        )}
       </div>
     );
   }
 
+  // step.type === "tool"
+  const toolBody = [
+    step.context && `context\n${step.context}`,
+    step.preview && `streaming\n${step.preview}`,
+    step.summary && `result\n${step.summary}`,
+    step.error && `error\n${step.error}`,
+    step.inline_diff && `diff\n${step.inline_diff}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const hasBody = Boolean(toolBody);
+  const open = userOpen ?? step.status === "error";
   const Icon = breakdownToolIcon(step.name);
   return (
     <div>
@@ -7802,8 +8010,9 @@ function ChatActivityDigest({
   tokenCount?: number;
   tools: ToolEntry[];
 }) {
-  // null = follow the default for the current state (open while busy,
-  // collapsed when done). A real boolean = the user toggled it explicitly.
+  // null = follow the default (expanded). The thinking/reasoning + tool
+  // breakdown stays visible after the turn finishes, not just while busy — it
+  // only collapses if the user explicitly toggles it shut.
   const [open, setOpen] = useState<boolean | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const rotatingVerb = useRotatingVerb(busy);
@@ -7833,7 +8042,7 @@ function ChatActivityDigest({
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
   const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
-  const expanded = open ?? busy;
+  const expanded = open ?? true;
   const tokens = busy
     ? liveTokens ?? 0
     : typeof tokenCount === "number"
