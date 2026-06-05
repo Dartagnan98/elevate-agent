@@ -915,7 +915,10 @@ export default function App() {
 
       <header
         className={cn(
-          "lg:hidden fixed top-0 left-0 right-0 z-40 h-12",
+          // Sidebar is persistent at every width now, so the mobile top bar
+          // (hamburger + brand) is never needed — it was what collided with the
+          // macOS traffic lights on a narrow window.
+          "hidden",
           "flex items-center gap-2 px-3",
           "bg-background-base shadow-[0_1px_0_color-mix(in_srgb,var(--midground-base)_7%,transparent)]",
         )}
@@ -956,23 +959,20 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-12 lg:pt-0">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1">
           <aside
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
-              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[calc(var(--sidebar-w)+var(--sidebar-gap)*2)] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col p-[var(--sidebar-gap)]",
+              // Persistent sticky rail at every width — no mobile drawer, so it
+              // never auto-collapses as the window shrinks. Manual collapse (the
+              // toggle) still hides it; the chat header has a reopen button.
+              "z-50 flex h-dvh max-h-dvh w-[calc(var(--sidebar-w)+var(--sidebar-gap)*2)] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col p-[var(--sidebar-gap)]",
               "bg-transparent",
-              "transition-transform duration-200 ease-out",
-              mobileOpen ? "translate-x-0" : "-translate-x-full",
-              sidebarCollapsed
-                ? "lg:hidden"
-                : cn(
-                    "lg:sticky lg:translate-x-0 lg:shrink-0",
-                    "lg:top-0 lg:h-dvh",
-                  ),
-              isConfigRoute && "lg:hidden",
+              sidebarCollapsed || isConfigRoute
+                ? "hidden"
+                : "sticky top-0 shrink-0 translate-x-0",
             )}
           >
             <DesktopSidebar
@@ -1875,7 +1875,7 @@ function DesktopSidebar({
         className="sidebar-top"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        <div className="flex h-7 w-[9.75rem] min-w-0 items-center pl-[3.75rem]">
+        <div className="flex h-7 w-[10.5rem] min-w-0 items-center pl-[4.75rem]">
           <img
             src={sidebarLogoSrc}
             alt="Elevation"
