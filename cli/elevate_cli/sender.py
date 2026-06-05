@@ -513,7 +513,9 @@ def _imsg_send_via_app(phone: str, draft: str, svc: str) -> tuple[int, str, str]
         json.dump({"to": phone, "text": draft, "service": svc}, fh)
     os.replace(tmp, req_path)
     _log.info("sender.imsg_app spooled service=%s phone=%s id=%s", svc, phone, rid)
-    deadline = _time.time() + 45
+    # Generous: the app may hit a wedged-Messages retry (imsg 30s + restart +
+    # imsg 30s). Wait through that before giving up.
+    deadline = _time.time() + 85
     while _time.time() < deadline:
         if os.path.exists(res_path):
             try:
