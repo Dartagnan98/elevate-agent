@@ -1677,9 +1677,9 @@ html .font-courier {
 }
 
 .composer-stage {
-  /* Match the message column width (resizable) so the composer and the
-     messages are always the same width. */
-  max-width: var(--chat-layout-width);
+  /* Align with the message *content* box: the column is var wide but .chat-inner
+     insets messages 24px each side, so subtract 48px to line the edges up. */
+  max-width: calc(var(--chat-layout-width) - 48px);
   width: 100%;
   margin: 0 auto 8px;
   display: flex;
@@ -1828,8 +1828,8 @@ html .font-courier {
 
 .composer {
   position: relative;
-  /* Match the message column width (resizable). */
-  max-width: var(--chat-layout-width);
+  /* Align with the message content box (column width minus chat-inner padding). */
+  max-width: calc(var(--chat-layout-width) - 48px);
   margin: 0 auto;
   border-radius: 12px;
   background: var(--bg-2);
@@ -1923,7 +1923,7 @@ html .font-courier {
 }
 
 .composer-foot {
-  max-width: 760px;
+  max-width: calc(var(--chat-layout-width) - 48px);
   margin: 8px auto 0;
   display: flex;
   align-items: center;
@@ -2127,7 +2127,7 @@ html .font-courier {
 }
 
 .steer-bar {
-  max-width: 760px;
+  max-width: calc(var(--chat-layout-width) - 48px);
   margin: 0 auto 8px;
   display: flex;
   align-items: center;

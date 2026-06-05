@@ -6331,7 +6331,7 @@ export default function ChatPage() {
                 style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
                 className="group absolute -right-4 top-0 z-10 hidden h-full w-4 cursor-col-resize items-center justify-center lg:flex"
               >
-                <span className="h-16 w-1 rounded-full bg-transparent transition-all group-hover:w-1.5 group-hover:bg-[var(--chat-accent)]" />
+                <span className="h-16 w-1 rounded-full bg-transparent" />
               </button>
               {queuedInputs.length ? (
                 <QueuedInputStrip
@@ -6526,7 +6526,7 @@ export default function ChatPage() {
                 onPointerDown={startPreviewResize}
                 type="button"
               >
-                <span className="h-12 w-1.5 rounded-full bg-transparent transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
+                <span className="h-12 w-1.5 rounded-full bg-transparent" />
               </button>
             )}
             {/* Activity card removed per request — the right area only shows a
