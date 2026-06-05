@@ -876,7 +876,7 @@ export default function App() {
   }, [mobileOpen]);
 
   useEffect(() => {
-    const mql = window.matchMedia("(min-width: 1024px)");
+    const mql = window.matchMedia("(min-width: 480px)");
     const onChange = (e: MediaQueryListEvent) => {
       if (e.matches) setMobileOpen(false);
     };
@@ -915,7 +915,9 @@ export default function App() {
 
       <header
         className={cn(
-          "lg:hidden fixed top-0 left-0 right-0 z-40 h-12",
+          // Mobile top bar only below 480px — the desktop sidebar (with the
+          // traffic-light header) stays persistent down to that width.
+          "min-[480px]:hidden fixed top-0 left-0 right-0 z-40 h-12",
           "flex items-center gap-2 px-3",
           "bg-background-base shadow-[0_1px_0_color-mix(in_srgb,var(--midground-base)_7%,transparent)]",
         )}
@@ -948,7 +950,7 @@ export default function App() {
           aria-label={t.app.closeNavigation}
           onClick={closeMobile}
           className={cn(
-            "lg:hidden fixed inset-0 z-40",
+            "min-[480px]:hidden fixed inset-0 z-40",
             "bg-black/60 cursor-pointer",
           )}
         />
@@ -956,7 +958,7 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-12 lg:pt-0">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-12 min-[480px]:pt-0">
         <div className="flex min-h-0 min-w-0 flex-1">
           <aside
             id="app-sidebar"
@@ -967,12 +969,12 @@ export default function App() {
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               sidebarCollapsed
-                ? "lg:hidden"
+                ? "min-[480px]:hidden"
                 : cn(
-                    "lg:sticky lg:translate-x-0 lg:shrink-0",
-                    "lg:top-0 lg:h-dvh",
+                    "min-[480px]:sticky min-[480px]:translate-x-0 min-[480px]:shrink-0",
+                    "min-[480px]:top-0 min-[480px]:h-dvh",
                   ),
-              isConfigRoute && "lg:hidden",
+              isConfigRoute && "min-[480px]:hidden",
             )}
           >
             <DesktopSidebar
@@ -1890,7 +1892,7 @@ function DesktopSidebar({
           aria-label={t.app.closeNavigation}
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           className={cn(
-            "absolute right-3 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 shrink-0 items-center justify-center lg:hidden",
+            "absolute right-3 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 shrink-0 items-center justify-center min-[480px]:hidden",
             "rounded-lg text-muted-foreground hover:bg-accent hover:text-midground",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
@@ -1899,7 +1901,7 @@ function DesktopSidebar({
         </button>
 
         <div
-          className="tools hidden lg:flex"
+          className="tools hidden min-[480px]:flex"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
           <button
@@ -2485,7 +2487,7 @@ function SessionListItem({
           {session.source ?? "local"} {timeAgo(session.last_active)}
         </span>
       </NavLink>
-      <div className="session-actions hidden lg:flex">
+      <div className="session-actions hidden min-[480px]:flex">
         <button
           type="button"
           aria-label={pinned ? "Unpin chat" : "Pin chat"}
