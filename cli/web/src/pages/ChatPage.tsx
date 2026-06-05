@@ -6526,7 +6526,7 @@ export default function ChatPage() {
                 onPointerDown={startPreviewResize}
                 type="button"
               >
-                <span className="h-12 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)] transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
+                <span className="h-12 w-1.5 rounded-full bg-transparent transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
               </button>
             )}
             {/* Activity card removed per request — the right area only shows a
