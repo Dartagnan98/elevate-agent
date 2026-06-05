@@ -11,11 +11,6 @@ import { ThemeProvider } from "./themes";
 // Expose the plugin SDK before rendering so plugins loaded via <script>
 // can access React, components, etc. immediately.
 markStartup("web:main-module-loaded");
-// Flag the desktop (Electron) build so CSS can inset the chat header away from
-// the macOS traffic lights only where they actually exist.
-if (typeof window !== "undefined" && (window as { elevateDesktop?: unknown }).elevateDesktop) {
-  document.documentElement.classList.add("is-desktop");
-}
 exposePluginSDK();
 markStartup("web:plugin-sdk-exposed");
 

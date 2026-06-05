@@ -989,13 +989,6 @@ html .font-courier {
   flex-shrink: 0;
 }
 
-/* When the sidebar is collapsed the chat header sits at the window's left edge,
-   where the macOS traffic lights live. Inset it so the toggle + breadcrumb
-   clear them — desktop (Electron) only; in a browser there are no controls. */
-.is-desktop .chat-top.is-collapsed {
-  padding-left: 84px;
-}
-
 .chat-top > * {
   -webkit-app-region: no-drag;
 }

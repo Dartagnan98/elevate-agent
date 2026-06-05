@@ -6154,7 +6154,7 @@ export default function ChatPage() {
           )}
         >
           <div
-            className={cn("chat-top relative", sidebarCollapsed && "is-collapsed")}
+            className="chat-top relative"
             style={{ WebkitAppRegion: "drag" } as CSSProperties}
           >
             {sidebarCollapsed && onShowSidebar ? (
@@ -6163,7 +6163,7 @@ export default function ChatPage() {
                 onClick={onShowSidebar}
                 aria-label="Show sidebar"
                 style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
-                className="icon-btn shrink-0"
+                className="icon-btn absolute left-[18px] top-1/2 -translate-y-1/2"
               >
                 <PanelLeftOpen className="h-3.5 w-3.5" />
               </button>
