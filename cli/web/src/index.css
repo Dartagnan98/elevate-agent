@@ -1059,7 +1059,9 @@ html .font-courier {
 }
 
 .chat-inner {
-  max-width: 760px;
+  /* Follows the resizable chat column (drag handle on the composer) instead of
+     a fixed 760px, so messages span the same width as the chat box. */
+  max-width: var(--chat-layout-width);
   margin: 0 auto;
   padding: 38px 24px 24px;
   display: flex;
@@ -1084,7 +1086,8 @@ html .font-courier {
   color: var(--fg);
   font-size: 14.5px;
   line-height: 1.7;
-  max-width: 720px;
+  /* Fill the chat column (resizable) rather than a fixed 720px. */
+  max-width: 100%;
 }
 
 .asst-msg p { margin: 0 0 12px; }

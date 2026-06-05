@@ -384,7 +384,7 @@ function Block({
         // When the table is wider than the chat column it scrolls left/right;
         // when it's narrower it still fills the width (min-w-full).
         <div className="my-1 max-w-full overflow-x-auto rounded-md border border-border">
-          <table className="w-max min-w-full border-collapse text-[0.85em]">
+          <table className="w-max min-w-full border-collapse">
             <thead>
               <tr className="bg-foreground/[0.04]">
                 {Array.from({ length: cols }, (_, c) => (
