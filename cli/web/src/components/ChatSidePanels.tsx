@@ -149,9 +149,11 @@ const SELECTOR_ROWS: {
 export function SidePanelSelector({
   mode,
   onSelect,
+  runningTasks = 0,
 }: {
   mode: SidePanelMode;
   onSelect: (mode: SidePanelMode) => void;
+  runningTasks?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
@@ -204,12 +206,23 @@ export function SidePanelSelector({
           // .icon-btn forces `display:grid` + a fixed 26px box, which stacks the
           // icon over the chevron and rides it up against the top border. Force a
           // centered inline row with auto width so it sits inline with the title.
-          "icon-btn !inline-flex !w-auto items-center gap-0.5 px-1.5",
+          "icon-btn relative !inline-flex !w-auto items-center gap-0.5 px-1.5",
           mode !== "none" && "text-[var(--chat-accent)]",
         )}
       >
         <PanelRight className="h-3.5 w-3.5" />
         <ChevronDown className="h-3 w-3 opacity-70" />
+        {runningTasks > 0 && mode !== "tasks" ? (
+          // Live pulse: a background task is running. Nudges the user toward the
+          // Background tasks panel without auto-stealing their view.
+          <span
+            className="absolute -right-0.5 -top-0.5 flex h-2 w-2"
+            title={`${runningTasks} background task${runningTasks === 1 ? "" : "s"} running`}
+          >
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--chat-accent)] opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--chat-accent)]" />
+          </span>
+        ) : null}
       </button>
       {open && coords
         ? createPortal(
@@ -238,6 +251,15 @@ export function SidePanelSelector({
                       {row.icon}
                     </span>
                     <span className="flex-1 truncate">{row.label}</span>
+                    {row.mode === "tasks" && runningTasks > 0 ? (
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-accent)_15%,transparent)] px-1.5 py-0.5 text-[10.5px] font-medium text-[var(--chat-accent)]">
+                        <span className="relative flex h-1.5 w-1.5">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--chat-accent)] opacity-75" />
+                          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--chat-accent)]" />
+                        </span>
+                        {runningTasks}
+                      </span>
+                    ) : null}
                     {row.hint ? (
                       <span className="shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
                         {row.hint}
@@ -379,6 +401,7 @@ export function PlanPanel({
 
 const BG_TOOL_LABELS: Record<string, string> = {
   delegate: "Subagent",
+  delegate_task: "Subagent",
   mixture_of_agents: "Mixture of agents",
   agent_handoff: "Handoff",
 };

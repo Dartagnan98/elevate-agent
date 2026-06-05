@@ -5820,6 +5820,20 @@ export default function ChatPage() {
     }
     return grouped;
   }, [tools]);
+  // Count of subagent / mixture / handoff tasks currently running — drives the
+  // live pulse on the Background tasks panel button.
+  const runningBackgroundTasks = useMemo(
+    () =>
+      tools.filter(
+        (tool) =>
+          tool.status === "running" &&
+          (tool.name === "delegate" ||
+            tool.name === "delegate_task" ||
+            tool.name === "mixture_of_agents" ||
+            tool.name === "agent_handoff"),
+      ).length,
+    [tools],
+  );
   const tracesByMessage = useMemo(() => {
     const grouped = new Map<string, ActivityTrace[]>();
     for (const trace of activityTrace) {
@@ -6185,7 +6199,11 @@ export default function ChatPage() {
               className="toggle-rail"
               style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
             >
-              <SidePanelSelector mode={sidePanel} onSelect={handleSelectPanel} />
+              <SidePanelSelector
+                mode={sidePanel}
+                onSelect={handleSelectPanel}
+                runningTasks={runningBackgroundTasks}
+              />
               {narrow && (
                 <button
                   type="button"
@@ -7607,17 +7625,26 @@ function MessageRow({
               {message.warning}
             </div>
           )}
-          {artifacts.length > 0 && (
-            <div className="mt-3 space-y-2">
-              {artifacts.slice(-4).map((artifact) => (
-                <InlineArtifactCard
-                  key={`message-artifact-${artifact.id}`}
-                  artifact={artifact}
-                  onOpenArtifact={onOpenArtifact}
-                />
-              ))}
-            </div>
-          )}
+          {(() => {
+            // Tool/subagent execution outputs (browser_navigate, terminal, …)
+            // belong in the Background tasks panel, not inline under the
+            // message. Only surface durable file/document artifacts here.
+            const inlineArtifacts = artifacts.filter(
+              (a) => a.kind !== "output",
+            );
+            if (!inlineArtifacts.length) return null;
+            return (
+              <div className="mt-3 space-y-2">
+                {inlineArtifacts.slice(-4).map((artifact) => (
+                  <InlineArtifactCard
+                    key={`message-artifact-${artifact.id}`}
+                    artifact={artifact}
+                    onOpenArtifact={onOpenArtifact}
+                  />
+                ))}
+              </div>
+            );
+          })()}
         </div>
         {isUser ? (
           <div className="user-actions">
@@ -7770,6 +7797,23 @@ function toolTarget(tool: ToolStep): string {
   return base.length > 36 ? `${base.slice(0, 36)}…` : base;
 }
 
+// Turn a raw tool identifier into a readable phrase, e.g.
+// "delegate_task" → "Delegated a task", "mixture_of_agents" → "Mixture of agents".
+const TOOL_NAME_LABELS: Record<string, string> = {
+  delegate: "Delegated a task",
+  delegate_task: "Delegated a task",
+  mixture_of_agents: "Ran a mixture of agents",
+  agent_handoff: "Handed off to an agent",
+  subagent: "Ran a subagent",
+};
+function humanizeToolName(name: string): string {
+  const key = name.toLowerCase();
+  if (TOOL_NAME_LABELS[key]) return TOOL_NAME_LABELS[key];
+  const words = name.replace(/[_-]+/g, " ").trim();
+  if (!words) return "Ran a step";
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 // Natural-language summary for a run of consecutive tool calls, e.g.
 // "Ran 2 commands", "Read App.tsx", "Ran a command, read a file".
 function describeToolGroup(tools: ToolStep[]): string {
@@ -7793,7 +7837,9 @@ function describeToolGroup(tools: ToolStep[]): string {
       case "edit": return one ? (target ? `edited ${target}` : "edited a file") : `edited ${n} files`;
       case "read": return one ? (target ? `read ${target}` : "read a file") : `read ${n} files`;
       case "skill": return one ? (target ? `loaded ${target}` : "loaded a skill") : `loaded ${n} skills`;
-      default: return one ? "ran a step" : `ran ${n} steps`;
+      // For uncategorized tools, surface the actual tool name (e.g.
+      // "delegate_task" → "Delegated a task") instead of a vague "ran a step".
+      default: return one ? humanizeToolName(items[0].name) : `ran ${n} steps`;
     }
   };
   const parts = order.map((cat) => phrase(cat, byCat.get(cat)!));
@@ -8262,7 +8308,12 @@ function ChatArtifactShelf({
   artifacts: ArtifactEntry[];
   onOpenArtifact(artifact: ArtifactEntry): void;
 }) {
-  const visible = artifacts.slice(-3).reverse();
+  // Tool/subagent outputs live in the Background tasks panel, not the inline
+  // shelf — only durable file/document artifacts surface here.
+  const visible = artifacts
+    .filter((a) => a.kind !== "output")
+    .slice(-3)
+    .reverse();
   if (!visible.length) return null;
 
   return (

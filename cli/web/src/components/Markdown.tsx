@@ -54,7 +54,23 @@ type BlockNode =
   | { type: "heading"; level: number; content: string }
   | { type: "hr" }
   | { type: "list"; ordered: boolean; items: string[] }
+  | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "paragraph"; content: string };
+
+/** A GFM table delimiter row, e.g. `| --- | :--: |` or `---|---`. */
+function isTableDelimiter(line: string): boolean {
+  const t = line.trim();
+  if (!t.includes("-") || !t.includes("|")) return false;
+  return /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$/.test(t);
+}
+
+/** Split a `| a | b |` table row into trimmed cells (outer pipes dropped). */
+function splitTableRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|")) t = t.slice(0, -1);
+  return t.split("|").map((c) => c.trim());
+}
 
 /* ------------------------------------------------------------------ */
 /*  Block parser                                                       */
@@ -92,6 +108,29 @@ function parseBlocks(text: string): BlockNode[] {
         content: headingMatch[2],
       });
       i++;
+      continue;
+    }
+
+    // GFM table — a header row of pipe-separated cells followed by a
+    // delimiter row. Renders as a real <table> grid instead of literal pipes.
+    if (
+      line.includes("|") &&
+      i + 1 < lines.length &&
+      isTableDelimiter(lines[i + 1])
+    ) {
+      const headers = splitTableRow(line);
+      i += 2; // consume header + delimiter
+      const rows: string[][] = [];
+      while (
+        i < lines.length &&
+        lines[i].includes("|") &&
+        lines[i].trim() !== "" &&
+        !isTableDelimiter(lines[i])
+      ) {
+        rows.push(splitTableRow(lines[i]));
+        i++;
+      }
+      blocks.push({ type: "table", headers, rows });
       continue;
     }
 
@@ -214,6 +253,52 @@ function Block({
             </li>
           ))}
         </Tag>
+      );
+    }
+
+    case "table": {
+      const cols = Math.max(
+        block.headers.length,
+        ...block.rows.map((r) => r.length),
+      );
+      return (
+        <div className="my-1 overflow-x-auto rounded-md border border-border">
+          <table className="w-full border-collapse text-[0.85em]">
+            <thead>
+              <tr className="bg-foreground/[0.04]">
+                {Array.from({ length: cols }, (_, c) => (
+                  <th
+                    key={c}
+                    className="border-b border-border px-2.5 py-1.5 text-left font-semibold whitespace-nowrap"
+                  >
+                    <InlineContent
+                      text={block.headers[c] ?? ""}
+                      highlightTerms={highlightTerms}
+                    />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, r) => (
+                <tr key={r} className="border-t border-border/60">
+                  {Array.from({ length: cols }, (_, c) => (
+                    <td
+                      key={c}
+                      className="px-2.5 py-1.5 align-top border-r border-border/40 last:border-r-0"
+                    >
+                      <InlineContent
+                        text={row[c] ?? ""}
+                        highlightTerms={highlightTerms}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {caret}
+        </div>
       );
     }
 
