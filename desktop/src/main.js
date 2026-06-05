@@ -1155,7 +1155,25 @@ function kickoffUpdates() {
     return;
   }
 
+  // Serialize update checks. Squirrel runs each download+extract as a separate
+  // `ditto` into its own staging dir; when checks stack up (3-min poll + focus +
+  // rapid re-checks while an update is pending), the parallel extractions race
+  // and fail with "ditto: ... No such file", so the install needs several
+  // retries (the "click 3 times" symptom). Only ever have one check in flight,
+  // and stop checking entirely once an update is already downloading/staged —
+  // there's nothing to gain, the user just needs to apply it.
+  let checkInFlight = false;
+  const busyStatuses = new Set(["checking", "available", "downloading", "ready"]);
   const check = async (reason) => {
+    if (checkInFlight || busyStatuses.has(updateState.status)) {
+      log.info(
+        `[updater] skip check (${reason}) — ${
+          checkInFlight ? "a check is already in flight" : `update already ${updateState.status}`
+        }`,
+      );
+      return;
+    }
+    checkInFlight = true;
     try {
       log.info(`[updater] checking for updates (${reason})`);
       await autoUpdater.checkForUpdates();
@@ -1163,6 +1181,8 @@ function kickoffUpdates() {
       const message = err && err.message ? err.message : String(err);
       log.warn(`[updater] check failed (${reason}): ${message}`);
       broadcastUpdaterEvent({ status: "error", error: message });
+    } finally {
+      checkInFlight = false;
     }
   };
 
