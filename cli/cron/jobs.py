@@ -1670,7 +1670,8 @@ def _looks_waiting_human(summary: Optional[str]) -> bool:
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                  delivery_error: Optional[str] = None,
                  summary: Optional[str] = None,
-                 session_id: Optional[str] = None):
+                 session_id: Optional[str] = None,
+                 outcome: Optional[str] = None):
     """
     Mark a job as having been run.
 
@@ -1725,7 +1726,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # Track consecutive stalled runs (blocked on a human / errored)
                 # and back the schedule off so a stuck watcher stops hammering
                 # its tick. A progressing run resets the counter and cadence.
-                stalled = (not success) or _looks_waiting_human(summary)
+                # Prefer the explicit cron `outcome` marker (survives the
+                # human-friendly prose delivery); fall back to the summary
+                # heuristic when no marker was emitted (older/non-cron callers).
+                cron_outcome = (outcome or "").strip().lower()
+                if cron_outcome in ("waiting_human", "needs_operator", "error"):
+                    stalled = True
+                elif cron_outcome == "ok":
+                    stalled = not success
+                else:
+                    stalled = (not success) or _looks_waiting_human(summary)
                 if stalled:
                     job["stall_count"] = int(job.get("stall_count") or 0) + 1
                 else:

@@ -2516,3 +2516,26 @@ class TestSendMediaTimeoutCancelsFuture:
         # 2. Second file still got dispatched — one timeout doesn't abort the batch
         adapter.send_video.assert_called_once()
         assert adapter.send_video.call_args[1]["video_path"] == "/tmp/fast.mp4"
+
+
+def test_extract_cron_status_parses_and_strips():
+    from cron.scheduler import _extract_cron_status
+
+    status, clean = _extract_cron_status(
+        "Just ran the watcher — waiting on you to sign.\n\n[[CRON_STATUS: waiting_human]]"
+    )
+    assert status == "waiting_human"
+    assert "CRON_STATUS" not in clean
+    assert clean.strip().endswith("sign.")
+    # No marker -> None, text unchanged (caller falls back to the heuristic).
+    assert _extract_cron_status("All good today.") == (None, "All good today.")
+    # Tolerant: single brackets, case, flexible whitespace.
+    assert _extract_cron_status("done [ cron_status : OK ]")[0] == "ok"
+
+
+def test_cron_hint_requests_hidden_status_marker():
+    from cron.scheduler import _build_job_prompt
+
+    prompt = _build_job_prompt({"name": "Test Watcher", "prompt": "do the thing"})
+    assert "CRON_STATUS" in prompt
+    assert "[[CRON_STATUS: waiting_human]]" in prompt

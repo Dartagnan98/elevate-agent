@@ -14,6 +14,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -199,6 +200,33 @@ from cron.jobs import advance_next_run, ensure_system_jobs, get_due_jobs, mark_j
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+
+# Hidden machine status marker the cron agent appends (see _build_job_prompt) so
+# the scheduler can pace re-runs even though the delivered message is now
+# human-friendly prose (no JSON / status codes). It is read for backoff, then
+# stripped before the human ever sees it. Tolerant: optional single/double
+# brackets, case-insensitive, flexible whitespace.
+_CRON_STATUS_RE = re.compile(
+    r"\[\[?\s*CRON_STATUS\s*:\s*(ok|waiting_human|needs_operator|error)\s*\]?\]",
+    re.IGNORECASE,
+)
+
+
+def _extract_cron_status(text: str):
+    """Pull the hidden CRON_STATUS marker out of a cron reply.
+
+    Returns ``(status_or_None, text_without_marker)`` where status is lowercased.
+    The marker (and any blank line it left behind) is removed so it never reaches
+    delivery or the saved summary. If the agent didn't emit one, status is None
+    and the caller falls back to the summary heuristic.
+    """
+    if not text:
+        return None, text
+    matches = _CRON_STATUS_RE.findall(text)
+    status = matches[-1].lower() if matches else None
+    cleaned = _CRON_STATUS_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]*\n[ \t]*\n[ \t]*\Z", "\n", cleaned).rstrip()
+    return status, cleaned
 
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
@@ -1125,6 +1153,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "results into plain language a person can skim. Lead with the outcome and keep it "
         "tight (a few sentences). This FORMAT overrides any 'reply exactly' / JSON output "
         "instruction in the task below — that machine format does not apply to cron delivery. "
+        "STATUS: After your human message, append ONE final line — a hidden machine "
+        "marker the system reads to pace re-runs and strips before anyone sees it: "
+        "[[CRON_STATUS: ok]] if the job did its work or made progress, "
+        "[[CRON_STATUS: waiting_human]] if you are blocked waiting on the realtor "
+        "(missing input, expired login, needs approval), or [[CRON_STATUS: error]] if it "
+        "failed. Put it on its own last line; it is not part of your human message. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
@@ -2058,6 +2092,10 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 success, output, final_response, error = run_job(
                     job, session_id=_cron_session_id
                 )
+                # Pull the hidden CRON_STATUS marker (drives backoff) and strip it
+                # so neither delivery nor the saved summary shows it. None → fall
+                # back to the summary heuristic in mark_job_run.
+                cron_outcome, final_response = _extract_cron_status(final_response)
 
                 output_file = save_job_output(job["id"], output)
                 if verbose:
@@ -2106,6 +2144,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     delivery_error=delivery_error,
                     summary=_summary_src,
                     session_id=_cron_session_id,
+                    outcome=cron_outcome,
                 )
                 return True
 

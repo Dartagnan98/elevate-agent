@@ -961,6 +961,29 @@ class TestStallBackoff:
         assert j["stall_count"] == 0
         assert j.get("backoff_minutes") is None
 
+    def test_outcome_marker_drives_backoff_on_prose(self, tmp_cron_dir):
+        # Cron now delivers human-friendly prose (no `waiting_human` token), so
+        # the explicit outcome marker must drive backoff instead of the summary.
+        job = create_job(prompt="watcher", schedule="every 10m")
+        jid = job["id"]
+        prose = "Just ran the watcher — still waiting on you to add the seller's phone number."
+        for _ in range(3):
+            mark_job_run(jid, success=True, summary=prose, outcome="waiting_human")
+        assert get_job(jid)["backoff_minutes"] == 30
+
+    def test_ok_marker_overrides_stray_token_in_summary(self, tmp_cron_dir):
+        # An explicit ok outcome must NOT be treated as a stall even if the
+        # literal token happens to appear in the prose summary.
+        job = create_job(prompt="watcher", schedule="every 10m")
+        jid = job["id"]
+        for _ in range(4):
+            mark_job_run(jid, success=True,
+                         summary="done; note: this is not a waiting_human situation",
+                         outcome="ok")
+        j = get_job(jid)
+        assert j["stall_count"] == 0
+        assert j.get("backoff_minutes") is None
+
 
 class TestMarkJobRunConcurrency:
     """Regression tests for concurrent parallel job state writes.
