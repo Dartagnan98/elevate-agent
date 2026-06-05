@@ -569,10 +569,11 @@ function defaultPreviewPanelWidth(): number {
 
 // User-resizable chat column width. Returns null when the user hasn't dragged it
 // (the responsive default min(1750px,95vw) applies); a number once they have.
-const CHAT_WIDTH_MIN = 460;
+const CHAT_WIDTH_MIN = 340;
+const CHAT_WIDTH_MAX = 1400;
 function clampChatWidth(width: number): number {
   if (typeof window === "undefined") return Math.round(width);
-  const max = Math.round(window.innerWidth * 0.98);
+  const max = Math.min(CHAT_WIDTH_MAX, Math.round(window.innerWidth * 0.96));
   return Math.round(Math.min(max, Math.max(CHAT_WIDTH_MIN, width)));
 }
 function defaultChatWidth(): number | null {

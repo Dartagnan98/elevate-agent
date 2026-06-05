@@ -127,7 +127,7 @@
   /* Responsive chat column — scales with the app window (like Claude). Default
      cap; the user can override live by dragging the resize handle, which sets
      --chat-layout-width-user (see ChatPage). */
-  --chat-layout-width: var(--chat-layout-width-user, min(2000px, 96vw));
+  --chat-layout-width: var(--chat-layout-width-user, min(1400px, 96vw));
   --chat-surface: var(--bg-2);
   --chat-surface-strong: var(--bg-3);
   --chat-surface-soft: var(--bg-soft);
@@ -1659,7 +1659,9 @@ html .font-courier {
 }
 
 .composer-stage {
-  max-width: 760px;
+  /* Match the message column width (resizable) so the composer and the
+     messages are always the same width. */
+  max-width: var(--chat-layout-width);
   width: 100%;
   margin: 0 auto 8px;
   display: flex;
@@ -1808,7 +1810,8 @@ html .font-courier {
 
 .composer {
   position: relative;
-  max-width: 760px;
+  /* Match the message column width (resizable). */
+  max-width: var(--chat-layout-width);
   margin: 0 auto;
   border-radius: 12px;
   background: var(--bg-2);
