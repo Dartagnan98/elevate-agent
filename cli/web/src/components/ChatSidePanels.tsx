@@ -22,7 +22,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import type { ToolEntry } from "@/components/ToolCall";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
@@ -395,16 +394,24 @@ export function PlanPanel({
 }
 
 // ---------------------------------------------------------------------------
-// Background tasks panel — subagent / mixture / handoff activity, derived
-// purely from the tool stream (ToolEntry.status). No backend.
+// Background tasks panel — every off-thread task (subagent runs, mixtures,
+// handoffs) the session spawns. Fed a unified list built in ChatPage from the
+// subagent lifecycle + the background tool stream.
 // ---------------------------------------------------------------------------
 
-const BG_TOOL_LABELS: Record<string, string> = {
-  delegate: "Subagent",
-  delegate_task: "Subagent",
-  mixture_of_agents: "Mixture of agents",
-  agent_handoff: "Handoff",
-};
+// One background task as the panel renders it. Built in ChatPage from
+// SubagentEntry (rich: goal/model/tool count) and background ToolEntry rows.
+export interface BackgroundTaskItem {
+  id: string;
+  kind: "subagent" | "mixture" | "handoff" | "task";
+  label: string;
+  status: "running" | "done" | "error";
+  detail?: string;
+  model?: string;
+  toolCount?: number;
+  startedAt?: number;
+  completedAt?: number;
+}
 
 function relativeTime(ts?: number): string {
   if (!ts) return "";
@@ -417,7 +424,7 @@ function relativeTime(ts?: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function TaskStatusBadge({ status }: { status: ToolEntry["status"] }) {
+function TaskStatusBadge({ status }: { status: BackgroundTaskItem["status"] }) {
   if (status === "running") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-accent)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-accent)]">
@@ -442,21 +449,37 @@ function TaskStatusBadge({ status }: { status: ToolEntry["status"] }) {
   );
 }
 
-function TaskCard({ tool }: { tool: ToolEntry }) {
-  const label = BG_TOOL_LABELS[tool.name] ?? tool.name;
-  const detail = tool.context || tool.summary || "";
+const KIND_LABEL: Record<BackgroundTaskItem["kind"], string> = {
+  subagent: "Subagent",
+  mixture: "Mixture of agents",
+  handoff: "Handoff",
+  task: "Task",
+};
+
+function TaskCard({ task }: { task: BackgroundTaskItem }) {
   return (
     <div className="rounded-[9px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2.5">
       <div className="flex items-center gap-2">
-        <TaskStatusBadge status={tool.status} />
-        <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">{label}</span>
+        <TaskStatusBadge status={task.status} />
+        <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">
+          {task.label}
+        </span>
         <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
-          {relativeTime(tool.completedAt ?? tool.startedAt)}
+          {relativeTime(task.completedAt ?? task.startedAt)}
         </span>
       </div>
-      {detail ? (
+      {(task.model || task.toolCount || task.kind !== "subagent") && (
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[var(--chat-muted)]">
+          <span className="uppercase tracking-wide">{KIND_LABEL[task.kind]}</span>
+          {task.model ? <span>· {task.model}</span> : null}
+          {task.toolCount ? (
+            <span>· {task.toolCount} tool{task.toolCount === 1 ? "" : "s"}</span>
+          ) : null}
+        </div>
+      )}
+      {task.detail ? (
         <p className="mt-1.5 line-clamp-3 break-words text-[12px] leading-5 text-[var(--chat-muted-strong)]">
-          {detail}
+          {task.detail}
         </p>
       ) : null}
     </div>
@@ -464,18 +487,14 @@ function TaskCard({ tool }: { tool: ToolEntry }) {
 }
 
 export function BackgroundTasksPanel({
-  tools,
+  tasks,
   onClose,
 }: {
-  tools: ToolEntry[];
+  tasks: BackgroundTaskItem[];
   onClose: () => void;
 }) {
-  const tasks = useMemo(
-    () => tools.filter((tool) => tool.name in BG_TOOL_LABELS).slice().reverse(),
-    [tools],
-  );
-  const running = tasks.filter((tool) => tool.status === "running");
-  const finished = tasks.filter((tool) => tool.status !== "running");
+  const running = tasks.filter((task) => task.status === "running");
+  const finished = tasks.filter((task) => task.status !== "running");
 
   return (
     <PanelShell
@@ -496,8 +515,8 @@ export function BackgroundTasksPanel({
             <div className="flex flex-col gap-2">
               <PanelSectionLabel>Running</PanelSectionLabel>
               <div className="flex flex-col gap-2">
-                {running.map((tool) => (
-                  <TaskCard key={tool.id} tool={tool} />
+                {running.map((task) => (
+                  <TaskCard key={task.id} task={task} />
                 ))}
               </div>
             </div>
@@ -506,8 +525,8 @@ export function BackgroundTasksPanel({
             <div className="flex flex-col gap-2">
               <PanelSectionLabel>Finished</PanelSectionLabel>
               <div className="flex flex-col gap-2">
-                {finished.map((tool) => (
-                  <TaskCard key={tool.id} tool={tool} />
+                {finished.map((task) => (
+                  <TaskCard key={task.id} task={task} />
                 ))}
               </div>
             </div>

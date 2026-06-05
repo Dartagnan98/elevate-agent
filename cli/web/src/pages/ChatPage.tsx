@@ -8,6 +8,7 @@ import type { ToolEntry } from "@/components/ToolCall";
 import {
   ArtifactsPanel,
   BackgroundTasksPanel,
+  type BackgroundTaskItem,
   EmptyPreviewPanel,
   FilesPanel,
   PlanPanel,
@@ -2769,10 +2770,9 @@ export default function ChatPage() {
     [],
   );
   const [tools, setTools] = useState<ToolEntry[]>([]);
-  // Subagent panel is no longer rendered (consolidated into the assistant
-  // activity digest), but event handlers still call setSubagents so we
-  // keep the setter alive without holding render state.
-  const [, setSubagents] = useState<SubagentEntry[]>([]);
+  // Subagent lifecycle (start/complete) — surfaced in the Background tasks panel
+  // with goal/model/status/tool-count detail.
+  const [subagents, setSubagents] = useState<SubagentEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
@@ -5808,20 +5808,64 @@ export default function ChatPage() {
     }
     return grouped;
   }, [tools]);
-  // Count of subagent / mixture / handoff tasks currently running — drives the
-  // live pulse on the Background tasks panel button.
+  // Unified background-task list for the panel: rich subagent lifecycle entries
+  // (goal/model/tool-count) plus any background-coordination tool runs not
+  // already represented by a subagent. Newest first.
+  const backgroundTasks = useMemo<BackgroundTaskItem[]>(() => {
+    const items: BackgroundTaskItem[] = [];
+    for (const s of subagents) {
+      items.push({
+        id: s.id,
+        kind: "subagent",
+        label: s.goal || "Subagent",
+        status: s.status,
+        detail: s.preview,
+        model: s.model,
+        toolCount: s.toolCount,
+        startedAt: s.startedAt,
+        completedAt: s.completedAt,
+      });
+    }
+    const haveSubagents = subagents.length > 0;
+    for (const t of tools) {
+      const isDelegate = t.name === "delegate" || t.name === "delegate_task";
+      const isMixture = t.name === "mixture_of_agents";
+      const isHandoff = t.name === "agent_handoff";
+      // delegate_* is already covered by the subagent lifecycle when present;
+      // only fall back to the tool row if no subagent entries exist.
+      if (isMixture || isHandoff || (isDelegate && !haveSubagents)) {
+        items.push({
+          id: t.id,
+          kind: isMixture ? "mixture" : isHandoff ? "handoff" : "subagent",
+          label: isMixture
+            ? "Mixture of agents"
+            : isHandoff
+              ? "Handoff"
+              : t.context || "Subagent",
+          status: t.status,
+          detail: t.context || t.summary,
+          startedAt: t.startedAt,
+          completedAt: t.completedAt,
+        });
+      }
+    }
+    return items.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  }, [subagents, tools]);
   const runningBackgroundTasks = useMemo(
-    () =>
-      tools.filter(
-        (tool) =>
-          tool.status === "running" &&
-          (tool.name === "delegate" ||
-            tool.name === "delegate_task" ||
-            tool.name === "mixture_of_agents" ||
-            tool.name === "agent_handoff"),
-      ).length,
-    [tools],
+    () => backgroundTasks.filter((task) => task.status === "running").length,
+    [backgroundTasks],
   );
+  // Pop the Background tasks panel open when a task first starts running — but
+  // only if nothing else is already taking the side panel, so it never steals
+  // a Preview/Plan the user is looking at.
+  const prevRunningTasksRef = useRef(0);
+  useEffect(() => {
+    const prev = prevRunningTasksRef.current;
+    prevRunningTasksRef.current = runningBackgroundTasks;
+    if (runningBackgroundTasks > prev && prev === 0 && sidePanel === "none") {
+      setSidePanel("tasks");
+    }
+  }, [runningBackgroundTasks, sidePanel]);
   const tracesByMessage = useMemo(() => {
     const grouped = new Map<string, ActivityTrace[]>();
     for (const trace of activityTrace) {
@@ -6043,7 +6087,7 @@ export default function ChatPage() {
           />
         );
       case "tasks":
-        return <BackgroundTasksPanel tools={tools} onClose={closeSidePanel} />;
+        return <BackgroundTasksPanel tasks={backgroundTasks} onClose={closeSidePanel} />;
       case "files":
         return (
           <FilesPanel
