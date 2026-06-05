@@ -37,6 +37,32 @@ def test_local_terminal_requirements(monkeypatch, caplog):
     assert "Terminal requirements check failed" not in caplog.text
 
 
+def test_terminal_survives_deleted_cwd(monkeypatch, caplog):
+    """A gateway whose cwd was deleted out from under it (a desktop
+    auto-update relocating the app bundle the process was launched from)
+    must NOT crash the terminal requirements check. os.getcwd() raising
+    errno 2 previously disabled all shell access for the session; now it
+    falls back to a valid directory."""
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.setenv("HOME", "/tmp")  # valid fallback dir
+
+    def _dead_cwd():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(terminal_tool_module.os, "getcwd", _dead_cwd)
+
+    # The guard falls back instead of raising...
+    assert terminal_tool_module._safe_getcwd() == "/tmp"
+    # ...so the requirements check still passes and logs no failure.
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+    assert ok is True
+    assert "Terminal requirements check failed" not in caplog.text
+    assert terminal_tool_module._get_env_config()["cwd"] == "/tmp"
+
+
 def test_unknown_terminal_env_logs_error_and_returns_false(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "unknown-backend")

@@ -1573,6 +1573,33 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
+# ── Backoff for recurring jobs stuck with no progress ────────────────────
+# A run that ends in `waiting_human` (blocked on the realtor) or errors out is
+# otherwise recorded as a normal run and re-fires on the next scheduled tick.
+# So a watcher blocked on a single unresolved item (expired portal login,
+# missing field) can reprocess it every 10 min, 24/7, spending a full model
+# session each time for zero progress. We count consecutive stalled runs and,
+# past a small grace, push the next run out exponentially (capped). The first
+# run that makes progress resets the counter and restores normal cadence.
+_STALL_BACKOFF_AFTER = 3        # allow this many quick retries before backing off
+_STALL_BACKOFF_BASE_MIN = 30    # first backoff delay (minutes)
+_STALL_BACKOFF_MAX_MIN = 360    # cap (6h)
+
+
+def _looks_waiting_human(summary: Optional[str]) -> bool:
+    """True if a cron run reported it is blocked on a human.
+
+    Workers return a structured result whose ``status`` is ``waiting_human``
+    (or ``needs_operator``) when they cannot proceed without the realtor. That
+    text rides along in the run summary, so a substring check drives backoff
+    without threading a new status field through the executor.
+    """
+    if not summary:
+        return False
+    s = summary.lower()
+    return "waiting_human" in s or "needs_operator" in s
+
+
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                  delivery_error: Optional[str] = None,
                  summary: Optional[str] = None,
@@ -1627,6 +1654,41 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
+
+                # Track consecutive stalled runs (blocked on a human / errored)
+                # and back the schedule off so a stuck watcher stops hammering
+                # its tick. A progressing run resets the counter and cadence.
+                stalled = (not success) or _looks_waiting_human(summary)
+                if stalled:
+                    job["stall_count"] = int(job.get("stall_count") or 0) + 1
+                else:
+                    job["stall_count"] = 0
+                stall_count = int(job.get("stall_count") or 0)
+                kind = job.get("schedule", {}).get("kind")
+                if (
+                    stalled
+                    and stall_count >= _STALL_BACKOFF_AFTER
+                    and kind in {"cron", "interval"}
+                    and job.get("next_run_at")
+                ):
+                    delay_min = min(
+                        _STALL_BACKOFF_MAX_MIN,
+                        _STALL_BACKOFF_BASE_MIN * (2 ** (stall_count - _STALL_BACKOFF_AFTER)),
+                    )
+                    backoff_at = (_hermes_now() + timedelta(minutes=delay_min)).isoformat()
+                    # Only ever push the next run further out, never pull it in.
+                    if backoff_at > job["next_run_at"]:
+                        job["next_run_at"] = backoff_at
+                        job["backoff_until"] = backoff_at
+                        job["backoff_minutes"] = delay_min
+                        logger.info(
+                            "Job '%s' stalled %d× (waiting_human/error) — backing "
+                            "off %d min to %s instead of re-firing on schedule.",
+                            job.get("name", job["id"]), stall_count, delay_min, backoff_at,
+                        )
+                else:
+                    job.pop("backoff_until", None)
+                    job.pop("backoff_minutes", None)
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't

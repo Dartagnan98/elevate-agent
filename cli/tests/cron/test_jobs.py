@@ -893,6 +893,75 @@ class TestEnabledToolsets:
         assert fetched["enabled_toolsets"] == ["web", "delegation"]
 
 
+class TestStallBackoff:
+    """A recurring job stuck on `waiting_human`/errors must back off its tick
+    instead of re-firing on schedule forever (burning a model session each
+    time for zero progress). A run that makes progress resets the cadence.
+    """
+
+    WH = '{"status": "waiting_human", "blocker": "expired SkySlope login"}'
+    OK = '{"status": "ok", "uploaded": 1}'
+
+    def _mins_out(self, job):
+        from cron.jobs import _ensure_aware, _hermes_now
+        nr = job.get("next_run_at")
+        return (_ensure_aware(datetime.fromisoformat(nr)) - _hermes_now()).total_seconds() / 60
+
+    def test_grace_then_exponential_backoff(self, tmp_cron_dir):
+        job = create_job(prompt="MLC watcher", schedule="every 10m")
+        jid = job["id"]
+        # First two stalls stay on the normal tick (give the human a chance).
+        for _ in range(2):
+            mark_job_run(jid, success=True, summary=self.WH)
+        j = get_job(jid)
+        assert j["stall_count"] == 2
+        assert j.get("backoff_minutes") is None
+        assert self._mins_out(j) <= 15  # still ~10-min cadence
+        # Third stall trips backoff: 30 -> 60 -> 120 minutes.
+        expected = [30, 60, 120]
+        for exp in expected:
+            mark_job_run(jid, success=True, summary=self.WH)
+            j = get_job(jid)
+            assert j["backoff_minutes"] == exp
+            assert self._mins_out(j) > 20
+
+    def test_backoff_is_capped(self, tmp_cron_dir):
+        job = create_job(prompt="watcher", schedule="every 10m")
+        jid = job["id"]
+        for _ in range(12):
+            mark_job_run(jid, success=True, summary=self.WH)
+        assert get_job(jid)["backoff_minutes"] == 360  # _STALL_BACKOFF_MAX_MIN
+
+    def test_progress_resets_cadence(self, tmp_cron_dir):
+        job = create_job(prompt="watcher", schedule="every 10m")
+        jid = job["id"]
+        for _ in range(5):
+            mark_job_run(jid, success=True, summary=self.WH)
+        assert get_job(jid)["stall_count"] == 5
+        # A run that makes progress clears the backoff and restores the tick.
+        mark_job_run(jid, success=True, summary=self.OK)
+        j = get_job(jid)
+        assert j["stall_count"] == 0
+        assert j.get("backoff_minutes") is None
+        assert self._mins_out(j) <= 15
+
+    def test_repeated_errors_also_back_off(self, tmp_cron_dir):
+        job = create_job(prompt="watcher", schedule="every 10m")
+        jid = job["id"]
+        for _ in range(3):
+            mark_job_run(jid, success=False, error="boom", summary="boom")
+        assert get_job(jid)["backoff_minutes"] == 30
+
+    def test_normal_runs_never_back_off(self, tmp_cron_dir):
+        job = create_job(prompt="watcher", schedule="every 10m")
+        jid = job["id"]
+        for _ in range(5):
+            mark_job_run(jid, success=True, summary=self.OK)
+        j = get_job(jid)
+        assert j["stall_count"] == 0
+        assert j.get("backoff_minutes") is None
+
+
 class TestMarkJobRunConcurrency:
     """Regression tests for concurrent parallel job state writes.
 

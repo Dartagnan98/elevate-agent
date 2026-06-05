@@ -1004,6 +1004,19 @@ _GATEWAY_TOOL_PROFILES = {
     "cron-automation": ("cronjob", "skills", "terminal", "file", "todo", "memory", "session_search"),
 }
 
+# Capability floor for auto mode: these core local toolsets are NEVER stripped
+# by intent profiling — only the heavy specialized toolsets (browser, vision,
+# image_gen, computer, code_execution, cronjob, delegation, web) stay intent-
+# gated. Without this floor, a phrasing the keyword classifier doesn't match
+# falls to the lean follow-up profile and the agent reports it "doesn't have"
+# file / terminal / Gmail (gws) / Calendar / deploy / Mailjet tools even though
+# the platform is configured for them — those all run through terminal + skills.
+# Intersected with the platform's configured toolsets, so a user who disabled a
+# capability stays disabled.
+_GATEWAY_CORE_TOOLSETS = (
+    "memory", "session_search", "todo", "messaging", "skills", "terminal", "file",
+)
+
 _GATEWAY_PROFILE_KEYWORDS = {
     # Check coding-edit before skill-runner. Real estate skill work often
     # mentions CMA/listings while asking to patch or debug the underlying code.
@@ -2668,6 +2681,13 @@ class GatewayRunner:
                 str(name) for name in _GATEWAY_TOOL_PROFILES.get(selected_profile, ())
             ]
             selected_toolsets = sorted(configured_set & set(requested_toolsets))
+            # Capability floor: never strip the agent's core local tools in auto
+            # mode — only the heavy specialized toolsets stay intent-gated. Keeps
+            # the agent from reporting "I don't have file/terminal/Gmail/deploy"
+            # on phrasings the keyword classifier doesn't recognize.
+            selected_toolsets = sorted(
+                set(selected_toolsets) | (configured_set & set(_GATEWAY_CORE_TOOLSETS))
+            )
 
         available_profiles: dict[str, dict[str, Any]] = {}
         for profile, requested in _GATEWAY_TOOL_PROFILES.items():
