@@ -6331,7 +6331,7 @@ export default function ChatPage() {
                 style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
                 className="group absolute -right-4 top-0 z-10 hidden h-full w-4 cursor-col-resize items-center justify-center lg:flex"
               >
-                <span className="h-10 w-1 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_70%,transparent)] transition-all group-hover:h-16 group-hover:w-1.5 group-hover:bg-[var(--chat-accent)]" />
+                <span className="h-16 w-1 rounded-full bg-transparent transition-all group-hover:w-1.5 group-hover:bg-[var(--chat-accent)]" />
               </button>
               {queuedInputs.length ? (
                 <QueuedInputStrip

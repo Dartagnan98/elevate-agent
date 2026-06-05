@@ -589,6 +589,21 @@ html .font-courier {
   background: transparent;
 }
 
+/* Belt-and-suspenders: kill every scrollbar anywhere inside the sidebar,
+   whatever element ends up being the scroll container. */
+#app-sidebar,
+#app-sidebar * {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+#app-sidebar::-webkit-scrollbar,
+#app-sidebar *::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
 .icon-btn {
   appearance: none;
   background: transparent;
