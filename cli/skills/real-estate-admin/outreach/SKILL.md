@@ -174,6 +174,74 @@ Outreach Drafts -- [date]
 
 Then ask: "want me to send any of these, edit them, or skip?"
 
+## Monitor mode — hot-leads + inbound-reply watcher
+
+Use this when a scheduled job says "run outreach in monitor mode" or asks to scan
+hot signals / inbound replies across the connected sources (CRM, Apple Messages,
+Gmail, SMS, social). This mode **drafts replies only** — never sends.
+
+1. Sync connected sources first: `elevate sync apple-messages,crm,social,gmail --json`.
+   Expected, non-fatal failure modes — report them, don't treat as a hard stop:
+   - Apple Messages can return `blocked=true` / `unable to open database file` →
+     a Full Disk Access gap on the sync process (see "How delivery works"); the
+     CRM still syncs.
+   - Composio Gmail/social can return HTTP 401 → report that channel's coverage
+     as blocked even if cached records exist.
+2. Re-score the inbox/contacts: `elevate review-contacts --json --actor cron:outreach-monitor`.
+3. Query the operational store **only via the Elevate data layer** (`elevate_db`) —
+   never raw `sqlite3`/`psql`:
+   - newest inbound per source (events grouped by kind + source),
+   - the hot list (contacts ranked by heat/lead score),
+   - existing `send_queue` rows in `pending_approval`/`queued` to avoid duplicate
+     drafts (match by recipient, see idempotency below),
+   - a durable "last run" cursor in `outreach_meta`; if absent, treat as first run
+     and use source newest-timestamps rather than guessing a window.
+4. Draft same-channel replies ONLY for genuinely new inbound that needs a reply.
+   If reply sources are blocked and nothing newer is cached, queue zero and say so.
+5. Persist the run cursor (`outreach_monitor_last_run_at`) so the next run resumes.
+6. Report compactly: source coverage + blockers, re-score summary, count of new
+   reply drafts queued, top hottest leads (score + stage/source + reason), and an
+   explicit "Nothing sent."
+
+## Nurture mode — first-touch / re-engagement queueing (no send)
+
+Use this when a scheduled job says "run outreach in nurture mode", asks for fresh
+first-touch leads, or asks to queue drafts for approval without sending. This mode
+**only queues `pending_approval` drafts** — a human approves later.
+
+1. Keep the candidate set tight — fresh first-touch (no prior contact, ~7 days)
+   plus genuinely active recent leads. Don't scan/score/present the entire CRM;
+   filter to fresh/active BEFORE drafting. Page deep enough not to miss real fresh
+   leads, but never dump the full list unless explicitly asked for an audit.
+2. **Suppress before drafting:** Bad Leads, Closed, Past Clients/Sphere/Client,
+   Contract, Pending/Firm, hidden/private, `unsubscribed`, channel-level
+   `cannotText && cannotEmail`, any lead touched (CRM `lastTouch` or local
+   outbound event) within 14 days, and any lead already represented by a
+   `pending_approval`/`queued` `send_queue` row or a recent draft artifact
+   (`events.kind='draft'`, draft attempts, source-inbox drafts) in the last 14
+   days.
+3. **Idempotency is per-recipient, not per-CRM-record.** Dedup by normalized phone
+   first, then email, then lead id. Duplicate CRM records can share one phone —
+   if ANY record for a recipient already has a pending/recent draft, skip ALL
+   records for that recipient. A naive per-record check redrafts duplicates.
+4. Pick the channel from the lead source: text (iMessage/SMS) when a phone exists
+   and texting is allowed, else email when allowed. Don't draft if no safe channel.
+5. Enrich from CRM context (inquiry + viewed/saved properties). Check viewed/saved
+   addresses against the active-listings doc so own-listing disclosure rules hold.
+   With weak attribution and no specific property, use broad system language — do
+   not invent listing/relationship history.
+6. **Queue into `send_queue` only**, never send: `status='pending_approval'`,
+   `payload_json.requires_confirmation=true`, `do_not_send_without_human_approval=true`,
+   `provider_message_id=NULL`, channel = the recipient's known channel. Insert a
+   matching `draft_attempts` row and a `kind='draft'` event. Use the Elevate data
+   layer / `elevate_db` — never raw `sqlite3`/`psql`.
+7. **Verify with SQL before reporting:** counts grouped by status + channel for
+   THIS run's task id, zero rows missing `requires_confirmation`, zero non-pending
+   rows, zero provider message IDs. Verify the exact `send_queue.id`s created by
+   THIS invocation — old cancelled duplicate rows under the same task id can make a
+   clean no-op run look unsafe. In cron mode, if nothing new was queued, return a
+   silent/no-op result after confirming queue integrity.
+
 ## Phase 4 — Validate and hygiene-screen
 
 Run QA on the drafts before any of them is shown as send-ready.
