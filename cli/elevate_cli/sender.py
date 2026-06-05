@@ -27,6 +27,7 @@ for an existing `provider_message_id` and short-circuits to `sent`.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -315,27 +316,100 @@ def _outreach_default_transport() -> str:
     return "iMessage" if val in ("imessage", "imsg") else "SMS"
 
 
+_IDS_CAP_SRC = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools", "ids-capability.swift")
+_IDS_CAP_BIN = os.path.expanduser("~/.elevate/bin/ids-capability")
+
+
+def _ids_capability_bin() -> str | None:
+    """Path to the iMessage-capability probe binary, building it on demand.
+
+    Returns the binary path if available/buildable, else None. Override the
+    path with ELEVATE_IDS_CAPABILITY_BIN. Compiles the bundled Swift source
+    (tools/ids-capability.swift) once with swiftc when the binary is missing —
+    so it self-installs on any Mac with the Xcode command-line tools.
+    """
+    override = os.getenv("ELEVATE_IDS_CAPABILITY_BIN")
+    if override:
+        return override if (os.path.isfile(override) and os.access(override, os.X_OK)) else None
+    if os.path.isfile(_IDS_CAP_BIN) and os.access(_IDS_CAP_BIN, os.X_OK):
+        return _IDS_CAP_BIN
+    swiftc = shutil.which("swiftc")
+    if not swiftc or not os.path.isfile(_IDS_CAP_SRC):
+        return None
+    try:
+        os.makedirs(os.path.dirname(_IDS_CAP_BIN), exist_ok=True)
+        r = subprocess.run(
+            [swiftc, "-O", _IDS_CAP_SRC, "-o", _IDS_CAP_BIN],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if r.returncode == 0 and os.path.isfile(_IDS_CAP_BIN):
+            os.chmod(_IDS_CAP_BIN, 0o755)
+            return _IDS_CAP_BIN
+        _log.warning("ids-capability build failed: %s", (r.stderr or "")[:200])
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("ids-capability build error: %s", exc)
+    return None
+
+
+def _ids_capability(phone: str) -> str | None:
+    """Ask Apple's IDS daemon whether a handle is iMessage-capable — the same
+    blue/green check the iPhone does. Returns "iMessage", "SMS", or None when
+    the probe is unavailable / inconclusive (caller falls back to SMS default).
+
+    This is what lets us route a BRAND-NEW number (no message history) the way
+    the iPhone would, instead of blindly defaulting. Read-only, no SIP, no
+    injection. Never raises — a missing/old-macOS probe degrades to None.
+    """
+    bin_path = _ids_capability_bin()
+    if not bin_path:
+        return None
+    dest = phone if (phone.startswith("tel:") or "@" in phone) else f"tel:{phone}"
+    try:
+        r = subprocess.run(
+            [bin_path, dest], capture_output=True, text=True, timeout=12, check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        data = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001
+        return None
+    t = str(data.get("transport") or "").lower()
+    _log.info("sender.ids_capability phone=%s -> %s", phone, t or "?")
+    if t == "imessage":
+        return "iMessage"
+    if t == "sms":
+        return "SMS"
+    return None
+
+
 def _detect_preferred_transport(phone: str) -> str:
     """Pick `iMessage` or `SMS` for a recipient.
 
-    Returns "iMessage" ONLY when this handle has a proven successful iMessage
-    in chat.db history. Every other case — SMS/RCS history, NO history (a cold
-    outreach number), or chat.db unreadable — routes SMS, the outreach-safe
-    default that reaches every phone.
+    Decision order:
+      1. Proven chat.db history — iMessage ONLY when the last successful
+         outbound was iMessage; SMS/RCS history routes SMS.
+      2. NO history (a cold/new number) or chat.db unreadable — ask Apple's
+         IDS daemon for the iMessage-capability of the handle (the same
+         blue/green check the iPhone does), via the ids-capability probe.
+      3. If IDS is inconclusive/unavailable — fall back to the outreach-safe
+         default (SMS), which reaches every phone.
 
-    This is deliberately SMS-first. Cold outreach targets numbers with no
-    history, and iMessage to a non-Apple number silently fails (error 22,
-    "sent" but never delivered). RCS contacts are Android users — macOS can
-    *receive* RCS (mirrored from a paired iPhone) but cannot *send* it, so
-    those route SMS too. Only when we have positive proof a number is on
-    iMessage do we use the blue bubble.
+    Cold outreach targets numbers with no history, and iMessage to a non-Apple
+    number silently fails (error 22, "sent" but never delivered). RCS contacts
+    are Android users — macOS can *receive* RCS but cannot *send* it, so those
+    route SMS too. We use the blue bubble only on positive proof (history or a
+    live IDS hit).
 
     chat.db.error: 0 = delivered/queued OK, 22 = "Not Delivered" (unreachable
     on iMessage). We only count error=0 is_sent=1 rows as proof.
     """
     default = _outreach_default_transport()
     if not os.path.exists(_CHAT_DB_PATH):
-        return default
+        # No local history at all — ask IDS, then default.
+        return _ids_capability(phone) or default
     import sqlite3 as _sqlite3
     try:
         conn = _sqlite3.connect(f"file:{_CHAT_DB_PATH}?mode=ro", uri=True, timeout=5)
@@ -350,10 +424,10 @@ def _detect_preferred_transport(phone: str) -> str:
         finally:
             conn.close()
     except Exception:
-        # chat.db unreadable (e.g. FDA not effective in this process). Never
-        # silently fall to iMessage — that's the failure that sends blue
-        # bubbles to Android. Use the outreach-safe default.
-        return default
+        # chat.db unreadable (e.g. FDA not effective in this process). Don't
+        # guess from nothing — the IDS probe has its own access; ask it, then
+        # fall back to the outreach-safe default. Never silently iMessage.
+        return _ids_capability(phone) or default
     if row and row[0]:
         svc = str(row[0]).strip().lower()
         # iMessage is the only blue-bubble transport the Mac can send. Every
@@ -363,9 +437,9 @@ def _detect_preferred_transport(phone: str) -> str:
         if svc == "imessage":
             return "iMessage"
         return "SMS"
-    # No successful history for this handle = a cold/new number. Outreach-safe
-    # default (SMS) rather than guessing iMessage.
-    return default
+    # No successful history for this handle = a cold/new number. Ask Apple's
+    # IDS (iPhone's blue/green check) before falling back to the SMS default.
+    return _ids_capability(phone) or default
 
 
 def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tuple[str, int] | None:
