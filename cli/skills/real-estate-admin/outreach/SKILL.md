@@ -204,6 +204,39 @@ Block the draft until fixed if it:
 Write `validation.json` and update `drafts.json` if you fix copy. Only drafts with
 no `errors` are send-ready.
 
+## How delivery works (READ before you send or diagnose a send failure)
+
+Texts are **transport-aware** now — do not assume everything is iMessage, and do
+NOT tell the realtor to "grant Full Disk Access" when a send fails. That is stale
+advice and is almost never the real cause.
+
+- **Per-number routing:** a number with proven iMessage history → iMessage; an
+  Android / SMS / RCS number → **SMS**; a brand-new number with no history is
+  checked against Apple's IDS (the iPhone's blue/green check) and routed
+  accordingly. SMS is the safe default — it reaches every phone.
+- **iMessage to a non-Apple number silently fails** ("sent" but never delivered).
+  That is why an Android lead can look sent but never arrive. The router avoids
+  this; old osascript-only sending does not.
+- **Native Mac delivery runs from the foreground Elevate app**, not the
+  background service — macOS only lets the app (not a headless process) control
+  Messages. So native sending requires the **current desktop app version**. If
+  the app is out of date, native sends may not deliver.
+- **If Messages.app wedges** (sends hang / "AppleEvent timed out"), quit and
+  reopen Messages — that clears it.
+
+**When a send won't deliver, the real fixes are (in order):**
+1. Update the Elevate desktop app (native send path ships in the app, not the
+   background service).
+2. Configure an **SMS provider** (Sendblue, Twilio, etc.) — the durable,
+   headless path for reliable/at-scale outreach, and the right answer if native
+   Mac sending keeps being flaky. This is what "SMS provider not configured"
+   means — it's a real option, not just an error.
+3. Only check Full Disk Access if the app genuinely can't *read* message history
+   — but that does not block *sending*, so don't lead with it.
+
+Tell the realtor the accurate version: native texting needs the latest app
+update; for rock-solid sending, an SMS provider is the durable route.
+
 ## Phase 5 — Send
 
 Ship a draft only on explicit same-turn approval. This is the only phase that sends.
@@ -268,11 +301,17 @@ Actions: `sent`, `skipped`, `edited_and_sent`, `send_failed`, `sent_via_email`,
 `deferred`, `snoozed`, `dismissed`. This file is how tomorrow's brew knows NOT to
 re-draft the same lead within cooldown.
 
-**Bounces and failures.** If `send-imessage.sh` fails: tell the realtor "iMessage to
-(phone) failed. Want me to try email, or skip?" If she says email and there is an
-email on file, send via `gws gmail users messages send` with a brief subject derived
-from the message, log a Lofty note, log the event as `sent_via_email`. If she skips,
-log `send_failed`. For repeated bounces, mark the lead cannot-text in Lofty.
+**Bounces and failures.** If a send fails or hangs: do NOT default to "grant Full
+Disk Access" — see "How delivery works" above. If it's a one-off, the cause is
+usually a wedged Messages.app (quit+reopen) or an out-of-date desktop app. Offer
+the realtor email instead: "Text to (phone) failed — want me to try email, or
+skip?" If she says email and there's an email on file, send via `gws gmail users
+messages send` with a brief subject derived from the message, log a Lofty note,
+log the event as `sent_via_email`. If she skips, log `send_failed`. If texts keep
+failing across leads (not just one), that's a transport/app issue — tell her the
+native send path needs the latest app update, or to set up an SMS provider for
+reliable delivery; don't keep retrying per-lead. For a genuine per-lead bounce
+(number can't receive texts), mark the lead cannot-text in Lofty.
 
 **Batch sends.** "Send all hot" / "send the top 3" — confirm the batch as a numbered
 list first, wait for one "go", then send sequentially with 30-second spacing so
