@@ -127,7 +127,10 @@
   /* Responsive chat column — scales with the app window (like Claude). Default
      cap; the user can override live by dragging the resize handle, which sets
      --chat-layout-width-user (see ChatPage). */
-  --chat-layout-width: var(--chat-layout-width-user, min(1000px, 96vw));
+  /* Responsive: never exceeds 96vw, so the column shrinks with the window even
+     when the user has dragged a fixed width (no more getting stuck at 1000px on
+     a small window). Default cap 1000px. */
+  --chat-layout-width: min(var(--chat-layout-width-user, 1000px), 96vw);
   --chat-surface: var(--bg-2);
   --chat-surface-strong: var(--bg-3);
   --chat-surface-soft: var(--bg-soft);
@@ -984,6 +987,13 @@ html .font-courier {
   padding: 0 18px 0 22px;
   -webkit-app-region: drag;
   flex-shrink: 0;
+}
+
+/* When the sidebar is collapsed the chat header sits at the window's left edge,
+   where the macOS traffic lights live. Inset it so the toggle + breadcrumb
+   clear them — desktop (Electron) only; in a browser there are no controls. */
+.is-desktop .chat-top.is-collapsed {
+  padding-left: 84px;
 }
 
 .chat-top > * {

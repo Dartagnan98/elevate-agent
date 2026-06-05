@@ -729,8 +729,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
-    minWidth: 980,
-    minHeight: 680,
+    minWidth: 380,
+    minHeight: 480,
     title: "Elevate",
     backgroundColor: "#0F0F0F",
     show: false,
