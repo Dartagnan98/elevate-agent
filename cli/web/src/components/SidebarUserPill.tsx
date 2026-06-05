@@ -269,8 +269,10 @@ export function SidebarUserPill() {
       >
         <div className="avatar">{initial}</div>
         <div className="who">
-          <div className="name">{nameLabel}</div>
-          <div className="role">{tierLabel}</div>
+          <div className="name">
+            {nameLabel}
+            {tierLabel ? <span className="role"> · {tierLabel}</span> : null}
+          </div>
         </div>
         <ChevronUp className={cn("user-chev", open && "open")} />
       </button>

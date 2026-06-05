@@ -679,6 +679,15 @@ function createMenu() {
       ],
     },
     {
+      label: "View",
+      submenu: [
+        // Without these, Cmd+R does nothing and the renderer never picks up a
+        // freshly deployed bundle (you'd have to fully quit + reopen).
+        { role: "reload", accelerator: "CmdOrCtrl+R" },
+        { role: "forceReload", accelerator: "Shift+CmdOrCtrl+R" },
+      ],
+    },
+    {
       label: "Navigate",
       submenu: [
         { label: "Chat", accelerator: "CmdOrCtrl+1", click: () => loadAppPath("/chat") },

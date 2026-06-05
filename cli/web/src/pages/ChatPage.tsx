@@ -6,6 +6,7 @@ import {
 } from "@/components/SlashPopover";
 import type { ToolEntry } from "@/components/ToolCall";
 import {
+  ArtifactsPanel,
   BackgroundTasksPanel,
   EmptyPreviewPanel,
   FilesPanel,
@@ -564,6 +565,28 @@ function defaultPreviewPanelWidth(): number {
     // Ignore malformed local storage.
   }
   return clampPreviewPanelWidth(window.innerWidth * 0.5);
+}
+
+// User-resizable chat column width. Returns null when the user hasn't dragged it
+// (the responsive default min(1750px,95vw) applies); a number once they have.
+const CHAT_WIDTH_MIN = 460;
+function clampChatWidth(width: number): number {
+  if (typeof window === "undefined") return Math.round(width);
+  const max = Math.round(window.innerWidth * 0.98);
+  return Math.round(Math.min(max, Math.max(CHAT_WIDTH_MIN, width)));
+}
+function defaultChatWidth(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = localStorage.getItem("elevate-chat-width");
+    if (stored) {
+      const n = parseInt(stored, 10);
+      if (Number.isFinite(n) && n > 0) return clampChatWidth(n);
+    }
+  } catch {
+    // Ignore malformed local storage.
+  }
+  return null;
 }
 
 const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
@@ -1828,12 +1851,12 @@ function addProgressSummary(
 }
 
 function buildProgressSummaries({
-  artifacts,
   busy,
   statusText,
   tools,
 }: {
-  artifacts: ArtifactEntry[];
+  // artifacts intentionally no longer surfaced in the Activity card
+  artifacts?: ArtifactEntry[];
   busy: boolean;
   statusText: string;
   tools: ToolEntry[];
@@ -1907,22 +1930,8 @@ function buildProgressSummaries({
     });
   }
 
-  if (artifacts.length) {
-    // Outputs land after the tools that produced them.
-    const lastToolEnd = Math.max(
-      0,
-      ...tools.map((tool) => tool.completedAt ?? tool.startedAt ?? 0),
-    );
-    addProgressSummary(real, {
-      at: lastToolEnd || Date.now(),
-      details: artifacts.slice(-8).map((artifact) =>
-        compactLine(artifact.detail || artifact.path || artifact.source, artifact.title),
-      ),
-      id: "artifacts",
-      label: "Prepare outputs",
-      status: "done",
-    });
-  }
+  // Artifacts are intentionally NOT surfaced in the Activity card anymore —
+  // no "Prepare outputs / N ARTIFACTS" section. (Removed per request.)
 
   real.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
 
@@ -2711,6 +2720,7 @@ export default function ChatPage() {
   const planAutoOpenDisabledRef = useRef(false);
   const lastTodoSigRef = useRef<string>("");
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
+  const [chatWidth, setChatWidth] = useState<number | null>(defaultChatWidth);
   const [messages, setMessagesRaw] = useState<ChatMessage[]>([]);
   // Wrap the setter so ANY call that wipes a populated list to empty is caught
   // with its call stack. This is how we pin the exact eraser of the blank bug
@@ -2971,10 +2981,11 @@ export default function ChatPage() {
       !previewAutoOpenDisabledRef.current &&
       !dismissedArtifactsRef.current.has(artifactDismissKey(previewCandidate))
     ) {
+      // Keep the latest artifact loaded as the preview's content, but do NOT
+      // auto-open the right panel — artifacts no longer take over the right
+      // side. They live in the Artifacts tab (the button); tap one to open it
+      // here in Preview.
       setPreviewArtifact(previewCandidate);
-      // The aside now renders by sidePanel mode, so auto-opening a preview
-      // must also flip the mode or the panel stays hidden.
-      setSidePanel((current) => (current === "none" ? "preview" : current));
     }
   }, []);
 
@@ -3142,6 +3153,54 @@ export default function ChatPage() {
       window.addEventListener("pointercancel", stopResize);
     },
     [sidePanel, previewPanelWidth],
+  );
+
+  // Drag-to-resize the chat column itself (works with or without a side panel).
+  // The column is centered, so dragging the right edge changes BOTH sides.
+  const startChatResize = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      const target = event.currentTarget;
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const shell = target.closest(".elevate-chat-shell") as HTMLElement | null;
+      const col = target.closest("[data-chat-col]") as HTMLElement | null;
+      const startWidth = col
+        ? Math.round(col.getBoundingClientRect().width)
+        : clampChatWidth(chatWidth ?? 1000);
+      target.setPointerCapture(pointerId);
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const delta = (moveEvent.clientX - startX) * 2;
+        const clamped = clampChatWidth(startWidth + delta);
+        if (shell) shell.style.setProperty("--chat-layout-width-user", `${clamped}px`);
+      };
+
+      const stopResize = () => {
+        if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+        const finalWidth = shell
+          ? parseInt(
+              shell.style.getPropertyValue("--chat-layout-width-user") || String(startWidth),
+              10,
+            )
+          : startWidth;
+        const c = clampChatWidth(finalWidth);
+        setChatWidth(c);
+        try {
+          localStorage.setItem("elevate-chat-width", String(c));
+        } catch {
+          // best-effort persistence
+        }
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", stopResize);
+        window.removeEventListener("pointercancel", stopResize);
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", stopResize);
+      window.addEventListener("pointercancel", stopResize);
+    },
+    [chatWidth],
   );
 
   // Auto-open the Plan panel when the agent writes/updates a todo list, unless
@@ -5948,11 +6007,10 @@ export default function ChatPage() {
   // Files / Background tasks are just breakdowns (lists) — they get a compact
   // fixed width and no resize handle.
   const isPreviewPanel = sidePanel === "preview";
-  const previewPanelLayoutStyle = isPreviewPanel
-    ? ({
-        "--preview-panel-width": previewPanelWidthPx,
-      } as CSSProperties)
-    : undefined;
+  const previewPanelLayoutStyle = {
+    ...(isPreviewPanel ? { "--preview-panel-width": previewPanelWidthPx } : {}),
+    ...(chatWidth ? { "--chat-layout-width-user": `${chatWidth}px` } : {}),
+  } as CSSProperties;
   // Plan/Files data is keyed by the PERSISTED session id (where the message
   // history lives), not the live gateway sessionId — on resume the latter is a
   // freshly minted id with no history yet. This is the same id artifacts and
@@ -5965,6 +6023,14 @@ export default function ChatPage() {
           <ArtifactPreviewPane artifact={previewArtifact} onClose={dismissPreviewArtifact} />
         ) : (
           <EmptyPreviewPanel onClose={dismissPreviewArtifact} />
+        );
+      case "artifacts":
+        return (
+          <ArtifactsPanel
+            artifacts={artifacts}
+            onOpen={openArtifactPreview}
+            onClose={closeSidePanel}
+          />
         );
       case "plan":
         return (
@@ -6235,7 +6301,19 @@ export default function ChatPage() {
                 Drop to attach
               </div>
             )}
-            <div className="mx-auto w-full max-w-[var(--chat-layout-width)]">
+            <div className="relative mx-auto w-full max-w-[var(--chat-layout-width)]" data-chat-col>
+              {/* Drag handle to resize the chat column width (persisted). Sits in
+                  the right margin; large screens only. */}
+              <button
+                type="button"
+                aria-label="Resize chat width"
+                title="Drag to resize chat width"
+                onPointerDown={startChatResize}
+                style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+                className="group absolute -right-4 top-0 z-10 hidden h-full w-4 cursor-col-resize items-center justify-center lg:flex"
+              >
+                <span className="h-10 w-1 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_70%,transparent)] transition-all group-hover:h-16 group-hover:w-1.5 group-hover:bg-[var(--chat-accent)]" />
+              </button>
               {queuedInputs.length ? (
                 <QueuedInputStrip
                   busy={busy}
@@ -6370,6 +6448,7 @@ export default function ChatPage() {
                 agents={activeComposerAgents}
                 canPickModel={canPickModel}
                 info={info}
+                running={busy}
                 onAttach={onPaperclipClick}
                 onOpenModel={() => setModelOpen(true)}
                 onSelectAgent={selectComposerAgent}
@@ -6403,7 +6482,9 @@ export default function ChatPage() {
             "hidden min-h-0 shrink-0 lg:flex",
             wideOpen
               ? "flex-col pb-[var(--sidebar-gap)] pl-0 pr-[var(--sidebar-gap)] pt-[var(--sidebar-gap)]"
-              : "w-[16.25rem] flex-col self-start pr-[18px] pt-[60px]",
+              // No activity card anymore — collapse the reserved column to zero
+              // width so the chat reclaims the space when no panel is open.
+              : "w-0 overflow-hidden",
           )}
           style={
             wideOpen
@@ -6429,7 +6510,10 @@ export default function ChatPage() {
                 <span className="h-12 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--chat-border)_78%,transparent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--chat-surface)_55%,transparent)] transition-all hover:w-2 hover:bg-[var(--chat-accent)]" />
               </button>
             )}
-            {wideOpen ? renderSidePanel() : activity}
+            {/* Activity card removed per request — the right area only shows a
+                side panel (Preview / Artifacts / Files / Background tasks / Plan)
+                when one is open; otherwise nothing. */}
+            {wideOpen ? renderSidePanel() : null}
           </div>
         </aside>
       </div>
@@ -6959,6 +7043,26 @@ function ComposerRichInputLayer({
   );
 }
 
+// Three dots that light up in sequence while the session is running — the
+// at-a-glance "working" indicator next to the model/context ring.
+function WorkingDots() {
+  return (
+    <span
+      className="inline-flex items-center gap-[3px] px-0.5"
+      aria-label="Session running"
+      title="Working…"
+    >
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="h-1.5 w-1.5 rounded-full bg-[var(--chat-accent)] animate-pulse"
+          style={{ animationDelay: `${i * 200}ms`, animationDuration: "1000ms" }}
+        />
+      ))}
+    </span>
+  );
+}
+
 function ContextRing({ usage }: { usage: UsageInfo | null }) {
   const used = Math.max(0, Math.min(100, usage?.context_percent ?? 0));
   const left = usage?.context_percent === undefined ? null : Math.max(0, 100 - used);
@@ -7035,6 +7139,7 @@ function ComposerActionBar({
   permissionMenuOpen,
   onTogglePermissionMenu,
   onSelectPermissionMode,
+  running,
   selectedAgent,
   selectedMicId,
   usage,
@@ -7060,6 +7165,7 @@ function ComposerActionBar({
   permissionMenuOpen: boolean;
   onTogglePermissionMenu(): void;
   onSelectPermissionMode(mode: PermissionMode): void;
+  running?: boolean;
   selectedAgent: ComposerAgent;
   selectedMicId: string;
   usage: UsageInfo | null;
@@ -7295,6 +7401,7 @@ function ComposerActionBar({
         >
           <span>{modelLabel(info)}</span>
         </button>
+        {running ? <WorkingDots /> : null}
         <ContextRing usage={usage} />
       </div>
     </div>
@@ -7414,7 +7521,9 @@ function MessageRow({
     >
       <div
         className={cn(
-          "min-w-0 flex-1 max-w-[74ch]",
+          // Match the responsive chat column width so messages grow/shrink with
+          // the app window (Claude-like) instead of a fixed ~74ch.
+          "min-w-0 flex-1 max-w-[var(--chat-layout-width)]",
           isUser && "flex flex-col items-end",
         )}
       >

@@ -7,8 +7,11 @@ import {
   Circle,
   CircleDot,
   File as FileIcon,
+  FileCode,
+  FileStack,
   FileText,
   Folder,
+  Image as ImageIcon,
   ListChecks,
   Loader2,
   PanelRight,
@@ -25,7 +28,7 @@ import { api } from "@/lib/api";
 import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
 
-export type SidePanelMode = "none" | "preview" | "plan" | "tasks" | "files";
+export type SidePanelMode = "none" | "preview" | "artifacts" | "plan" | "tasks" | "files";
 
 // ---------------------------------------------------------------------------
 // Shared shell — mirrors ArtifactPreviewPane so every side panel reads the
@@ -137,6 +140,7 @@ const SELECTOR_ROWS: {
   hint?: string;
 }[] = [
   { mode: "preview", label: "Preview", icon: <FileText className="h-4 w-4" />, hint: "⇧⌘P" },
+  { mode: "artifacts", label: "Artifacts", icon: <FileStack className="h-4 w-4" /> },
   { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" />, hint: "⇧⌘F" },
   { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" /> },
   { mode: "plan", label: "Plan", icon: <ListChecks className="h-4 w-4" /> },
@@ -197,7 +201,10 @@ export function SidePanelSelector({
         aria-expanded={open}
         title="Side panels"
         className={cn(
-          "icon-btn inline-flex items-center gap-0.5",
+          // .icon-btn forces `display:grid` + a fixed 26px box, which stacks the
+          // icon over the chevron and rides it up against the top border. Force a
+          // centered inline row with auto width so it sits inline with the title.
+          "icon-btn !inline-flex !w-auto items-center gap-0.5 px-1.5",
           mode !== "none" && "text-[var(--chat-accent)]",
         )}
       >
@@ -482,6 +489,114 @@ export function BackgroundTasksPanel({
               </div>
             </div>
           ) : null}
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts — a card list of everything generated this session (PDFs, HTML,
+// images, files). Same card language as Background tasks; clicking a card opens
+// it in the Preview pane.
+// ---------------------------------------------------------------------------
+
+// Minimal shape the card renders — structurally compatible with ChatPage's
+// ArtifactEntry (kept local to avoid a circular import back into ChatPage).
+export interface ArtifactListItem {
+  id: string;
+  title: string;
+  kind: string;
+  createdAt: number;
+  detail?: string;
+  path?: string;
+  source?: string;
+  status?: "error" | "ok";
+}
+
+function artifactKindIcon(kind: string) {
+  switch (kind) {
+    case "image":
+      return <ImageIcon className="h-4 w-4" />;
+    case "html":
+      return <FileCode className="h-4 w-4" />;
+    case "pdf":
+    case "text":
+      return <FileText className="h-4 w-4" />;
+    default:
+      return <FileIcon className="h-4 w-4" />;
+  }
+}
+
+function ArtifactCard<T extends ArtifactListItem>({
+  item,
+  onOpen,
+}: {
+  item: T;
+  onOpen: (item: T) => void;
+}) {
+  const detail = item.path || item.detail || item.source || "";
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(item)}
+      className="w-full rounded-[9px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2.5 text-left transition-colors hover:bg-[var(--chat-surface-strong)]"
+    >
+      <div className="flex items-center gap-2">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--chat-muted-strong)]">
+          {artifactKindIcon(item.kind)}
+        </span>
+        <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">
+          {item.title}
+        </span>
+        {item.status === "error" ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-danger)]">
+            <AlertCircle className="h-3 w-3" />
+            Error
+          </span>
+        ) : null}
+        <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
+          {relativeTime(item.createdAt)}
+        </span>
+      </div>
+      {detail ? (
+        <p className="mt-1.5 line-clamp-2 break-words text-[12px] leading-5 text-[var(--chat-muted-strong)]">
+          {detail}
+        </p>
+      ) : null}
+    </button>
+  );
+}
+
+export function ArtifactsPanel<T extends ArtifactListItem>({
+  artifacts,
+  onOpen,
+  onClose,
+}: {
+  artifacts: T[];
+  onOpen: (item: T) => void;
+  onClose: () => void;
+}) {
+  // Newest first.
+  const items = useMemo(() => artifacts.slice().reverse(), [artifacts]);
+  return (
+    <PanelShell
+      icon={<FileStack className="h-4.5 w-4.5" />}
+      title="Artifacts"
+      subtitle={items.length ? `${items.length} this session` : "Generated files & previews"}
+      onClose={onClose}
+    >
+      {items.length === 0 ? (
+        <PanelEmpty
+          icon={<FileStack className="h-5 w-5" />}
+          title="No artifacts yet"
+          body="PDFs, documents, images, and files the agent generates this session show up here. Tap one to preview it."
+        />
+      ) : (
+        <div className="flex flex-col gap-2 p-3">
+          {items.map((item) => (
+            <ArtifactCard key={item.id} item={item} onOpen={onOpen} />
+          ))}
         </div>
       )}
     </PanelShell>
