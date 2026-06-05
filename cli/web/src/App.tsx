@@ -1297,7 +1297,6 @@ function DesktopSidebar({
   const [sessionMenu, setSessionMenu] = useState<SessionMenuState | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const { toast, showToast } = useToast();
-  const { themeName } = useTheme();
   const {
     activeAction,
     isBusy: systemActionBusy,
@@ -1308,8 +1307,6 @@ function DesktopSidebar({
   } = useSystemActions();
   const desktopUpdater = useMemo(getDesktopUpdater, []);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdaterState | null>(null);
-  const sidebarLogoSrc =
-    themeName === "light" ? "/elevateos-wordmark.png" : "/elevateos-wordmark-dark.png";
 
   useEffect(() => {
     if (!desktopUpdater) return;
@@ -1877,14 +1874,9 @@ function DesktopSidebar({
         className="sidebar-top"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        <div className="flex h-7 w-[9.75rem] min-w-0 items-center pl-[3.75rem]">
-          <img
-            src={sidebarLogoSrc}
-            alt="Elevation"
-            className="h-6 w-full object-contain"
-            draggable={false}
-          />
-        </div>
+        {/* Logo removed per request — empty spacer keeps the row height and the
+            traffic-light clearance on the left. */}
+        <div className="h-7 w-[9.75rem] shrink-0" aria-hidden />
 
         <button
           type="button"

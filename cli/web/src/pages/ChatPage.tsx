@@ -6082,25 +6082,25 @@ export default function ChatPage() {
     />
   );
 
+  // Floating mobile Activity panel removed per request — the triggers are gone
+  // so it can never open; kept mounted off-screen only to avoid a large
+  // unused-symbol cascade. Never visible to the user.
   const mobileActivityPortal =
     narrow &&
     portalRoot &&
+    mobilePanelOpen &&
     createPortal(
       <>
-        {mobilePanelOpen && (
-          <button
-            aria-label="Close activity"
-            className="fixed inset-0 z-[55] bg-black/55 backdrop-blur-sm"
-            onClick={() => setMobilePanelOpen(false)}
-            type="button"
-          />
-        )}
+        <button
+          aria-label="Close activity"
+          className="fixed inset-0 z-[55] bg-black/55 backdrop-blur-sm"
+          onClick={() => setMobilePanelOpen(false)}
+          type="button"
+        />
         <aside
           className={cn(
             "fixed right-4 top-4 z-[60] flex h-[52dvh] max-h-[32rem] min-h-[22rem] w-[min(24rem,calc(100vw-2rem))] flex-col",
-            "normal-case",
-            mobilePanelOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]",
-            "transition-transform duration-200 ease-out",
+            "normal-case translate-x-0 transition-transform duration-200 ease-out",
           )}
         >
           <Button
@@ -6205,16 +6205,6 @@ export default function ChatPage() {
                 onSelect={handleSelectPanel}
                 runningTasks={runningBackgroundTasks}
               />
-              {narrow && (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="Toggle activity"
-                  onClick={() => setMobilePanelOpen((value) => !value)}
-                >
-                  <PanelLeftOpen className="h-3.5 w-3.5" />
-                </button>
-              )}
             </div>
           </div>
           <div ref={chatScrollRef} className="chat-scroll" onScroll={handleChatScroll}>
@@ -6538,15 +6528,6 @@ export default function ChatPage() {
       </div>
       {mobileActivityPortal}
       {mobilePreviewPortal}
-      {narrow && !mobilePanelOpen && !wideOpen && (
-        <button
-          className="fixed right-4 top-4 z-40 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-1.5 text-[12px] font-medium text-[var(--chat-muted-strong)] shadow-[0_12px_34px_-18px_rgba(0,0,0,0.7)]"
-          onClick={() => setMobilePanelOpen(true)}
-          type="button"
-        >
-          Activity
-        </button>
-      )}
       {modelOpen && canPickModel && sessionId && (
         <ModelPickerDialog
           gw={gw}
