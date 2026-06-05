@@ -6457,7 +6457,6 @@ export default function ChatPage() {
                 agents={activeComposerAgents}
                 canPickModel={canPickModel}
                 info={info}
-                running={busy}
                 onAttach={onPaperclipClick}
                 onOpenModel={() => setModelOpen(true)}
                 onSelectAgent={selectComposerAgent}
@@ -7043,25 +7042,8 @@ function ComposerRichInputLayer({
   );
 }
 
-// Three dots that light up in sequence while the session is running — the
-// at-a-glance "working" indicator next to the model/context ring.
-function WorkingDots() {
-  return (
-    <span
-      className="inline-flex items-center gap-[3px] px-0.5"
-      aria-label="Session running"
-      title="Working…"
-    >
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="h-1.5 w-1.5 rounded-full bg-[var(--chat-accent)] animate-pulse"
-          style={{ animationDelay: `${i * 200}ms`, animationDuration: "1000ms" }}
-        />
-      ))}
-    </span>
-  );
-}
+// (WorkingDots removed — the running indicator now lives on the sidebar chat
+// row, not the composer footer.)
 
 function ContextRing({ usage }: { usage: UsageInfo | null }) {
   const used = Math.max(0, Math.min(100, usage?.context_percent ?? 0));
@@ -7139,7 +7121,6 @@ function ComposerActionBar({
   permissionMenuOpen,
   onTogglePermissionMenu,
   onSelectPermissionMode,
-  running,
   selectedAgent,
   selectedMicId,
   usage,
@@ -7165,7 +7146,6 @@ function ComposerActionBar({
   permissionMenuOpen: boolean;
   onTogglePermissionMenu(): void;
   onSelectPermissionMode(mode: PermissionMode): void;
-  running?: boolean;
   selectedAgent: ComposerAgent;
   selectedMicId: string;
   usage: UsageInfo | null;
@@ -7401,7 +7381,6 @@ function ComposerActionBar({
         >
           <span>{modelLabel(info)}</span>
         </button>
-        {running ? <WorkingDots /> : null}
         <ContextRing usage={usage} />
       </div>
     </div>

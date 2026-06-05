@@ -1217,6 +1217,34 @@ async function copyToClipboard(value: string): Promise<void> {
   document.body.removeChild(textarea);
 }
 
+// Sidebar chat list is cached to localStorage so it paints instantly on app
+// restart (the dashboard backend takes a few seconds to boot; without this the
+// sidebar sits empty until it's ready). Fresh data overwrites the cache once
+// the API responds.
+const SESSIONS_CACHE_KEY = "elevate.sidebar.sessions.v1";
+function readCachedSessions(): SessionInfo[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(SESSIONS_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Never trust cached running state — clear it so a stale "running" row
+    // doesn't flash the 3-dot indicator until live data confirms it.
+    return parsed.map((s) => ({ ...s, is_active: false }));
+  } catch {
+    return [];
+  }
+}
+function writeCachedSessions(sessions: SessionInfo[]) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(sessions.slice(0, 60)));
+  } catch {
+    /* ignore quota / serialization errors */
+  }
+}
+
 function DesktopSidebar({
   embeddedChat,
   // navItems no longer rendered in the sidebar (Tools moved to the profile
@@ -1239,8 +1267,11 @@ function DesktopSidebar({
   const location = useLocation();
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [sessions, setSessions] = useState<SessionInfo[]>(readCachedSessions);
+  // If we have a cached list, don't show the loading state — paint it instantly.
+  const [sessionsLoading, setSessionsLoading] = useState(
+    () => readCachedSessions().length === 0,
+  );
   const [sessionError, setSessionError] = useState(false);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
@@ -1410,7 +1441,9 @@ function DesktopSidebar({
         }
       }
 
-      setSessions(Array.from(byId.values()));
+      const loadedSessions = Array.from(byId.values());
+      setSessions(loadedSessions);
+      writeCachedSessions(loadedSessions);
       setSessionError(false);
     } catch {
       setSessionError(true);
@@ -2366,14 +2399,31 @@ function SessionStatusDot({
     tone = "ok";
     label = "Done";
   }
+  // While a chat is actively running a turn, show three sequenced dots (the
+  // "working" indicator) on its sidebar row instead of the single status dot.
+  if (running) {
+    return (
+      <span
+        aria-label={label}
+        title={label}
+        className="inline-flex items-center gap-[2px]"
+      >
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="h-1 w-1 rounded-full bg-[var(--color-success)] animate-pulse"
+            style={{ animationDelay: `${i * 200}ms`, animationDuration: "1000ms" }}
+          />
+        ))}
+      </span>
+    );
+  }
   return (
     <span
       aria-label={label}
       title={label}
       className={cn(
         "dot",
-        // Pulse while the chat is actively running a turn.
-        running && "animate-pulse",
         tone === "warning" && "warn",
         tone === "idle" && "idle",
         tone === "ok" && "done",
